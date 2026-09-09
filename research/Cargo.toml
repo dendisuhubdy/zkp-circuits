@@ -1,0 +1,39 @@
+[package]
+name = "rand_zkvm"
+version = "0.1.0"
+edition = "2021"
+description = "Rand Protocol reference zkVM: RV32I under a zero-knowledge batch STARK (Plonky3, Goldilocks)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rand_zkvm"
+path = "src/main.rs"
+
+[dependencies]
+p3-air = "=0.7.0"
+p3-uni-stark = "=0.7.0"
+p3-batch-stark = "=0.7.0"
+p3-lookup = "=0.7.0"
+p3-goldilocks = "=0.7.0"
+p3-field = "=0.7.0"
+p3-matrix = "=0.7.0"
+p3-challenger = "=0.7.0"
+p3-commit = "=0.7.0"
+p3-fri = "=0.7.0"
+p3-dft = "=0.7.0"
+p3-merkle-tree = "=0.7.0"
+p3-symmetric = "=0.7.0"
+rand = { version = "0.10", features = ["std_rng"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+
+[profile.release]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test]
+opt-level = 1
