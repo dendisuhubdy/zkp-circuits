@@ -43,3 +43,9 @@ fn every_guest_decodes() {
         }
     }
 }
+
+#[test]
+#[should_panic(expected = "at least one value")]
+fn bubble_sort_rejects_empty_input() {
+    let _ = guests::bubble_sort(&[]);
+}

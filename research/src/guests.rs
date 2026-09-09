@@ -47,6 +47,7 @@ pub fn memcpy(n: u32) -> Program {
 
 /// Stores `values` at HEAP, bubble-sorts them in place (unsigned), outputs min and max.
 pub fn bubble_sort(values: &[u32]) -> Program {
+    assert!(!values.is_empty(), "bubble_sort guest needs at least one value");
     let n = values.len() as i32;
     let mut a = Assembler::new(0);
     for (i, v) in values.iter().enumerate() {
