@@ -141,3 +141,33 @@ fn alu_fill_rejects_wrong_result() {
     let mut row = vec![F::ZERO; alu::col::WIDTH];
     fill_row(&mut row, &AluEvent { op: AluOp::Add, a: 1, b: 1, c: 3 }, &mut counts);
 }
+
+use rand_zkvm::tables::cpu::{self, cpu_trace, public_values};
+
+#[test]
+fn cpu_trace_mirrors_events_and_pads() {
+    let p = guests::fib(3);
+    let e = execute(&p, &[], 10_000).unwrap();
+    let t = cpu_trace(&e.events, 64);
+    let w = cpu::col::WIDTH;
+    assert_eq!(t.height(), 64);
+    for (i, ev) in e.events.iter().enumerate() {
+        let r = &t.values[i * w..(i + 1) * w];
+        assert_eq!(r[cpu::col::CLK], F::from_u32(ev.clk));
+        assert_eq!(r[cpu::col::PC], F::from_u32(ev.pc));
+        assert_eq!(r[cpu::col::NEXT_PC], F::from_u32(ev.next_pc));
+        assert_eq!(r[cpu::col::IS_REAL], F::ONE);
+        let d = ev.dec.to_fields();
+        for k in 0..18 { assert_eq!(r[cpu::col::DEC0 + k], F::from_u32(d[k])); }
+        assert_eq!((r[cpu::col::A], r[cpu::col::B], r[cpu::col::C]), (F::from_u32(ev.a), F::from_u32(ev.b), F::from_u32(ev.c)));
+    }
+    let last_real = e.events.len() - 1;
+    assert_eq!(t.values[last_real * w + cpu::col::SYS_HALT], F::ONE);
+    let write_row = e.events.iter().position(|ev| matches!(ev.sys, Some(rand_zkvm::emulator::Syscall::WriteOutput { .. }))).unwrap();
+    assert_eq!(t.values[write_row * w + cpu::col::OUT_SEL0], F::ONE);
+    let pad = &t.values[(last_real + 1) * w..(last_real + 2) * w];
+    assert!(pad.iter().all(|x| *x == F::ZERO));
+    let pv = public_values(0, 10, &e.outputs);
+    assert_eq!(pv.len(), cpu::pv::NUM);
+    assert_eq!(pv[cpu::pv::OUT0], F::from_u32(2));
+}
