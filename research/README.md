@@ -43,32 +43,26 @@ they exchange facts through eight named LogUp buses, and the batch verifier
 checks that every bus balances globally.
 
 ```
-                    ┌───────────────────┐
-                    │      PROGRAM       │  preprocessed; commitment = hc
-                    │  pc + 18 selectors  │
-                    └─────────┬──────────┘
-                               │ PROGRAM  (lookup: cpu fetches, program provides)
-                               ▼
-      MEMORY  ◄───────┌───────────────────┐───────►  ALU
-   (permutation,        │        CPU         │      (lookup: cpu sends ops,
-    cpu ↔ memory)       │   one row / cycle    │       alu answers)
-                       └─────────┬─────────┘
-                                 │
-                ┌─────────────────┴──────────────────┐
-                ▼                                     ▼
-       ┌───────────────────┐               ┌───────────────────┐
-       │       MEMORY        │               │         ALU         │
-       │  regs + RAM, sorted   │               │  byte-limb adder,    │
-       │   by (space,addr,ts)  │               │  shifts, compares    │
-       └─────────┬──────────┘               └─────────┬──────────┘
-                 │ RANGE8                              │ RANGE8 AND8 OR8 XOR8 POW2
-                 └───────────────────┬──────────────────┘
-                                     ▼
-                            ┌───────────────────┐
-                            │        BYTE          │  preprocessed, 2^16 rows
-                            │  every (a,b) pair:     │
-                            │  a&b a|b a^b, 2^a       │
-                            └───────────────────┘
+                                  ┌───────────┐
+                                  │  PROGRAM  │ preprocessed; commitment = hc
+                                  └───────────┘
+                                        │ PROGRAM bus (lookup: cpu fetches, program provides)
+                  MEMORY bus            ▼             ALU bus
+                            ◄─────┌───────────┐─────►
+                 (permutation)    │    CPU    │    (lookup)
+                                  └───────────┘
+                                        │
+                    ┌───────────────────┴───────────────────┐
+                    ▼                                       ▼
+               ┌───────────┐                           ┌───────────┐
+               │  MEMORY   │                           │    ALU    │
+               └───────────┘                           └───────────┘
+                     │ RANGE8                                │ RANGE8 AND8 OR8 XOR8 POW2
+                     └───────────────────┴───────────────────┘
+                                         ▼
+                                    ┌───────────┐
+                                    │   BYTE    │ preprocessed, 2^16 rows: every (a,b) byte pair
+                                    └───────────┘
 ```
 
 `program` and `byte` are preprocessed (committed once, independent of any

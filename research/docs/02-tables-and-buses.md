@@ -6,32 +6,26 @@ directly; they exchange facts through named LogUp buses, and the batch
 verifier checks that every bus balances globally.
 
 ```
-                    ┌───────────────────┐
-                    │      PROGRAM       │  preprocessed; commitment = hc
-                    │  pc + 18 selectors  │
-                    └─────────┬──────────┘
-                               │ PROGRAM  (lookup: cpu fetches, program provides)
-                               ▼
-      MEMORY  ◄───────┌───────────────────┐───────►  ALU
-   (permutation,        │        CPU         │      (lookup: cpu sends ops,
-    cpu ↔ memory)       │   one row / cycle    │       alu answers)
-                       └─────────┬─────────┘
-                                 │
-                ┌─────────────────┴──────────────────┐
-                ▼                                     ▼
-       ┌───────────────────┐               ┌───────────────────┐
-       │       MEMORY        │               │         ALU         │
-       │  regs + RAM, sorted   │               │  byte-limb adder,    │
-       │   by (space,addr,ts)  │               │  shifts, compares    │
-       └─────────┬──────────┘               └─────────┬──────────┘
-                 │ RANGE8                              │ RANGE8 AND8 OR8 XOR8 POW2
-                 └───────────────────┬──────────────────┘
-                                     ▼
-                            ┌───────────────────┐
-                            │        BYTE          │  preprocessed, 2^16 rows
-                            │  every (a,b) pair:     │
-                            │  a&b a|b a^b, 2^a       │
-                            └───────────────────┘
+                                  ┌───────────┐
+                                  │  PROGRAM  │ preprocessed; commitment = hc
+                                  └───────────┘
+                                        │ PROGRAM bus (lookup: cpu fetches, program provides)
+                  MEMORY bus            ▼             ALU bus
+                            ◄─────┌───────────┐─────►
+                 (permutation)    │    CPU    │    (lookup)
+                                  └───────────┘
+                                        │
+                    ┌───────────────────┴───────────────────┐
+                    ▼                                       ▼
+               ┌───────────┐                           ┌───────────┐
+               │  MEMORY   │                           │    ALU    │
+               └───────────┘                           └───────────┘
+                     │ RANGE8                                │ RANGE8 AND8 OR8 XOR8 POW2
+                     └───────────────────┴───────────────────┘
+                                         ▼
+                                    ┌───────────┐
+                                    │   BYTE    │ preprocessed, 2^16 rows: every (a,b) byte pair
+                                    └───────────┘
 ```
 
 Eight buses in total: `PROGRAM`, `MEMORY`, `ALU`, and five carried by the
@@ -138,7 +132,10 @@ Preprocessed: 2^16 rows, one per byte pair `(a, b)`, holding `a&b`, `a|b`,
 lookup can only land on an `is_pow2` row. Provides `RANGE8` (`[a]`), `AND8`/
 `OR8`/`XOR8` (`[a,b,a·b]`), and `POW2` (`[a,pow2]`), each with its own
 multiplicity column. It is the only table besides `program` that is
-preprocessed, and the only one shared by every other table.
+preprocessed, and its buses are consumed by `memory` (`RANGE8` only) and
+`alu` (all five) — `cpu` and `program` never look it up directly; every byte
+check the CPU or the program table needs is delegated through `alu` or
+`memory` first.
 
 ## Why the program is preprocessed, and what that means for `hc`
 
