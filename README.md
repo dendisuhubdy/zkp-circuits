@@ -8,6 +8,7 @@
 | `zkp4` | Zcash-style shielded pool | arkworks | notes with hidden values, spend keys, nullifiers, in-circuit balance + range checks |
 | `zkp5` | Monero-style transactions | curve25519-dalek, bulletproofs | stealth addresses, Pedersen commitments, hand-written CLSAG ring signatures, key images |
 | `zkp6` | Tornado Cash mixer | arkworks | Merkle-membership withdraw proof, simulated contract with account balances, front-running / double-spend defences |
+| `research` | **Rand reference zkVM** | Plonky3 (Goldilocks, LogUp, hiding FRI) | RV32I guest programs proved under one universal relation; the guidance circuit for the whole protocol |
 
 Each crate: `cargo run --release` for a narrated demo, `cargo test --release` for the tests.
 
@@ -79,3 +80,4 @@ buying you).
 1. `zkp1` — learn what a constraint is, and the three phases.
 2. `zkp2/src/lib.rs` — the comparison table, then `chain.rs`, `snark.rs`.
 3. `zkp3/src/lib.rs` — the same table from the other side, then `air.rs`, `stark.rs`.
+4. `research/README.md` — the real thing: a zkVM, and what "confidential arbitrary computation" means concretely.

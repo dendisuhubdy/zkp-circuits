@@ -1,0 +1,102 @@
+# Privacy
+
+This is the "what does confidential actually mean here" document: what the
+zero-knowledge property covers, what a tier reveals, exactly what a proof
+leaks, and where the crate's privacy story stops today.
+
+## Zero knowledge is statistical, not perfect
+
+Proving uses `HidingFriPcs` (`machine.rs::build_config`), which randomises
+the low-degree extension of every main trace and the FRI batch polynomial
+before committing. `make_config` seeds this from fresh OS entropy for every
+proof, so two proofs of the same run are different bytes and both verify —
+demonstrated in Part 7 of the demo and in `tests/zk.rs`. This is not perfect
+zero knowledge, and the crate does not claim it is: Plonky3 0.7 says so
+itself, in `p3-batch-stark-0.7.0/src/prover.rs:469` — `// TODO: This
+approach is only statistically ZK.` The gap is a fixed, quantifiable
+soundness/privacy tradeoff of the library's blinding technique, not a bug in
+this crate; closing it is upstream's work, not this milestone's. Poseidon2's
+round constants are likewise derived from a fixed development seed
+(`PERM_SEED` in `machine.rs`) rather than the published Goldilocks constants
+— a placeholder for the same reason: correct math, wrong constants for
+production.
+
+`Machine::new` takes a `FriProfile`: `Production` (80 FRI queries, 20
+proof-of-work bits — the whitepaper numbers) or `Test` (16 queries, 4 PoW
+bits, for a fast `cargo test`). Both use blowup 8 and the same hiding PCS;
+only the query count and grinding difficulty differ, which is why a
+`Production` proof is roughly four times the bytes of a `Test` proof of the
+same trace (Part 8 of the demo prints both) without either one being any
+less zero-knowledge than the other.
+
+## Private inputs are witness, not yet bound to anything
+
+`READ_INPUT idx` (syscall 2) returns whatever word the prover supplies at
+that index — a value chosen by the prover, checked by nothing. Milestone 1's
+relation is existential: it proves *"there exist inputs such that running
+this program on them produced these outputs,"* full stop. Nothing here binds
+a private input to a note commitment, a nullifier, or a Merkle path against
+a public state root — that arrives with syscalls 10–13 (`POSEIDON2`,
+`NOTE_COMMIT`, `NULLIFY`, `MERKLE_VERIFY`) in milestone 3. Until then, "the
+balance is private" means only that the verifier never sees the number, not
+that the number is tied to any real account.
+
+## What `verify` actually checks
+
+`Machine::verify(program, proof)` — the code a node runs — checks, in order:
+the proof carries exactly 10 public values; `public_values[PC_ENTRY]` equals
+`program.base_pc`; `public_values[TIER]` equals `proof.tier`; `proof.tier` is
+one of the six values in `TIERS` (an attacker-chosen out-of-range tier is
+rejected here, before it can be used to compute a table height and panic);
+the proof's degree bits match the heights that tier implies for all five
+tables; and finally the batch STARK itself, against a verifier key recomputed
+from the program. Both `verify` and `code_hash` recompute that key from
+scratch every time, including the full 2^16-row byte table's preprocessed
+commitment — a known, fixed cost of this milestone, not yet cached.
+
+## Tiers: what padding hides
+
+Trace height never reflects the actual cycle count; it is padded up to the
+smallest tier that fits. `cpu` and `alu` pad to `2^ℓ` and `2^(ℓ+1)` rows,
+`memory` to `2^(ℓ+2)` (four accesses per cycle, worst case); `program` pads
+to the next power of two above the program's own length (minimum 16 rows);
+`byte` is always the fixed 65 536 rows. Padding rows carry `is_real = 0` and
+emit nothing on any bus.
+
+| Tier `ℓ` | `cpu` rows | `alu` rows | `memory` rows | max cycles |
+|---|---|---|---|---|
+| 10 | 1 024 | 2 048 | 4 096 | 1 023 |
+| 12 | 4 096 | 8 192 | 16 384 | 4 095 |
+| 14 | 16 384 | 32 768 | 65 536 | 16 383 |
+| 16 | 65 536 | 131 072 | 262 144 | 65 535 |
+| 18 | 262 144 | 524 288 | 1 048 576 | 262 143 |
+| 20 | 1 048 576 | 2 097 152 | 4 194 304 | 1 048 575 |
+
+A run that needs more than `tier.max_cycles()` cycles for its chosen tier is
+refused by `build_traces`, not silently truncated.
+
+## What a proof leaks
+
+| Data | Status |
+|---|---|
+| Code hash `hc` | public — the preprocessed commitment |
+| Entry point `pc_entry` | public |
+| Gas tier `ℓ` | public per proof (the proof's own size already reveals its trace height, so hiding the tier index buys nothing at the single-proof level; a batch-level histogram, as the whitepaper describes, is a property of the aggregation layer, not of one proof) |
+| Eight output words | public |
+| Private inputs (`READ_INPUT` values) | hidden — witness only |
+| Every register and memory value | hidden |
+| Every branch taken | hidden |
+| The exact cycle count | hidden — only the padded tier height is visible |
+| Which syscalls ran, beyond what the outputs imply | hidden |
+
+## The delegated-proving boundary
+
+Proving is out of the circuit's scope by design: the witness is a
+`Vec<CycleEvent>` (`emulator::Execution`), and whoever holds it — the
+prover, wherever it runs — sees everything: every register, every branch,
+every private input. The zero-knowledge property protects the verifier's
+view of the proof, not the prover's view of the computation. A confidential
+application that cannot trust its own prover needs a separate delegation
+story (trusted hardware, MPC, or proving on the data owner's own machine);
+this crate does not attempt to solve that, matching the whitepaper's own
+remark on the boundary.
