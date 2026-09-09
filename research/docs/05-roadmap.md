@@ -4,7 +4,7 @@
 
 | # | Scope | Exit criterion | Status |
 |---|---|---|---|
-| M1 | Tables (program, cpu, memory, alu, byte), ISA row M1, syscalls 0–1, ZK on, tier padding, assembler, emulator, tests, guidance README + `docs/01–05` | `fib`, `memcpy`, `bubble_sort` (and `balance_check`) prove and verify with ZK at their tiers; all cheating tests reject | **done** — 34 tests pass, the narrated demo runs clean |
+| M1 | Tables (program, cpu, memory, alu, byte), ISA row M1, syscalls 0–1, ZK on, tier padding, assembler, emulator, tests, guidance README + `docs/01–05` | `fib`, `memcpy`, `bubble_sort`, `alu_mix` (and `balance_check`) prove and verify with ZK at their tiers; all cheating tests reject | **done** — 43 tests pass, the narrated demo runs clean |
 | M2 | Sub-word loads/stores, the M extension, a flat-binary loader, `READ_INPUT` bound to something | a guest compiled with an external RISC-V toolchain runs and proves | not started |
 | M3 | Poseidon2 chip, syscalls 10–13 (`POSEIDON2`, `NOTE_COMMIT`, `NULLIFY`, `MERKLE_VERIFY`), program digest moved in-circuit as a public value | the zkp6/zkp4 transfer relation re-expressed as a guest proves under `R_exec` | not started |
 | M4 | EVM and sBPF guest interpreters, Keccak/SHA coprocessors (`docs/04-guests.md`) | an ERC-20 `transfer` and an SPL `Transfer` each prove under `R_exec` | not started |
