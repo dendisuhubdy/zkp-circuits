@@ -13,6 +13,7 @@ use rand_zkvm::isa::Instr;
 use rand_zkvm::tables::program::{self, program_trace, ProgramAir};
 use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
+use rand_zkvm::tables::memory::{self, memory_trace};
 
 /// A throwaway table that asks the byte table questions. main: [x, y, z, is_real]
 #[derive(Clone)]
@@ -84,4 +85,27 @@ fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
     let t = program_trace(&p, &e.events);
     let total: u64 = t.values.iter().map(|x| x.as_canonical_u64()).sum();
     assert_eq!(total as usize, e.events.len(), "every cycle fetched exactly one row");
+}
+
+#[test]
+fn memory_trace_is_sorted_and_consistent() {
+    let p = guests::memcpy(4);
+    let e = execute(&p, &[], 10_000).unwrap();
+    let mut counts = ByteCounts::default();
+    let t = memory_trace(&e.events, 1 << 12, &mut counts);
+    let w = memory::col::WIDTH;
+    let accesses: usize = e.events.iter().map(|c| c.accesses.len()).sum();
+    let real: usize = (0..t.height()).filter(|r| t.values[r * w + memory::col::IS_REAL] == F::ONE).count();
+    assert_eq!(real, accesses);
+    let key = |r: usize| t.values[r * w + memory::col::SPACE].as_canonical_u64() << 30 | t.values[r * w + memory::col::ADDR].as_canonical_u64();
+    let ts = |r: usize| t.values[r * w + memory::col::TS].as_canonical_u64();
+    for r in 0..real - 1 {
+        assert!((key(r), ts(r)) < (key(r + 1), ts(r + 1)), "row {r} not sorted");
+        if key(r) == key(r + 1) && t.values[(r + 1) * w + memory::col::IS_WRITE] == F::ZERO {
+            assert_eq!(t.values[r * w + memory::col::VALUE], t.values[(r + 1) * w + memory::col::VALUE], "read at row {} must see previous value", r + 1);
+        }
+    }
+    // Δ limbs were counted: 4 range checks per real transition
+    let total: u64 = counts.range.iter().sum();
+    assert_eq!(total as usize, 4 * (real - 1));
 }
