@@ -85,6 +85,15 @@ where
         b.assert_zero((v(IS_JAL) + v(IS_JALR)) * (v(C) - v(PC) - four.clone()));
         b.assert_zero(v(IS_LUI) * (v(C) - v(IMM)));
         b.assert_zero(v(IS_AUIPC) * (v(C) - v(TGT)));
+        // On every other kind of row (branch, store, ecall HALT/WRITE_OUTPUT) nothing above
+        // defines C, and it is never sent on the WRITES_RD/SYS_READ register-write message
+        // either, so without this constraint C is a completely free column there: a malicious
+        // witness could set it to anything with no other constraint noticing. `cpu_trace`
+        // always leaves it at the emulator's own `c = 0` default for these rows (see
+        // `emulator::execute`), so this cannot reject any honest trace. Pin it to that same
+        // zero sentinel.
+        let defines_c = v(IS_ALU) + v(IS_LOAD) + v(IS_JAL) + v(IS_JALR) + v(IS_LUI) + v(IS_AUIPC) + v(SYS_READ);
+        b.assert_zero((one.clone() - defines_c) * v(C));
 
         // next pc
         let taken = v(ALU_OUT) + v(BR_NEG) - v(ALU_OUT) * v(BR_NEG) * AB::Expr::TWO;
