@@ -4,9 +4,15 @@ use rand_zkvm::tables::bus;
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_batch_stark::{prove_batch, verify_batch, ProverData, StarkInstance};
 use p3_field::PrimeCharacteristicRing;
+use p3_field::PrimeField64;
 use p3_lookup::{Count, InteractionBuilder};
 use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::Matrix;
 use rand_zkvm::tables::F;
+use rand_zkvm::isa::Instr;
+use rand_zkvm::tables::program::{self, program_trace, ProgramAir};
+use rand_zkvm::emulator::execute;
+use rand_zkvm::guests;
 
 /// A throwaway table that asks the byte table questions. main: [x, y, z, is_real]
 #[derive(Clone)]
@@ -57,4 +63,25 @@ fn byte_table_answers_range_and_and_lookups() {
     let pd = ProverData::from_instances(&config, &instances);
     let proof = prove_batch(&config, &instances, &pd);
     verify_batch(&config, &airs, &proof, &[vec![], vec![]], &pd.common).unwrap();
+}
+
+#[test]
+fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
+    let p = guests::fib(5);
+    let air = ProgramAir { program: p.clone() };
+    let pre: RowMajorMatrix<F> = <ProgramAir as BaseAir<F>>::preprocessed_trace(&air).unwrap();
+    assert_eq!(pre.height(), air.height());
+    assert_eq!(pre.height(), 16);
+    // row 2 is the third instruction
+    let d = Instr::decode(p.words[2]).unwrap().decoded().to_fields();
+    let row: Vec<F> = pre.values[2 * program::pre::WIDTH..3 * program::pre::WIDTH].to_vec();
+    assert_eq!(row[program::pre::PC], F::from_u32(8));
+    for (i, f) in d.iter().enumerate() { assert_eq!(row[program::pre::FIELDS + i], F::from_u32(*f), "field {i}"); }
+    assert_eq!(row[program::pre::VALID], F::ONE);
+    let last = pre.height() - 1;
+    assert_eq!(pre.values[last * program::pre::WIDTH + program::pre::VALID], F::ZERO);
+    let e = execute(&p, &[], 10_000).unwrap();
+    let t = program_trace(&p, &e.events);
+    let total: u64 = t.values.iter().map(|x| x.as_canonical_u64()).sum();
+    assert_eq!(total as usize, e.events.len(), "every cycle fetched exactly one row");
 }
