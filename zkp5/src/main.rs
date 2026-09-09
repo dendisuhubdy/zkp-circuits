@@ -3,6 +3,7 @@
 use std::time::Instant;
 use zkp5::keys::Account;
 use zkp5::tx::{build_tx, Chain, TxError};
+use zkp5::viz::{print_state, render_outputs};
 use zkp5::{pt, RING_SIZE};
 
 fn short(b: &[u8; 32]) -> String {
@@ -26,6 +27,7 @@ fn main() {
     println!("    {} outputs on chain, each = (one-time key P, commitment C, R, encrypted amount)", chain.outputs.len());
     let o = &chain.outputs[15];
     println!("    e.g. output 15: P={} C={}  — nothing says 'alice' or '8'", short(&pt(&o.one_time_pk)), short(&pt(&o.commitment)));
+    print_state(&chain, &[&alice, &bob]);
 
     println!("\n── Alice's wallet scans the chain with her view key");
     let mine = chain.scan(&alice);
@@ -48,10 +50,13 @@ fn main() {
     }
     println!("      fee = 1 (public)   range proof {} bytes", tx.range_proof.to_bytes().len());
     println!("    ↑ real input is one of {RING_SIZE} (Alice's is index 14). Amounts hidden. Bob's address hidden.");
+    println!("    the ring, as Alice's wallet sees it (the ◀ is known only to her):");
+    print!("{}", render_outputs(&chain, "      ", Some(&tx.inputs[0].ring), Some(mine[0].global_index)));
 
     let t = Instant::now();
     chain.apply(&tx).unwrap();
     println!("    node verified in {:?}: ring sig ✓  key image new ✓  ΣC' = ΣC_out + fee·H ✓  range ✓", t.elapsed());
+    print_state(&chain, &[&alice, &bob]);
 
     println!("\n── Bob scans and finds his payment");
     let bobs = chain.scan(&bob);
@@ -79,5 +84,6 @@ fn main() {
     let tx6 = build_tx(&chain, &mine[1..2], &[(bob.address(), 7), (alice.address(), 0)], 1, &mut rng).unwrap();
     chain.apply(&tx6).unwrap();
     println!("    Bob now owns {} shielded", chain.scan(&bob).iter().map(|o| o.amount).sum::<u64>());
+    print_state(&chain, &[&alice, &bob]);
     println!("    Observer: {} outputs, 2 key images, two rings of {RING_SIZE}. No amounts, no addresses.", chain.outputs.len());
 }

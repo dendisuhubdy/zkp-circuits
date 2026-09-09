@@ -41,6 +41,7 @@
 //!   `note.rs`               keys, notes, commitments, nullifiers (native)
 //!   `circuit.rs`            the transfer circuit
 //!   `ledger.rs`             simulated chain: transparent balances + shielded pool
+//!   `viz.rs`                stdout drawings of the commitment tree and balances
 //!   `main.rs`               Alice shields, pays Bob, Bob unshields; attacks
 
 pub mod circuit;
@@ -48,6 +49,7 @@ pub mod hash;
 pub mod ledger;
 pub mod merkle;
 pub mod note;
+pub mod viz;
 
 pub type Fr = ark_bn254::Fr;
 pub const TREE_DEPTH: usize = 8;

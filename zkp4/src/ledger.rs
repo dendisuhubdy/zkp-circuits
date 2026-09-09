@@ -40,12 +40,26 @@ pub struct NoteDelivery {
     pub leaf_index: usize,
 }
 
+/// How a leaf got into the tree, as far as the chain can tell.
+#[derive(Clone, Debug)]
+pub enum LeafOrigin {
+    /// t → z: the sender and the value are public.
+    Shield { from: String, value: u64 },
+    /// Output `which` of the shielded transfer that revealed `nullifier`.
+    /// Value and recipient are hidden.
+    TxOutput { nullifier: Fr, which: usize },
+}
+
 pub struct Ledger {
     pub transparent: BTreeMap<String, u64>,
     pub pool: u64,
     tree: MerkleTree,
+    /// One entry per leaf, in leaf order.
+    origins: Vec<LeafOrigin>,
     known_roots: HashSet<Fr>,
     nullifiers: HashSet<Fr>,
+    /// `nullifiers` in insertion order, for display.
+    nullifier_log: Vec<Fr>,
     pvk: PreparedVerifyingKey<Bn254>,
 }
 
@@ -58,8 +72,10 @@ impl Ledger {
             transparent: BTreeMap::new(),
             pool: 0,
             tree,
+            origins: Vec::new(),
             known_roots,
             nullifiers: HashSet::new(),
+            nullifier_log: Vec::new(),
             pvk: Groth16::<Bn254>::process_vk(vk).expect("vk"),
         }
     }
@@ -77,6 +93,19 @@ impl Ledger {
     pub fn path(&self, idx: usize) -> crate::merkle::MerklePath {
         self.tree.path(idx)
     }
+    pub fn tree(&self) -> &MerkleTree {
+        &self.tree
+    }
+    pub fn origin(&self, idx: usize) -> &LeafOrigin {
+        &self.origins[idx]
+    }
+    /// Nullifiers revealed so far, oldest first.
+    pub fn nullifiers(&self) -> &[Fr] {
+        &self.nullifier_log
+    }
+    pub fn known_roots(&self) -> usize {
+        self.known_roots.len()
+    }
 
     /// t → z. The value is public here (it comes from a transparent
     /// balance); only the recipient of the new note is hidden. Zcash still
@@ -90,6 +119,7 @@ impl Ledger {
         *bal -= note.value;
         self.pool += note.value;
         let idx = self.tree.insert(note.commitment());
+        self.origins.push(LeafOrigin::Shield { from: from.into(), value: note.value });
         self.known_roots.insert(self.tree.root());
         Ok(idx)
     }
@@ -108,8 +138,11 @@ impl Ledger {
             return Err(LedgerError::InvalidProof);
         }
         self.nullifiers.insert(tx.nullifier);
+        self.nullifier_log.push(tx.nullifier);
         let i0 = self.tree.insert(tx.cm_out[0]);
         let i1 = self.tree.insert(tx.cm_out[1]);
+        self.origins.push(LeafOrigin::TxOutput { nullifier: tx.nullifier, which: 0 });
+        self.origins.push(LeafOrigin::TxOutput { nullifier: tx.nullifier, which: 1 });
         self.known_roots.insert(self.tree.root());
         if tx.v_pub > 0 {
             self.pool -= tx.v_pub;

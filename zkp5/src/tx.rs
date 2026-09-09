@@ -74,15 +74,51 @@ pub enum TxError {
     BadRing,
 }
 
+/// How an output got on chain, as far as an observer can tell.
+#[derive(Clone, Debug)]
+pub enum OutputOrigin {
+    /// Coinbase amounts are public in Monero too.
+    Coinbase { amount: u64 },
+    /// Output `which` of the `tx`-th accepted transaction. Amount and
+    /// recipient hidden.
+    TxOutput { tx: usize, which: usize },
+}
+
 pub struct Chain {
     pub outputs: Vec<Output>,
+    /// One entry per output, in output order.
+    origins: Vec<OutputOrigin>,
     key_images: HashSet<[u8; 32]>,
+    /// `key_images` in insertion order, for display.
+    key_image_log: Vec<[u8; 32]>,
+    /// Accepted (non-coinbase) transactions so far.
+    txs: usize,
     bp_gens: BulletproofGens,
 }
 
 impl Chain {
     pub fn new() -> Self {
-        Chain { outputs: Vec::new(), key_images: HashSet::new(), bp_gens: BulletproofGens::new(64, 16) }
+        Chain {
+            outputs: Vec::new(),
+            origins: Vec::new(),
+            key_images: HashSet::new(),
+            key_image_log: Vec::new(),
+            txs: 0,
+            bp_gens: BulletproofGens::new(64, 16),
+        }
+    }
+
+    pub fn origin(&self, idx: usize) -> &OutputOrigin {
+        &self.origins[idx]
+    }
+
+    /// Key images recorded so far, oldest first.
+    pub fn key_images(&self) -> &[[u8; 32]] {
+        &self.key_image_log
+    }
+
+    pub fn tx_count(&self) -> usize {
+        self.txs
     }
 
     /// Coinbase: mint an output with a public amount (blinding chosen by the
@@ -97,6 +133,7 @@ impl Chain {
             tx_pubkey: r * G,
             index_in_tx: 0,
         });
+        self.origins.push(OutputOrigin::Coinbase { amount });
         self.outputs.len() - 1
     }
 
@@ -149,7 +186,12 @@ impl Chain {
         // accepted
         for ki in new_images {
             self.key_images.insert(ki);
+            self.key_image_log.push(ki);
         }
+        for which in 0..tx.outputs.len() {
+            self.origins.push(OutputOrigin::TxOutput { tx: self.txs, which });
+        }
+        self.txs += 1;
         self.outputs.extend(tx.outputs.iter().cloned());
         Ok(())
     }

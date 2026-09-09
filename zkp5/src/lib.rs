@@ -42,12 +42,14 @@
 //!   `pedersen.rs`  commitments C = γG + vH and the H generator
 //!   `clsag.rs`     CLSAG linkable ring signature (hand-written, ~100 lines)
 //!   `tx.rs`        transaction build / verify, chain state, key images
+//!   `viz.rs`       stdout drawings of the output set, rings, key images, wallet balances
 //!   `main.rs`      Alice pays Bob with 10 decoys; attacks
 
 pub mod clsag;
 pub mod keys;
 pub mod pedersen;
 pub mod tx;
+pub mod viz;
 
 pub use curve25519_dalek::ristretto::RistrettoPoint as Point;
 pub use curve25519_dalek::scalar::Scalar;

@@ -22,6 +22,7 @@ Read `../zkp6` (Tornado Cash) first. This crate is the same Merkle-membership ci
 | `src/circuit.rs` | the 1-input 2-output transfer circuit (1 679 constraints) |
 | `src/ledger.rs` | transparent balances, shielded pool, `shield` (t→z), `apply` (z→z or z→z+t), wallet-side `build_transfer` |
 | `src/hash.rs`, `src/merkle.rs` | identical to zkp6 |
+| `src/viz.rs` | stdout drawings: the commitment tree with empty subtrees collapsed (chain view, and the wallet's view with the spend path marked), transparent balances and the pool |
 | `src/main.rs` | scenario and attacks: replay, inflation, spending someone else's note, re-spend |
 
 ## Simplifications

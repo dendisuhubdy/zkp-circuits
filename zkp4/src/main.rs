@@ -5,17 +5,11 @@ use std::time::Instant;
 use zkp4::circuit::TransferCircuit;
 use zkp4::ledger::{build_transfer, setup, Ledger, LedgerError};
 use zkp4::note::{Note, SpendingKey};
+use zkp4::viz::{fr, print_state, render_tree};
 use zkp4::{Fr, TREE_DEPTH};
 
-fn fr(f: &Fr) -> String {
-    use ark_ff::{BigInteger, PrimeField};
-    let h: String = f.into_bigint().to_bytes_be().iter().map(|b| format!("{b:02x}")).collect();
-    format!("0x{}…", &h[..10])
-}
-fn state(l: &Ledger) {
-    let t: Vec<String> = l.transparent.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    println!("    transparent: {}   shielded pool total={}   commitments={}", t.join(" "), l.pool, l.notes());
-}
+
+use zkp4::viz::leaf_label;
 
 fn main() {
     let mut rng = rand::rngs::OsRng;
@@ -36,32 +30,36 @@ fn main() {
     println!("    alice sk={} → z-address pk={}", fr(&alice.0), fr(&alice.public_key()));
     println!("    bob   sk={} → z-address pk={}", fr(&bob.0), fr(&bob.public_key()));
     l.mint("alice-t", 10);
-    state(&l);
+    print_state(&l);
 
     println!("\n── Alice shields 10 (t → z)");
     let n_alice = Note::new(10, alice.public_key(), &mut rng);
     let idx_alice = l.shield("alice-t", &n_alice).unwrap();
     println!("    on chain: value=10 (public), cm={}  leaf {}", fr(&n_alice.commitment()), idx_alice);
-    state(&l);
+    print_state(&l);
 
     println!("\n── Alice pays Bob 3, shielded (z → z). Change 7 back to herself.");
     let to_bob = Note::new(3, bob.public_key(), &mut rng);
     let change = Note::new(7, alice.public_key(), &mut rng);
+    println!("    Alice's wallet: Merkle path for her note at leaf {idx_alice}");
+    print!("{}", render_tree(l.tree(), "      ", &|i| leaf_label(&l, i), Some(idx_alice)));
     let t = Instant::now();
     let tx = build_transfer(&l, &pk, &alice, &n_alice, idx_alice, [to_bob, change], 0, None, &mut rng).unwrap();
     println!("    proof {:?}", t.elapsed());
     println!("    on chain: nf={}  cm_out=[{}, {}]  v_pub=0", fr(&tx.nullifier), fr(&tx.cm_out[0]), fr(&tx.cm_out[1]));
     println!("    ↑ no amounts, no addresses, no link to leaf {idx_alice}. Alice sends Bob (3, ρ, r) off-chain.");
     let [idx_bob, _idx_change] = l.apply(&tx).unwrap();
-    state(&l);
+    print_state(&l);
 
     println!("\n── Bob unshields 2 to 'bob-t', keeps 1 shielded (z → z + t)");
     let keep = Note::new(1, bob.public_key(), &mut rng);
     let zero = Note::new(0, bob.public_key(), &mut rng);
+    println!("    Bob's wallet: Merkle path for the note Alice sent him, leaf {idx_bob}");
+    print!("{}", render_tree(l.tree(), "      ", &|i| leaf_label(&l, i), Some(idx_bob)));
     let tx2 = build_transfer(&l, &pk, &bob, &to_bob, idx_bob, [keep, zero], 2, Some("bob-t"), &mut rng).unwrap();
     println!("    on chain: nf={}  v_pub=2 → bob-t", fr(&tx2.nullifier));
     l.apply(&tx2).unwrap();
-    state(&l);
+    print_state(&l);
 
     println!("\n── Attacks");
     let r = l.apply(&tx2);

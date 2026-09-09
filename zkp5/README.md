@@ -9,6 +9,12 @@ The one crate in this series with no SNARK and no circuit. Privacy comes from fo
 | CLSAG linkable ring signature | who spends (one of 11) | `src/clsag.rs` |
 | key images | double spends, without linking | `src/clsag.rs`, checked in `src/tx.rs` |
 
+There is no Merkle tree here (the anonymity set is a ring, not a pool), so
+`src/viz.rs` draws the flat **output set** instead: every output's one-time
+key, commitment and public origin, the ring of a transaction overlaid on it
+with the real spend marked in the wallet's view only, the key images seen,
+and each wallet's balance as recovered by scanning with its view key.
+
 ```
 cargo run --release     # Alice pays Bob hiding among 10 decoys; Bob's wallet finds it; attacks
 cargo test --release
