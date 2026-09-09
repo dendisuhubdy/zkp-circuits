@@ -267,7 +267,13 @@ impl Machine {
 
     pub fn verify(&self, program: &Program, proof: &Proof) -> Result<(), VerifyError> {
         if proof.public_values.len() != crate::tables::cpu::pv::NUM { return Err(VerifyError::PublicValues); }
+        if proof.public_values[crate::tables::cpu::pv::PC_ENTRY] != program.base_pc as u64 { return Err(VerifyError::PublicValues); }
         if proof.public_values[crate::tables::cpu::pv::TIER] != proof.tier.0 as u64 { return Err(VerifyError::Tier); }
+        // `proof.tier` is deserialized from untrusted bytes: an attacker-supplied out-of-range
+        // tier (anything not in TIERS) must be rejected here, before `log_ext_degrees` calls
+        // `Tier::cpu_height`/`alu_height`/`mem_height`, which shift by `self.0` and panic in
+        // debug builds for a large enough tier (e.g. `1usize << 99`).
+        if !TIERS.contains(&proof.tier.0) { return Err(VerifyError::Tier); }
         if proof.batch.degree_bits != self.log_ext_degrees(program, proof.tier) { return Err(VerifyError::Tier); }
         let airs = chips(program);
         let pv: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();

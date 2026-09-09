@@ -78,3 +78,22 @@ fn a_run_that_does_not_fit_the_tier_is_refused() {
     let (proof, _) = m.prove(&p, &[], None).unwrap();
     assert_eq!(proof.tier, Tier(12));
 }
+
+#[test]
+fn out_of_range_tier_is_an_error_not_a_panic() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    proof.tier = Tier(99);
+    proof.public_values[cpu::pv::TIER] = 99;
+    assert!(matches!(m.verify(&p, &proof), Err(rand_zkvm::machine::VerifyError::Tier)));
+}
+
+#[test]
+fn wrong_entry_point_claim_is_rejected() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    proof.public_values[cpu::pv::PC_ENTRY] = 4;
+    assert!(matches!(m.verify(&p, &proof), Err(rand_zkvm::machine::VerifyError::PublicValues)));
+}
