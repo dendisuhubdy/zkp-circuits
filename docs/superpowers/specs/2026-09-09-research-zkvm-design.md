@@ -52,7 +52,7 @@ chips" shape, and it is what `p3-batch-stark` 0.7 provides directly.
 | `cpu` | one per cycle | no | `MEMORY` accesses, `ALU` ops, `BYTE` checks | `PROGRAM` fetch |
 | `memory` | one per access, sorted by (space, addr, clk) | no | `BYTE` checks (ordering) | `MEMORY` accesses |
 | `alu` | one per arithmetic/logic/compare/shift op | no | `BYTE` checks (limbs, bitwise) | `ALU` ops |
-| `byte` | 2^16 rows: every (a, b) byte pair with a&b, a\|b, a^b | yes | `BYTE` entries | — |
+| `byte` | 2^16 rows: every (a, b) byte pair with a&b, a\|b, a^b; first 32 rows also carry 2^a | yes | `BYTE` and `POW2` entries | — |
 
 ### 3.2 Buses
 
@@ -62,6 +62,7 @@ chips" shape, and it is what `p3-batch-stark` 0.7 provides directly.
 | `MEMORY` | permutation (multiset equality) | (space, addr, clk, value, is_write) | cpu | memory |
 | `ALU` | lookup | (op, a, b, c) | alu | cpu |
 | `BYTE` | lookup | (a, b, a&b, a\|b, a^b) | byte | alu, memory, cpu |
+| `POW2` | lookup | (s, 2^s), s < 32 | byte (first 32 rows) | alu |
 
 `space` distinguishes the register file (space 0, addr = register index 0–31)
 from RAM (space 1, addr = word address). Registers therefore live in the
@@ -121,14 +122,14 @@ every 32×32 product fits in the field without overflow (max
 `memory`. sBPF's 64-bit registers cost about two RV32 operations each when
 interpreted, which is an acceptable tax for a guest.
 
-### 4.2 Syscalls (`ECALL`, number in `a7`, args in `a0..a2`)
+### 4.2 Syscalls (`ECALL`, number in `a7`, args in `a0`, `a1`; result in `a0`)
 
 | # | Name | Milestone | Effect |
 |---|---|---|---|
 | 0 | `HALT` | M1 | ends execution; remaining rows are padding |
 | 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, slot < 8 |
 | 2 | `READ_INPUT idx` | M2 | returns private input word `idx` (witness only) |
-| 10 | `POSEIDON2 ptr_in ptr_out` | M3 | hashes 8 words, writes 4 |
+| 10 | `POSEIDON2 ptr_in ptr_out` | M3 | hashes 8 words at `ptr_in`, writes 4 at `ptr_out` |
 | 11 | `NOTE_COMMIT` | M3 | commitment of (value, ρ, pk) |
 | 12 | `NULLIFY` | M3 | nf = H(sk ‖ ρ) |
 | 13 | `MERKLE_VERIFY` | M3 | membership against public root |
@@ -185,10 +186,15 @@ Constraints:
 - `LW`: send `(1, (a + imm)/4, clk, mem_val, 0)` on `MEMORY`, `c = mem_val`;
   the address add goes through the ALU. `SW`: same with `is_write = 1` and
   `mem_val = b`.
-- `ECALL`: `a7`, `a0..a2` are read like any registers (extra `MEMORY` reads
-  on that row). `HALT` sets `is_halted` and forces `is_real = 0` on the next
-  row. `WRITE_OUTPUT` constrains `public_values[2 + slot] = word` via a
-  selector on `slot` (8 boolean columns, one-hot).
+- `ECALL`: the program table pre-decodes `rs1 = 17 (a7)` and `rs2 = 10 (a0)`
+  for every `ECALL`, so the syscall number and first argument arrive through
+  the ordinary `a` and `b` reads. The second argument `a1` is read through
+  the memory-access slot as `(0, 11, clk, mem_val, 0)`. An `ECALL` row
+  therefore makes at most three `MEMORY` reads and one write, keeping the
+  four-accesses-per-cycle bound of §7. `HALT` sets `is_halted` and forces
+  `is_real = 0` on the next row. `WRITE_OUTPUT` constrains
+  `public_values[2 + slot] = word` with `slot = a0`, `word = a1`, via eight
+  one-hot selector columns on `slot`.
 - Transition: `next.pc = next_pc` on real→real rows.
 
 ### 5.3 `memory` (main)
@@ -231,8 +237,8 @@ Constraints:
   one more `BYTE` lookup of `a3 & 0x80`).
 - `eq`: `c = (a − b == 0)` via inverse column.
 - `sll`: `c + hi·2^32 = a · pow2` with `pow2 = 2^(b mod 32)`, `hi` and `c`
-  range-checked; `pow2` comes from a 32-row lookup embedded in the byte table
-  (rows `(s, 2^s)` for `s < 32`).
+  range-checked; `(b mod 32, pow2)` is looked up on `POW2`, and `b mod 32`
+  is `b0 & 31` via one `BYTE` lookup.
 - `srl`: `a = c · pow2 + rem`, `rem < pow2` enforced as
   `rem · 2^(32−s) < 2^32`.
 - `sra`: `srl` on the magnitude with sign fill from the top bit.
@@ -241,8 +247,11 @@ Constraints:
 
 ### 5.5 `byte` (preprocessed)
 
-2^16 rows `(a, b, a&b, a|b, a^b)` plus the 32 `(s, 2^s)` rows folded into a
-sixth column. Provides on `BYTE` with count `mult` (main column).
+2^16 preprocessed rows `(a, b, a&b, a|b, a^b, pow2, is_pow2_row)`, where
+`pow2 = 2^a` and `is_pow2_row = 1` on the first 32 rows (those with `b = 0`
+and `a < 32`) and both are 0 elsewhere. Provides `(a, b, a&b, a|b, a^b)` on
+`BYTE` with count `mult_byte` and `(a, pow2)` on `POW2` with count
+`mult_pow2 · is_pow2_row` (both `mult_*` are main columns).
 
 ## 6. Witness generation
 
