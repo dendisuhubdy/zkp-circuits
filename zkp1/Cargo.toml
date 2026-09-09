@@ -1,0 +1,21 @@
+[package]
+name = "zkp1"
+version = "0.1.0"
+edition = "2021"
+description = "Educational zk-SNARK (Groth16 over BN254, via arkworks): write a circuit, run a trusted setup, prove, verify"
+
+[dependencies]
+# arkworks: the standard pure-Rust zk-SNARK toolkit
+ark-ff = "0.5"            # finite-field arithmetic
+ark-ec = "0.5"            # elliptic-curve / pairing traits
+ark-bn254 = "0.5"         # the BN254 curve (same one Ethereum precompiles + circom use)
+ark-relations = "0.5"     # R1CS: the constraint-system representation of a circuit
+ark-r1cs-std = "0.5"      # "gadgets": ergonomic variables you can add/multiply inside a circuit
+ark-groth16 = "0.5"       # the Groth16 proof system (setup / prove / verify)
+ark-snark = "0.5"         # generic SNARK trait
+ark-std = "0.5"           # rng + misc
+ark-serialize = "0.5"     # to measure / serialize proofs and keys
+rand = "0.8"              # OS entropy for setup / proof randomness
+
+[profile.release]
+opt-level = 3
