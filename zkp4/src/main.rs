@@ -68,12 +68,15 @@ fn main() {
     println!("    replay Bob's tx           → {:?}", r.unwrap_err());
     let o1 = Note::new(6, bob.public_key(), &mut rng);
     let o2 = Note::new(6, alice.public_key(), &mut rng);
-    let bad = build_transfer(&l, &pk, &alice, &change, idx_bob + 1, [o1, o2], 0, None, &mut rng).unwrap();
-    println!("    7 in, 6+6 out (inflate)   → {:?}   (v_in ≠ v1 + v2 + v_pub)", l.apply(&bad).unwrap_err());
+    // The next two are prover-side forgeries. The wallet checks its witness
+    // before calling Groth16 and refuses; a wallet that skipped the check
+    // would emit a proof the ledger rejects as InvalidProof (see build_transfer).
+    let bad = build_transfer(&l, &pk, &alice, &change, idx_bob + 1, [o1, o2], 0, None, &mut rng);
+    println!("    7 in, 6+6 out (inflate)   → wallet refused: {:?}   (v_in ≠ v1 + v2 + v_pub)", bad.err().unwrap());
     let o1 = Note::new(5, bob.public_key(), &mut rng);
     let o2 = Note::new(2, bob.public_key(), &mut rng);
-    let bad = build_transfer(&l, &pk, &bob, &change, idx_bob + 1, [o1, o2], 0, None, &mut rng).unwrap();
-    println!("    Bob spends Alice's change → {:?}   (pk ≠ H(bob.sk))", l.apply(&bad).unwrap_err());
+    let bad = build_transfer(&l, &pk, &bob, &change, idx_bob + 1, [o1, o2], 0, None, &mut rng);
+    println!("    Bob spends Alice's change → wallet refused: {:?}   (pk ≠ H(bob.sk))", bad.err().unwrap());
     let bad = build_transfer(&l, &pk, &alice, &n_alice, idx_alice, [to_bob, change], 0, None, &mut rng).unwrap();
     println!("    Alice re-spends note 0    → {:?}", l.apply(&bad).unwrap_err());
     let _ = LedgerError::UnknownRoot;

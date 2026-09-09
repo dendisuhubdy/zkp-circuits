@@ -39,7 +39,7 @@ fn main() {
     // ---- prove --------------------------------------------------------------
     println!("\n[prove]");
     let t = Instant::now();
-    let proof = snark::prove(&pk, ChainCircuit::with_secret(x0), &mut rng);
+    let proof = snark::prove(&pk, ChainCircuit::with_secret(x0), &mut rng).expect("honest witness");
     let t_prove = t.elapsed();
     let mut bytes = Vec::new();
     proof.serialize_compressed(&mut bytes).unwrap();
@@ -53,11 +53,16 @@ fn main() {
     let t_verify = t.elapsed();
     println!("    correct y     : accepted = {ok}   ({t_verify:?})");
     println!("    wrong y       : accepted = {}", snark::verify(&vk, &[y + Fr::from(1u64)], &proof));
-    let bad = snark::prove(&pk, ChainCircuit { x0: Some(Fr::from(4u64)), y: Some(y) }, &mut rng);
-    println!("    wrong x₀      : accepted = {}", snark::verify(&vk, &[y], &bad));
+    // A cheating prover with the wrong secret. Our `prove` checks the witness
+    // before calling Groth16, so it refuses rather than forging a proof that
+    // the verifier would reject anyway (see the note on `snark::prove`).
+    match snark::prove(&pk, ChainCircuit { x0: Some(Fr::from(4u64)), y: Some(y) }, &mut rng) {
+        Ok(bad) => println!("    wrong x₀      : accepted = {}", snark::verify(&vk, &[y], &bad)),
+        Err(e) => println!("    wrong x₀      : prover refused ({e:?}) — x₀=4 does not reach y"),
+    }
 
     // ---- zero-knowledge -----------------------------------------------------
-    let p2 = snark::prove(&pk, ChainCircuit::with_secret(x0), &mut rng);
+    let p2 = snark::prove(&pk, ChainCircuit::with_secret(x0), &mut rng).expect("honest witness");
     let mut b2 = Vec::new();
     p2.serialize_compressed(&mut b2).unwrap();
     println!("\n[zero-knowledge]  second proof of same statement identical? {}  (blinded by r, s)", bytes == b2);

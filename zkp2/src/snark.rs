@@ -31,7 +31,7 @@
 
 use ark_bn254::Bn254;
 use ark_groth16::{Groth16, Proof, ProvingKey, VerifyingKey};
-use ark_relations::r1cs::ConstraintSynthesizer;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, SynthesisError};
 use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
 use ark_std::rand::{CryptoRng, RngCore};
@@ -48,8 +48,23 @@ pub fn setup<C: ConstraintSynthesizer<Fr>, R: RngCore + CryptoRng>(circuit: C, r
 }
 
 /// Needs the proving key (which embeds τ-derived points) and the witness.
-pub fn prove<C: ConstraintSynthesizer<Fr>, R: RngCore + CryptoRng>(pk: &Pk, circuit: C, rng: &mut R) -> SnarkProof {
-    Groth16::<Bn254>::prove(pk, circuit, rng).expect("prove")
+///
+/// Groth16 itself never rejects a bad witness: ark-groth16's prover has a
+/// `debug_assert!(cs.is_satisfied())` that panics in debug builds, and in
+/// release builds it silently emits a proof the verifier will reject. A
+/// real prover checks its own witness first, so we do that here and return
+/// `SynthesisError::Unsatisfiable` instead of calling into the library.
+pub fn prove<C: ConstraintSynthesizer<Fr> + Clone, R: RngCore + CryptoRng>(
+    pk: &Pk,
+    circuit: C,
+    rng: &mut R,
+) -> Result<SnarkProof, SynthesisError> {
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    circuit.clone().generate_constraints(cs.clone())?;
+    if !cs.is_satisfied()? {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    Groth16::<Bn254>::prove(pk, circuit, rng)
 }
 
 /// Needs the verifying key (a few curve points), public inputs, proof.
@@ -73,18 +88,31 @@ mod tests {
         let (pk, vk) = setup(ChainCircuit::blank(), &mut rng);
         let x0 = Fr::from(3u64);
         let y = chain(x0);
-        let proof = prove(&pk, ChainCircuit::with_secret(x0), &mut rng);
+        let proof = prove(&pk, ChainCircuit::with_secret(x0), &mut rng).unwrap();
         assert!(verify(&vk, &[y], &proof));
         assert!(!verify(&vk, &[y + Fr::from(1u64)], &proof));
         assert_eq!(size_of(&proof), 128);
     }
 
     #[test]
-    fn wrong_witness_rejected() {
+    fn wrong_witness_refused_by_prover() {
+        let mut rng = rand::rngs::OsRng;
+        let (pk, _vk) = setup(ChainCircuit::blank(), &mut rng);
+        let y = chain(Fr::from(3u64));
+        let res = prove(&pk, ChainCircuit { x0: Some(Fr::from(4u64)), y: Some(y) }, &mut rng);
+        assert!(matches!(res, Err(SynthesisError::Unsatisfiable)));
+    }
+
+    /// ark-groth16's prover has `debug_assert!(cs.is_satisfied())`, so a proof
+    /// forged from a bad witness can only be produced in a release build
+    /// (`cargo test --release`). There, the verifier rejects it.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn forged_proof_rejected_by_verifier() {
         let mut rng = rand::rngs::OsRng;
         let (pk, vk) = setup(ChainCircuit::blank(), &mut rng);
         let y = chain(Fr::from(3u64));
-        let proof = prove(&pk, ChainCircuit { x0: Some(Fr::from(4u64)), y: Some(y) }, &mut rng);
-        assert!(!verify(&vk, &[y], &proof));
+        let forged = Groth16::<Bn254>::prove(&pk, ChainCircuit { x0: Some(Fr::from(4u64)), y: Some(y) }, &mut rng).unwrap();
+        assert!(!verify(&vk, &[y], &forged));
     }
 }

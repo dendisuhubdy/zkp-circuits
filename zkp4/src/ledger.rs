@@ -7,6 +7,7 @@ use crate::note::{Note, SpendingKey};
 use crate::Fr;
 use ark_bn254::Bn254;
 use ark_groth16::{Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, SynthesisError};
 use ark_snark::SNARK;
 use std::collections::{BTreeMap, HashSet};
 
@@ -118,8 +119,14 @@ impl Ledger {
     }
 }
 
-/// Wallet side: build a transfer. `notes_out` values must sum with v_pub to
-/// the input value or the prover will produce a proof that fails to verify.
+/// Wallet side: build a transfer.
+///
+/// The wallet checks its own witness before proving. Groth16 itself does
+/// not: ark-groth16's prover has a `debug_assert!(cs.is_satisfied())` that
+/// panics in debug builds, and in release builds it silently emits a proof
+/// the ledger would reject. So a transfer that does not balance, or that
+/// spends a note with the wrong key, comes back as
+/// `SynthesisError::Unsatisfiable` here instead of reaching the chain.
 #[allow(clippy::too_many_arguments)]
 pub fn build_transfer<R: rand::Rng + rand::CryptoRng>(
     ledger: &Ledger,
@@ -131,7 +138,7 @@ pub fn build_transfer<R: rand::Rng + rand::CryptoRng>(
     v_pub: u64,
     to_transparent: Option<&str>,
     rng: &mut R,
-) -> Result<ShieldedTx, ark_relations::r1cs::SynthesisError> {
+) -> Result<ShieldedTx, SynthesisError> {
     let root = ledger.root();
     let nullifier = sk.nullifier(note_in);
     let cm_out = [notes_out[0].commitment(), notes_out[1].commitment()];
@@ -145,6 +152,11 @@ pub fn build_transfer<R: rand::Rng + rand::CryptoRng>(
         path: Some(ledger.path(leaf_index)),
         notes_out: [Some(notes_out[0]), Some(notes_out[1])],
     };
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    circuit.clone().generate_constraints(cs.clone())?;
+    if !cs.is_satisfied()? {
+        return Err(SynthesisError::Unsatisfiable);
+    }
     let proof = Groth16::<Bn254>::prove(pk, circuit, rng)?;
     Ok(ShieldedTx { root, nullifier, cm_out, v_pub, to_transparent: to_transparent.map(String::from), proof })
 }
@@ -190,19 +202,46 @@ mod tests {
     }
 
     #[test]
-    fn inflation_and_theft_rejected() {
-        let (pk, mut l, alice, bob, n, idx, mut rng) = world();
+    fn inflation_and_theft_refused_by_wallet() {
+        let (pk, l, alice, bob, n, idx, mut rng) = world();
         // inflation: 10 in, 12 out
         let o1 = Note::new(6, bob.public_key(), &mut rng);
         let o2 = Note::new(6, alice.public_key(), &mut rng);
-        let tx = build_transfer(&l, &pk, &alice, &n, idx, [o1, o2], 0, None, &mut rng).unwrap();
-        assert!(matches!(l.apply(&tx), Err(LedgerError::InvalidProof)));
-        // wrap-around: v1 = 2^64 - 1 + ... cannot even be expressed as u64 here, but a
-        // value ≥ 2^64 would fail enforce_u64; test the sum-wrap via v_pub instead:
+        let r = build_transfer(&l, &pk, &alice, &n, idx, [o1, o2], 0, None, &mut rng);
+        assert!(matches!(r, Err(SynthesisError::Unsatisfiable)));
         // theft: bob tries to spend alice's note with his key
         let o1 = Note::new(5, bob.public_key(), &mut rng);
         let o2 = Note::new(5, bob.public_key(), &mut rng);
-        let tx = build_transfer(&l, &pk, &bob, &n, idx, [o1, o2], 0, None, &mut rng).unwrap();
-        assert!(matches!(l.apply(&tx), Err(LedgerError::InvalidProof)));
+        let r = build_transfer(&l, &pk, &bob, &n, idx, [o1, o2], 0, None, &mut rng);
+        assert!(matches!(r, Err(SynthesisError::Unsatisfiable)));
+    }
+
+    /// Bypass the wallet's check and forge proofs straight from Groth16.
+    /// ark-groth16's prover `debug_assert!`s on a bad witness, so this can
+    /// only run in a release build (`cargo test --release`); there the
+    /// ledger's verifier rejects both forgeries.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn forged_proofs_rejected_by_ledger() {
+        let (pk, mut l, alice, bob, n, idx, mut rng) = world();
+        fn forge(l: &Ledger, pk: &Pk, sk: &SpendingKey, n: &Note, idx: usize, outs: [Note; 2], rng: &mut rand::rngs::OsRng) -> ShieldedTx {
+            let cm_out = [outs[0].commitment(), outs[1].commitment()];
+            let circuit = TransferCircuit {
+                root: Some(l.root()),
+                nullifier: Some(sk.nullifier(n)),
+                cm_out: [Some(cm_out[0]), Some(cm_out[1])],
+                v_pub: Some(0),
+                sk: Some(*sk),
+                note_in: Some(*n),
+                path: Some(l.path(idx)),
+                notes_out: [Some(outs[0]), Some(outs[1])],
+            };
+            let proof = Groth16::<Bn254>::prove(pk, circuit, rng).unwrap();
+            ShieldedTx { root: l.root(), nullifier: sk.nullifier(n), cm_out, v_pub: 0, to_transparent: None, proof }
+        }
+        let inflate = forge(&l, &pk, &alice, &n, idx, [Note::new(6, bob.public_key(), &mut rng), Note::new(6, alice.public_key(), &mut rng)], &mut rng);
+        assert!(matches!(l.apply(&inflate), Err(LedgerError::InvalidProof)));
+        let theft = forge(&l, &pk, &bob, &n, idx, [Note::new(5, bob.public_key(), &mut rng), Note::new(5, bob.public_key(), &mut rng)], &mut rng);
+        assert!(matches!(l.apply(&theft), Err(LedgerError::InvalidProof)));
     }
 }
