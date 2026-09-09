@@ -14,6 +14,9 @@ use rand_zkvm::tables::program::{self, program_trace, ProgramAir};
 use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::tables::memory::{self, memory_trace};
+use rand_zkvm::tables::alu::{self, fill_row};
+use rand_zkvm::emulator::AluEvent;
+use rand_zkvm::isa::AluOp;
 
 /// A throwaway table that asks the byte table questions. main: [x, y, z, is_real]
 #[derive(Clone)]
@@ -108,4 +111,33 @@ fn memory_trace_is_sorted_and_consistent() {
     // Δ limbs were counted: 4 range checks per real transition
     let total: u64 = counts.range.iter().sum();
     assert_eq!(total as usize, 4 * (real - 1));
+}
+
+#[test]
+fn alu_rows_recompose_and_carry() {
+    let mut counts = ByteCounts::default();
+    let mut row = vec![F::ZERO; alu::col::WIDTH];
+    fill_row(&mut row, &AluEvent { op: AluOp::Add, a: 0xffff_ffff, b: 1, c: 0 }, &mut counts);
+    assert_eq!(row[alu::col::FLAG0 + AluOp::Add.code() as usize], F::ONE);
+    assert_eq!(row[alu::col::C], F::ZERO);
+    for i in 0..4 { assert_eq!(row[alu::col::CARRY0 + i], F::ONE, "carry {i}"); }
+    let mut row = vec![F::ZERO; alu::col::WIDTH];
+    fill_row(&mut row, &AluEvent { op: AluOp::Sra, a: 0x8000_0000, b: 4, c: 0xf800_0000 }, &mut counts);
+    assert_eq!(row[alu::col::SA], F::ONE);
+    assert_eq!(row[alu::col::SH], F::from_u32(4));
+    assert_eq!(row[alu::col::PW], F::from_u32(16));
+    // q = (~a) >> 4 = 0x07ff_ffff ; c = ~q
+    assert_eq!(row[alu::col::Q0], F::from_u32(0xff));
+    assert_eq!(row[alu::col::C0 + 3], F::from_u32(0xf8));
+    let mut row = vec![F::ZERO; alu::col::WIDTH];
+    fill_row(&mut row, &AluEvent { op: AluOp::Slt, a: 0xffff_ffff, b: 0, c: 1 }, &mut counts);
+    assert_eq!((row[alu::col::SA], row[alu::col::SB], row[alu::col::CARRY0 + 3]), (F::ONE, F::ZERO, F::ZERO));
+}
+
+#[test]
+#[should_panic(expected = "does not match")]
+fn alu_fill_rejects_wrong_result() {
+    let mut counts = ByteCounts::default();
+    let mut row = vec![F::ZERO; alu::col::WIDTH];
+    fill_row(&mut row, &AluEvent { op: AluOp::Add, a: 1, b: 1, c: 3 }, &mut counts);
 }
