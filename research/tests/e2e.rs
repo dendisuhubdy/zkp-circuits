@@ -26,3 +26,14 @@ fn tier_padding_hides_cycle_count() {
     assert_eq!(p10.public_values[1], 10);
     assert_eq!(p12.public_values[1], 12);
 }
+
+#[test]
+fn a_fresh_verifier_accepts_the_proof() {
+    let prover = Machine::new(FriProfile::Test);
+    let verifier = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (proof, _) = prover.prove(&p, &[], None).unwrap();
+    verifier.verify(&p, &proof).unwrap();
+    assert_eq!(prover.code_hash(&p, proof.tier), verifier.code_hash(&p, proof.tier));
+    assert_ne!(prover.code_hash(&p, proof.tier), verifier.code_hash(&guests::fib(11), proof.tier));
+}

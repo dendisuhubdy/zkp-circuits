@@ -57,13 +57,17 @@ pub fn permutation() -> Perm {
     Perm::new_from_rng_128(&mut StdRng::seed_from_u64(PERM_SEED))
 }
 
-pub fn make_config(profile: FriProfile) -> Config {
+/// Builds a `Config` from two explicit RNGs: `mmcs_rng` seeds the value MMCS's per-commit
+/// hiding salts (used for *every* commit through it, preprocessed traces included — see
+/// `p3_merkle_tree::hiding_mmcs::MerkleTreeHidingMmcs::commit`), `pcs_rng` seeds the PCS's own
+/// random codewords/quotient blinding. Kept private: callers pick a seeding strategy through
+/// `make_config` (fresh OS entropy, for proving) or `key_config` (deterministic, for a
+/// preprocessed commitment any verifier can recompute).
+fn build_config(profile: FriProfile, mmcs_rng: StdRng, pcs_rng: StdRng) -> Config {
     let perm = permutation();
     let hash = Hash::new(perm.clone());
     let compress = Compress::new(perm.clone());
-    // The RNGs below only feed the zero-knowledge masks; fresh entropy per proof is
-    // taken from the OS.
-    let val_mmcs = ValMmcs::new(hash, compress, 2, StdRng::from_rng(&mut rand::rng()));
+    let val_mmcs = ValMmcs::new(hash, compress, 2, mmcs_rng);
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let fri = FriParameters {
         log_blowup: 3,
@@ -74,8 +78,14 @@ pub fn make_config(profile: FriProfile) -> Config {
         query_proof_of_work_bits: profile.pow_bits(),
         mmcs: challenge_mmcs,
     };
-    let pcs = Pcs::new(Dft::default(), val_mmcs, fri, 4, StdRng::from_rng(&mut rand::rng()));
+    let pcs = Pcs::new(Dft::default(), val_mmcs, fri, 4, pcs_rng);
     StarkConfig::new(pcs, Challenger::new(perm))
+}
+
+pub fn make_config(profile: FriProfile) -> Config {
+    // Fresh entropy per proof, taken from the OS: this is the config actually used to prove,
+    // so main-trace and quotient commitments stay hiding.
+    build_config(profile, StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()))
 }
 
 use crate::emulator::{execute, ExecError, Execution};
@@ -86,7 +96,6 @@ use crate::tables::cpu::{cpu_trace, public_values, CpuAir};
 use crate::tables::memory::{memory_trace, MemoryAir};
 use crate::tables::program::{program_trace, ProgramAir};
 use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder};
-use p3_batch_stark::common::GlobalPreprocessed;
 use p3_batch_stark::{prove_batch, verify_batch, BatchProof, CommonData, ProverData, StarkInstance};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_lookup::InteractionBuilder;
@@ -94,9 +103,6 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use p3_uni_stark::StarkGenericConfig;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 
 pub const TIERS: [usize; 6] = [10, 12, 14, 16, 18, 20];
 
@@ -174,31 +180,36 @@ impl Proof {
     pub fn size(&self) -> usize { self.to_bytes().len() }
 }
 
-/// (program.base_pc, program.words, tier) identifies a circuit instance for the setup cache below.
-type SetupKey = (u32, Vec<u32>, usize);
-
-pub struct Machine {
-    pub config: Config,
-    pub profile: FriProfile,
-    /// Memoized per-(program, tier) `ProverData`, keyed by the program's own identity.
-    ///
-    /// `HidingFriPcs::commit_preprocessing` still routes through `MerkleTreeHidingMmcs::commit`,
-    /// which mixes fresh random salt columns into *every* commit call, preprocessed or not (see
-    /// `p3_merkle_tree::hiding_mmcs`). So two independent calls to
-    /// `ProverData::from_airs_and_degrees` for the very same program and tier produce two
-    /// different preprocessed commitments. `Machine::verify` calling `verifier_key` fresh after
-    /// `prove`/`prove_traces` had already built its own `ProverData` would therefore hand
-    /// `verify_batch` a preprocessed commitment the proof's transcript was never built against;
-    /// the mismatch doesn't surface as a constraint violation but as the verifier's FRI
-    /// proof-of-work check failing (`InvalidPowWitness`) once the two transcripts have diverged.
-    /// Caching the `ProverData` per (program, tier) makes `prove_traces` and `verifier_key`
-    /// agree on the exact same preprocessed commitment, matching how every caller in this crate
-    /// uses one `Machine` for both proving and verifying a given circuit.
-    setup: RefCell<HashMap<SetupKey, Rc<ProverData<Config>>>>,
+/// Deterministic 64-bit digest of a program: an FNV-1a-style fold over `base_pc` and every
+/// word. Used only to seed `key_config`'s RNGs, never for anything cryptographic in its own
+/// right — it just needs to be a pure function of the program.
+fn program_digest(program: &Program) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (program.base_pc as u64);
+    for &w in &program.words {
+        h ^= w as u64;
+        h = h.wrapping_mul(0x0000_0001_0000_01b3);
+    }
+    h
 }
 
+/// A `Config` whose value-MMCS salts and PCS random codewords are both seeded deterministically
+/// from `program` (and nothing else) instead of OS entropy. The program and byte tables are
+/// public data — a program-derived salt costs them no privacy — so the resulting preprocessed
+/// commitment (`Machine::verifier_key`/`code_hash`) is a pure function of the program: any
+/// verifier can recompute it standalone, without having witnessed the proving session. Never
+/// used for the actual `prove_batch` call, whose main-trace/quotient/permutation commitments
+/// must keep fresh entropy (see `make_config`) or two proofs of the same run would be
+/// distinguishable, breaking zero-knowledge.
+fn key_config(profile: FriProfile, program: &Program) -> Config {
+    let seed = program_digest(program);
+    // XOR with an arbitrary odd constant so the two RNG streams don't start identically.
+    build_config(profile, StdRng::seed_from_u64(seed), StdRng::seed_from_u64(seed ^ 0x9E37_79B9_7F4A_7C15))
+}
+
+pub struct Machine { pub config: Config, pub profile: FriProfile }
+
 impl Machine {
-    pub fn new(profile: FriProfile) -> Self { Self { config: make_config(profile), profile, setup: RefCell::new(HashMap::new()) } }
+    pub fn new(profile: FriProfile) -> Self { Self { config: make_config(profile), profile } }
 
     fn log_ext_degrees(&self, program: &Program, tier: Tier) -> Vec<usize> {
         let zk = self.config.is_zk();
@@ -207,29 +218,8 @@ impl Machine {
             .iter().map(|h| h.trailing_zeros() as usize + zk).collect()
     }
 
-    /// Look up or build (and cache) this program's `ProverData` for `tier`. See the `setup`
-    /// field's doc comment for why this must be memoized rather than recomputed per call.
-    fn prover_data(&self, program: &Program, tier: Tier) -> Rc<ProverData<Config>> {
-        let key: SetupKey = (program.base_pc, program.words.clone(), tier.0);
-        if let Some(pd) = self.setup.borrow().get(&key) { return pd.clone(); }
-        let pd = Rc::new(ProverData::from_airs_and_degrees(&self.config, &chips(program), &self.log_ext_degrees(program, tier)));
-        self.setup.borrow_mut().insert(key, pd.clone());
-        pd
-    }
-
-    /// Deep-clones a `CommonData` (the crate does not derive `Clone` for it) so the cached
-    /// `ProverData` can hand out an owned verifier key without losing its own copy.
-    fn clone_common(common: &CommonData<Config>) -> CommonData<Config> {
-        let preprocessed = common.preprocessed.as_ref().map(|g| GlobalPreprocessed {
-            commitment: g.commitment.clone(),
-            instances: g.instances.clone(),
-            matrix_to_instance: g.matrix_to_instance.clone(),
-        });
-        CommonData::new(preprocessed, common.lookups.clone())
-    }
-
     pub fn verifier_key(&self, program: &Program, tier: Tier) -> CommonData<Config> {
-        Self::clone_common(&self.prover_data(program, tier).common)
+        ProverData::from_airs_and_degrees(&key_config(self.profile, program), &chips(program), &self.log_ext_degrees(program, tier)).common
     }
 
     /// The code hash hc: the Merkle root of the preprocessed columns (program + byte table).
@@ -252,7 +242,25 @@ impl Machine {
         let instances: Vec<StarkInstance<'_, Config, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
         }).collect();
-        let prover_data = self.prover_data(program, tier);
+        // Built with `key_config` so the preprocessed tree's commitment (and the leaf data
+        // `prove_batch` opens it against) matches exactly what a verifier will recompute via
+        // `verifier_key`. `prove_batch` itself still runs against `self.config` (fresh entropy)
+        // for the main trace, quotient, and permutation commitments: see the doc comment on
+        // `key_config` and the confirmation below that `prove_batch` never re-derives the
+        // preprocessed commitment from its `config` argument.
+        //
+        // Confirmed in `p3-batch-stark-0.7.0/src/prover.rs`: `prove_batch` reads the
+        // preprocessed commitment and metadata from `prover_data.common.preprocessed`, and
+        // opens it using `prover_data.prover_only.preprocessed_prover_data` directly (see the
+        // "Round 3" block that builds `rounds` for `pcs.open_with_preprocessing`). It only
+        // calls `config.pcs()` for the PCS's structural operations (domains, the main/quotient/
+        // permutation commits, and the actual opening machinery) — never to recompute or
+        // re-commit the preprocessed trace. So `config` and the config used to build
+        // `prover_data` only need to be *structurally* compatible (same hash/compress/Dft/FRI
+        // parameters, which `key_config` and `make_config` share via `build_config`); their
+        // RNG state can differ freely.
+        let key_cfg = key_config(self.profile, program);
+        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees(program, tier));
         let batch = prove_batch(&self.config, &instances, &prover_data);
         Proof { tier, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }
     }
