@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (eleven proofs, one at production FRI parameters)
-cargo test              # 43 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end
+cargo test              # 49 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -120,6 +120,29 @@ exist as syscalls. Those arrive as syscalls 10–13 (`POSEIDON2`,
 `docs/05-roadmap.md`. Milestone 1 proves the general-purpose machine works;
 milestone 3 is what turns it into a shielded pool.
 
+## Viewing keys
+
+Ahead of milestone 3, the crate carries a first shielded transfer and the
+disclosure layer that makes it auditable — `guests::transfer`, `notes.rs`,
+`viewing.rs`, `ledger.rs`, and Part 9 of the demo. The transfer spends one
+note and creates one, recomputing both commitments and the nullifier inside
+the guest with an add/xor/rotate hash (`arx.rs`, a development stand-in for
+the M3 Poseidon2 chip, since RV32I has no multiplier and no hash syscall).
+Beside the proof the sender publishes an envelope: the created note's
+plaintext under a per-transaction key, wrapped to the receiver (ML-KEM-768)
+and to the sender's own outgoing key.
+
+A party's **viewing key** is a one-way image of its spend key. It opens every
+envelope the party sent or received and nothing else; a **transaction key**
+opens one envelope. Each opened row carries sender, receiver, amount, asset
+and time, plus the note opening, and anyone holding the same key can check
+the row against the chain's commitments and nullifiers. The viewing key
+cannot spend: the guest takes the spend key as its private input and derives
+the address itself, so a witness built from the viewing key names a
+commitment the chain has never seen, and claiming the real one is a
+constraint failure. What it does not yet do — in-circuit membership, so the
+spent commitment is public — and why: `docs/06-viewing-keys.md`.
+
 ## The three targets
 
 Only RISC-V executes natively today. Solidity and Solana are software
@@ -143,7 +166,9 @@ milestone 4 builds first: `docs/04-guests.md`.
 | Private inputs, every register/memory value, every branch, the exact cycle count, which syscalls ran | hidden |
 
 `hc` is binding but not hiding — its salt is derived from the program — which
-costs nothing while the verifier holds the program anyway.
+costs nothing while the verifier holds the program anyway. A shielded
+transfer additionally publishes its spent commitment in the clear until
+`MERKLE_VERIFY` exists (`docs/06-viewing-keys.md`).
 
 Full detail, including the tier-to-row-count table and the delegated-proving
 boundary: `docs/03-privacy.md`.
@@ -172,3 +197,5 @@ boundary: `docs/03-privacy.md`.
 4. `src/tables/memory.rs` — registers and RAM in one sorted table.
 5. `src/tables/alu.rs` — byte-limb arithmetic, shifts, compares.
 6. `src/machine.rs` — the Plonky3 config, tiers, `prove`/`verify`.
+7. `src/notes.rs`, `src/viewing.rs`, `src/ledger.rs` — keys, notes, envelopes,
+   disclosures, and the simulated chain the transfer guest is checked against.

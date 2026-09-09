@@ -46,6 +46,25 @@ a public state root — that arrives with syscalls 10–13 (`POSEIDON2`,
 balance is private" means only that the verifier never sees the number, not
 that the number is tied to any real account.
 
+The one exception is the shielded transfer guest, which binds its inputs by
+recomputing note commitments and a nullifier in-circuit and publishing them
+(`docs/06-viewing-keys.md`). That is a per-guest choice, not a machine
+property: `READ_INPUT` itself is still unchecked, and the transfer's `cm_in`
+is a *public* output checked by the ledger rather than a Merkle witness, so
+the spent commitment — and with it the link from a note's creation to its
+spend — is visible on chain until milestone 3.
+
+## Selective disclosure: viewing keys
+
+A shielded transaction is opaque to the chain and readable by exactly two
+kinds of key: a party's viewing key (its whole history, sent and received)
+and a per-transaction key (one transaction). Neither can spend. Every row a
+key opens carries sender, receiver, amount, asset and time together with the
+note opening, so a third party holding the same key checks the row against
+the on-chain commitments and nullifiers rather than trusting whoever handed
+it over. The construction, the checks, and the honest list of what it does
+not yet cover are in `docs/06-viewing-keys.md`.
+
 ## `hc` is binding, not hiding — and the program is not secret in M1
 
 `hc` is the preprocessed Merkle root, and `machine.rs::key_config` seeds its
@@ -120,6 +139,8 @@ refused by `build_traces`, not silently truncated.
 | Every branch taken | hidden |
 | The exact cycle count | hidden — only the padded tier height is visible |
 | Which syscalls ran, beyond what the outputs imply | hidden |
+| Shielded transfer (`guests::transfer`): the spent commitment `cm_in`, nullifier, created commitment, and time | public — `cm_in` only because membership is not yet proved in-circuit |
+| Shielded transfer: sender, receiver, amount, asset, note randomness | hidden from the chain; opened by the receiver's or sender's viewing key, or by the transaction key (`docs/06-viewing-keys.md`) |
 
 ## The delegated-proving boundary
 

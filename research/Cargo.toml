@@ -28,6 +28,8 @@ p3-symmetric = "=0.7.0"
 rand = { version = "0.10", features = ["std_rng"] }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
+ml-kem = "=0.3.2"
+chacha20poly1305 = "=0.11.0"
 
 [profile.release]
 opt-level = 3

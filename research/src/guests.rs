@@ -163,3 +163,84 @@ pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
         ("alu_mix", alu_mix(), vec![]),
     ]
 }
+
+/// The shielded transfer: spends one note and creates one of the same amount and asset.
+///
+/// Private inputs (`notes::input`): the spend key, the spent note's fields, and the created
+/// note's owner, time, nonce and randomness. The guest derives `nk = H_NK(sk)` and
+/// `pk = H_PK(nk)` itself, so the spent note's owner and the created note's `from` are the
+/// address of whoever holds `sk` — that is what authenticates the sender — and it recomputes
+/// both commitments and the nullifier with `arx::emit_hash`. Public outputs
+/// (`notes::output`): `cm_in`, `nf`, `cm_out`, and the created note's `time`.
+///
+/// What it does *not* do in milestone 1: prove `cm_in` is in a commitment tree — there is no
+/// `MERKLE_VERIFY` syscall yet, so the ledger checks membership against the public `cm_in`
+/// (`ledger.rs`), which leaks which note was spent. `docs/06-viewing-keys.md` states the
+/// consequences.
+pub fn transfer() -> Program {
+    use crate::arx::{self, domain, reg};
+    use crate::notes::{input, output, Note};
+    const BASE: u32 = 25;                       // s9: RAM base register
+    const BUF: i32 = 0;                         // hash message buffer (12 words, zero-padded)
+    const INP: i32 = 0x100;                     // the 16 private inputs
+    const NK: i32 = 0x200; const PK: i32 = 0x208; const NF: i32 = 0x210; const CM_IN: i32 = 0x218; const CM_OUT: i32 = 0x220;
+    let inp = |i: usize| INP + 4 * i as i32;
+    let mut a = Assembler::new(0);
+    a.extend(li(BASE, HEAP));
+    // Read every private input once and keep it in RAM.
+    for i in 0..input::COUNT {
+        a.extend(read_input(i as u32));
+        a.push(sw(BASE, REG_A0, inp(i)));
+    }
+    let copy = |a: &mut Assembler, src: i32, dst: i32| { a.push(lw(T0, BASE, src)); a.push(sw(BASE, T0, dst)); };
+    let zero = |a: &mut Assembler, dst: i32| a.push(sw(BASE, REG_ZERO, dst));
+    let store_digest = |a: &mut Assembler, dst: i32| { a.push(sw(BASE, reg::STATE[0], dst)); a.push(sw(BASE, reg::STATE[1], dst + 4)); };
+    // nk = H_NK(sk)
+    copy(&mut a, inp(input::SK), BUF); copy(&mut a, inp(input::SK + 1), BUF + 4); zero(&mut a, BUF + 8); zero(&mut a, BUF + 12);
+    arx::emit_call_hash(&mut a, HEAP + BUF, 2, domain::NK);
+    store_digest(&mut a, NK);
+    // pk = H_PK(nk)
+    copy(&mut a, NK, BUF); copy(&mut a, NK + 4, BUF + 4);
+    arx::emit_call_hash(&mut a, HEAP + BUF, 2, domain::PK);
+    store_digest(&mut a, PK);
+    // nf = H_NF(nk, rho_in)
+    copy(&mut a, NK, BUF); copy(&mut a, NK + 4, BUF + 4); copy(&mut a, inp(input::IN_RHO), BUF + 8);
+    arx::emit_call_hash(&mut a, HEAP + BUF, 3, domain::NF);
+    store_digest(&mut a, NF);
+    // cm_in = H_CM(pk, in.from, in.amount, in.asset, in.time, in.rho, in.r)
+    let note_words: [i32; Note::WORDS] = [PK, PK + 4, inp(input::IN_FROM), inp(input::IN_FROM + 1), inp(input::IN_AMOUNT), inp(input::IN_ASSET), inp(input::IN_TIME), inp(input::IN_RHO), inp(input::IN_R), inp(input::IN_R + 1)];
+    for (i, src) in note_words.iter().enumerate() { copy(&mut a, *src, BUF + 4 * i as i32); }
+    zero(&mut a, BUF + 40); zero(&mut a, BUF + 44);
+    arx::emit_call_hash(&mut a, HEAP + BUF, Note::WORDS, domain::CM);
+    store_digest(&mut a, CM_IN);
+    // cm_out = H_CM(out.pk, pk, in.amount, in.asset, out.time, out.rho, out.r)
+    let note_words: [i32; Note::WORDS] = [inp(input::OUT_PK), inp(input::OUT_PK + 1), PK, PK + 4, inp(input::IN_AMOUNT), inp(input::IN_ASSET), inp(input::OUT_TIME), inp(input::OUT_RHO), inp(input::OUT_R), inp(input::OUT_R + 1)];
+    for (i, src) in note_words.iter().enumerate() { copy(&mut a, *src, BUF + 4 * i as i32); }
+    arx::emit_call_hash(&mut a, HEAP + BUF, Note::WORDS, domain::CM);
+    store_digest(&mut a, CM_OUT);
+    // Publish.
+    for (slot, src) in [(output::CM_IN, CM_IN), (output::CM_IN + 1, CM_IN + 4), (output::NF, NF), (output::NF + 1, NF + 4), (output::CM_OUT, CM_OUT), (output::CM_OUT + 1, CM_OUT + 4), (output::TIME, inp(input::OUT_TIME))] {
+        a.push(lw(T1, BASE, src));
+        a.extend(write_output(slot as u32, T1));
+    }
+    a.extend(halt());
+    arx::emit_perm(&mut a);
+    arx::emit_hash(&mut a);
+    a.assemble()
+}
+
+/// Hashes `msg` under `arx::domain::TEST` and outputs the four rate words: the fixture that
+/// pins the guest-side `Arx8` to the native one.
+pub fn arx_probe(msg: &[u32]) -> Program {
+    use crate::arx::{self, domain, reg};
+    const BASE: u32 = 25;
+    let mut a = Assembler::new(0);
+    a.extend(li(BASE, HEAP));
+    for (i, w) in msg.iter().enumerate() { a.extend(li(T0, *w as i32)); a.push(sw(BASE, T0, 4 * i as i32)); }
+    arx::emit_call_hash(&mut a, HEAP, msg.len(), domain::TEST);
+    for i in 0..4 { a.extend(write_output(i as u32, reg::STATE[i])); }
+    a.extend(halt());
+    arx::emit_perm(&mut a);
+    arx::emit_hash(&mut a);
+    a.assemble()
+}
