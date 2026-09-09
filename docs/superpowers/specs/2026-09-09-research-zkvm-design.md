@@ -61,8 +61,11 @@ chips" shape, and it is what `p3-batch-stark` 0.7 provides directly.
 | `PROGRAM` | lookup (table) | (pc, flags…, rd, rs1, rs2, imm, rd_is_zero) | program | cpu |
 | `MEMORY` | permutation (multiset equality) | (space, addr, clk, value, is_write) | cpu | memory |
 | `ALU` | lookup | (op, a, b, c) | alu | cpu |
-| `BYTE` | lookup | (a, b, a&b, a\|b, a^b) | byte | alu, memory, cpu |
+| `RANGE8` | lookup | (x), x < 256 | byte | alu, memory |
+| `AND8` / `OR8` / `XOR8` | lookup | (a, b, a op b) | byte | alu |
 | `POW2` | lookup | (s, 2^s), s < 32 | byte (first 32 rows) | alu |
+
+The byte table serves five buses rather than one five-field bus so that a range check is a one-field message and a bitwise op a three-field one; the table is the same 2^16 rows.
 
 `space` distinguishes the register file (space 0, addr = register index 0–31)
 from RAM (space 1, addr = word address). Registers therefore live in the
@@ -128,7 +131,7 @@ interpreted, which is an acceptable tax for a guest.
 |---|---|---|---|
 | 0 | `HALT` | M1 | ends execution; remaining rows are padding |
 | 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, slot < 8 |
-| 2 | `READ_INPUT idx` | M2 | returns private input word `idx` (witness only) |
+| 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` (witness only) |
 | 10 | `POSEIDON2 ptr_in ptr_out` | M3 | hashes 8 words at `ptr_in`, writes 4 at `ptr_out` |
 | 11 | `NOTE_COMMIT` | M3 | commitment of (value, ρ, pk) |
 | 12 | `NULLIFY` | M3 | nf = H(sk ‖ ρ) |
@@ -154,8 +157,12 @@ range-checked: ALU results (limbs), immediates (preprocessed, trusted), `pc+4`
 
 ### 5.1 `program` (preprocessed + 1 main column)
 
-Preprocessed: `pc`, one boolean flag per mnemonic in §4.1, `rd`, `rs1`,
-`rs2`, `imm` (as a `u32` value, sign already applied), `rd_is_zero`.
+Preprocessed: `pc`, `rd`, `rs1`, `rs2`, `imm` (as a `u32` value, sign already
+applied), and the pre-decoded *selectors* `is_alu, alu_op, is_imm, is_branch,
+br_op, br_neg, is_load, is_store, is_jal, is_jalr, is_lui, is_auipc, is_ecall,
+writes_rd` (18 fields; `writes_rd` already folds in `rd ≠ 0`). Selectors
+rather than one flag per mnemonic: the same trust model, fewer columns, and
+the CPU constraints read as "if load then …" instead of sums of flags.
 Main: `mult` — how many times this row was fetched. Provides
 `(pc, flags…, rd, rs1, rs2, imm, rd_is_zero)` on `PROGRAM` with count `mult`.
 
