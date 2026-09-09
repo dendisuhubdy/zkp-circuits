@@ -164,7 +164,7 @@ pub fn build_traces(program: &Program, exec: &Execution, tier: Tier) -> Result<T
     let cycles = exec.cycles();
     if cycles > tier.max_cycles() { return Err(ProveError::TooManyCycles { cycles, tier }); }
     let mut counts = ByteCounts::default();
-    let cpu = cpu_trace(&exec.events, tier.cpu_height());
+    let cpu = cpu_trace(&exec.events, tier.cpu_height(), &mut counts);
     let memory = memory_trace(&exec.events, tier.mem_height(), &mut counts);
     let alu = alu_trace(&exec.events, tier.alu_height(), &mut counts);
     let byte = byte_trace(&counts);

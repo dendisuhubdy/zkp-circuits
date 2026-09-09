@@ -1,6 +1,6 @@
 //! One row per cycle. Fetches from PROGRAM, reads and writes through MEMORY,
 //! delegates arithmetic to ALU. The only table with public values.
-use super::{bus, program::MESSAGE_LEN, F};
+use super::{bus, byte::ByteCounts, limbs, program::MESSAGE_LEN, F};
 use crate::emulator::{CycleEvent, Syscall, ECALL_MEM_REG, SLOT_MEM, SLOT_R1, SLOT_R2, SLOT_W};
 use crate::isa::{NUM_OUTPUTS, SYS_HALT as SYS_NUM_HALT, SYS_READ_INPUT, SYS_WRITE_OUTPUT};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
@@ -25,7 +25,10 @@ pub mod col {
     /// `DoubleWrite` rule), and because `OUT_SEL_i` is zero on padding rows the value
     /// survives to the last row, where it says whether slot `i` was ever written.
     pub const WRITTEN0: usize = OUT_SEL0 + crate::isa::NUM_OUTPUTS;  // 40
-    pub const WIDTH: usize = WRITTEN0 + crate::isa::NUM_OUTPUTS;     // 48
+    /// The four byte limbs of `MEM_ADDR` on load/store rows: what makes word alignment a
+    /// stated constraint rather than a side effect of the memory table's key ordering.
+    pub const MA0: usize = WRITTEN0 + crate::isa::NUM_OUTPUTS;       // 48
+    pub const WIDTH: usize = MA0 + 4;                                // 52
     /// Columns that must be zero on padding rows.
     pub const SELECTORS: [usize; 15] = [IS_ALU, IS_IMM, IS_BRANCH, IS_LOAD, IS_STORE, IS_JAL, IS_JALR, IS_LUI, IS_AUIPC, IS_ECALL, WRITES_RD, SYS_HALT, SYS_WRITE, SYS_READ, BR_NEG];
 }
@@ -111,6 +114,18 @@ where
         // memory
         let is_mem = v(IS_LOAD) + v(IS_STORE);
         b.assert_zero(is_mem.clone() * (v(MEM_ADDR) * four.clone() - v(ALU_OUT)));
+        // Alignment, stated. `MEM_ADDR·4 = ALU_OUT` alone is a field identity: a misaligned
+        // `ALU_OUT` just yields `MEM_ADDR = ALU_OUT·4⁻¹ mod p`, and until now that was
+        // defeated only by accident — such a key cannot be ordered in the memory table. The
+        // four byte limbs plus the `AND8` check of the top limb against `0xC0` bound
+        // `MEM_ADDR` to `[0, 2^30)`. With `ALU_OUT` already 32-bit (the ALU table's own limb
+        // range checks) the product `MEM_ADDR·4 < 2^32` cannot wrap, so the identity holds
+        // over the integers and `ALU_OUT` really is a multiple of 4.
+        let mut ma = AB::Expr::ZERO;
+        for i in 0..4 { ma += v(MA0 + i) * AB::Expr::from_u32(1 << (8 * i)); }
+        b.assert_zero(is_mem.clone() * (v(MEM_ADDR) - ma));
+        for i in 0..4 { bus::RANGE8.lookup_key(b, [v(MA0 + i)], Count::bounded(is_mem.clone(), 1)); }
+        bus::AND8.lookup_key(b, [v(MA0 + 3), AB::Expr::from_u32(0xC0), AB::Expr::ZERO], Count::bounded(is_mem.clone(), 1));
         b.assert_zero(v(IS_ECALL) * (v(MEM_ADDR) - AB::Expr::from_u32(ECALL_MEM_REG)));
         let ts = |slot: u32| v(CLK) * four.clone() + AB::Expr::from_u32(slot);
         let zero = AB::Expr::ZERO;
@@ -156,7 +171,9 @@ pub fn public_values(pc_entry: u32, tier_log2: usize, outputs: &[u32; NUM_OUTPUT
     v
 }
 
-pub fn cpu_trace(events: &[CycleEvent], height: usize) -> RowMajorMatrix<F> {
+/// `counts` receives the `RANGE8`/`AND8` lookups the alignment limbs declare, in lock-step
+/// with the interactions the AIR above evaluates.
+pub fn cpu_trace(events: &[CycleEvent], height: usize, counts: &mut ByteCounts) -> RowMajorMatrix<F> {
     assert!(events.len() < height, "cpu table needs a padding row: {} cycles, height {height}", events.len());
     let mut v = F::zero_vec(height * WIDTH);
     let mut written = [0u32; NUM_OUTPUTS];
@@ -167,6 +184,11 @@ pub fn cpu_trace(events: &[CycleEvent], height: usize) -> RowMajorMatrix<F> {
         r[A] = F::from_u32(e.a); r[B] = F::from_u32(e.b); r[C] = F::from_u32(e.c);
         r[ALU_OUT] = F::from_u32(e.alu_out); r[TGT] = F::from_u32(e.tgt);
         r[MEM_ADDR] = F::from_u32(e.mem_addr); r[MEM_VAL] = F::from_u32(e.mem_val);
+        if e.dec.is_load == 1 || e.dec.is_store == 1 {
+            let ml = limbs(e.mem_addr);
+            for k in 0..4 { r[MA0 + k] = ml[k]; counts.range8((e.mem_addr >> (8 * k)) & 0xff); }
+            counts.and8((e.mem_addr >> 24) & 0xff, 0xC0);
+        }
         match e.sys {
             Some(Syscall::Halt) => r[SYS_HALT] = F::ONE,
             Some(Syscall::WriteOutput { slot, .. }) => { r[SYS_WRITE] = F::ONE; r[OUT_SEL0 + slot as usize] = F::ONE; written[slot as usize] += 1; }

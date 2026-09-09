@@ -148,7 +148,8 @@ use rand_zkvm::tables::cpu::{self, cpu_trace, public_values};
 fn cpu_trace_mirrors_events_and_pads() {
     let p = guests::fib(3);
     let e = execute(&p, &[], 10_000).unwrap();
-    let t = cpu_trace(&e.events, 64);
+    let mut counts = ByteCounts::default();
+    let t = cpu_trace(&e.events, 64, &mut counts);
     let w = cpu::col::WIDTH;
     assert_eq!(t.height(), 64);
     for (i, ev) in e.events.iter().enumerate() {
@@ -178,4 +179,26 @@ fn cpu_trace_mirrors_events_and_pads() {
     let pv = public_values(0, 10, &e.outputs);
     assert_eq!(pv.len(), cpu::pv::NUM);
     assert_eq!(pv[cpu::pv::OUT0], F::from_u32(2));
+}
+
+#[test]
+fn cpu_trace_limbs_and_counts_every_load_store_address() {
+    let p = guests::memcpy(4);
+    let e = execute(&p, &[], 10_000).unwrap();
+    let mut counts = ByteCounts::default();
+    let t = cpu_trace(&e.events, 1 << 10, &mut counts);
+    let w = cpu::col::WIDTH;
+    let mem_rows: Vec<usize> = (0..e.events.len()).filter(|i| e.events[*i].dec.is_load == 1 || e.events[*i].dec.is_store == 1).collect();
+    assert!(!mem_rows.is_empty(), "memcpy loads and stores");
+    for i in &mem_rows {
+        let addr = e.events[*i].mem_addr;
+        assert!(addr < 1 << 30, "row {i}: mem_addr must fit the AND8 bound");
+        for k in 0..4 {
+            assert_eq!(t.values[i * w + cpu::col::MA0 + k], F::from_u32((addr >> (8 * k)) & 0xff), "row {i} limb {k}");
+        }
+    }
+    // Four RANGE8 lookups and one AND8 (top limb against 0xC0) per load/store row, and none
+    // on any other kind of row: exactly what the AIR's `is_mem`-counted interactions declare.
+    assert_eq!(counts.range.iter().sum::<u64>() as usize, 4 * mem_rows.len());
+    assert_eq!(counts.and.iter().sum::<u64>() as usize, mem_rows.len());
 }
