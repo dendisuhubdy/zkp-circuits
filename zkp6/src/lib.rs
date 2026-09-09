@@ -42,9 +42,11 @@
 //!   `merkle.rs`  full binary Merkle tree (native) + path-verification gadget
 //!   `circuit.rs` the withdraw circuit
 //!   `mixer.rs`   the simulated contract: balances, tree, roots, nullifiers
+//!   `cli.rs`     the wallet: deposit prints a note; withdraw takes only a note
 //!   `main.rs`    Alice / Bob / Carol scenario
 
 pub mod circuit;
+pub mod cli;
 pub mod hash;
 pub mod merkle;
 pub mod mixer;

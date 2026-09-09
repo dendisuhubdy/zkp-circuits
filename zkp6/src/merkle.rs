@@ -55,6 +55,12 @@ impl MerkleTree {
         self.next_index == 0
     }
 
+    /// The inserted leaves in order — what a wallet reconstructs from the
+    /// contract's `Deposit(commitment, leafIndex)` event log.
+    pub fn leaves(&self) -> &[Fr] {
+        &self.levels[0][..self.next_index]
+    }
+
     /// Append a leaf and recompute the DEPTH hashes on its path.
     pub fn insert(&mut self, leaf: Fr) -> usize {
         let idx = self.next_index;
