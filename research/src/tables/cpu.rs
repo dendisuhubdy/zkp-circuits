@@ -20,7 +20,12 @@ pub mod col {
     pub const MEM_ADDR: usize = 27; pub const MEM_VAL: usize = 28;
     pub const SYS_HALT: usize = 29; pub const SYS_WRITE: usize = 30; pub const SYS_READ: usize = 31;
     pub const OUT_SEL0: usize = 32;
-    pub const WIDTH: usize = OUT_SEL0 + crate::isa::NUM_OUTPUTS; // 40
+    /// `WRITTEN_i` is the running count of `OUT_SEL_i` over rows `0..=this one`. It is
+    /// boolean on every row, so a slot can be written at most once (the emulator's
+    /// `DoubleWrite` rule), and because `OUT_SEL_i` is zero on padding rows the value
+    /// survives to the last row, where it says whether slot `i` was ever written.
+    pub const WRITTEN0: usize = OUT_SEL0 + crate::isa::NUM_OUTPUTS;  // 40
+    pub const WIDTH: usize = WRITTEN0 + crate::isa::NUM_OUTPUTS;     // 48
     /// Columns that must be zero on padding rows.
     pub const SELECTORS: [usize; 15] = [IS_ALU, IS_IMM, IS_BRANCH, IS_LOAD, IS_STORE, IS_JAL, IS_JALR, IS_LUI, IS_AUIPC, IS_ECALL, WRITES_RD, SYS_HALT, SYS_WRITE, SYS_READ, BR_NEG];
 }
@@ -130,6 +135,18 @@ where
             sel_sum += s;
         }
         b.assert_eq(sel_sum, v(SYS_WRITE));
+        // Spec §3.4: an output slot no `WRITE_OUTPUT` ever selected is zero. Only the slots
+        // a `WRITE_OUTPUT` row selects are pinned above, so without this a never-written
+        // slot's `pv[OUT0 + i]` is a free public value. `WRITTEN_i` accumulates `OUT_SEL_i`;
+        // asserting it boolean on every row also caps each slot at one write. `OUT_SEL_i` is
+        // zero on every padding row (its sum is `SYS_WRITE`, a `SELECTORS` entry), so the
+        // accumulator holds its final value through the padding to the last row.
+        for i in 0..NUM_OUTPUTS {
+            b.assert_bool(v(WRITTEN0 + i));
+            b.when_first_row().assert_eq(v(WRITTEN0 + i), v(OUT_SEL0 + i));
+            b.when_transition().assert_eq(n(WRITTEN0 + i), v(WRITTEN0 + i) + n(OUT_SEL0 + i));
+            b.when_last_row().assert_zero((one.clone() - v(WRITTEN0 + i)) * pvs[pv::OUT0 + i].clone());
+        }
     }
 }
 
@@ -142,6 +159,7 @@ pub fn public_values(pc_entry: u32, tier_log2: usize, outputs: &[u32; NUM_OUTPUT
 pub fn cpu_trace(events: &[CycleEvent], height: usize) -> RowMajorMatrix<F> {
     assert!(events.len() < height, "cpu table needs a padding row: {} cycles, height {height}", events.len());
     let mut v = F::zero_vec(height * WIDTH);
+    let mut written = [0u32; NUM_OUTPUTS];
     for (i, e) in events.iter().enumerate() {
         let r = &mut v[i * WIDTH..(i + 1) * WIDTH];
         r[CLK] = F::from_u32(e.clk); r[PC] = F::from_u32(e.pc); r[NEXT_PC] = F::from_u32(e.next_pc); r[IS_REAL] = F::ONE;
@@ -151,10 +169,17 @@ pub fn cpu_trace(events: &[CycleEvent], height: usize) -> RowMajorMatrix<F> {
         r[MEM_ADDR] = F::from_u32(e.mem_addr); r[MEM_VAL] = F::from_u32(e.mem_val);
         match e.sys {
             Some(Syscall::Halt) => r[SYS_HALT] = F::ONE,
-            Some(Syscall::WriteOutput { slot, .. }) => { r[SYS_WRITE] = F::ONE; r[OUT_SEL0 + slot as usize] = F::ONE; }
+            Some(Syscall::WriteOutput { slot, .. }) => { r[SYS_WRITE] = F::ONE; r[OUT_SEL0 + slot as usize] = F::ONE; written[slot as usize] += 1; }
             Some(Syscall::ReadInput { .. }) => r[SYS_READ] = F::ONE,
             None => {}
         }
+        for (k, w) in written.iter().enumerate() { r[WRITTEN0 + k] = F::from_u32(*w); }
+    }
+    // The accumulator must carry its final value through the padding: the last row is where
+    // `(1 − written_i)·pv[out_i] = 0` reads it.
+    for i in events.len()..height {
+        let r = &mut v[i * WIDTH..(i + 1) * WIDTH];
+        for (k, w) in written.iter().enumerate() { r[WRITTEN0 + k] = F::from_u32(*w); }
     }
     RowMajorMatrix::new(v, WIDTH)
 }

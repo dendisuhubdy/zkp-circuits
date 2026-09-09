@@ -165,8 +165,16 @@ fn cpu_trace_mirrors_events_and_pads() {
     assert_eq!(t.values[last_real * w + cpu::col::SYS_HALT], F::ONE);
     let write_row = e.events.iter().position(|ev| matches!(ev.sys, Some(rand_zkvm::emulator::Syscall::WriteOutput { .. }))).unwrap();
     assert_eq!(t.values[write_row * w + cpu::col::OUT_SEL0], F::ONE);
+    // Padding rows are all-zero except the `written` accumulators, which must carry the
+    // final per-slot write counts through to the last row for the unwritten-slot constraint.
     let pad = &t.values[(last_real + 1) * w..(last_real + 2) * w];
-    assert!(pad.iter().all(|x| *x == F::ZERO));
+    for (i, x) in pad.iter().enumerate() {
+        let expected = if i == cpu::col::WRITTEN0 { F::ONE } else { F::ZERO };
+        assert_eq!(*x, expected, "padding column {i}");
+    }
+    let last = &t.values[(t.height() - 1) * w..t.height() * w];
+    assert_eq!(last[cpu::col::WRITTEN0], F::ONE, "slot 0 was written");
+    for k in 1..8 { assert_eq!(last[cpu::col::WRITTEN0 + k], F::ZERO, "slot {k} was not"); }
     let pv = public_values(0, 10, &e.outputs);
     assert_eq!(pv.len(), cpu::pv::NUM);
     assert_eq!(pv[cpu::pv::OUT0], F::from_u32(2));

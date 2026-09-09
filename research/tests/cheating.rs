@@ -175,3 +175,12 @@ fn a_tuple_forged_on_an_alu_padding_row_is_rejected() {
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
 
+
+#[test]
+fn claiming_a_word_in_an_unwritten_output_slot_is_rejected() {
+    let (m, p, mut t) = setup();
+    // `fib` writes slot 0 only; spec §3.4 says every slot no WRITE_OUTPUT selected is zero.
+    assert_eq!(t.public_values[cpu::pv::OUT0 + 1], F::ZERO);
+    t.public_values[cpu::pv::OUT0 + 1] = F::from_u32(7);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
