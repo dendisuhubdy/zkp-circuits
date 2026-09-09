@@ -1,0 +1,12 @@
+[package]
+name = "rand-zkvm-kernels"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rand-zkvm-kernels"
+path = "src/main.rs"
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }

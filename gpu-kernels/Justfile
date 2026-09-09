@@ -1,0 +1,5 @@
+# Requires: CUDA Toolkit 13, LLVM 21+, and `cargo +nightly-2026-08-28 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide`
+kernels arch="sm_80":
+    cargo oxide build --arch {{arch}}
+    cp rand-zkvm-kernels.ptx ../rand-zkvm-cuda/ptx/kernels.{{arch}}.ptx
+    @echo "record the cuda-oxide commit and toolkit version in ../rand-zkvm-cuda/ptx/PTX_BUILD.md"
