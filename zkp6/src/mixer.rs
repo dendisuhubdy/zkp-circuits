@@ -14,6 +14,7 @@ use crate::merkle::MerkleTree;
 use crate::Fr;
 use ark_bn254::Bn254;
 use ark_groth16::{Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, SynthesisError};
 use ark_snark::SNARK;
 use ark_std::UniformRand;
 use std::collections::{BTreeMap, HashSet};
@@ -89,6 +90,10 @@ pub struct Mixer {
     tree: MerkleTree,
     known_roots: HashSet<Fr>,
     spent: HashSet<Fr>,
+    /// `spent` in insertion order, for display.
+    spent_log: Vec<Fr>,
+    /// Who sent each deposit transaction, by leaf index. Public on chain.
+    depositors: Vec<String>,
     pvk: PreparedVerifyingKey<Bn254>,
     pub balances: BTreeMap<String, u64>,
     pub pool: u64,
@@ -104,6 +109,8 @@ impl Mixer {
             tree,
             known_roots,
             spent: HashSet::new(),
+            spent_log: Vec::new(),
+            depositors: Vec::new(),
             pvk: Groth16::<Bn254>::process_vk(vk).expect("vk"),
             balances: BTreeMap::new(),
             pool: 0,
@@ -120,6 +127,28 @@ impl Mixer {
 
     pub fn deposits(&self) -> usize {
         self.tree.len()
+    }
+
+    pub fn withdrawals(&self) -> usize {
+        self.spent_log.len()
+    }
+
+    pub fn tree(&self) -> &MerkleTree {
+        &self.tree
+    }
+
+    /// Sender of the deposit that filled leaf `idx`.
+    pub fn depositor(&self, idx: usize) -> &str {
+        &self.depositors[idx]
+    }
+
+    /// Nullifier hashes recorded so far, oldest first.
+    pub fn spent_nullifiers(&self) -> &[Fr] {
+        &self.spent_log
+    }
+
+    pub fn known_roots(&self) -> usize {
+        self.known_roots.len()
     }
 
     /// The contract's event log: every `Deposit(commitment, leafIndex)` in
@@ -142,6 +171,7 @@ impl Mixer {
         *bal -= self.denomination;
         self.pool += self.denomination;
         let idx = self.tree.insert(commitment);
+        self.depositors.push(from.to_string());
         self.known_roots.insert(self.tree.root());
         Ok(idx)
     }
@@ -162,6 +192,7 @@ impl Mixer {
             return Err(MixerError::InvalidProof);
         }
         self.spent.insert(nullifier_hash);
+        self.spent_log.push(nullifier_hash);
         self.pool -= self.denomination;
         *self.balances.entry(recipient.to_string()).or_default() += self.denomination;
         Ok(())
@@ -189,9 +220,23 @@ impl Mixer {
             secret: Some(note.secret),
             path: Some(path),
         };
-        let proof = Groth16::<Bn254>::prove(pk, circuit, rng)?;
+        let proof = prove(pk, circuit, rng)?;
         Ok((proof, root, nh))
     }
+}
+
+/// Prove, but check the witness first. ark-groth16 never rejects a bad
+/// witness: in debug builds it hits `debug_assert!(cs.is_satisfied())` and
+/// panics, in release builds it silently emits a proof the verifier will
+/// reject. A real wallet checks its own witness, so we do that here and
+/// return `Unsatisfiable` instead of calling into the library.
+pub fn prove<R: rand::Rng + rand::CryptoRng>(pk: &Pk, circuit: WithdrawCircuit, rng: &mut R) -> Result<Proof<Bn254>, SynthesisError> {
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    circuit.clone().generate_constraints(cs.clone())?;
+    if !cs.is_satisfied()? {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    Groth16::<Bn254>::prove(pk, circuit, rng)
 }
 
 /// One-time circuit setup. On chain, the vk is compiled into the verifier
@@ -221,10 +266,10 @@ mod tests {
 
         // same note again → nullifier already seen
         assert!(matches!(m.withdraw(&proof, root, nh, "carol"), Err(MixerError::NoteAlreadySpent)));
-        // proof bound to carol cannot pay dave
-        let (proof2, root2, nh2) = m.prove_withdraw(&pk, &Note { leaf_index: note.leaf_index, ..Note::random(&mut rng) }, "dave", &mut rng).unwrap();
-        // ^ a random note that was never deposited: path is for leaf 0 but leaf != commitment
-        assert!(matches!(m.withdraw(&proof2, root2, nh2, "dave"), Err(MixerError::InvalidProof)));
+        // a random note that was never deposited: the path is for leaf 0 but
+        // H(ν, s) != leaf, so the witness is unsatisfying and the prover refuses
+        let never_deposited = Note { leaf_index: note.leaf_index, ..Note::random(&mut rng) };
+        assert!(matches!(m.prove_withdraw(&pk, &never_deposited, "dave", &mut rng), Err(SynthesisError::Unsatisfiable)));
     }
 
     #[test]

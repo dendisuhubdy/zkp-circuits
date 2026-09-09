@@ -47,6 +47,11 @@ impl MerkleTree {
         self.levels[TREE_DEPTH][0]
     }
 
+    /// Hash at (`level`, `idx`); level 0 = leaves, level DEPTH = root.
+    pub fn node(&self, level: usize, idx: usize) -> Fr {
+        self.levels[level][idx]
+    }
+
     pub fn len(&self) -> usize {
         self.next_index
     }

@@ -49,6 +49,7 @@ note with one corrupted hex digit, and a malformed note.
 | `src/circuit.rs` | the withdraw circuit (827 constraints): commitment, nullifier hash, membership, recipient binding |
 | `src/mixer.rs` | the contract: `deposit`, `withdraw`, root history, nullifier set, balances, event log; note string encode/parse |
 | `src/cli.rs` | the wallet CLI: `deposit` prints a note, `withdraw` takes only a note and narrates each step |
+| `src/viz.rs` | stdout drawings: the Merkle tree with empty subtrees collapsed (observer view, and the wallet's view with the proof path marked) and the balance table |
 | `src/main.rs` | scenario and attacks |
 
 ## Attacks the demo shows being rejected

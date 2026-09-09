@@ -6,13 +6,9 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, SynthesisMode
 use std::time::Instant;
 use zkp6::circuit::WithdrawCircuit;
 use zkp6::cli;
+use zkp6::viz;
 use zkp6::mixer::{setup, Mixer, MixerError, Note};
 use zkp6::{Fr, TREE_DEPTH};
-
-fn balances(m: &Mixer) {
-    let parts: Vec<String> = m.balances.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    println!("  balances: {}   pool={}   deposits={}\n", parts.join("  "), m.pool, m.deposits());
-}
 
 fn main() {
     let mut rng = rand::rngs::OsRng;
@@ -28,20 +24,20 @@ fn main() {
     let mut m = Mixer::new(1, &vk);
     m.fund("alice", 2);
     m.fund("bob", 2);
-    balances(&m);
+    viz::print_state(&m);
 
     // ---- deposits: each prints a note string ----------------------------------
     let note_alice = cli::deposit(&mut m, "alice", &mut rng).unwrap();
     println!();
     let note_bob = cli::deposit(&mut m, "bob", &mut rng).unwrap();
     println!();
-    balances(&m);
+    viz::print_state(&m);
 
     // ---- withdraw with a note ---------------------------------------------------
     println!("── Alice sends her note string to Carol over Signal. Carol has no account here.");
     cli::withdraw(&mut m, &pk, &note_alice, "carol", &mut rng).unwrap();
     println!();
-    balances(&m);
+    viz::print_state(&m);
 
     // ---- attacks, all driven through the same CLI --------------------------------
     println!("── Attacks");
@@ -72,12 +68,12 @@ fn main() {
     println!("  original lands: {:?}", m.withdraw(&proof, root, nh, "erin"));
     let _ = MixerError::TreeFull;
     println!();
-    balances(&m);
+    viz::print_state(&m);
 
     // ---- Bob later ----------------------------------------------------------------
     println!("── Weeks later, Bob withdraws his own note to a fresh account");
     cli::withdraw(&mut m, &pk, &note_bob, "bob-fresh", &mut rng).unwrap();
     println!();
-    balances(&m);
+    viz::print_state(&m);
     println!("An observer sees {} deposits and 3 withdrawals and cannot pair them.", m.deposits());
 }

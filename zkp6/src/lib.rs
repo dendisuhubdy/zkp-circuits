@@ -43,6 +43,7 @@
 //!   `circuit.rs` the withdraw circuit
 //!   `mixer.rs`   the simulated contract: balances, tree, roots, nullifiers
 //!   `cli.rs`     the wallet: deposit prints a note; withdraw takes only a note
+//!   `viz.rs`     stdout drawings of the Merkle tree and the balance table
 //!   `main.rs`    Alice / Bob / Carol scenario
 
 pub mod circuit;
@@ -50,6 +51,7 @@ pub mod cli;
 pub mod hash;
 pub mod merkle;
 pub mod mixer;
+pub mod viz;
 
 pub type Fr = ark_bn254::Fr;
 

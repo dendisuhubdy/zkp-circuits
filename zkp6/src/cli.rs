@@ -13,19 +13,10 @@
 
 use crate::circuit::WithdrawCircuit;
 use crate::merkle::{root_from_path, MerkleTree};
-use crate::mixer::{Mixer, MixerError, Note, Pk};
-use crate::Fr;
-use ark_bn254::Bn254;
-use ark_groth16::Groth16;
+use crate::mixer::{prove, Mixer, MixerError, Note, Pk};
+use crate::viz::{fr, render_tree};
 use ark_serialize::CanonicalSerialize;
-use ark_snark::SNARK;
 use std::time::Instant;
-
-fn fr(f: &Fr) -> String {
-    use ark_ff::{BigInteger, PrimeField};
-    let h: String = f.into_bigint().to_bytes_be().iter().map(|b| format!("{b:02x}")).collect();
-    format!("0x{}…", &h[..12])
-}
 
 /// `tornado deposit`: make a note, send the commitment, print the note.
 pub fn deposit<R: rand::Rng>(m: &mut Mixer, from: &str, rng: &mut R) -> Result<String, MixerError> {
@@ -81,6 +72,7 @@ pub fn withdraw<R: rand::Rng + rand::CryptoRng>(m: &mut Mixer, pk: &Pk, note_str
     println!("  [4] rebuild tree    → {} leaves, local root {}", local.len(), fr(&root));
     println!("                        path for leaf {idx}: {} siblings, position bits {:?}", path.siblings.len(), path.is_right.iter().map(|b| *b as u8).collect::<Vec<_>>());
     debug_assert_eq!(root_from_path(c, &path), root);
+    print!("{}", render_tree(&local, "                        ", &|i| m.depositor(i).to_string(), Some(idx)));
     println!("                        contract root {}  match={}", fr(&m.root()), root == m.root());
 
     // 5. nullifier hash
@@ -97,7 +89,7 @@ pub fn withdraw<R: rand::Rng + rand::CryptoRng>(m: &mut Mixer, pk: &Pk, note_str
         secret: Some(note.secret),
         path: Some(path),
     };
-    let proof = Groth16::<Bn254>::prove(pk, circuit, rng).map_err(|e| format!("{e:?}"))?;
+    let proof = prove(pk, circuit, rng).map_err(|e| format!("{e:?}"))?;
     let mut bytes = Vec::new();
     proof.serialize_compressed(&mut bytes).unwrap();
     println!("  [6] prove           → {} bytes in {:?}   (public: root, nullifierHash, recipient)", bytes.len(), t.elapsed());
