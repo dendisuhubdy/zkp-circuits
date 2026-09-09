@@ -184,3 +184,15 @@ fn claiming_a_word_in_an_unwritten_output_slot_is_rejected() {
     t.public_values[cpu::pv::OUT0 + 1] = F::from_u32(7);
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
+
+#[test]
+fn non_canonical_public_values_are_an_error_not_a_panic() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    m.verify(&p, &proof).unwrap();
+    // `Val::from_u64` does not reduce, so `out0 + p` is the same field element and would
+    // otherwise verify — with a different `to_bytes()` and a different apparent output.
+    proof.public_values[cpu::pv::OUT0] += F::ORDER_U64;
+    assert!(matches!(m.verify(&p, &proof), Err(rand_zkvm::machine::VerifyError::PublicValues)));
+}

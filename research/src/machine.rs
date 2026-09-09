@@ -267,6 +267,12 @@ impl Machine {
 
     pub fn verify(&self, program: &Program, proof: &Proof) -> Result<(), VerifyError> {
         if proof.public_values.len() != crate::tables::cpu::pv::NUM { return Err(VerifyError::PublicValues); }
+        // `public_values` is deserialized from untrusted bytes as raw `u64`s, and
+        // `Val::from_u64` does not reduce: `out0` and `out0 + p` are the same field element
+        // and both verify, but they are different `to_bytes()` and different numbers to
+        // anyone reading the proof. Insist on the canonical representative so a proof has
+        // exactly one encoding of its outputs.
+        if proof.public_values.iter().any(|x| *x >= Val::ORDER_U64) { return Err(VerifyError::PublicValues); }
         if proof.public_values[crate::tables::cpu::pv::PC_ENTRY] != program.base_pc as u64 { return Err(VerifyError::PublicValues); }
         if proof.public_values[crate::tables::cpu::pv::TIER] != proof.tier.0 as u64 { return Err(VerifyError::Tier); }
         // `proof.tier` is deserialized from untrusted bytes: an attacker-supplied out-of-range
