@@ -1,18 +1,54 @@
 //! Every test here builds a wrong witness and checks the verifier rejects it.
 //! In debug builds Plonky3 panics inside `prove_batch` on the first violated
 //! constraint; in release builds it produces a proof that fails to verify.
-//! `rejects` accepts either.
+//! `rejects` accepts either — and nothing else.
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::Matrix;
 use rand_zkvm::emulator::{execute, SLOT_W};
 use rand_zkvm::guests;
 use rand_zkvm::isa::REG_A1;
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, Traces};
-use rand_zkvm::tables::{alu, cpu, memory, F};
+use rand_zkvm::tables::{alu, byte, cpu, memory, program, F};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+/// The panic `p3-batch-stark`'s debug constraint checker raises when a row violates a
+/// constraint. Its full form is
+/// `"constraints not satisfied on row {row_index}: failed constraints = {rendered}"` —
+/// the `panic!` at the end of the row loop in
+/// `~/.cargo/registry/src/index.crates.io-*/p3-batch-stark-0.7.0/src/check_constraints.rs`
+/// (line 132 in that release). Matching the fixed prefix is what separates "the constraint
+/// system caught this" from any other unwind.
+const CONSTRAINT_PANIC: &str = "constraints not satisfied on row";
+
+/// A tamper counts as rejected only if `verify` returned an error, or if the panic came from
+/// the constraint checker above. Anything else — a trace-builder `assert!`, an index out of
+/// bounds, a `Lookup mismatch` from the bus-balance checker — means the test tripped over
+/// something other than the constraint it was written for, so it must fail rather than pass
+/// for the wrong reason.
 fn rejects(f: impl FnOnce() -> Result<(), rand_zkvm::machine::VerifyError>) -> bool {
-    match catch_unwind(AssertUnwindSafe(f)) { Ok(Ok(())) => false, _ => true }
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(())) => false,
+        Ok(Err(_)) => true,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            let is_constraint = msg.contains(CONSTRAINT_PANIC);
+            if !is_constraint { eprintln!("rejects(): panic was not a constraint failure: {msg}"); }
+            is_constraint
+        }
+    }
+}
+
+#[test]
+fn rejects_only_counts_a_constraint_failure_or_a_verify_error() {
+    assert!(rejects(|| Err(rand_zkvm::machine::VerifyError::PublicValues)));
+    assert!(rejects(|| panic!("constraints not satisfied on row 7: failed constraints = [#1]")));
+    // A trace-builder `assert!` is not the constraint system catching anything.
+    assert!(!rejects(|| panic!("alu table needs a padding row: 5 ops, height 4")));
+    assert!(!rejects(|| Ok(())));
 }
 
 fn setup() -> (Machine, rand_zkvm::isa::Program, Traces) {
@@ -195,4 +231,36 @@ fn non_canonical_public_values_are_an_error_not_a_panic() {
     // otherwise verify — with a different `to_bytes()` and a different apparent output.
     proof.public_values[cpu::pv::OUT0] += F::ORDER_U64;
     assert!(matches!(m.verify(&p, &proof), Err(rand_zkvm::machine::VerifyError::PublicValues)));
+}
+
+#[test]
+fn bumping_a_program_multiplicity_on_a_padding_row_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = program::col::WIDTH;
+    let pad = t.program.height() - 1; // the table is padded past the last instruction
+    assert!(pad >= p.len(), "last program row is padding");
+    t.program.values[pad * w + program::col::MULT] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+#[test]
+fn swapping_two_adjacent_memory_rows_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = memory::col::WIDTH;
+    let real = (0..t.memory.height()).filter(|r| t.memory.values[r * w + memory::col::IS_REAL] == F::ONE).count();
+    assert!(real > 4, "fib(10) touches memory plenty");
+    // Swapping whole rows leaves the MEMORY multiset and the RANGE8 counts untouched, so
+    // both buses still balance: the only thing that can catch this is the ordering AIR.
+    let r = real / 2;
+    for k in 0..w { t.memory.values.swap(r * w + k, (r + 1) * w + k); }
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+#[test]
+fn bumping_a_byte_pow2_multiplicity_on_a_non_pow2_row_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = byte::col::WIDTH;
+    let row = byte::row_of(200, 5); // b != 0 and a >= 32, so is_pow2 is 0 here
+    t.byte.values[row * w + byte::col::M_POW2] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
