@@ -1,0 +1,11 @@
+[package]
+name = "zkp3"
+version = "0.1.0"
+edition = "2021"
+description = "zk-STARK half of the SNARK-vs-STARK pair: winterfell proving the same iterated x^3 + K chain"
+
+[dependencies]
+winterfell = "0.13"   # pure-Rust STARK prover/verifier (Meta / Polygon Miden lineage)
+
+[profile.release]
+opt-level = 3

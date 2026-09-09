@@ -5,6 +5,9 @@
 | `zkp1` | zk-SNARK (Groth16) | arkworks | what a circuit / R1CS is; setup → prove → verify; the three ZK properties |
 | `zkp2` | zk-SNARK (Groth16) | arkworks | **SNARK half of a matched pair** — same statement as zkp3 |
 | `zkp3` | zk-STARK | winterfell | **STARK half of a matched pair** — same statement as zkp2 |
+| `zkp4` | Zcash-style shielded pool | arkworks | notes with hidden values, spend keys, nullifiers, in-circuit balance + range checks |
+| `zkp5` | Monero-style transactions | curve25519-dalek, bulletproofs | stealth addresses, Pedersen commitments, hand-written CLSAG ring signatures, key images |
+| `zkp6` | Tornado Cash mixer | arkworks | Merkle-membership withdraw proof, simulated contract with account balances, front-running / double-spend defences |
 
 Each crate: `cargo run --release` for a narrated demo, `cargo test --release` for the tests.
 
@@ -49,6 +52,27 @@ Things to notice in the code:
 - **Same computation, different y.** The two crates print different numeric
   results because they compute mod different primes. Field choice is a
   first-class design decision in a STARK.
+
+## zkp4 / zkp5 / zkp6: three privacy systems, side by side
+
+All three simulate a ledger you can watch: deposits, transfers, an observer's
+view, and a list of attacks the verifier must reject.
+
+|                    | Tornado (zkp6)          | Zcash (zkp4)                     | Monero (zkp5)                    |
+|--------------------|-------------------------|----------------------------------|----------------------------------|
+| proof system       | Groth16 SNARK           | Groth16 SNARK                    | CLSAG ring sig + Bulletproofs    |
+| circuit size       | 827 constraints         | 1 679 constraints                | no circuit                       |
+| trusted setup      | yes                     | yes                              | no                               |
+| anonymity set      | whole pool              | whole pool                       | ring of 11 per input             |
+| amounts            | fixed denomination      | hidden, range-checked in circuit | hidden, Pedersen + range proof   |
+| ownership          | whoever holds the note  | spending key, pk = H(sk)         | one-time key from stealth addr   |
+| double-spend tag   | nullifier H(ν)          | nullifier H(sk, ρ)               | key image x·Hp(P)                |
+| spend proof size   | 128 B                   | 128 B                            | ~1.5 KB                          |
+| verify time (here) | ~1 ms                   | ~1 ms                            | ~3 ms                            |
+
+Suggested order: zkp6 (simplest), then zkp4 (adds values and keys to the
+same Merkle circuit), then zkp5 (no circuit at all — see what the SNARK was
+buying you).
 
 ## Reading order
 

@@ -1,0 +1,20 @@
+[package]
+name = "zkp2"
+version = "0.1.0"
+edition = "2021"
+description = "zk-SNARK half of the SNARK-vs-STARK pair: Groth16 over BN254 proving an iterated x^3 + K chain"
+
+[dependencies]
+ark-ff = "0.5"
+ark-ec = "0.5"
+ark-bn254 = "0.5"
+ark-relations = "0.5"
+ark-r1cs-std = "0.5"
+ark-groth16 = "0.5"
+ark-snark = "0.5"
+ark-std = "0.5"
+ark-serialize = "0.5"
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
