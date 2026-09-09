@@ -14,10 +14,16 @@ selector fields the CPU trusts, and the syscall ABI.
 | never | `FENCE`, CSR instructions, `EBREAK` (traps) |
 
 Only word-aligned loads and stores exist today. `LW`/`SW` compute the byte
-address through the ALU and then divide by 4 in the CPU's memory constraint;
-the emulator (`emulator.rs`) returns `ExecError::Misaligned` for any address
-that is not a multiple of 4, and there is no sub-word path yet. Data memory
-(the RAM half of the `memory` table) starts entirely zeroed — a guest that
+address through the ALU and then divide by 4 in the CPU's memory constraint.
+Alignment is a *constraint*, not only an emulator error: `mem_addr·4 = alu_out`
+alone would be satisfied over the field by `mem_addr = alu_out·4⁻¹ mod p`, so
+the CPU table also decomposes `mem_addr` into four range-checked byte limbs and
+bounds it below 2^30 with an `AND8` lookup against `0xC0`. With `alu_out`
+already 32-bit, `mem_addr·4 < 2^32` cannot wrap, the identity holds over the
+integers, and a misaligned address is unprovable. The emulator (`emulator.rs`)
+returns `ExecError::Misaligned` for any address that is not a multiple of 4,
+so the two agree; there is no sub-word path yet. Data memory (the RAM half of
+the `memory` table) starts entirely zeroed — a guest that
 wants an initialised array has to write it itself before reading it. `x0` is
 hard-wired to zero: the program table's `writes_rd` selector is already
 `(rd ≠ 0)`, so a write to `x0` is never sent on the register-write side of
@@ -99,8 +105,8 @@ needs one, is read through the row's memory-access slot as register `a1`
 | # | Name | Milestone | Effect |
 |---|---|---|---|
 | 0 | `HALT` | M1 | ends execution; every remaining row in the table is padding |
-| 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, `slot < 8`; constrained directly against the public values |
-| 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — a prover-chosen witness value, see `docs/03-privacy.md` |
+| 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, `slot < 8`; constrained directly against the public values, at most once per slot, and any slot never written is pinned to zero |
+| 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — a prover-chosen witness value, and two reads of the same `idx` are not constrained to agree; see `docs/03-privacy.md` |
 | 10 | `POSEIDON2 ptr_in ptr_out` | M3 (not implemented) | hashes 8 words at `ptr_in`, writes 4 at `ptr_out` |
 | 11 | `NOTE_COMMIT` | M3 (not implemented) | commitment of `(value, ρ, pk)` |
 | 12 | `NULLIFY` | M3 (not implemented) | `nf = H(sk ‖ ρ)` |

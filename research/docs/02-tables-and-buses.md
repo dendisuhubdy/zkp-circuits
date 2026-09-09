@@ -46,18 +46,21 @@ then `valid` (1 on real instruction rows, 0 on padding). One main column,
 `valid = 0` must have `mult = 0` — padding can never be fetched. Provides
 `(pc, 18 fields…)` on `PROGRAM` with count `mult`.
 
-## `cpu` — main, `col::WIDTH = 40`
+## `cpu` — main, `col::WIDTH = 52`
 
 Columns: `clk pc next_pc is_real`, the same 18 decoded fields (fetched, not
 recomputed), `a b c alu_out tgt` (operands and results), `mem_addr mem_val`,
-three syscall flags `sys_halt sys_write sys_read`, and eight one-hot output
-selectors `out_sel0..7`. This is the only table with public values: `pc_entry`,
-the tier index, and the eight output words.
+three syscall flags `sys_halt sys_write sys_read`, eight one-hot output
+selectors `out_sel0..7` (indices 32–39), eight cumulative counters
+`written0..7` (40–47), and four byte limbs `ma0..3` of `mem_addr` (48–51).
+This is the only table with public values: `pc_entry`, the tier index, and the
+eight output words.
 
 Constraints, in words: `is_real` is boolean and monotone (once 0, stays 0);
 `clk` starts at 0 and increments by 1 on real rows; the first row's `pc`
-equals the public `pc_entry`; the row after the last real row must be a
-`HALT`. Every real row looks up its own `(pc, 18 fields)` on `PROGRAM` — the
+equals the public `pc_entry`; the *last real row* is a `HALT`, and nothing
+runs after it — every row past it is padding. Every real row looks up its
+own `(pc, 18 fields)` on `PROGRAM` — the
 CPU never decodes an opcode bit itself, only trusts what the lookup
 returned. The second ALU operand is `imm` or `b` depending on `is_imm`; an
 ALU-using row (`is_alu`, branch, load, store, `jalr`) looks up `(op, a,
@@ -74,10 +77,23 @@ reads/writes and the one optional memory access go out on `MEMORY` below.
 and first argument arrive through the ordinary register-read slots; the
 second argument (`a1`) is read through the memory-access slot.
 `WRITE_OUTPUT` constrains `public_values[2+slot] = word` via eight one-hot
-selectors on `slot`.
+selectors on `slot`. The eight `written_i` columns accumulate `out_sel_i` down
+the table and are boolean on every row, which caps each slot at a single write
+(matching the emulator's `DoubleWrite` error) and lets the last row assert
+`(1 − written_i)·public_values[2+i] = 0`: a slot no `WRITE_OUTPUT` ever
+selected is zero, as the spec requires, instead of being a free public value.
+
+Word alignment of `LW`/`SW` is a stated constraint, not an accident.
+`mem_addr·4 = alu_out` on its own is a field identity — a misaligned `alu_out`
+would just give `mem_addr = alu_out·4⁻¹ mod p` — so `mem_addr` is additionally
+decomposed into the four byte limbs `ma0..3`, each range-checked on `RANGE8`,
+with one `AND8` lookup `(ma3, 0xC0) → 0` bounding `mem_addr` below 2^30. Since
+`alu_out` is already 32-bit (the ALU table's own limb range checks),
+`mem_addr·4 < 2^32` cannot wrap and the identity holds over the integers.
 
 Sends: 4 `MEMORY` messages per row (two register reads, one optional
-RAM/`a1` access, one optional register write), 2 `ALU` lookups. Receives:
+RAM/`a1` access, one optional register write), 2 `ALU` lookups, and on
+load/store rows 4 `RANGE8` plus 1 `AND8` for the address limbs. Receives:
 1 `PROGRAM` lookup.
 
 ## `memory` — main, `col::WIDTH = 12`
@@ -122,20 +138,30 @@ triple on `AND8`/`OR8`/`XOR8`; `sll` proves `a·2^sh = c + hi·2^32` with `hi`
 and `c` range-checked and `(sh, 2^sh)` on `POW2`; `srl`/`sra` prove the
 integer division `a = q·2^sh + r`, `r < 2^sh`, with `sra` working on the
 two's-complement magnitude and re-flipping the sign after. Provides
-`(op, a, b, c)` on `ALU` with count `mult`.
+`(op, a, b, c)` on `ALU` with count `mult`, and `(1 − is_real)·mult = 0`
+forces that count to zero on padding rows. That last one is load-bearing: on a
+padding row every op flag is zero (so `op` reads as `Add`), the limb range
+checks are counted by `is_real`, every arithmetic constraint carries a flag
+factor, and the recomposition `a = Σ a_i·2^{8i}` is satisfied by parking a
+whole field element in limb 0 — so without it a padding row provided an
+arbitrary `Add` tuple with arbitrary multiplicity, and the CPU consumes `Add`
+for every `ADD`/`ADDI`, every load/store address, every `JALR` target and the
+whole slot-2 `(0, pc, imm, tgt)` lookup. The general rule, applied to every
+`table_entry` in the crate: **the count must be forced to zero wherever the
+message columns are unconstrained.** `program` already does this
+(`mult·(1 − valid) = 0`); `byte` is preprocessed with no padding rows at all.
 
 ## `byte` — preprocessed, `pre::WIDTH = 7` + `col::WIDTH = 5`
 
 Preprocessed: 2^16 rows, one per byte pair `(a, b)`, holding `a&b`, `a|b`,
 `a^b`, and — on the 32 rows with `b = 0, a < 32` — `pow2 = 2^a` and a flag
 `is_pow2`. Main: five multiplicities, one per bus. Constraint: a `POW2`
-lookup can only land on an `is_pow2` row. Provides `RANGE8` (`[a]`), `AND8`/
-`OR8`/`XOR8` (`[a,b,a·b]`), and `POW2` (`[a,pow2]`), each with its own
-multiplicity column. It is the only table besides `program` that is
-preprocessed, and its buses are consumed by `memory` (`RANGE8` only) and
-`alu` (all five) — `cpu` and `program` never look it up directly; every byte
-check the CPU or the program table needs is delegated through `alu` or
-`memory` first.
+lookup can only land on an `is_pow2` row. Provides `RANGE8` (`[a]`), `AND8`
+(`[a, b, a & b]`), `OR8` (`[a, b, a | b]`), `XOR8` (`[a, b, a ^ b]`), and
+`POW2` (`[a, 2^a]`), each with its own multiplicity column. It is the only
+table besides `program` that is preprocessed. Its buses are consumed by
+`memory` (`RANGE8` only), `alu` (all five), and `cpu` (`RANGE8` and `AND8`,
+for the load/store address limbs); `program` never looks it up.
 
 ## Why the program is preprocessed, and what that means for `hc`
 
@@ -154,11 +180,22 @@ milestone, to be cached later.
 Recomputability depends on one deliberate choice in `machine.rs::key_config`:
 the hiding MMCS's per-commit salt (and the PCS's own random codewords) are
 seeded not from OS entropy but from a deterministic 64-bit digest of the
-program (`program_digest`). Every actual `prove_batch` call still runs
-against `make_config`'s fresh-entropy config for the main-trace, quotient,
-and permutation commitments — that is what keeps zero knowledge intact, and
-is why two proofs of the same run are still different bytes (`docs/03-privacy.md`).
-Only the *preprocessed* commitment — `program` and `byte`, both of them
-public data with nothing to hide — is deterministic, and that determinism is
-exactly what lets `hc` be recomputed by any verifier without having
-witnessed the original proving session.
+program (`program_digest`, which folds `base_pc`, the word count, and every
+word). Every actual `prove_batch` call still runs against `make_config`'s
+fresh-entropy config for the main-trace, quotient, and permutation
+commitments — that is what keeps zero knowledge intact, and is why two proofs
+of the same run are still different bytes (`docs/03-privacy.md`). Only the
+*preprocessed* commitment — `program` and `byte` — is deterministic, and that
+determinism is exactly what lets `hc` be recomputed by any verifier without
+having witnessed the original proving session.
+
+The reason this is safe is **not** that "the program table is public, so no
+privacy is lost." A commitment whose randomness is a function of the message
+is binding but not hiding: it is brute-forceable over any guessable program
+space, and two deployments of the same program yield the same `hc` and are
+therefore linkable. It is harmless in milestone 1 for a more basic reason —
+program confidentiality is not a milestone-1 property at all. `verify` takes
+the whole `Program` in the clear, so the verifier already holds every word and
+there is nothing left for a salt to hide. See `docs/03-privacy.md`; a hiding
+program commitment is a milestone-3 question, alongside the in-circuit digest
+that stops the verifier from holding the code.

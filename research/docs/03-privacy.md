@@ -32,7 +32,12 @@ less zero-knowledge than the other.
 ## Private inputs are witness, not yet bound to anything
 
 `READ_INPUT idx` (syscall 2) returns whatever word the prover supplies at
-that index — a value chosen by the prover, checked by nothing. Milestone 1's
+that index — a value chosen by the prover, checked by nothing. Nothing ties
+two reads of the *same* index together either: the constraint system treats
+each `READ_INPUT` row independently, so `READ_INPUT 0` may return one word on
+one cycle and a different word on the next and the proof still verifies. The
+input array is a per-row witness, not a committed vector; a guest that needs a
+stable value must read it once and keep it in a register. Milestone 1's
 relation is existential: it proves *"there exist inputs such that running
 this program on them produced these outputs,"* full stop. Nothing here binds
 a private input to a note commitment, a nullifier, or a Merkle path against
@@ -41,11 +46,37 @@ a public state root — that arrives with syscalls 10–13 (`POSEIDON2`,
 balance is private" means only that the verifier never sees the number, not
 that the number is tied to any real account.
 
+## `hc` is binding, not hiding — and the program is not secret in M1
+
+`hc` is the preprocessed Merkle root, and `machine.rs::key_config` seeds its
+salt from `program_digest`, a deterministic function of the program itself. A
+commitment whose randomness is derived from the message it commits to is
+**binding but not hiding**: anyone who can guess a candidate program can
+recompute `hc` and confirm the guess, and two deployments of the same program
+produce the same `hc` and are trivially linkable. The earlier framing — "no
+privacy is lost because the program table is public" — was the wrong reason
+for the right mechanism.
+
+The right reason is simpler: **program confidentiality is not a milestone-1
+property.** `Machine::verify(program, proof)` takes the entire `Program` in
+the clear; every verifier holds every instruction word. There is nothing for a
+salt to hide, so a deterministic non-hiding digest costs nothing here, and the
+determinism buys something real — any verifier can recompute `hc` standalone
+without having witnessed the proving session.
+
+That changes in milestone 3, where the code digest moves in-circuit and the
+verifier stops holding the program (`docs/05-roadmap.md`). That is the point
+at which a *hiding* program commitment — a salt from real entropy, published
+alongside the program's ciphertext, or a digest computed under the proof —
+becomes both necessary and possible. Until then, treat `hc` as an identifier
+for a public program, not as a secret-keeping commitment.
+
 ## What `verify` actually checks
 
 `Machine::verify(program, proof)` — the code a node runs — checks, in order:
-the proof carries exactly 10 public values; `public_values[PC_ENTRY]` equals
-`program.base_pc`; `public_values[TIER]` equals `proof.tier`; `proof.tier` is
+the proof carries exactly 10 public values; every one of them is a canonical
+Goldilocks residue (`< p`, so `out0` and `out0 + p` are not two spellings of
+the same proof); `public_values[PC_ENTRY]` equals `program.base_pc`; `public_values[TIER]` equals `proof.tier`; `proof.tier` is
 one of the six values in `TIERS` (an attacker-chosen out-of-range tier is
 rejected here, before it can be used to compute a table height and panic);
 the proof's degree bits match the heights that tier implies for all five
@@ -79,7 +110,8 @@ refused by `build_traces`, not silently truncated.
 
 | Data | Status |
 |---|---|
-| Code hash `hc` | public — the preprocessed commitment |
+| The program itself | public — `verify` takes it in the clear; `hc` identifies it, it does not hide it |
+| Code hash `hc` | public — the preprocessed commitment, binding but not hiding |
 | Entry point `pc_entry` | public |
 | Gas tier `ℓ` | public per proof (the proof's own size already reveals its trace height, so hiding the tier index buys nothing at the single-proof level; a batch-level histogram, as the whitepaper describes, is a property of the aggregation layer, not of one proof) |
 | Eight output words | public |

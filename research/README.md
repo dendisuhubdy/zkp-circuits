@@ -24,8 +24,8 @@ growing its own proof system.
 ```
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
-cargo run --release     # the narrated demo, ~4-5 minutes wall time (six proofs, one at production FRI parameters)
-cargo test              # 34 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end
+cargo run --release     # the narrated demo, ~5-6 minutes wall time (ten proofs, one at production FRI parameters)
+cargo test              # 43 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -78,7 +78,10 @@ A confidential call publishes three things: the code hash `hc`, the gas tier
 regardless), and a fixed-length array of output words. Everything else —
 every register, every memory cell, every branch, the exact cycle count, and
 every private input — stays inside the witness and is never seen by a
-verifier (Part 1 of the demo).
+verifier (Part 1 of the demo). The *program* is not among the hidden things:
+`verify` takes the whole `Program` in the clear, so `hc` identifies a public
+program rather than hiding a secret one. Program confidentiality is not a
+milestone-1 property (`docs/03-privacy.md`).
 
 Private inputs enter through the `READ_INPUT idx` syscall: the prover
 supplies whatever word it wants at that index, and the constraint system
@@ -136,8 +139,11 @@ milestone 4 builds first: `docs/04-guests.md`.
 
 | Data | Status |
 |---|---|
-| Code hash `hc`, entry point `pc_entry`, gas tier, eight output words | public |
+| The program itself, its code hash `hc`, entry point `pc_entry`, gas tier, eight output words | public |
 | Private inputs, every register/memory value, every branch, the exact cycle count, which syscalls ran | hidden |
+
+`hc` is binding but not hiding — its salt is derived from the program — which
+costs nothing while the verifier holds the program anyway.
 
 Full detail, including the tier-to-row-count table and the delegated-proving
 boundary: `docs/03-privacy.md`.
@@ -146,7 +152,8 @@ boundary: `docs/03-privacy.md`.
 
 1. `hc` is a verifier-side (per-program) commitment in this milestone, not
    yet a public value the universal verifier consumes — milestone 3 moves
-   it in-circuit.
+   it in-circuit. It is also binding but not hiding, which is only acceptable
+   because `verify` holds the program in the clear today.
 2. The gas tier is public per proof, not only as a batch-level histogram.
 3. Zero knowledge is statistical in Plonky3 0.7, not perfect.
 4. The transcript hash is Poseidon2, not the whitepaper's SHA3-384/BLAKE3-384
