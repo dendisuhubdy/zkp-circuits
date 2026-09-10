@@ -860,3 +860,24 @@ fn a_row_claiming_to_be_both_an_absorb_and_a_write_back_row_is_rejected() {
     t.cpu.values[absorbs[0] * w + cpu::col::IS_HASH_OUT] = F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
+
+/// CRITICAL 2b regression (round 2): before the three `n(HASH_FIN) = 0`/"followed by
+/// `HASH_FIN = 1`" routing rules, a witness could route the `n = 0` case straight from the
+/// ecall row to the *second* write-back row, skipping the first — digest words 0..3 are then
+/// never written at all, so a guest reading `ptr..ptr+3` back would see whatever was already
+/// in RAM instead of the honest zeros: a valid proof of a non-honest execution. Flip the
+/// (otherwise honest) first write-back row's own `HASH_FIN` from 0 to 1, i.e. pretend it is
+/// the only write-back row present — trips `SYS_HASH·n(IS_HASH_OUT)·n(HASH_FIN) = 0` directly
+/// on the ecall row, a local `CONSTRAINT_PANIC`.
+#[test]
+fn skipping_the_first_write_back_row_is_rejected() {
+    let (m, p, mut t) = setup_poseidon2(&[]);
+    let w = cpu::col::WIDTH;
+    let (ecall, absorbs, writes) = hash_rows(&t);
+    assert!(absorbs.is_empty(), "n=0 has no absorb rows");
+    assert_eq!(writes.len(), 2, "one POSEIDON2 call always has two write-back rows");
+    assert_eq!(writes[0], ecall + 1, "the first write-back row follows the ecall row directly");
+    assert_eq!(t.cpu.values[writes[0] * w + cpu::col::HASH_FIN], F::ZERO);
+    t.cpu.values[writes[0] * w + cpu::col::HASH_FIN] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}

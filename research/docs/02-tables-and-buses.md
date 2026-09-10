@@ -257,6 +257,24 @@ caught by the first write-back row's own `hash_left = 0` requirement
 to match, since nothing but the `sys_hash -> next` copy otherwise touches
 it, and a witness is free to set the copied value to whatever it likes.
 
+**The "skip the first write-back row" escape.** A narrower version of the
+same idea survives even with all of the above: nothing stopped a witness
+routing straight into a `hash_fin = 1` row — the *second* write-back
+row — without ever visiting the first, whether coming from the ecall row
+directly (`n = 0`) or from the last absorb row (`n > 0`). Digest words
+0..3 are then never written at all, so a guest reading `ptr..ptr+3` back
+would see whatever RAM already held instead of the honest zeros — a valid
+proof of a non-honest execution. Three rules, one per way into a
+`hash_fin = 1` row, close it: `sys_hash·n(is_hash_out)·n(hash_fin) = 0`
+(ecall row), `is_hash·n(is_hash_out)·n(hash_fin) = 0` (last absorb row),
+and — the case neither of those two reaches, a witness parking at the
+first write-back row and then routing *its own* next row somewhere other
+than the second write-back row —
+`is_hash_out·(1-hash_fin)·(1 - n(is_hash_out)·n(hash_fin)) = 0` (degree 4,
+still under the degree-8 ceiling). Together the three cover every
+transition that could land on `hash_fin = 1`, so a `POSEIDON2` call now
+always writes both digest rows.
+
 **Canonical digest encoding.** `hv_lo + hv_hi·2^32 = hs_lane` is only a
 *field* identity — for any lane value `v < 2^32 - 1` the non-canonical
 pair `(v + 1, 2^32 - 1)` satisfies it too (`(v+1) + (2^32-1)·2^32 = v + p
@@ -279,21 +297,26 @@ wherever its message is unconstrained):
   `hash_left = hash_n`, `hash_idx = 0`, `hs0..7 = 0` are all pinned
   directly; its own `MEMORY`/`ALU`/`PROGRAM` sends are the ordinary-ecall
   formulas, untouched; `hp0..3`/`hp3_hi` bound `hash_ptr < 2^30` (above);
-  the two routing rules above bind the next row's kind to `hash_n`.
+  the three routing rules above bind the next row's kind to `hash_n` and
+  rule out landing on `hash_fin = 1` directly.
 - *absorb, non-final*: `act3 = 1` is forced (a witness cannot split one
   block into two smaller ones — a different, non-standard hash of the same
   message), so the row always absorbs a full 4-word block; `hash_left`/
-  `hash_idx` chain to the next absorb row; the `POSEIDON2` lookup pins the
-  chain to a genuine permutation.
+  `hash_idx` chain to the next absorb row (`hash_idx` bounded `< 1024`,
+  `= POSEIDON2_MAX_WORDS / 4`, via `idx0`'s plain `RANGE8` plus `idx0+1`'s
+  tightened `AND4[idx1, 3, idx1]`, matching only `idx1 < 4`); the
+  `POSEIDON2` lookup pins the chain to a genuine permutation.
 - *absorb, final (partial)*: `act3` may be 0, but `hash_left` is forced to
   drain to exactly 0 on the *next* row — no early stop leaving words
   unabsorbed, no over-absorption (which would otherwise only be caught by
-  a `RANGE8`-rejected field wraparound); inactive lanes' `hv_k = hs_k`.
+  a `RANGE8`-rejected field wraparound); inactive lanes' `hv_k = hs_k`;
+  the next row cannot land on `hash_fin = 1` either (above).
 - *write-back 1*: `hash_fin = 0`; `hash_left = 0` is required directly
   (not just via propagation — the `n = 0` escape above); `hs0..7` is
   whatever the last absorb's `POSEIDON2` lookup pinned it to (the digest,
   lanes 0..3); `hv0..3` splits `hs0..1`, canonically (`himax0..1`/
-  `inv0..1` above); all four `MEMORY` slots write unconditionally.
+  `inv0..1` above); all four `MEMORY` slots write unconditionally; its own
+  next row must be the second write-back row (above).
 - *write-back 2*: `hash_fin = 1`, ending the row-group (`next_pc = pc + 4`
   here, nowhere else in the group); `hs0..7` is copied forward from
   write-back 1 unchanged; `hv0..3` splits `hs2..3`, canonically. `is_hash`
@@ -646,13 +669,16 @@ sign-fix identity, `cpu`'s from its packed lookup fraction-pins rather than
 its own row logic (whose costliest single constraint is only degree 6),
 `poseidon2`'s from its S-box split (see that table's own section). M3.2's
 hash-row columns and constraints (below), including the address bound,
-`n = 0` escape, and canonical-digest-encoding fixes, keep every individual
-product at or under what the existing worst case already spent — the
-biggest single new terms are all degree 3 (the `not_final`/`final_absorb`
-absorb-chain gates, the write-back `hs` copy-forward pin, the `sys_hash·
-n(is_hash_out)·hash_n` routing rule, the write-back `hash_left = 0` rule,
-and the `himax`/`inv` canonical-encoding equations) — so `cpu`'s measured
-degree is unchanged at 8, not raised past it. This
+`n = 0` escape, "skip the first write-back row" escape, and
+canonical-digest-encoding fixes, keep every individual product at or under
+what the existing worst case already spent — the biggest single new term
+is the write-back "must be followed by `hash_fin = 1`" rule at degree 4
+(`is_hash_out·(1-hash_fin)·(1 - n(is_hash_out)·n(hash_fin))`); every other
+new term is degree 3 or lower (the `not_final`/`final_absorb` absorb-chain
+gates, the write-back `hs` copy-forward pin, the three `n(hash_fin) = 0`/
+routing rules, the write-back `hash_left = 0` rule, and the `himax`/`inv`
+canonical-encoding equations) — so `cpu`'s measured degree is unchanged at
+8, not raised past it. This
 config's ceiling is degree 8 (`generic_config`'s `log_blowup = 3` plus this
 machine's `is_zk = 1` hiding: `constraint_degree = max_degree + 1 ≤ 9` ⇒
 `log2_ceil(8) = 3` quotient chunks, `p3-batch-stark`'s cap), so `alu` and

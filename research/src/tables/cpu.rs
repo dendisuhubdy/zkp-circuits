@@ -453,6 +453,15 @@ where
             // only be a write-back row when `HASH_N = 0`.
             t.assert_zero(v(SYS_HASH) * (n(IS_HASH) + n(IS_HASH_OUT) - one.clone()));
             t.assert_zero(v(SYS_HASH) * n(IS_HASH_OUT) * v(HASH_N));
+            // CRITICAL 2b (fix, round 2): the rule above stops a nonzero-`HASH_N` call from
+            // routing straight to *a* write-back row, but a zero-`HASH_N` call legitimately
+            // does route straight to a write-back row — and without this, nothing stopped it
+            // from routing to the *second* one (`HASH_FIN = 1`) directly, skipping the first
+            // write-back row entirely. That would never write digest words 0..3 at all, so a
+            // guest reading `ptr..ptr+3` back would see whatever was already in RAM instead of
+            // the honest zeros — a valid proof of a non-honest execution. The row right after
+            // the ecall row, if it is a write-back row, must be the *first* one.
+            t.assert_zero(v(SYS_HASH) * n(IS_HASH_OUT) * n(HASH_FIN));
             // The second write-back row needs the same `HS0..7` (specifically lanes 2/3, the
             // digest's third/fourth field elements) the first row established from the last
             // absorb's `POSEIDON2` lookup — nothing else propagates it there.
@@ -494,18 +503,29 @@ where
             // `HASH_LEFT` without a huge, RANGE8-rejected wraparound) over-absorb.
             let final_absorb = is_hash.clone() * (one.clone() - n(IS_HASH));
             t.assert_zero(final_absorb * n(HASH_LEFT));
+            // CRITICAL 2b (fix, round 2), the absorb-side twin of the `SYS_HASH` rule above:
+            // the row right after the last absorb row, if it is a write-back row (the only
+            // legitimate case once absorption has actually happened), must be the *first* one,
+            // not the second — otherwise digest words 0..3 are never written.
+            t.assert_zero(is_hash.clone() * n(IS_HASH_OUT) * n(HASH_FIN));
         }
         // Inactive lanes are not overwritten by the sponge: `HV_k` carries the previous
         // state's own lane `k` forward instead of a memory read.
         for i in 0..4 { b.assert_zero(is_hash.clone() * (one.clone() - v(ACT0 + i)) * (v(HV0 + i) - v(HS0 + i))); }
-        // `HASH_LEFT`/`HASH_IDX` range checks (2 byte limbs each — 16 bits comfortably bounds
-        // both, since `POSEIDON2_MAX_WORDS = 4096`), the same purpose `MA0..3` serves for
-        // `MEM_ADDR`: without this, a wrong `HASH_LEFT`/`HASH_IDX` could only be caught via a
-        // field-arithmetic identity, satisfiable by a huge wraparound value a cheating witness
-        // could otherwise pick freely.
+        // `HASH_LEFT`/`HASH_IDX` range checks (byte limbs), the same purpose `MA0..3` serves
+        // for `MEM_ADDR`: without this, a wrong `HASH_LEFT`/`HASH_IDX` could only be caught via
+        // a field-arithmetic identity, satisfiable by a huge wraparound value a cheating
+        // witness could otherwise pick freely. `HASH_LEFT`'s 16-bit bound (`LEFT0..1`, both
+        // `RANGE8`-checked) comfortably covers `POSEIDON2_MAX_WORDS = 4096`. `HASH_IDX`'s
+        // top limb is tightened further, to `< 4` rather than `< 256`: the nibble table has no
+        // entries with `a >= 16`, so requesting `AND4[IDX1, 3, IDX1]` (instead of a plain
+        // `RANGE8[IDX1]`) only finds a match when `IDX1 & 3 == IDX1`, i.e. `IDX1 < 4` — giving
+        // `HASH_IDX = IDX0 + 256·IDX1 < 1024`, exactly `POSEIDON2_MAX_WORDS / 4`, the largest
+        // block index a real call can ever reach.
         b.assert_zero(is_hash.clone() * (v(LEFT0) + v(LEFT0 + 1) * AB::Expr::from_u32(256) - v(HASH_LEFT)));
         b.assert_zero(is_hash.clone() * (v(IDX0) + v(IDX0 + 1) * AB::Expr::from_u32(256) - v(HASH_IDX)));
-        for c in [LEFT0, LEFT0 + 1, IDX0, IDX0 + 1] { bus::RANGE8.lookup_key(b, [v(c)], Count::bounded(is_hash.clone(), 1)); }
+        for c in [LEFT0, LEFT0 + 1, IDX0] { bus::RANGE8.lookup_key(b, [v(c)], Count::bounded(is_hash.clone(), 1)); }
+        bus::AND4.lookup_key(b, [v(IDX0 + 1), AB::Expr::from_u32(3), v(IDX0 + 1)], Count::bounded(is_hash.clone(), 1));
         // The `POSEIDON2` lookup: `state_in` overwrites lanes 0..3 of the row's entering state
         // (`HS`) with this row's `HV`, keeping the capacity lanes 4..7; `state_out` is the
         // *next* row's `HS0..7` — so this single bus interaction is what proves the chain from
@@ -526,6 +546,17 @@ where
         // `zero_vec` default, and the `n = 0` case's own copy from the ecall row is 0 too — so
         // this cannot reject any honest witness.
         b.assert_zero(is_hash_out.clone() * (one.clone() - v(HASH_FIN)) * v(HASH_LEFT));
+        // CRITICAL 2b (fix, round 2): the first write-back row's own next row must be the
+        // second write-back row (`IS_HASH_OUT = 1, HASH_FIN = 1`) — the third and last piece
+        // that rules out ever skipping the first write-back row (see the two `n(HASH_FIN) = 0`
+        // routing rules above, on the ecall row and the last absorb row): together the three
+        // cover every way a witness could route *into* a `HASH_FIN = 1` row, so a `POSEIDON2`
+        // call now always writes both digest rows or the proof does not verify. Degree 4
+        // (`is_hash_out·(1-HASH_FIN)` is degree 2, `1 - n(IS_HASH_OUT)·n(HASH_FIN)` is degree
+        // 2), still under this table's degree-8 ceiling.
+        b.when_transition().assert_zero(
+            is_hash_out.clone() * (one.clone() - v(HASH_FIN)) * (one.clone() - n(IS_HASH_OUT) * n(HASH_FIN)),
+        );
 
         // Write-back rows: `HV0..3` is this row's 4 written machine words, which must be an
         // honest `u32` decomposition (`HVL0..15`, RANGE8-checked) of two `HS` lanes — lanes
@@ -700,7 +731,9 @@ pub fn cpu_trace(events: &[CycleEvent], height: usize, range: &mut RangeCounts, 
                     range.range8(l0); range.range8(l1);
                     let (i0, i1) = (idx & 0xff, (idx >> 8) & 0xff);
                     r[IDX0] = F::from_u32(i0); r[IDX0 + 1] = F::from_u32(i1);
-                    range.range8(i0); range.range8(i1);
+                    range.range8(i0);
+                    // `IDX0+1`'s tightened `< 4` bound: `AND4[i1, 3, i1]`, not `RANGE8`.
+                    nibble.and4(i1, 3);
                 }
                 HashRow::WriteOut { fin, words, state } => {
                     r[IS_HASH_OUT] = F::ONE;
