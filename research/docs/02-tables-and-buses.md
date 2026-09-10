@@ -148,9 +148,12 @@ nibble on `slt` rows for `sb`, or `b0`'s high nibble on shift rows for
 `qh3` (`sll`'s `q0+3`'s high nibble, its overflow check).
 
 Constraints: exactly one op flag set per real row; every limb decomposition
-recomposes to its word and is range-checked on `RANGE8`; `add`/`sub`/`slt`/
-`sltu` share one limb-wise adder with boolean carries; `slt`/`sltu` reduce to
-a subtract-with-borrow, `slt`/`sra` sign-correct using the top-limb's sign
+recomposes to its word, and `a0..3`/`b0..3` are range-checked on `RANGE8`
+under `g_ab = is_real − and − or − xor`, `c0..3` under the further-narrowed
+`g_c = g_ab − slt − sltu − eq` (M2.4: dropped wherever a stronger constraint
+already binds the limb — see below); `add`/`sub`/`slt`/`sltu` share one
+limb-wise adder with boolean carries; `slt`/`sltu` reduce to a
+subtract-with-borrow, `slt`/`sra` sign-correct using the top-limb's sign
 bit. Every sign/shift/overflow bit below M2.3 came from a byte-table `AND8`
 lookup against a single-bit mask; each is now a **nibble isolated
 extraction**: given a byte column `x` and a *derived* high-nibble witness
@@ -170,14 +173,60 @@ nibble can be a *derived pure expression*, `(byte − lo)·16⁻¹`, with **no**
 extra dummy range check — the low nibble's own lookup already anchors it,
 and the map `byte ↦ (byte − lo)·16⁻¹` only lands in `[0,16)` for `byte < 256`
 (see `bitwise_high_nibble`'s doc comment in `alu.rs` for the bijection
-argument). That is two lookups per limb, eight per bitwise row. `sll` proves
+argument). That is two lookups per limb, eight per bitwise row.
+
+**M2.4 — collapsing the RANGE8 limb checks.** Before M2.4, `a0..3`/`b0..3`/
+`c0..3` were unconditionally `RANGE8`-checked on every real row (`is_real`),
+twelve lookups regardless of op — on top of the eight nibble lookups a
+bitwise row already pays, a pure redundancy: the nibble lookups above
+already bind every bitwise limb (both nibbles of each byte get a real
+lookup, so the byte itself is forced into `[0,256)` — see
+`bitwise_high_nibble`'s doc comment). `g_ab` (`a0..3`/`b0..3`) and `g_c`
+(`c0..3`) drop the RANGE8 lookup for a limb wherever a stronger constraint
+already binds it: `g_ab` is 0 on `and`/`or`/`xor` rows (nibble-bound
+instead); `g_c` is additionally 0 on `slt`/`sltu`/`eq` rows, where
+`(cmp+eq)·c·(c−1) = 0` already forces `c ∈ {0,1}` — stronger than a
+byte-range check. Both gates are sums of boolean row-selector flags (never a
+product), so `Count::bounded(gate, 1)` still holds. Exact per-op lookup
+counts (RANGE8 + `POW2`/`AND4`/`OR4`/`XOR4`, all bus lookups this table
+performs per row; excludes the one `ALU` `table_entry` it always provides),
+counted directly from `fill_row`/`alu_trace`'s `RangeCounts`/`NibbleCounts`
+calls (see `tests/tables.rs::cmp_and_eq_rows_do_not_range_check_their_c_limb`
+and `::bitwise_rows_no_longer_range_check_their_byte_limbs`, which assert
+these totals against the honest witness the fill functions actually build):
+
+| Op | `a0..3` RANGE8 | `b0..3` RANGE8 | `c0..3` RANGE8 | `s0..3`/`t0..3`/`q0..3` RANGE8 | sign/shift/overflow nibble lookups | `POW2` | Total/row |
+|---|---|---|---|---|---|---|---|
+| `add`/`sub` | 4 (`g_ab`) | 4 (`g_ab`) | 4 (`g_ab` — stays: a wrong carry could pass the field identity with an out-of-range limb) | 0 | 0 | 0 | **12** |
+| `eq` | 4 (`g_ab`) | 4 (`g_ab`) | 0 (`g_c`, dropped) | 0 | 0 | 0 | **8** |
+| `sltu` | 4 (`g_ab`) | 4 (`g_ab`) | 0 (`g_c`, dropped) | 4 (`s0..3`, `cmp` gate, unchanged) | 0 | 0 | **12** |
+| `slt` | 4 (`g_ab`) | 4 (`g_ab`) | 0 (`g_c`, dropped) | 4 (`s0..3`, `cmp` gate, unchanged) | 4 (`sa`: dummy+extract, `sb`: dummy+extract) | 0 | **16** |
+| `and`/`or`/`xor` | 0 (`g_ab`, dropped) | 0 (`g_ab`, dropped) | 0 (`g_ab`, dropped) | 0 | 8 (4 limbs × {lo, hi} on the active op's bus) | 0 | **8** |
+| `sll` | 4 (`g_ab`) | 4 (`g_ab`) | 4 (`g_ab` — the shift result needs its own range proof) | 4 (`q0..3`, `shift` gate, unchanged) | 4 (shift-amount: dummy+extract; overflow `qh3`: dummy+extract) | 1 | **21** |
+| `srl` | 4 (`g_ab`) | 4 (`g_ab`) | 4 (`g_ab`) | 12 (`q0..3` + `s0..3` + `t0..3`, `shift`/`rshift` gates, unchanged) | 2 (shift-amount: dummy+extract) | 1 | **27** |
+| `sra` | 4 (`g_ab`) | 4 (`g_ab`) | 4 (`g_ab`) | 12 (`q0..3` + `s0..3` + `t0..3`) | 4 (shift-amount: dummy+extract; `sa`: dummy+extract) | 1 | **29** |
+
+`and`/`or`/`xor` (the M2.3 motivating case, 20 lookups before this task —
+12 RANGE8 + 8 nibble) drop to 8; `add`/`sub`/`eq`/`sltu` land at or under 12.
+The Global Constraints' ≤14-lookups/row target is met by every op except
+`slt` (16) and the shift family (`sll`/`srl`/`sra`, 21–29) — this is a
+resolved scope note, not a miss: `slt` needs two independent isolated sign
+extractions (`sa` on `a`, `sb` on `b`), each costing a dummy range-check
+plus the real extraction, since nothing else on a `slt` row looks up either
+companion low nibble the way the bitwise case's own op lookup does; and
+`q0..3`/`s0..3`/`t0..3` (the shift/compare scratch limbs) were explicitly
+scoped **unchanged** for this task ("Q, S, T lookups stay op-gated as
+today"), so the shift family's pre-existing per-row cost carries forward
+untouched. `sll` proves
 `a·2^sh = c + hi·2^32` with `hi` and `c` range-checked and `(sh, 2^sh)` on
 `POW2`; `srl`/`sra` prove the integer division `a = q·2^sh + r`, `r < 2^sh`,
 with `sra` working on the two's-complement magnitude and re-flipping the
 sign after. Provides `(op, a, b, c)` on `ALU` with count `mult`, and
 `(1 − is_real)·mult = 0` forces that count to zero on padding rows. That last
 one is load-bearing: on a padding row every op flag is zero (so `op` reads as
-`Add`), the limb range checks are counted by `is_real`, every arithmetic
+`Add`), the limb range checks are gated by `is_real` (directly, or via
+`g_ab`/`g_c`, which are themselves `is_real` minus some of those same zero
+flags — so still zero on a padding row), every arithmetic
 constraint carries a flag factor, and the recomposition `a = Σ a_i·2^{8i}` is
 satisfied by parking a whole field element in limb 0 — so without it a
 padding row provided an arbitrary `Add` tuple with arbitrary multiplicity,

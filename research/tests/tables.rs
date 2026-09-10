@@ -164,6 +164,52 @@ fn alu_rows_recompose_and_carry() {
     assert_eq!((row[alu::col::SA], row[alu::col::SB], row[alu::col::CARRY0 + 3]), (F::ONE, F::ZERO, F::ZERO));
 }
 
+/// M2.4: `slt`/`sltu`/`eq` rows no longer RANGE8-check their `C0..3` limb, since
+/// `(cmp+eq)*C*(C-1)=0` already forces `C ∈ {0,1}` directly — a stronger constraint
+/// than a byte-range check, so the RANGE8 lookup on `C0..3` was redundant there.
+/// Method: call `fill_row` directly (the exact code path that decides whether to
+/// call `range.range8()` per limb) and sum the resulting `RangeCounts`.
+#[test]
+fn cmp_and_eq_rows_do_not_range_check_their_c_limb() {
+    let mut range = RangeCounts::default();
+    let mut nibble = NibbleCounts::default();
+    // slt: A(4) + B(4) + S(4, cmp gate, unchanged) = 12, not 4(A)+4(B)+4(C)+4(S)=16.
+    let mut row = vec![F::ZERO; alu::col::WIDTH];
+    fill_row(&mut row, &AluEvent { op: AluOp::Slt, a: 3, b: 9, c: 1 }, &mut range, &mut nibble);
+    assert_eq!(range.range.iter().sum::<u64>(), 12);
+
+    // eq: A(4) + B(4) = 8, not 4(A)+4(B)+4(C)=12 (eq has no S/T/Q scratch limbs at all).
+    let mut range = RangeCounts::default();
+    let mut row = vec![F::ZERO; alu::col::WIDTH];
+    fill_row(&mut row, &AluEvent { op: AluOp::Eq, a: 3, b: 3, c: 1 }, &mut range, &mut nibble);
+    assert_eq!(range.range.iter().sum::<u64>(), 8);
+
+    // sltu: A(4) + B(4) + S(4, cmp gate) = 12, C dropped same as slt.
+    let mut range = RangeCounts::default();
+    let mut row = vec![F::ZERO; alu::col::WIDTH];
+    fill_row(&mut row, &AluEvent { op: AluOp::Sltu, a: 3, b: 9, c: 1 }, &mut range, &mut nibble);
+    assert_eq!(range.range.iter().sum::<u64>(), 12);
+}
+
+/// M2.4: bitwise rows no longer RANGE8-check ANY of `A0..3`/`B0..3`/`C0..3` — the
+/// nibble lookups (`bitwise_high_nibble`) already bind all twelve limbs on these
+/// rows (verified: each limb's low nibble gets a real AND4/OR4/XOR4 lookup, and its
+/// derived high nibble gets a second one, so both halves — hence the whole byte —
+/// are forced into range by the nibble table alone). Before M2.4 these rows paid
+/// RANGE8 (12) *and* nibble (8) for the same bytes; after, only the nibble lookups
+/// remain: `add/sub`'s 12 RANGE8 lookups collapse to 0, leaving just the 8 nibble
+/// lookups already present since Task 3.
+#[test]
+fn bitwise_rows_no_longer_range_check_their_byte_limbs() {
+    let mut range = RangeCounts::default();
+    let mut nibble = NibbleCounts::default();
+    let mut row = vec![F::ZERO; alu::col::WIDTH];
+    fill_row(&mut row, &AluEvent { op: AluOp::And, a: 0x12, b: 0x34, c: 0x12 & 0x34 }, &mut range, &mut nibble);
+    assert_eq!(range.range.iter().sum::<u64>(), 0, "no RANGE8 lookups on a bitwise row");
+    let total_nibble: u64 = nibble.and.iter().sum::<u64>() + nibble.or.iter().sum::<u64>() + nibble.xor.iter().sum::<u64>();
+    assert_eq!(total_nibble, 8, "4 limbs x {{lo, hi}} = 8 nibble lookups, unchanged from Task 3");
+}
+
 #[test]
 #[should_panic(expected = "does not match")]
 fn alu_fill_rejects_wrong_result() {

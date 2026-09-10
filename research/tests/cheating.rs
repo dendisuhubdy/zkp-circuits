@@ -354,3 +354,42 @@ fn storing_a_value_that_was_never_in_a_register_is_rejected() {
     assert_eq!(t.public_values[cpu::pv::OUT0], F::from_u32(0x0500_0000));
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
+
+/// M2.4 regression: bitwise rows (`and`/`or`/`xor`) no longer RANGE8-check their
+/// `A0..3`/`B0..3`/`C0..3` limbs (`g_ab` is 0 there) — those limbs are now bound
+/// solely by the nibble lookups. This bumps the RANGE8 table's own multiplicity at
+/// a value that appears as this `and` row's `A0` limb (0x12): nothing on the AND
+/// row (or, on inspection, anywhere else in this tiny program) asks the RANGE8 bus
+/// for one more count of 0x12, so the bus no longer balances and the proof must
+/// fail — confirming the dropped gate didn't leave a residual, silent RANGE8 demand
+/// for this limb.
+#[test]
+fn bumping_range8_on_a_bitwise_rows_now_unconstrained_a_limb_is_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(5, 0x12)); a.extend(li(6, 0x34));
+    a.push(and(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    t.range.values[0x12 * range::col::WIDTH + range::col::M_RANGE] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// M2.4 regression: `slt`/`sltu`/`eq` rows no longer RANGE8-check their `C0..3`
+/// limb (`g_c` is 0 there) — `C` is bound instead by `(cmp+eq)*C*(C-1)=0`. This
+/// bumps the RANGE8 table's multiplicity at value 1 (this `slt` row's `C`, and
+/// hence `C0`); the RANGE8 bus no longer has a matching demand for that extra
+/// count, so the proof must fail.
+#[test]
+fn bumping_range8_on_an_slt_rows_now_unconstrained_c_limb_is_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(5, 3)); a.extend(li(6, 9));
+    a.push(slt(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    t.range.values[range::col::WIDTH + range::col::M_RANGE] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}

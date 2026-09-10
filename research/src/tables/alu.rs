@@ -106,8 +106,33 @@ where
         b.assert_eq(word(A0), v(A));
         b.assert_eq(word(B0), v(B));
         b.assert_eq(word(C0), v(C));
+        // RANGE8 gates: `g_ab` drops A/B's byte-range lookups on bitwise rows, where the
+        // nibble table already binds every limb twice (low nibble, real lookup; high
+        // nibble, derived-but-still-looked-up — see `bitwise_high_nibble`'s doc comment),
+        // which is a strictly stronger byte-range proof than RANGE8 gives. `g_c` further
+        // drops C's lookup on `slt`/`sltu`/`eq` rows, where `(cmp+eq)*C*(C-1)=0` (below)
+        // already forces `C ∈ {0,1}` directly — also strictly stronger than a byte-range
+        // check. Both gates stay sums of boolean row-selector flags (never a product), so
+        // `Count::bounded(gate, 1)` still holds: on any row exactly one flag is 1 (the
+        // `sum == is_real` constraint above), so each gate expression evaluates to 0 or 1.
+        //
+        // INVARIANT re-argued for these two gates specifically: on a bitwise row, `g_ab`
+        // is 0, so A0..3/B0..3 are NOT bus message columns for RANGE8 on that row — but
+        // they remain fully constrained by the nibble lookups a few lines below (the low
+        // nibble is a real AND4/OR4/XOR4 lookup input, the high nibble is a field-forced
+        // function of the byte and that low nibble, itself also looked up), so nothing is
+        // free there. On an `slt`/`sltu`/`eq` row, `g_c` is 0, so C0..3 are not RANGE8
+        // message columns — but C itself is pinned to {0,1} by the boolean constraint a
+        // few lines below, and C0..3's recomposition (`word(C0) == C` above) forces
+        // C0=C∈{0,1} and C1=C2=C3=0, which is a valid byte regardless — so C0..3 can never
+        // smuggle an out-of-range value there either. On every other row kind (add/sub,
+        // shifts) both gates are 1, matching the pre-M2.4 unconditional behavior exactly.
+        let g_ab = is_real.clone() - and.clone() - or.clone() - xor.clone();
+        let g_c = g_ab.clone() - slt.clone() - sltu.clone() - eq.clone();
         for i in 0..4 {
-            for base in [A0, B0, C0] { bus::RANGE8.lookup_key(b, [v(base + i)], Count::bounded(is_real.clone(), 1)); }
+            bus::RANGE8.lookup_key(b, [v(A0 + i)], Count::bounded(g_ab.clone(), 1));
+            bus::RANGE8.lookup_key(b, [v(B0 + i)], Count::bounded(g_ab.clone(), 1));
+            bus::RANGE8.lookup_key(b, [v(C0 + i)], Count::bounded(g_c.clone(), 1));
         }
         let cmp = slt.clone() + sltu.clone();
         let rshift = srl.clone() + sra.clone();
@@ -227,7 +252,12 @@ pub fn fill_row(row: &mut [F], ev: &AluEvent, range: &mut RangeCounts, nibble: &
     row[FLAG0 + op.code() as usize] = F::ONE;
     row[A] = F::from_u32(a); row[B] = F::from_u32(b); row[C] = F::from_u32(c);
     row[IS_REAL] = F::ONE; row[MULT] = F::ONE;
-    set_limbs(row, A0, a, range, true); set_limbs(row, B0, b, range, true); set_limbs(row, C0, c, range, true);
+    // Mirror the AIR's `g_ab`/`g_c` gates exactly: bitwise rows (And/Or/Xor) don't count
+    // A/B/C's RANGE8 lookups at all (the nibble lookups below bind them instead); cmp/eq
+    // rows (Slt/Sltu/Eq) count A/B but not C (C's own boolean constraint binds it instead).
+    let count_ab = !matches!(op, AluOp::And | AluOp::Or | AluOp::Xor);
+    let count_c = count_ab && !matches!(op, AluOp::Slt | AluOp::Sltu | AluOp::Eq);
+    set_limbs(row, A0, a, range, count_ab); set_limbs(row, B0, b, range, count_ab); set_limbs(row, C0, c, range, count_c);
     let (a3, b3, b0) = ((a >> 24) & 0xff, (b >> 24) & 0xff, b & 0xff);
     let adder = |row: &mut [F], x: u32, y: u32| {
         // carries of x + y limb-wise
