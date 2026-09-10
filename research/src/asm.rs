@@ -81,3 +81,105 @@ pub mod ops {
         v
     }
 }
+
+// ───────────────────────── M3.3: note-layer guest routines ─────────────────────────
+//
+// `NOTE_COMMIT`, `NULLIFY` and `MERKLE_VERIFY` are library code, not new syscalls: they
+// stage a domain tag plus the relevant `Word8`s into a scratch RAM buffer (word-for-word
+// copies), call `ops::call_poseidon2` over that buffer, then copy out the 8-word result — the
+// same shape `guests::transfer` used by hand for the M1.5/M3.2 development hash. All addressing is
+// relative to a shared RAM-base register `base` (the caller loads its HEAP-relative value
+// once, e.g. `guests::transfer`'s `BASE`); `ptr_words` is the scratch buffer's *word* address
+// (`(HEAP + buf) / 4`, computed by the caller at assembly time since both are compile-time
+// constants — `asm.rs` itself has no HEAP constant).
+use crate::notes::{domain, Note};
+
+/// Copies a `Word8` (8 words) from `base + src` to `base + dst`. The `Word8` analogue of a
+/// hand-written 2-word `copy` helper.
+pub fn copy_word8(a: &mut Assembler, base: u32, tmp: u32, src: i32, dst: i32) {
+    for i in 0..8 {
+        a.push(ops::lw(tmp, base, src + 4 * i));
+        a.push(ops::sw(base, tmp, dst + 4 * i));
+    }
+}
+
+/// `NOTE_COMMIT`: `note_words` (`Note::WORDS` words, already laid out at `base + note_at`)
+/// hashed as `H(CM_DOMAIN, note_words)`. Stages `[CM_DOMAIN, note_words...]` at `base + buf`
+/// (needs `1 + Note::WORDS` = 28 words of scratch), calls `POSEIDON2`, and copies the 8-word
+/// digest to `base + cm_out`.
+pub fn emit_note_commit(a: &mut Assembler, base: u32, tmp: u32, note_at: i32, buf: i32, ptr_words: i32, cm_out: i32) {
+    a.extend(ops::li(tmp, domain::CM as i32));
+    a.push(ops::sw(base, tmp, buf));
+    for i in 0..Note::WORDS as i32 {
+        a.push(ops::lw(tmp, base, note_at + 4 * i));
+        a.push(ops::sw(base, tmp, buf + 4 + 4 * i));
+    }
+    a.extend(ops::call_poseidon2(ptr_words, 1 + Note::WORDS));
+    copy_word8(a, base, tmp, buf, cm_out);
+}
+
+/// `NULLIFY`: the M1.5 form, `nf = H(NF_DOMAIN, nk, cm)` — bound to the commitment, not a
+/// sender-chosen nonce, so two notes for the same owner can never collide to one nullifier.
+/// `nk`/`cm` (8 words each) must already be at `base + nk_at` / `base + cm_at`. Stages
+/// `[NF_DOMAIN, nk(8), cm(8)]` at `base + buf` (17 words of scratch), calls `POSEIDON2`, and
+/// copies the digest to `base + nf_out`.
+pub fn emit_nullify(a: &mut Assembler, base: u32, tmp: u32, nk_at: i32, cm_at: i32, buf: i32, ptr_words: i32, nf_out: i32) {
+    a.extend(ops::li(tmp, domain::NF as i32));
+    a.push(ops::sw(base, tmp, buf));
+    copy_word8(a, base, tmp, nk_at, buf + 4);
+    copy_word8(a, base, tmp, cm_at, buf + 36);
+    a.extend(ops::call_poseidon2(ptr_words, 17));
+    copy_word8(a, base, tmp, buf, nf_out);
+}
+
+/// `MERKLE_VERIFY`, depth `depth` (32 in this crate): proves the `Word8` at `base + leaf` is
+/// a member of a tree whose root is written to `base + root_out`, given a private sibling
+/// path already laid out at `base + path` (`depth` `Word8`s, leaf to root) and `index_word`
+/// — a register holding the leaf's index, whose bit `level` selects which side the running
+/// node is on at that level (`0`: running is left, sibling is right; `1`: the reverse).
+///
+/// Unrolled at assembly time (`depth` is fixed, so every level's path offset — `path + 32 *
+/// level` — is a compile-time constant); the only runtime-conditioned step per level is the
+/// branch that picks left/right order. Per level: `[NODE_DOMAIN, left(8), right(8)]` (17
+/// words) staged at `base + buf`, one `POSEIDON2` call (`ceil(17/4) = 5` permutations),
+/// result copied back into the running node. `label_prefix` must be unique per call site (two
+/// `MERKLE_VERIFY`s in one program would otherwise collide on level labels).
+#[allow(clippy::too_many_arguments)]
+pub fn emit_merkle_verify(
+    a: &mut Assembler,
+    base: u32,
+    tmp: u32,
+    bit: u32,
+    leaf: i32,
+    path: i32,
+    index_word: u32,
+    buf: i32,
+    ptr_words: i32,
+    root_out: i32,
+    depth: usize,
+    label_prefix: &str,
+) {
+    use crate::isa::{BranchCond, REG_ZERO};
+    copy_word8(a, base, tmp, leaf, root_out);
+    for level in 0..depth {
+        let sib = path + 32 * level as i32;
+        let bit0 = format!("{label_prefix}_l{level}_bit0");
+        let done = format!("{label_prefix}_l{level}_done");
+        a.push(ops::srli(bit, index_word, level as u32));
+        a.push(ops::andi(bit, bit, 1));
+        a.branch(BranchCond::Eq, bit, REG_ZERO, &bit0);
+        // bit == 1: the running node is on the right — [sibling, running].
+        copy_word8(a, base, tmp, sib, buf + 4);
+        copy_word8(a, base, tmp, root_out, buf + 36);
+        a.jal(REG_ZERO, &done);
+        a.label(&bit0);
+        // bit == 0: the running node is on the left — [running, sibling].
+        copy_word8(a, base, tmp, root_out, buf + 4);
+        copy_word8(a, base, tmp, sib, buf + 36);
+        a.label(&done);
+        a.extend(ops::li(tmp, domain::NODE as i32));
+        a.push(ops::sw(base, tmp, buf));
+        a.extend(ops::call_poseidon2(ptr_words, 17));
+        copy_word8(a, base, tmp, buf, root_out);
+    }
+}

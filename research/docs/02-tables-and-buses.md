@@ -590,9 +590,11 @@ permutation, **one row per round**, in fixed 32-row blocks — 30 round rows
 (4 initial full rounds, 22 partial rounds, 4 terminal full rounds —
 `p3_goldilocks`'s own `GOLDILOCKS_POSEIDON2_HALF_FULL_ROUNDS`/
 `GOLDILOCKS_POSEIDON2_PARTIAL_ROUNDS_8`) plus 2 idle rows. Height is
-`tier.poseidon2_height() = tier.cpu_height()` (a tier-10 proof has 32
-permutation slots, tier-12 has 128; M3.3 measures whether the transfer guest
-actually fits, and doubles this if not — see the M3 ledger).
+`tier.poseidon2_height()`, decoupled from `tier.cpu_height()` since M3.3:
+`2^(t+1)` (a tier-10 proof has 64 permutation slots, tier-12 has 256).
+M3.3 measured the `transfer` guest at 190 permutations at tier 12 — more
+than the `2^t` = 128 slots `poseidon2_height` gave through M3.2, so it
+gained the extra bit of height (`docs/06-viewing-keys.md`'s cost table).
 
 Preprocessed columns (period 32, `pre::WIDTH = 13`): `rc0..7` (this round's
 constants — only lane 0 is nonzero on a partial round), `is_full`,

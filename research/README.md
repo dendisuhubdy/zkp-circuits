@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 101 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
+cargo test              # 107 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -109,7 +109,7 @@ Execution happens natively and in the clear on the prover's machine (Part
 3) — the emulator is the reference semantics, and nothing about running it
 is itself confidential; confidentiality is a property of the *proof*, not
 of the execution environment. Arithmetization (Part 4) turns that execution
-into six tables padded to the smallest gas tier that fits, which is why the
+into seven tables padded to the smallest gas tier that fits, which is why the
 trace height — and hence the tier — is the only thing about "how much work
 happened" that a verifier can see. Proving and verifying (Part 5) run
 against Plonky3's hiding FRI PCS, so the main-trace and quotient commitments
@@ -125,23 +125,25 @@ verifier key actually pins down.
 
 Mapped onto the whitepaper's shielded-pool language: `R_transfer` (the
 Zcash-style spend/output relation from `zkp4`/`zkp6`) is just another guest
-program under this same `R_exec`, once notes, nullifiers, and Merkle paths
-exist as syscalls. Those arrive as syscalls 10–13 (`POSEIDON2`,
-`NOTE_COMMIT`, `NULLIFY`, `MERKLE_VERIFY`) in milestone 3 — see
+program under this same `R_exec`, built on notes, nullifiers, and in-circuit
+Merkle membership. Those arrive as the `POSEIDON2` syscall (3) plus three
+guest-level routines built on it — `NOTE_COMMIT`, `NULLIFY`, `MERKLE_VERIFY`
+(`asm.rs`; no new syscall numbers) — in milestone 3 — see
 `docs/05-roadmap.md`. Milestone 1 proves the general-purpose machine works;
 milestone 3 is what turns it into a shielded pool.
 
 ## Viewing keys
 
-Ahead of milestone 3, the crate carries a first shielded transfer and the
-disclosure layer that makes it auditable — `guests::transfer`, `notes.rs`,
-`viewing.rs`, `ledger.rs`, and Part 9 of the demo. The transfer spends one
-note and creates one, recomputing both commitments and the nullifier inside
-the guest with an add/xor/rotate hash (`arx.rs`, a development stand-in for
-the M3 Poseidon2 chip, since RV32I has no multiplier and no hash syscall).
-Beside the proof the sender publishes an envelope: the created note's
-plaintext under a per-transaction key, wrapped to the receiver (ML-KEM-768)
-and to the sender's own outgoing key.
+The crate carries a shielded transfer and the disclosure layer that makes it
+auditable — `guests::transfer`, `notes.rs`, `viewing.rs`, `ledger.rs`, and
+Part 9 of the demo. The transfer spends one note and creates one,
+recomputing both commitments and the nullifier inside the guest with the
+Poseidon2 chip (`NOTE_COMMIT`/`NULLIFY`, built on the `POSEIDON2` syscall),
+and proves the spent commitment's membership in an append-only commitment
+tree in-circuit (`MERKLE_VERIFY`) rather than publishing it. Beside the
+proof the sender publishes an envelope: the created note's plaintext under a
+per-transaction key, wrapped to the receiver (ML-KEM-768) and to the
+sender's own outgoing key.
 
 A party's **viewing key** is a one-way image of its spend key. It opens every
 envelope the party sent or received and nothing else; a **transaction key**
@@ -151,8 +153,9 @@ the row against the chain's commitments and nullifiers. The viewing key
 cannot spend: the guest takes the spend key as its private input and derives
 the address itself, so a witness built from the viewing key names a
 commitment the chain has never seen, and claiming the real one is a
-constraint failure. What it does not yet do — in-circuit membership, so the
-spent commitment is public — and why: `docs/06-viewing-keys.md`.
+constraint failure. The spent commitment itself is never public — only the
+commitment-tree root (`anchor`) the proof was built against is, one of the
+ledger's last 16 recorded roots: `docs/06-viewing-keys.md`.
 
 ## The three targets
 

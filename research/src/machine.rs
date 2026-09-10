@@ -186,11 +186,13 @@ impl Tier {
     pub fn mem_height(self) -> usize { 1 << (self.0 + 2) }
     /// One padding row is always kept.
     pub fn max_cycles(self) -> usize { self.cpu_height() - 1 }
-    /// `2^t`, i.e. `2^(t-5)` Poseidon2 permutation slots (each block is 32 rows). The M3 plan's
-    /// own estimate is that the transfer guest may need `2^(t+1)` at tier 12 (~165
-    /// permutations vs. 128 slots here) — M3.3 measures the real count; if it doesn't fit,
-    /// this is the one line that changes.
-    pub fn poseidon2_height(self) -> usize { self.cpu_height() }
+    /// `2^(t+1)`, i.e. `2^(t-4)` Poseidon2 permutation slots (each block is 32 rows) —
+    /// decoupled from `cpu_height` (was `2^t`/`2^(t-5)` slots through M3.2). M3.3 measured the
+    /// `transfer` guest at 190 permutations at tier 12 (`docs/06-viewing-keys.md`'s cost
+    /// table): the cycle count (3 764) fits tier 12's 4 095-cycle budget comfortably, but 190
+    /// permutations exceed the 128 slots `2^t` would give tier 12, so this table gets one
+    /// extra bit of height at every tier rather than sharing `cpu_height`'s.
+    pub fn poseidon2_height(self) -> usize { 1 << (self.0 + 1) }
 }
 
 #[derive(Clone)]

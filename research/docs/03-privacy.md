@@ -73,20 +73,21 @@ one cycle and a different word on the next and the proof still verifies. The
 input array is a per-row witness, not a committed vector; a guest that needs a
 stable value must read it once and keep it in a register. Milestone 1's
 relation is existential: it proves *"there exist inputs such that running
-this program on them produced these outputs,"* full stop. Nothing here binds
-a private input to a note commitment, a nullifier, or a Merkle path against
-a public state root — that arrives with syscalls 10–13 (`POSEIDON2`,
-`NOTE_COMMIT`, `NULLIFY`, `MERKLE_VERIFY`) in milestone 3. Until then, "the
-balance is private" means only that the verifier never sees the number, not
-that the number is tied to any real account.
+this program on them produced these outputs,"* full stop for a general
+guest — nothing outside the shielded transfer binds a private input to a
+note commitment, a nullifier, or a Merkle path against a public state root.
+For everything else, "the balance is private" means only that the verifier
+never sees the number, not that the number is tied to any real account.
 
 The one exception is the shielded transfer guest, which binds its inputs by
-recomputing note commitments and a nullifier in-circuit and publishing them
-(`docs/06-viewing-keys.md`). That is a per-guest choice, not a machine
-property: `READ_INPUT` itself is still unchecked, and the transfer's `cm_in`
-is a *public* output checked by the ledger rather than a Merkle witness, so
-the spent commitment — and with it the link from a note's creation to its
-spend — is visible on chain until milestone 3.
+recomputing note commitments and a nullifier in-circuit, proving the spent
+commitment's membership in the commitment tree (`POSEIDON2`, `NOTE_COMMIT`,
+`NULLIFY`, `MERKLE_VERIFY` — `docs/06-viewing-keys.md`), and publishing a
+single digest of the result. That is a per-guest choice, not a machine
+property: `READ_INPUT` itself is still unchecked. Since milestone 3.3, the
+spent commitment `cm_in` itself is *not* public — only the tree root
+(`anchor`) it was proved against is — so the link from a note's creation to
+its spend is no longer visible on chain.
 
 ## Selective disclosure: viewing keys
 
@@ -178,7 +179,8 @@ refused by `build_traces`, not silently truncated.
 | Every branch taken | hidden |
 | The exact cycle count | hidden — only the padded tier height is visible |
 | Which syscalls ran, beyond what the outputs imply | hidden |
-| Shielded transfer (`guests::transfer`): the spent commitment `cm_in`, nullifier, created commitment, and time | public — `cm_in` only because membership is not yet proved in-circuit |
+| Shielded transfer (`guests::transfer`): the output-commitment digest `H(anchor, nf, cm_out, time)` | public (the eight output words); the ledger is separately handed the plaintext `anchor`/`nf`/`cm_out`/`time` alongside the proof and checks them against the digest — `docs/06-viewing-keys.md`'s "Public outputs" |
+| Shielded transfer: the spent commitment `cm_in` | hidden — proved in-circuit (`MERKLE_VERIFY`) against `anchor`, a commitment-tree root, never published itself; only `anchor` (one of the ledger's last 16 roots) and `nf` (a one-way function of `cm_in`) are public, so the link from a note's creation to its spend is not visible on chain |
 | Shielded transfer: sender, receiver, amount, asset, note randomness | hidden from the chain; opened by the receiver's or sender's viewing key, or by the transaction key (`docs/06-viewing-keys.md`) |
 
 ## The delegated-proving boundary

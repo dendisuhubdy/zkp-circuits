@@ -20,7 +20,7 @@
 //! key silent about everyone else's transactions.
 
 use crate::ledger::{Ledger, Tx};
-use crate::notes::{words_to_bytes, Note, ViewingKey, Word2};
+use crate::notes::{words_to_bytes, Note, ViewingKey, Word8};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use ml_kem::kem::FromSeed;
@@ -34,7 +34,7 @@ type KemCt = ml_kem::ml_kem_768::Ciphertext;
 /// A party's address as a sender needs it: the note owner field `pk` plus the ML-KEM
 /// encapsulation key envelopes are sealed to.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Address { pub pk: Word2, pub kem_ek: Vec<u8> }
+pub struct Address { pub pk: Word8, pub kem_ek: Vec<u8> }
 
 impl ViewingKey {
     fn kem_keys(&self) -> (Dk, Ek) { MlKem768::from_seed(&ml_kem::Seed::from(self.kem_seed())) }
@@ -69,7 +69,7 @@ const AAD_RECEIVER: &[u8] = b"rand-envelope-receiver";
 const AAD_SENDER: &[u8] = b"rand-envelope-sender";
 const AAD_BODY: &[u8] = b"rand-envelope-body";
 
-fn aad(tag: &[u8], cm: Word2) -> Vec<u8> { [tag, &words_to_bytes(&cm)].concat() }
+fn aad(tag: &[u8], cm: Word8) -> Vec<u8> { [tag, &words_to_bytes(&cm)].concat() }
 
 /// Random-nonce ChaCha20-Poly1305; the 12-byte nonce is prepended to the ciphertext.
 fn seal(key: &[u8; 32], aad: &[u8], pt: &[u8]) -> Vec<u8> {
@@ -102,12 +102,12 @@ impl Envelope {
 
     /// Opens the note with the transaction key. `cm` is the on-chain commitment the
     /// envelope was published with.
-    pub fn open_with_tx_key(&self, cm: Word2, key: &TxKey) -> Option<Note> {
+    pub fn open_with_tx_key(&self, cm: Word8, key: &TxKey) -> Option<Note> {
         let note = Note::from_bytes(&open(&key.0, &aad(AAD_BODY, cm), &self.body)?)?;
         (note.commitment() == cm).then_some(note)
     }
     /// Opens as the receiver: decapsulate, unwrap the transaction key, open the body.
-    pub fn open_as_receiver(&self, cm: Word2, vk: &ViewingKey) -> Option<(TxKey, Note)> {
+    pub fn open_as_receiver(&self, cm: Word8, vk: &ViewingKey) -> Option<(TxKey, Note)> {
         let (dk, _) = vk.kem_keys();
         let ct = KemCt::try_from(&self.kem_ct[..]).ok()?;
         let ss: [u8; 32] = dk.decapsulate(&ct).into();
@@ -115,7 +115,7 @@ impl Envelope {
         Some((key, self.open_with_tx_key(cm, &key)?))
     }
     /// Opens as the sender, through `ovk`.
-    pub fn open_as_sender(&self, cm: Word2, vk: &ViewingKey) -> Option<(TxKey, Note)> {
+    pub fn open_as_sender(&self, cm: Word8, vk: &ViewingKey) -> Option<(TxKey, Note)> {
         let key = TxKey(open(&vk.ovk(), &aad(AAD_SENDER, cm), &self.to_sender)?.try_into().ok()?);
         Some((key, self.open_with_tx_key(cm, &key)?))
     }
@@ -137,26 +137,29 @@ pub enum Role { Received, Sent, Transaction }
 pub struct Row {
     pub tx: usize,
     pub role: Role,
-    pub sender: Word2,
-    pub receiver: Word2,
+    pub sender: Word8,
+    pub receiver: Word8,
     pub amount: u32,
     pub asset: u32,
     pub time: u32,
     /// The created note's on-chain commitment.
-    pub cm_out: Word2,
-    /// The spent note's commitment and nullifier, as the chain published them (mints have none).
-    pub cm_in: Option<Word2>,
-    pub nf: Option<Word2>,
+    pub cm_out: Word8,
+    /// The spent note's nullifier, as the chain published it (mints have none). M3.3: the
+    /// spent note's *commitment* is never public (`MERKLE_VERIFY` proves it in-circuit
+    /// against an anchor) — only the nullifier is, which is enough to recompute and check
+    /// (`verify_row`) since the nullifier is bound to the commitment.
+    pub nf: Option<Word8>,
     /// The created note, opened.
     pub note: Note,
     /// For a `Sent` row: the note that was spent, opened — the party's own earlier `Received`
-    /// note whose commitment is `cm_in`. What lets the nullifier be recomputed.
+    /// note whose nullifier (under the party's `nk`) is `nf`. What lets the nullifier be
+    /// recomputed.
     pub spent: Option<Note>,
 }
 
 impl Row {
     fn new(tx: usize, t: &Tx, role: Role, note: Note, spent: Option<Note>) -> Row {
-        Row { tx, role, sender: note.from, receiver: note.pk, amount: note.amount, asset: note.asset, time: note.time, cm_out: t.cm_out, cm_in: t.cm_in, nf: t.nf, note, spent }
+        Row { tx, role, sender: note.from, receiver: note.pk, amount: note.amount, asset: note.asset, time: note.time, cm_out: t.cm_out, nf: t.nf, note, spent }
     }
 }
 
@@ -179,7 +182,10 @@ pub fn scan(ledger: &Ledger, d: &Disclosure) -> Vec<Row> {
                     rows.push(Row::new(i, t, Role::Received, note, None));
                 }
                 if let Some((_, note)) = t.envelope.open_as_sender(t.cm_out, vk) {
-                    let spent = t.cm_in.and_then(|cm| owned.iter().copied().find(|n| n.commitment() == cm));
+                    // The spent note's commitment is not public (M3.3: `MERKLE_VERIFY` proves
+                    // it in-circuit) — find it from the party's own history by nullifier
+                    // instead, the same way an outsider could not.
+                    let spent = t.nf.and_then(|nf| owned.iter().copied().find(|n| vk.nullifier(&n.commitment()) == nf));
                     rows.push(Row::new(i, t, Role::Sent, note, spent));
                 }
             }
@@ -215,7 +221,7 @@ pub fn verify_row(ledger: &Ledger, d: &Disclosure, row: &Row) -> Result<(), RowE
     if n.commitment() != t.cm_out || row.cm_out != t.cm_out { return Err(RowError::Commitment); }
     if (row.sender, row.receiver, row.amount, row.asset, row.time) != (n.from, n.pk, n.amount, n.asset, n.time) { return Err(RowError::Fields); }
     if row.time != t.time { return Err(RowError::Time); }
-    if row.cm_in != t.cm_in || row.nf != t.nf { return Err(RowError::Nullifier); }
+    if row.nf != t.nf { return Err(RowError::Nullifier); }
     match (d, row.role) {
         (Disclosure::Transaction { tx, key }, Role::Transaction) => {
             if *tx != row.tx { return Err(RowError::Scope); }
@@ -226,12 +232,12 @@ pub fn verify_row(ledger: &Ledger, d: &Disclosure, row: &Row) -> Result<(), RowE
         }
         (Disclosure::Party(vk), Role::Sent) => {
             if n.from != vk.pk() { return Err(RowError::Party); }
-            match (t.cm_in, row.spent) {
+            match (t.nf, row.spent) {
                 // A mint: created from nothing, so there is no nullifier to check.
                 (None, None) => {}
-                (Some(cm_in), Some(spent)) => {
+                (Some(nf), Some(spent)) => {
                     if spent.pk != vk.pk() { return Err(RowError::Party); }
-                    if spent.commitment() != cm_in || Some(vk.nullifier(&cm_in)) != t.nf { return Err(RowError::Nullifier); }
+                    if vk.nullifier(&spent.commitment()) != nf { return Err(RowError::Nullifier); }
                 }
                 _ => return Err(RowError::Nullifier),
             }

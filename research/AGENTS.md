@@ -8,7 +8,7 @@ the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (101 tests). Everything uses
+- `cargo test` — the whole suite (107 tests). Everything uses
   `FriProfile::Test`; the two proof-backed viewing tests take ~70 s and
   `tests/zk.rs` ~50 s. All green is the bar before any commit.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one
@@ -49,12 +49,13 @@ the emulator disagree, the AIR is wrong.
 
 ## Known development placeholders — not bugs, don't "fix" them
 
-- `Arx8` (a 4-round ChaCha sponge) and the 64-bit key/commitment/nullifier
-  widths: stand-ins for the M3 Poseidon2 chip and 256-bit values.
-- `PERM_SEED` Poseidon2 round constants; statistical (not perfect) ZK from
+- `PERM_SEED` Poseidon2 round constants (a fixed development seed, not the
+  published `GOLDILOCKS_POSEIDON2_RC_8_*` constants — swapping them is a
+  config change, not a rewrite); statistical (not perfect) ZK from
   Plonky3 0.7's hiding PCS; `hc` binding-but-not-hiding; `READ_INPUT`
   existential (unbound witness).
-- The transfer guest's `cm_in` is a public output until M3's `MERKLE_VERIFY`.
+- `hc`, the program commitment, is still verifier-side, not yet an
+  in-circuit public value (`docs/05-roadmap.md`'s "Known deviations").
 
 ## Commits
 

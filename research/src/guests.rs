@@ -267,25 +267,35 @@ pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
 
 /// The shielded transfer: spends one note and creates one of the same amount and asset.
 ///
-/// Private inputs (`notes::input`): the spend key, the spent note's fields, and the created
-/// note's owner, time and randomness. The guest derives `nk = H_NK(sk)` and `pk = H_PK(nk)`
-/// itself, so the spent note's owner and the created note's `from` are the address of
-/// whoever holds `sk` — that is what authenticates the sender — and it recomputes both
-/// commitments plus the nullifier (bound to `cm_in`, not to a sender-chosen nonce) with
-/// `arx::emit_hash`. Public outputs (`notes::output`): `cm_in`, `nf`, `cm_out`, and the
-/// created note's `time`.
+/// Private inputs (`notes::input`): the spend key, the spent note's fields, the created
+/// note's owner/time/randomness, and the Merkle witness (path, index) for the spent note's
+/// commitment. The guest derives `nk = H_NK(sk)` and `pk = H_PK(nk)` itself, so the spent
+/// note's owner and the created note's `from` are the address of whoever holds `sk` — that is
+/// what authenticates the sender. It recomputes `cm_in` (`NOTE_COMMIT`), proves `cm_in`'s
+/// membership in the commitment tree via `MERKLE_VERIFY` (getting `anchor`, the tree root),
+/// computes `nf` (`NULLIFY`, bound to `cm_in`, not a sender-chosen nonce) and `cm_out`
+/// (`NOTE_COMMIT`), and publishes a single 8-word output-commitment digest,
+/// `notes::output_digest(anchor, nf, cm_out, time_out)` (`notes::output::DIGEST`) — see
+/// `docs/06-viewing-keys.md`'s "Public outputs" section for why `anchor`/`nf`/`cm_out`/`time`
+/// are folded into one digest rather than published as four separate `Word8` outputs.
 ///
-/// What it does *not* do in milestone 1: prove `cm_in` is in a commitment tree — there is no
-/// `MERKLE_VERIFY` syscall yet, so the ledger checks membership against the public `cm_in`
-/// (`ledger.rs`), which leaks which note was spent. `docs/06-viewing-keys.md` states the
-/// consequences.
+/// `cm_in` itself is never published (M3.3 moves it from a public output to the Merkle
+/// witness): only `anchor` is, so the chain no longer shows which commitment a transfer
+/// spent.
 pub fn transfer() -> Program {
-    use crate::arx::{self, domain, reg};
-    use crate::notes::{input, output, Note};
-    const BASE: u32 = 25;                       // s9: RAM base register
-    const BUF: i32 = 0;                         // hash message buffer (12 words, zero-padded)
-    const INP: i32 = 0x100;                     // the 14 private inputs
-    const NK: i32 = 0x200; const PK: i32 = 0x208; const NF: i32 = 0x210; const CM_IN: i32 = 0x218; const CM_OUT: i32 = 0x220;
+    use crate::asm::{copy_word8, emit_merkle_verify, emit_note_commit, emit_nullify};
+    use crate::notes::{domain, input, output, DEPTH};
+    const BASE: u32 = 25; // s9: RAM base register, holds HEAP
+    const BIT: u32 = 26;  // s10: MERKLE_VERIFY's branch scratch
+    const BUF: i32 = 0x000;   // hash scratch: up to 28 words (112 bytes)
+    const INP: i32 = 0x100;   // the input::COUNT private inputs
+    const NK: i32 = 0x600;
+    const PK: i32 = 0x620;
+    const CM_IN: i32 = 0x640;
+    const NF: i32 = 0x660;
+    const CM_OUT: i32 = 0x680;
+    const ANCHOR: i32 = 0x6a0;
+    let ptr_words = |buf: i32| (HEAP + buf) / 4;
     let inp = |i: usize| INP + 4 * i as i32;
     let mut a = Assembler::new(0);
     a.extend(li(BASE, HEAP));
@@ -294,56 +304,101 @@ pub fn transfer() -> Program {
         a.extend(read_input(i as u32));
         a.push(sw(BASE, REG_A0, inp(i)));
     }
-    let copy = |a: &mut Assembler, src: i32, dst: i32| { a.push(lw(T0, BASE, src)); a.push(sw(BASE, T0, dst)); };
-    let zero = |a: &mut Assembler, dst: i32| a.push(sw(BASE, REG_ZERO, dst));
-    let store_digest = |a: &mut Assembler, dst: i32| { a.push(sw(BASE, reg::STATE[0], dst)); a.push(sw(BASE, reg::STATE[1], dst + 4)); };
-    // nk = H_NK(sk)
-    copy(&mut a, inp(input::SK), BUF); copy(&mut a, inp(input::SK + 1), BUF + 4); zero(&mut a, BUF + 8); zero(&mut a, BUF + 12);
-    arx::emit_call_hash(&mut a, HEAP + BUF, 2, domain::NK);
-    store_digest(&mut a, NK);
+    // nk = H_NK(sk) — sk is 2 words; NOTE_COMMIT/NULLIFY expect Word8 neighbours, so this one
+    // small hash is emitted directly rather than through a note/nullifier-shaped wrapper.
+    a.extend(li(T0, domain::NK as i32));
+    a.push(sw(BASE, T0, BUF));
+    a.push(lw(T0, BASE, inp(input::SK)));
+    a.push(sw(BASE, T0, BUF + 4));
+    a.push(lw(T0, BASE, inp(input::SK + 1)));
+    a.push(sw(BASE, T0, BUF + 8));
+    a.extend(call_poseidon2(ptr_words(BUF), 3));
+    copy_word8(&mut a, BASE, T0, BUF, NK);
     // pk = H_PK(nk)
-    copy(&mut a, NK, BUF); copy(&mut a, NK + 4, BUF + 4);
-    arx::emit_call_hash(&mut a, HEAP + BUF, 2, domain::PK);
-    store_digest(&mut a, PK);
-    // cm_in = H_CM(pk, in.from, in.amount, in.asset, in.time, in.r)
-    let note_words: [i32; Note::WORDS] = [PK, PK + 4, inp(input::IN_FROM), inp(input::IN_FROM + 1), inp(input::IN_AMOUNT), inp(input::IN_ASSET), inp(input::IN_TIME), inp(input::IN_R), inp(input::IN_R + 1)];
-    for (i, src) in note_words.iter().enumerate() { copy(&mut a, *src, BUF + 4 * i as i32); }
-    zero(&mut a, BUF + 36); zero(&mut a, BUF + 40); zero(&mut a, BUF + 44);
-    arx::emit_call_hash(&mut a, HEAP + BUF, Note::WORDS, domain::CM);
-    store_digest(&mut a, CM_IN);
-    // nf = H_NF(nk, cm_in) — bound to the commitment, so two notes can never share one
-    copy(&mut a, NK, BUF); copy(&mut a, NK + 4, BUF + 4); copy(&mut a, CM_IN, BUF + 8); copy(&mut a, CM_IN + 4, BUF + 12);
-    arx::emit_call_hash(&mut a, HEAP + BUF, 4, domain::NF);
-    store_digest(&mut a, NF);
-    // cm_out = H_CM(out.pk, pk, in.amount, in.asset, out.time, out.r)
-    let note_words: [i32; Note::WORDS] = [inp(input::OUT_PK), inp(input::OUT_PK + 1), PK, PK + 4, inp(input::IN_AMOUNT), inp(input::IN_ASSET), inp(input::OUT_TIME), inp(input::OUT_R), inp(input::OUT_R + 1)];
-    for (i, src) in note_words.iter().enumerate() { copy(&mut a, *src, BUF + 4 * i as i32); }
-    // the padding words are still zero from the cm_in block — nf's message stayed below BUF+16
-    arx::emit_call_hash(&mut a, HEAP + BUF, Note::WORDS, domain::CM);
-    store_digest(&mut a, CM_OUT);
+    a.extend(li(T0, domain::PK as i32));
+    a.push(sw(BASE, T0, BUF));
+    copy_word8(&mut a, BASE, T0, NK, BUF + 4);
+    a.extend(call_poseidon2(ptr_words(BUF), 9));
+    copy_word8(&mut a, BASE, T0, BUF, PK);
+    // cm_in = NOTE_COMMIT(pk, in.from, in.amount, in.asset, in.time, in.r) — assembled into a
+    // Note::WORDS-word staging area at BUF + 0x80 (past the hash scratch region).
+    const NOTE_IN: i32 = 0x080;
+    copy_word8(&mut a, BASE, T0, PK, NOTE_IN);
+    copy_word8(&mut a, BASE, T0, inp(input::IN_FROM), NOTE_IN + 32);
+    a.push(lw(T0, BASE, inp(input::IN_AMOUNT))); a.push(sw(BASE, T0, NOTE_IN + 64));
+    a.push(lw(T0, BASE, inp(input::IN_ASSET))); a.push(sw(BASE, T0, NOTE_IN + 68));
+    a.push(lw(T0, BASE, inp(input::IN_TIME))); a.push(sw(BASE, T0, NOTE_IN + 72));
+    copy_word8(&mut a, BASE, T0, inp(input::IN_R), NOTE_IN + 76);
+    emit_note_commit(&mut a, BASE, T0, NOTE_IN, BUF, ptr_words(BUF), CM_IN);
+    // anchor = MERKLE_VERIFY(cm_in, path, index) — proves cm_in is in the commitment tree.
+    a.push(lw(T1, BASE, inp(input::INDEX)));
+    emit_merkle_verify(&mut a, BASE, T0, BIT, CM_IN, inp(input::PATH), T1, BUF, ptr_words(BUF), ANCHOR, DEPTH, "transfer_merkle");
+    // nf = NULLIFY(nk, cm_in) — bound to the commitment, so two notes can never share one.
+    emit_nullify(&mut a, BASE, T0, NK, CM_IN, BUF, ptr_words(BUF), NF);
+    // cm_out = NOTE_COMMIT(out.pk, pk, in.amount, in.asset, out.time, out.r)
+    copy_word8(&mut a, BASE, T0, inp(input::OUT_PK), NOTE_IN);
+    copy_word8(&mut a, BASE, T0, PK, NOTE_IN + 32);
+    a.push(lw(T0, BASE, inp(input::IN_AMOUNT))); a.push(sw(BASE, T0, NOTE_IN + 64));
+    a.push(lw(T0, BASE, inp(input::IN_ASSET))); a.push(sw(BASE, T0, NOTE_IN + 68));
+    a.push(lw(T0, BASE, inp(input::OUT_TIME))); a.push(sw(BASE, T0, NOTE_IN + 72));
+    copy_word8(&mut a, BASE, T0, inp(input::OUT_R), NOTE_IN + 76);
+    emit_note_commit(&mut a, BASE, T0, NOTE_IN, BUF, ptr_words(BUF), CM_OUT);
+    // digest = H(OUT_DOMAIN, anchor, nf, cm_out, time_out) — the single published output.
+    a.extend(li(T0, domain::OUT as i32));
+    a.push(sw(BASE, T0, BUF));
+    copy_word8(&mut a, BASE, T0, ANCHOR, BUF + 4);
+    copy_word8(&mut a, BASE, T0, NF, BUF + 36);
+    copy_word8(&mut a, BASE, T0, CM_OUT, BUF + 68);
+    a.push(lw(T0, BASE, inp(input::OUT_TIME))); a.push(sw(BASE, T0, BUF + 100));
+    a.extend(call_poseidon2(ptr_words(BUF), 26));
     // Publish.
-    for (slot, src) in [(output::CM_IN, CM_IN), (output::CM_IN + 1, CM_IN + 4), (output::NF, NF), (output::NF + 1, NF + 4), (output::CM_OUT, CM_OUT), (output::CM_OUT + 1, CM_OUT + 4), (output::TIME, inp(input::OUT_TIME))] {
-        a.push(lw(T1, BASE, src));
-        a.extend(write_output(slot as u32, T1));
+    for i in 0..8 {
+        a.push(lw(T1, BASE, BUF + 4 * i));
+        a.extend(write_output((output::DIGEST + i as usize) as u32, T1));
     }
     a.extend(halt());
-    arx::emit_perm(&mut a);
-    arx::emit_hash(&mut a);
     a.assemble()
 }
 
-/// Hashes `msg` under `arx::domain::TEST` and outputs the four rate words: the fixture that
-/// pins the guest-side `Arx8` to the native one.
-pub fn arx_probe(msg: &[u32]) -> Program {
-    use crate::arx::{self, domain, reg};
+/// `NOTE_COMMIT`, standalone: hashes `msg` (`Note::WORDS` words, embedded at assembly time)
+/// as `H(CM_DOMAIN, msg)` and outputs the 8-word digest — the fixture that pins the guest's
+/// `NOTE_COMMIT` to `notes::hash(notes::domain::CM, ..)`.
+pub fn note_commit_probe(msg: &[u32; crate::notes::Note::WORDS]) -> Program {
+    use crate::asm::emit_note_commit;
     const BASE: u32 = 25;
+    const NOTE_IN: i32 = 0x080;
+    const BUF: i32 = 0x000;
+    const CM: i32 = 0x100;
     let mut a = Assembler::new(0);
     a.extend(li(BASE, HEAP));
-    for (i, w) in msg.iter().enumerate() { a.extend(li(T0, *w as i32)); a.push(sw(BASE, T0, 4 * i as i32)); }
-    arx::emit_call_hash(&mut a, HEAP, msg.len(), domain::TEST);
-    for i in 0..4 { a.extend(write_output(i as u32, reg::STATE[i])); }
+    for (i, w) in msg.iter().enumerate() { a.extend(li(T0, *w as i32)); a.push(sw(BASE, T0, NOTE_IN + 4 * i as i32)); }
+    emit_note_commit(&mut a, BASE, T0, NOTE_IN, BUF, (HEAP + BUF) / 4, CM);
+    for i in 0..8 { a.push(lw(T1, BASE, CM + 4 * i)); a.extend(write_output(i as u32, T1)); }
     a.extend(halt());
-    arx::emit_perm(&mut a);
-    arx::emit_hash(&mut a);
+    a.assemble()
+}
+
+/// `MERKLE_VERIFY`, standalone: `leaf`, `path` (`DEPTH` siblings, leaf to root) and `index`
+/// are embedded at assembly time; outputs the computed root — the fixture that pins the
+/// guest's `MERKLE_VERIFY` to a host-side `ledger::CommitmentTree`.
+pub fn merkle_probe(leaf: crate::notes::Word8, path: &[crate::notes::Word8; crate::notes::DEPTH], index: u32) -> Program {
+    use crate::asm::emit_merkle_verify;
+    use crate::notes::DEPTH;
+    const BASE: u32 = 25;
+    const BIT: u32 = 26;
+    const LEAF: i32 = 0x080;
+    const PATH: i32 = 0x0a0; // DEPTH * 8 words = 1024 bytes -> 0x0a0..0x4a0
+    const BUF: i32 = 0x000;
+    const ROOT: i32 = 0x4a0;
+    let mut a = Assembler::new(0);
+    a.extend(li(BASE, HEAP));
+    for (i, w) in leaf.iter().enumerate() { a.extend(li(T0, *w as i32)); a.push(sw(BASE, T0, LEAF + 4 * i as i32)); }
+    for (level, sib) in path.iter().enumerate() {
+        for (i, w) in sib.iter().enumerate() { a.extend(li(T0, *w as i32)); a.push(sw(BASE, T0, PATH + 32 * level as i32 + 4 * i as i32)); }
+    }
+    a.extend(li(T1, index as i32));
+    emit_merkle_verify(&mut a, BASE, T0, BIT, LEAF, PATH, T1, BUF, (HEAP + BUF) / 4, ROOT, DEPTH, "merkle_probe");
+    for i in 0..8 { a.push(lw(T2, BASE, ROOT + 4 * i)); a.extend(write_output(i as u32, T2)); }
+    a.extend(halt());
     a.assemble()
 }

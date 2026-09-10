@@ -142,9 +142,14 @@ needs one, is read through the row's memory-access slot as register `a1`
 | 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, `slot < 8`; constrained directly against the public values, at most once per slot, and any slot never written is pinned to zero |
 | 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — a prover-chosen witness value, and two reads of the same `idx` are not constrained to agree; see `docs/03-privacy.md` |
 | 3 | `POSEIDON2 ptr n` | M3.2 | hashes the `n` words at word address `ptr` (`0 <= n <= POSEIDON2_MAX_WORDS = 4096`) with the Poseidon2 sponge (rate 4, overwrite mode, no padding — `hash::sponge_hash`, the exact `PaddingFreeSponge<_, 8, 4, 4>` semantics) and overwrites `ptr..ptr+8` with the 8-word (lo/hi) digest in place |
-| 11 | `NOTE_COMMIT` | M3 (not implemented) | commitment of `(value, ρ, pk)` |
-| 12 | `NULLIFY` | M3 (not implemented) | `nf = H(nk ‖ cm)` — bound to the commitment, not to a sender-chosen nonce |
-| 13 | `MERKLE_VERIFY` | M3 (not implemented) | membership against a public root |
+
+`NOTE_COMMIT`, `NULLIFY` and `MERKLE_VERIFY` (M3.3) are **not** separate
+syscalls: they are guest-level library routines built entirely on
+`POSEIDON2` (`asm::emit_note_commit`/`emit_nullify`/`emit_merkle_verify`),
+staging a domain-tagged message into RAM and calling `POSEIDON2` over it —
+`NOTE_COMMIT`/`NULLIFY` once, `MERKLE_VERIFY` once per tree level (32 calls
+for this crate's depth). No new syscall numbers were needed; see
+`docs/06-viewing-keys.md`.
 
 `POSEIDON2` does not follow the "second argument through the memory slot,
 result in `a0`" shape the syscall preamble above describes for a
