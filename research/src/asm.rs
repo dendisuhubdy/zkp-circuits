@@ -42,8 +42,14 @@ pub mod ops {
     pub fn srai(rd: u32, rs1: u32, sh: u32) -> Instr { Instr::AluImm { op: AluOp::Sra, rd, rs1, imm: sh & 31 } }
     macro_rules! rrr { ($($name:ident => $op:ident),*) => { $( pub fn $name(rd: u32, rs1: u32, rs2: u32) -> Instr { Instr::AluReg { op: AluOp::$op, rd, rs1, rs2 } } )* } }
     rrr!(add => Add, sub => Sub, and => And, or => Or, xor => Xor, sll => Sll, srl => Srl, sra => Sra, slt => Slt, sltu => Sltu);
-    pub fn lw(rd: u32, rs1: u32, off: i32) -> Instr { Instr::Lw { rd, rs1, imm: imm(off) } }
-    pub fn sw(rs1: u32, rs2: u32, off: i32) -> Instr { Instr::Sw { rs1, rs2, imm: imm(off) } }
+    pub fn lb(rd: u32, rs1: u32, off: i32) -> Instr { Instr::Load { rd, rs1, imm: imm(off), width: Width::Byte, signed: true } }
+    pub fn lbu(rd: u32, rs1: u32, off: i32) -> Instr { Instr::Load { rd, rs1, imm: imm(off), width: Width::Byte, signed: false } }
+    pub fn lh(rd: u32, rs1: u32, off: i32) -> Instr { Instr::Load { rd, rs1, imm: imm(off), width: Width::Half, signed: true } }
+    pub fn lhu(rd: u32, rs1: u32, off: i32) -> Instr { Instr::Load { rd, rs1, imm: imm(off), width: Width::Half, signed: false } }
+    pub fn lw(rd: u32, rs1: u32, off: i32) -> Instr { Instr::Load { rd, rs1, imm: imm(off), width: Width::Word, signed: false } }
+    pub fn sb(rs1: u32, rs2: u32, off: i32) -> Instr { Instr::Store { rs1, rs2, imm: imm(off), width: Width::Byte } }
+    pub fn sh(rs1: u32, rs2: u32, off: i32) -> Instr { Instr::Store { rs1, rs2, imm: imm(off), width: Width::Half } }
+    pub fn sw(rs1: u32, rs2: u32, off: i32) -> Instr { Instr::Store { rs1, rs2, imm: imm(off), width: Width::Word } }
     pub fn lui(rd: u32, upper: u32) -> Instr { Instr::Lui { rd, imm: upper & 0xffff_f000 } }
     pub fn auipc(rd: u32, upper: u32) -> Instr { Instr::Auipc { rd, imm: upper & 0xffff_f000 } }
     pub fn jalr(rd: u32, rs1: u32, off: i32) -> Instr { Instr::Jalr { rd, rs1, imm: imm(off) } }

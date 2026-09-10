@@ -293,21 +293,34 @@ fn bumping_a_nibble_and_multiplicity_on_a_padding_row_is_rejected() {
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
 
-/// The memory-path mirror of `forge_fib_output_through_an_alu_padding_row`: an honest
-/// `store 5; load; output` witness is rewritten so the `SW` delivers a value that was
-/// never in any register. Before the CPU pinned `MEM_VAL = B` on store rows, nothing tied
-/// the value sent on the MEMORY bus to the register the store reads: the bus delivered the
-/// forgery, the load read it back as genuine memory contents, and "out0 = forged" verified.
+/// The memory-path mirror of `forge_fib_output_through_an_alu_padding_row`, ported to
+/// M2.5's read-modify-write store: an honest `store 5; load; output` witness is rewritten
+/// so the `SW` delivers a value that was never in any register. Before the CPU pinned
+/// `MEM_VAL = B` on store rows (`2c8a39d`), nothing tied the value sent on the MEMORY bus
+/// to the register the store reads. M2.5 replaced that single pin with the `MERGED0..3`
+/// formula (`MERGED_k = W_k + selp(k)*(bp(k) - W_k)`, `bp` built from `RB0..3`, and
+/// `is_store*(B - word(RB0))=0` ties `RB0..3` to `B`): on this program's plain `SW`
+/// (`off=0`), `selp(k)=1` for every `k`, so the formula forces `MERGED = word(RB0) = B`
+/// structurally. This helper forges `MERGED0..3` directly — bypassing `RB0..3`/`B`, which
+/// stay untouched and honestly show `5` — so the row constraint above must reject it,
+/// exactly as `2c8a39d`'s `MEM_VAL = B` pin did for the old single-column design.
 fn forge_a_store(t: &mut Traces, forged: u32) {
-    let (wc, wm, wa) = (cpu::col::WIDTH, memory::col::WIDTH, alu::col::WIDTH);
+    use rand_zkvm::tables::limbs;
+    let (wc, wm) = (cpu::col::WIDTH, memory::col::WIDTH);
     let new = F::from_u32(forged);
+    let nl = limbs(forged);
 
-    // cpu: the store itself, the load that reads it back, the `mv a1, t1` staging the
+    // cpu: the store's own MERGED (the value actually written), the load that reads it
+    // back (its own, independent MEM_VAL/W0..3 word witness), the `mv a1, t1` staging the
     // output word, and every ecall row (each reads `a1` through the memory slot).
     for r in 0..t.cpu.height() {
         let row = &mut t.cpu.values[r * wc..(r + 1) * wc];
-        if row[cpu::col::IS_STORE] == F::ONE { row[cpu::col::MEM_VAL] = new; }
-        if row[cpu::col::IS_LOAD] == F::ONE { row[cpu::col::MEM_VAL] = new; row[cpu::col::C] = new; }
+        if row[cpu::col::IS_SW] == F::ONE { for k in 0..4 { row[cpu::col::MERGED0 + k] = nl[k]; } }
+        if row[cpu::col::IS_LW] == F::ONE {
+            row[cpu::col::MEM_VAL] = new;
+            for k in 0..4 { row[cpu::col::W0 + k] = nl[k]; }
+            row[cpu::col::C] = new;
+        }
         if row[cpu::col::IS_ECALL] == F::ONE { row[cpu::col::MEM_VAL] = new; }
         if row[cpu::col::IS_ALU] == F::ONE && row[cpu::col::RD] == F::from_u32(REG_A1) && row[cpu::col::RS1] == F::from_u32(6) {
             row[cpu::col::A] = new; row[cpu::col::ALU_OUT] = new; row[cpu::col::C] = new;
@@ -321,19 +334,6 @@ fn forge_a_store(t: &mut Traces, forged: u32) {
         let addr = row[memory::col::ADDR];
         if ram && addr == F::from_u32(0x400) { row[memory::col::VALUE] = new; }
         if !ram && (addr == F::from_u32(6) || addr == F::from_u32(REG_A1)) { row[memory::col::VALUE] = new; }
-    }
-    // alu: the mv's `(Add, 5, 0, 5)` becomes `(Add, forged, 0, forged)`. The forged value
-    // must be chosen with the same byte multiset as 5 = 0x0000_0005 (e.g. 0x0500_0000), so
-    // the re-laid limbs consume exactly what the byte table already provides.
-    for r in 0..t.alu.height() {
-        let row = &mut t.alu.values[r * wa..(r + 1) * wa];
-        if row[alu::col::IS_REAL] == F::ONE && row[alu::col::FLAG0] == F::ONE
-            && row[alu::col::A] == F::from_u32(5) && row[alu::col::B] == F::ZERO && row[alu::col::C] == F::from_u32(5)
-        {
-            row[alu::col::A] = new; row[alu::col::C] = new;
-            for k in 0..3 { row[alu::col::A0 + k] = F::ZERO; row[alu::col::C0 + k] = F::ZERO; }
-            row[alu::col::A0 + 3] = F::from_u32(5); row[alu::col::C0 + 3] = F::from_u32(5);
-        }
     }
     t.public_values[cpu::pv::OUT0] = new;
 }
@@ -391,5 +391,94 @@ fn bumping_range8_on_an_slt_rows_now_unconstrained_c_limb_is_rejected() {
     let e = execute(&p, &[], 10_000).unwrap();
     let mut t = build_traces(&p, &e, Tier(10)).unwrap();
     t.range.values[range::col::WIDTH + range::col::M_RANGE] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// M2.5: a store's `MERGED0..3` is the read-modify-write result, bound per byte by
+/// `MERGED_k = W_k + selp(k)*(bp(k) - W_k)`. Corrupting one limb to disagree with that
+/// formula — even while leaving the *aggregate* value looking plausible — must be caught
+/// by the row constraint directly, not just by an accidental downstream mismatch.
+#[test]
+fn a_store_that_replaces_the_wrong_byte_is_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(8, 0x1000)); a.extend(li(5, 0x11223344u32 as i32)); a.extend(li(6, 0xff));
+    a.push(sw(8, 5, 0)); a.push(sb(8, 6, 0)); // sets byte 0 to 0xff: word becomes 0x112233ff
+    a.push(lw(7, 8, 0)); a.extend(write_output(0, 7)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    assert_eq!(e.outputs[0], 0x112233ff);
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let w = cpu::col::WIDTH;
+    // Find the SB row and corrupt MERGED to replace byte 1 instead of byte 0.
+    let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
+    t.cpu.values[sb_row * w + cpu::col::MERGED0] = F::from_u32(0x44);     // put the old byte 0 back
+    t.cpu.values[sb_row * w + cpu::col::MERGED0 + 1] = F::from_u32(0xff); // and corrupt byte 1 instead
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// M2.5: `LB`'s sign extension runs through `SGN`, itself bound to the sign-relevant
+/// byte's true top bit only via the `AND4[HI, 8, SGN*8]` lookup — flipping `SGN` (and `C`
+/// to match, so the row's own `C` pin stays self-consistent) must be caught by that
+/// lookup disagreeing with the nibble table, not by the `C` pin alone.
+#[test]
+fn a_load_byte_with_flipped_sign_extension_is_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(8, 0x1000)); a.extend(li(5, 0xffu32 as i32)); // byte 0xff, top bit set
+    a.push(sw(8, 5, 0)); a.push(lb(6, 8, 0)); // LB sign-extends: -1 = 0xffffffff
+    a.extend(write_output(0, 6)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    assert_eq!(e.outputs[0], 0xffff_ffff);
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let w = cpu::col::WIDTH;
+    let lb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_LB] == F::ONE).unwrap();
+    t.cpu.values[lb_row * w + cpu::col::SGN] = F::ZERO; // flip: claim unsigned-looking zero-extend
+    t.cpu.values[lb_row * w + cpu::col::C] = F::from_u32(0xff);
+    t.public_values[cpu::pv::OUT0] = F::from_u32(0xff);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// M2.5: `IS_LH*OFF0 = 0` is the stated alignment constraint for halfwords — a retagged
+/// row claiming `LH` at an odd byte offset must be rejected by the AIR, not merely
+/// unreachable through the emulator.
+#[test]
+fn a_misaligned_lh_is_rejected_by_the_air() {
+    let mut a = Assembler::new(0);
+    a.extend(li(8, 0x1000)); a.extend(li(5, 0x1234)); a.push(sw(8, 5, 0));
+    a.push(lw(6, 8, 0)); // an ordinary LW so the trace has a row to repurpose
+    a.extend(write_output(0, 6)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let w = cpu::col::WIDTH;
+    let lw_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_LW] == F::ONE).unwrap();
+    // Retag this LW row as an LH with OFF0=1 (byte offset 1 — misaligned for a half).
+    t.cpu.values[lw_row * w + cpu::col::IS_LW] = F::ZERO;
+    t.cpu.values[lw_row * w + cpu::col::IS_LH] = F::ONE;
+    t.cpu.values[lw_row * w + cpu::col::OFF0] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// M2.5: `SB`'s per-byte `MERGED` formula pins `selp(k)=0` for every byte outside `off`,
+/// forcing `MERGED_k = W_k` there — corrupting a byte the store never touches must be
+/// caught even though the touched byte (`off`) is still correct.
+#[test]
+fn a_sb_that_changes_a_byte_outside_its_offset_is_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(8, 0x1000)); a.extend(li(5, 0x11223344u32 as i32)); a.extend(li(6, 0xff));
+    a.push(sw(8, 5, 0)); a.push(sb(8, 6, 1)); // sets byte 1 only: word becomes 0x1122ff44
+    a.push(lw(7, 8, 0)); a.extend(write_output(0, 7)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    assert_eq!(e.outputs[0], 0x1122ff44);
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let w = cpu::col::WIDTH;
+    let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
+    // Also corrupt byte 2 (outside off=1), leaving byte 1 correct.
+    t.cpu.values[sb_row * w + cpu::col::MERGED0 + 2] = F::from_u32(0x00);
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }

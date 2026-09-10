@@ -9,22 +9,31 @@ selector fields the CPU trusts, and the syscall ABI.
 
 | Milestone | Instructions |
 |---|---|
-| M1 (implemented) | `LUI AUIPC JAL JALR` · `BEQ BNE BLT BGE BLTU BGEU` · `LW SW` · `ADDI SLTI SLTIU XORI ORI ANDI SLLI SRLI SRAI` · `ADD SUB SLL SLT SLTU XOR SRL SRA OR AND` · `ECALL` |
-| M2 (not yet implemented) | `LB LH LBU LHU SB SH` · `MUL MULH MULHU MULHSU DIV DIVU REM REMU` |
+| M1+M2 (implemented) | `LUI AUIPC JAL JALR` · `BEQ BNE BLT BGE BLTU BGEU` · `LW SW` · `LB LH LBU LHU SB SH` · `ADDI SLTI SLTIU XORI ORI ANDI SLLI SRLI SRAI` · `ADD SUB SLL SLT SLTU XOR SRL SRA OR AND` · `ECALL` |
+| M2 (not yet implemented) | `MUL MULH MULHU MULHSU DIV DIVU REM REMU` |
 | never | `FENCE`, CSR instructions, `EBREAK` (traps) |
 
-Only word-aligned loads and stores exist today. `LW`/`SW` compute the byte
-address through the ALU and then divide by 4 in the CPU's memory constraint.
-Alignment is a *constraint*, not only an emulator error: `mem_addr·4 = alu_out`
-alone would be satisfied over the field by `mem_addr = alu_out·4⁻¹ mod p`, so
-the CPU table also decomposes `mem_addr` into four range-checked byte limbs and
-bounds it below 2^30 with a nibble extraction against the top limb (`AND4`
-lookups, since M2.3). With `alu_out` already 32-bit, `mem_addr·4 < 2^32`
-cannot wrap, the identity holds over the integers, and a misaligned address
-is unprovable. The emulator (`emulator.rs`)
-returns `ExecError::Misaligned` for any address that is not a multiple of 4,
-so the two agree; there is no sub-word path yet. Data memory (the RAM half of
-the `memory` table) starts entirely zeroed — a guest that
+Memory stays word-addressed (M2.5): `Instr::Load { rd, rs1, imm, width, signed }` and
+`Instr::Store { rs1, rs2, imm, width }` carry a `Width ∈ {Byte, Half, Word}` that selects
+how many bytes of the addressed word a load/store touches, and — for loads — whether the
+result is sign- or zero-extended. `LW`/`SW` compute the byte address through the ALU;
+`off = alu_out & 3` is the byte offset within its word. Alignment is a *constraint*, not
+only an emulator error: the underlying identity `mem_addr·4 + off = alu_out` alone would be
+satisfiable over the field by `mem_addr = (alu_out − off)·4⁻¹ mod p` for any `off` a
+cheating witness likes, so the CPU table also decomposes `mem_addr` into four
+range-checked byte limbs and bounds it below 2^30 with a nibble extraction against the top
+limb (`AND4` lookups, since M2.3). With `alu_out` already 32-bit and `off` a sum of two
+booleans (hence `< 4`), `mem_addr·4 + off < 2^32` cannot wrap, so the identity holds over
+the integers, not just mod `p`. On top of that, width imposes its own alignment: a full
+word must sit on a word boundary (`off = 0`), a halfword on a 2-byte boundary (`off ∈ {0,
+2}`), and a byte is never misaligned — `IS_LW*(OFF0+OFF1) = 0` and `IS_LH*OFF0 = 0` (and the
+`SW`/`SH` equivalents) state this directly in the AIR, not just in the emulator. The
+emulator (`emulator.rs`) returns `ExecError::Misaligned` for the same cases, carrying the
+byte address (`alu_out`) that failed. A store is a read-modify-write of the addressed word:
+the emulator reads the pre-store word, merges in the stored bytes at `off`, and writes the
+merged word back; `LB`/`LBU`/`LH`/`LHU` extract the selected byte/half and, for the signed
+forms, sign-extend it. Data memory (the RAM half of the `memory` table) starts entirely
+zeroed — a guest that
 wants an initialised array has to write it itself before reading it. `x0` is
 hard-wired to zero: the program table's `writes_rd` selector is already
 `(rd ≠ 0)`, so a write to `x0` is never sent on the register-write side of
@@ -63,7 +72,9 @@ tax for a guest, not a reason to widen the machine.
 The program table is preprocessed: it holds every instruction word's decode
 already worked out, and the CPU table only ever reads these fields off the
 `PROGRAM` bus — it never inspects opcode bits itself. `Decoded::to_fields`
-fixes the order (`isa.rs`), 18 fields in total:
+fixes the order (`isa.rs`), 23 fields in total (M2.5 replaced the single
+`is_load`/`is_store` booleans with a one-hot per load/store mnemonic, plus a
+`signed` flag):
 
 | Field | Meaning |
 |---|---|
@@ -73,12 +84,13 @@ fixes the order (`isa.rs`), 18 fields in total:
 | `imm` | immediate, already sign-extended to a `u32` |
 | `is_alu` | set for `AluImm`/`AluReg` |
 | `alu_op` | the `AluOp` code the ALU bus should use |
-| `is_imm` | set whenever the second operand is `imm`, not `rs2`'s value (`AluImm`, `Lw`, `Sw`, `Jalr`) |
+| `is_imm` | set whenever the second operand is `imm`, not `rs2`'s value (`AluImm`, `Load`, `Store`, `Jalr`) |
 | `is_branch` | set for all six branch mnemonics |
 | `br_op` | the ALU comparison (`Slt`, `Sltu`, or `Eq`) the branch reduces to |
 | `br_neg` | flips the comparison result for `BNE`/`BGE`/`BGEU` |
-| `is_load` | set for `LW` |
-| `is_store` | set for `SW` |
+| `is_lb`, `is_lh`, `is_lw` | one-hot: which load width (`is_load = is_lb+is_lh+is_lw`) |
+| `is_sb`, `is_sh`, `is_sw` | one-hot: which store width (`is_store = is_sb+is_sh+is_sw`) |
+| `signed` | set for `LB`/`LH` (the sign-extending loads); meaningless elsewhere |
 | `is_jal` | set for `JAL` |
 | `is_jalr` | set for `JALR` |
 | `is_lui` | set for `LUI` |
@@ -87,11 +99,13 @@ fixes the order (`isa.rs`), 18 fields in total:
 | `writes_rd` | `1` iff this instruction writes a register and that register is not `x0` |
 
 This is a deliberate refinement beyond the design spec's original wording:
-rather than one boolean flag per mnemonic, the table pre-decodes these 18
+rather than one boolean flag per mnemonic, the table pre-decodes these 23
 semantic fields once. The trust model is identical (the CPU still never
 decodes a bit; every selector arrives already proved correct by the `PROGRAM`
-lookup), but there are fewer columns and the CPU's constraints read as "if
-`is_load` then …" instead of long sums over one-hot mnemonic flags.
+lookup), but there are fewer columns than one-per-mnemonic and the CPU's
+constraints read as "if `is_lb+is_lh+is_lw` then …" instead of long sums over
+every individual instruction's own flag. `is_load`/`is_store` are themselves
+now *expressions* the CPU AIR computes from the one-hot fields, not columns.
 
 ## Syscall ABI
 

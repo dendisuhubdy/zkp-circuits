@@ -6,6 +6,85 @@ use rand_zkvm::isa::*;
 fn run(p: &Program, inputs: &[u32]) -> Execution { execute(p, inputs, 1 << 16).unwrap() }
 
 #[test]
+fn sub_word_loads_and_stores_match_the_spec() {
+    let mut a = Assembler::new(0);
+    a.extend(li(8, 0x1000)); a.extend(li(5, 0x11223344u32 as i32));
+    a.push(sw(8, 5, 0));
+    a.push(lb(6, 8, 0)); a.extend(write_output(0, 6));   // byte 0 = 0x44, sign-extends to 0x44
+    a.push(lbu(6, 8, 3)); a.extend(write_output(1, 6));  // byte 3 = 0x11
+    a.push(lh(6, 8, 2)); a.extend(write_output(2, 6));   // half at 2 = 0x1122
+    a.extend(halt());
+    let e = run(&a.assemble(), &[]);
+    assert_eq!((e.outputs[0], e.outputs[1], e.outputs[2]), (0x44, 0x11, 0x1122));
+}
+
+#[test]
+fn sub_word_signed_loads_sign_extend_and_unsigned_loads_zero_extend() {
+    let mut a = Assembler::new(0);
+    a.extend(li(8, 0x1000)); a.extend(li(5, 0xffu32 as i32));
+    a.push(sw(8, 5, 0));
+    a.push(lb(6, 8, 0)); a.extend(write_output(0, 6));   // signed: 0xff -> -1 -> 0xffff_ffff
+    a.push(lbu(6, 8, 0)); a.extend(write_output(1, 6));  // unsigned: 0xff -> 0xff
+    a.extend(li(5, 0xff00u32 as i32));
+    a.push(sw(8, 5, 4));
+    a.push(lh(6, 8, 4)); a.extend(write_output(2, 6));   // signed half: 0xff00 -> 0xffff_ff00
+    a.push(lhu(6, 8, 4)); a.extend(write_output(3, 6));  // unsigned half: 0xff00
+    a.extend(halt());
+    let e = run(&a.assemble(), &[]);
+    assert_eq!(e.outputs[0], 0xffff_ffff);
+    assert_eq!(e.outputs[1], 0xff);
+    assert_eq!(e.outputs[2], 0xffff_ff00);
+    assert_eq!(e.outputs[3], 0xff00);
+}
+
+#[test]
+fn a_sub_word_store_is_a_read_modify_write_that_leaves_other_bytes_alone() {
+    let mut a = Assembler::new(0);
+    a.extend(li(8, 0x1000)); a.extend(li(5, 0x11223344u32 as i32)); a.extend(li(6, 0xab));
+    a.push(sw(8, 5, 0));
+    a.push(sb(8, 6, 1));            // only byte 1 becomes 0xab: 0x1122ab44
+    a.push(lw(7, 8, 0)); a.extend(write_output(0, 7));
+    a.extend(halt());
+    let e = run(&a.assemble(), &[]);
+    assert_eq!(e.outputs[0], 0x1122ab44);
+}
+
+#[test]
+fn misaligned_half_load_and_store_are_rejected() {
+    // `Misaligned` carries the actual byte address (`alu_out`), matching `errors_are_reported`'s
+    // existing convention (`lw(6, 0, 2)` -> `Misaligned(2)`, not `Misaligned(0)`).
+    let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.push(lh(6, 8, 1)); a.extend(halt());
+    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(0x1001));
+    let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.extend(li(5, 1)); a.push(sh(8, 5, 1)); a.extend(halt());
+    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(0x1001));
+}
+
+#[test]
+fn misaligned_word_load_and_store_are_still_rejected() {
+    let mut a = Assembler::new(0); a.push(lw(6, 0, 2)); a.extend(halt());
+    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(2));
+    let mut a = Assembler::new(0); a.extend(li(5, 1)); a.push(sw(0, 5, 2)); a.extend(halt());
+    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(2));
+}
+
+#[test]
+fn byte_and_half_loads_are_never_misaligned_except_half_on_an_odd_offset() {
+    // lb/sb at every offset succeed; lh/sh only at offsets 0 and 2.
+    for off in 0..4i32 {
+        let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.push(lb(6, 8, off)); a.extend(halt());
+        execute(&a.assemble(), &[], 100).unwrap();
+    }
+    for off in [0i32, 2] {
+        let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.push(lh(6, 8, off)); a.extend(halt());
+        execute(&a.assemble(), &[], 100).unwrap();
+    }
+    for off in [1i32, 3] {
+        let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.push(lh(6, 8, off)); a.extend(halt());
+        assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(0x1000 + off as u32));
+    }
+}
+
+#[test]
 fn fib_outputs_the_right_number() {
     let e = run(&guests::fib(20), &[]);
     assert!(e.halted);
@@ -41,15 +120,33 @@ fn events_carry_what_the_cpu_table_needs() {
     assert_eq!(ev.accesses[2], MemAccess { space: SPACE_REG, addr: 5, slot: SLOT_W, value: 7, is_write: true });
     assert_eq!(ev.alu, vec![AluEvent { op: AluOp::Add, a: 0, b: 7, c: 7 }]);
     let ev = &e.events[1];
-    assert_eq!((ev.mem_addr, ev.mem_val), (0x40, 7));
-    assert_eq!(ev.accesses[2], MemAccess { space: SPACE_RAM, addr: 0x40, slot: SLOT_MEM, value: 7, is_write: true });
-    assert_eq!(ev.accesses.len(), 3, "no rd write for sw");
+    // `mem_val` is now the pre-store word (unwritten memory reads zero); the merged word
+    // (7) goes out separately on `SLOT_W` — a store is a read-modify-write of one word.
+    assert_eq!((ev.mem_addr, ev.mem_val), (0x40, 0));
+    assert_eq!(ev.accesses[2], MemAccess { space: SPACE_RAM, addr: 0x40, slot: SLOT_MEM, value: 0, is_write: false });
+    assert_eq!(ev.accesses[3], MemAccess { space: SPACE_RAM, addr: 0x40, slot: SLOT_W, value: 7, is_write: true });
+    assert_eq!(ev.accesses.len(), 4, "rs1 read, rs2 read, RAM read (SLOT_MEM), RAM write (SLOT_W)");
     let ev = &e.events[2];
     assert_eq!((ev.mem_addr, ev.mem_val, ev.c), (0x40, 7, 7));
     let last = e.events.last().unwrap();
     assert_eq!(last.sys, Some(Syscall::Halt));
     assert_eq!(last.mem_addr, 11);
     assert_eq!(last.accesses.len(), 3, "a7 read, a0 read, a1 read via mem slot");
+}
+
+#[test]
+fn sub_word_checksum_guest_matches_hand_computed_reference() {
+    let e = run(&guests::sub_word_checksum(), &[]);
+    assert!(e.halted);
+    // word0 = 0x7fff0281 (bytes 0x81 02 ff 7f), word1 = 0x00ff8001 (halves 0x8001 00ff).
+    assert_eq!(e.outputs[1], 0x7fff_0281);
+    assert_eq!(e.outputs[2], 0x00ff_8001);
+    // XOR fold of: LB(0)=0xffff_ff81, LBU(0)=0x81, LB(3)=0x7f, LH(4)=0xffff_8001,
+    // LHU(4)=0x8001, LH(6)=0xff, LW(0)=word0, LW(4)=word1.
+    let folded = [0xffff_ff81u32, 0x81, 0x7f, 0xffff_8001, 0x8001, 0xff, 0x7fff_0281, 0x00ff_8001];
+    let acc = folded.iter().fold(0u32, |a, x| a ^ x);
+    assert_eq!(e.outputs[0], acc);
+    assert_eq!(e.outputs[0], 0x7f00_7d00);
 }
 
 #[test]

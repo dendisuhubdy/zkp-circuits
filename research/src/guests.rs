@@ -160,6 +160,44 @@ pub fn alu_mix() -> Program {
     a.assemble()
 }
 
+/// M2.5: exercises every sub-word load/store mnemonic (`LB LH LBU LHU SB SH`) as a
+/// read-modify-write over word-addressed memory. Packs four individually-stored bytes and
+/// two stored halfwords into two words (each `SB`/`SH` must leave every other byte of its
+/// word alone), then reads them back through every load width/signedness combination and
+/// folds the results into an XOR checksum: a wrong sign-extension, a wrong merged byte, or
+/// a misread half all change `out0`. `out1`/`out2` expose the two packed words directly, so
+/// a wrong byte/half merge shows up even if the checksum happened to cancel out.
+pub fn sub_word_checksum() -> Program {
+    let mut a = Assembler::new(0);
+    a.extend(li(S0, HEAP));
+    // word 0 (offset 0): four individually-stored bytes, 0x81 02 ff 7f (one with the sign
+    // bit set at offset 0, one clear at offset 3 — LB must treat them differently).
+    for (off, byte) in [(0i32, 0x81u32), (1, 0x02), (2, 0xff), (3, 0x7f)] {
+        a.extend(li(T1, byte as i32)); a.push(sb(S0, T1, off));
+    }
+    // word 1 (offset 4): two stored halfwords, 0x8001 (sign bit set) and 0x00ff (clear).
+    a.extend(li(T1, 0x8001u32 as i32)); a.push(sh(S0, T1, 4));
+    a.extend(li(T1, 0x00ff)); a.push(sh(S0, T1, 6));
+
+    a.extend(li(T0, 0)); // checksum accumulator
+    let fold = |a: &mut Assembler| a.push(xor(T0, T0, T2));
+
+    a.push(lb(T2, S0, 0)); fold(&mut a);   // 0x81 signed   -> 0xffff_ff81
+    a.push(lbu(T2, S0, 0)); fold(&mut a);  // 0x81 unsigned -> 0x0000_0081
+    a.push(lb(T2, S0, 3)); fold(&mut a);   // 0x7f, sign bit clear either way
+    a.push(lh(T2, S0, 4)); fold(&mut a);   // 0x8001 signed   -> 0xffff_8001
+    a.push(lhu(T2, S0, 4)); fold(&mut a);  // 0x8001 unsigned -> 0x0000_8001
+    a.push(lh(T2, S0, 6)); fold(&mut a);   // 0x00ff, sign bit clear
+    a.push(lw(T2, S0, 0)); fold(&mut a);   // the packed word itself, straight LW
+    a.push(lw(T2, S0, 4)); fold(&mut a);
+
+    a.extend(write_output(0, T0));
+    a.push(lw(T1, S0, 0)); a.extend(write_output(1, T1));
+    a.push(lw(T1, S0, 4)); a.extend(write_output(2, T1));
+    a.extend(halt());
+    a.assemble()
+}
+
 /// (name, program, private inputs)
 pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
     vec![
@@ -168,6 +206,7 @@ pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
         ("bubble_sort", bubble_sort(&[9, 3, 0xffff_fff0, 1, 7, 3]), vec![]),
         ("balance_check", balance_check(1000), vec![400, 250, 300, 75]),
         ("alu_mix", alu_mix(), vec![]),
+        ("sub_word_checksum", sub_word_checksum(), vec![]),
     ]
 }
 

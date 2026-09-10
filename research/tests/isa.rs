@@ -27,8 +27,14 @@ fn encode_decode_roundtrip_every_variant() {
         Instr::Jalr { rd: 0, rs1: 1, imm: 0 },
         Instr::Branch { cond: BranchCond::Ne, rs1: 3, rs2: 4, imm: (-12i32) as u32 },
         Instr::Branch { cond: BranchCond::Geu, rs1: 3, rs2: 4, imm: 4094 },
-        Instr::Lw { rd: 7, rs1: 2, imm: (-4i32) as u32 },
-        Instr::Sw { rs1: 2, rs2: 7, imm: 2047 },
+        Instr::Load { rd: 7, rs1: 2, imm: (-4i32) as u32, width: Width::Word, signed: false },
+        Instr::Store { rs1: 2, rs2: 7, imm: 2047, width: Width::Word },
+        Instr::Load { rd: 3, rs1: 2, imm: 8, width: Width::Byte, signed: true },
+        Instr::Load { rd: 3, rs1: 2, imm: 8, width: Width::Byte, signed: false },
+        Instr::Load { rd: 3, rs1: 2, imm: 8, width: Width::Half, signed: true },
+        Instr::Load { rd: 3, rs1: 2, imm: 8, width: Width::Half, signed: false },
+        Instr::Store { rs1: 2, rs2: 7, imm: 8, width: Width::Byte },
+        Instr::Store { rs1: 2, rs2: 7, imm: 8, width: Width::Half },
         Instr::AluImm { op: AluOp::Add, rd: 1, rs1: 1, imm: (-1i32) as u32 },
         Instr::AluImm { op: AluOp::Sra, rd: 1, rs1: 1, imm: 7 },
         Instr::AluImm { op: AluOp::Srl, rd: 1, rs1: 1, imm: 31 },
@@ -54,9 +60,21 @@ fn known_encodings_match_the_riscv_spec() {
     // beq x1, x2, +8 = 0x00208463
     assert_eq!(Instr::Branch { cond: BranchCond::Eq, rs1: 1, rs2: 2, imm: 8 }.encode(), 0x0020_8463);
     // lw x5, 4(x2) = 0x00412283
-    assert_eq!(Instr::Lw { rd: 5, rs1: 2, imm: 4 }.encode(), 0x0041_2283);
+    assert_eq!(Instr::Load { rd: 5, rs1: 2, imm: 4, width: Width::Word, signed: false }.encode(), 0x0041_2283);
     // sw x5, 4(x2) = 0x00512223
-    assert_eq!(Instr::Sw { rs1: 2, rs2: 5, imm: 4 }.encode(), 0x0051_2223);
+    assert_eq!(Instr::Store { rs1: 2, rs2: 5, imm: 4, width: Width::Word }.encode(), 0x0051_2223);
+    // lb x5, 4(x2) = 0x00410283
+    assert_eq!(Instr::Load { rd: 5, rs1: 2, imm: 4, width: Width::Byte, signed: true }.encode(), 0x0041_0283);
+    // lbu x5, 4(x2) = 0x00414283
+    assert_eq!(Instr::Load { rd: 5, rs1: 2, imm: 4, width: Width::Byte, signed: false }.encode(), 0x0041_4283);
+    // lh x5, 4(x2) = 0x00411283
+    assert_eq!(Instr::Load { rd: 5, rs1: 2, imm: 4, width: Width::Half, signed: true }.encode(), 0x0041_1283);
+    // lhu x5, 4(x2) = 0x00415283
+    assert_eq!(Instr::Load { rd: 5, rs1: 2, imm: 4, width: Width::Half, signed: false }.encode(), 0x0041_5283);
+    // sb x5, 4(x2) = 0x00510223
+    assert_eq!(Instr::Store { rs1: 2, rs2: 5, imm: 4, width: Width::Byte }.encode(), 0x0051_0223);
+    // sh x5, 4(x2) = 0x00511223
+    assert_eq!(Instr::Store { rs1: 2, rs2: 5, imm: 4, width: Width::Half }.encode(), 0x0051_1223);
 }
 
 #[test]
@@ -69,8 +87,19 @@ fn decoded_selectors() {
     assert_eq!((d.is_branch, d.br_op, d.br_neg, d.is_imm), (1, 8, 1, 0));
     let d = Instr::Ecall.decoded();
     assert_eq!((d.is_ecall, d.rs1, d.rs2, d.rd, d.writes_rd), (1, 17, 10, 10, 0));
-    let d = Instr::Lw { rd: 2, rs1: 3, imm: 4 }.decoded();
-    assert_eq!((d.is_load, d.is_imm, d.writes_rd), (1, 1, 1));
-    assert_eq!(Decoded::NUM_FIELDS, 18);
+    let d = Instr::Load { rd: 2, rs1: 3, imm: 4, width: Width::Word, signed: false }.decoded();
+    assert_eq!((d.is_lw, d.is_imm, d.writes_rd), (1, 1, 1));
+    assert_eq!(Decoded::NUM_FIELDS, 23);
     assert_eq!(d.to_fields()[0], 2);
+
+    let d = Instr::Load { rd: 2, rs1: 3, imm: 4, width: Width::Byte, signed: true }.decoded();
+    assert_eq!((d.is_lb, d.is_lh, d.is_lw, d.signed), (1, 0, 0, 1));
+    let d = Instr::Load { rd: 2, rs1: 3, imm: 4, width: Width::Byte, signed: false }.decoded();
+    assert_eq!((d.is_lb, d.signed), (1, 0));
+    let d = Instr::Load { rd: 2, rs1: 3, imm: 4, width: Width::Half, signed: true }.decoded();
+    assert_eq!((d.is_lh, d.signed), (1, 1));
+    let d = Instr::Store { rs1: 2, rs2: 3, imm: 4, width: Width::Byte }.decoded();
+    assert_eq!((d.is_sb, d.is_sh, d.is_sw), (1, 0, 0));
+    let d = Instr::Store { rs1: 2, rs2: 3, imm: 4, width: Width::Half }.decoded();
+    assert_eq!((d.is_sb, d.is_sh, d.is_sw), (0, 1, 0));
 }

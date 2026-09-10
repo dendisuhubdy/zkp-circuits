@@ -54,6 +54,12 @@ impl BranchCond {
     fn from_funct3(f: u32) -> Option<Self> { Some(match f { 0 => Self::Eq, 1 => Self::Ne, 4 => Self::Lt, 5 => Self::Ge, 6 => Self::Ltu, 7 => Self::Geu, _ => return None }) }
 }
 
+/// Sub-word load/store width. Memory itself stays word-addressed (`RAM` in the `memory`
+/// table is keyed by word address); `Width` only selects how many bytes of the addressed
+/// word a `Load`/`Store` touches, and — for loads — whether the result is sign-extended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Width { Byte, Half, Word }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Instr {
     Lui { rd: u32, imm: u32 },
@@ -61,8 +67,8 @@ pub enum Instr {
     Jal { rd: u32, imm: u32 },
     Jalr { rd: u32, rs1: u32, imm: u32 },
     Branch { cond: BranchCond, rs1: u32, rs2: u32, imm: u32 },
-    Lw { rd: u32, rs1: u32, imm: u32 },
-    Sw { rs1: u32, rs2: u32, imm: u32 },
+    Load { rd: u32, rs1: u32, imm: u32, width: Width, signed: bool },
+    Store { rs1: u32, rs2: u32, imm: u32, width: Width },
     AluImm { op: AluOp, rd: u32, rs1: u32, imm: u32 },
     AluReg { op: AluOp, rd: u32, rs1: u32, rs2: u32 },
     Ecall,
@@ -98,7 +104,7 @@ fn alu_from_funct(f3: u32, f7: u32, imm_form: bool) -> Result<AluOp, DecodeError
         _ => return Err(DecodeError::Funct((f7 << 3) | f3)),
     })
 }
-fn sext(x: u32, bits: u32) -> u32 { ((x << (32 - bits)) as i32 >> (32 - bits)) as u32 }
+pub(crate) fn sext(x: u32, bits: u32) -> u32 { ((x << (32 - bits)) as i32 >> (32 - bits)) as u32 }
 fn bits(w: u32, hi: u32, lo: u32) -> u32 { (w >> lo) & ((1u32 << (hi - lo + 1)) - 1) }
 
 impl Instr {
@@ -110,8 +116,17 @@ impl Instr {
             Instr::Jal { rd, imm } => bits(imm, 20, 20) << 31 | bits(imm, 10, 1) << 21 | bits(imm, 11, 11) << 20 | bits(imm, 19, 12) << 12 | rd << 7 | OP_JAL,
             Instr::Jalr { rd, rs1, imm } => i_type(imm, rs1, 0, rd, OP_JALR),
             Instr::Branch { cond, rs1, rs2, imm } => bits(imm, 12, 12) << 31 | bits(imm, 10, 5) << 25 | rs2 << 20 | rs1 << 15 | cond.funct3() << 12 | bits(imm, 4, 1) << 8 | bits(imm, 11, 11) << 7 | OP_BRANCH,
-            Instr::Lw { rd, rs1, imm } => i_type(imm, rs1, 2, rd, OP_LOAD),
-            Instr::Sw { rs1, rs2, imm } => bits(imm, 11, 5) << 25 | rs2 << 20 | rs1 << 15 | 2 << 12 | bits(imm, 4, 0) << 7 | OP_STORE,
+            Instr::Load { rd, rs1, imm, width, signed } => {
+                let f3 = match (width, signed) {
+                    (Width::Byte, true) => 0, (Width::Half, true) => 1, (Width::Word, _) => 2,
+                    (Width::Byte, false) => 4, (Width::Half, false) => 5,
+                };
+                i_type(imm, rs1, f3, rd, OP_LOAD)
+            }
+            Instr::Store { rs1, rs2, imm, width } => {
+                let f3 = match width { Width::Byte => 0, Width::Half => 1, Width::Word => 2 };
+                bits(imm, 11, 5) << 25 | rs2 << 20 | rs1 << 15 | f3 << 12 | bits(imm, 4, 0) << 7 | OP_STORE
+            }
             Instr::AluImm { op, rd, rs1, imm } => {
                 let (f3, f7) = alu_funct(op);
                 let imm = if matches!(op, AluOp::Sll | AluOp::Srl | AluOp::Sra) { (imm & 31) | f7 << 5 } else { imm };
@@ -131,8 +146,18 @@ impl Instr {
             OP_JAL => { let imm = bits(w, 31, 31) << 20 | bits(w, 19, 12) << 12 | bits(w, 20, 20) << 11 | bits(w, 30, 21) << 1; Instr::Jal { rd, imm: sext(imm, 21) } }
             OP_JALR => Instr::Jalr { rd, rs1, imm: imm_i },
             OP_BRANCH => { let imm = bits(w, 31, 31) << 12 | bits(w, 7, 7) << 11 | bits(w, 30, 25) << 5 | bits(w, 11, 8) << 1; Instr::Branch { cond: BranchCond::from_funct3(f3).ok_or(DecodeError::Funct(f3))?, rs1, rs2, imm: sext(imm, 13) } }
-            OP_LOAD => { if f3 != 2 { return Err(DecodeError::Funct(f3)); } Instr::Lw { rd, rs1, imm: imm_i } }
-            OP_STORE => { if f3 != 2 { return Err(DecodeError::Funct(f3)); } Instr::Sw { rs1, rs2, imm: sext(bits(w, 31, 25) << 5 | bits(w, 11, 7), 12) } }
+            OP_LOAD => {
+                let (width, signed) = match f3 {
+                    0 => (Width::Byte, true), 1 => (Width::Half, true), 2 => (Width::Word, false),
+                    4 => (Width::Byte, false), 5 => (Width::Half, false),
+                    _ => return Err(DecodeError::Funct(f3)),
+                };
+                Instr::Load { rd, rs1, imm: imm_i, width, signed }
+            }
+            OP_STORE => {
+                let width = match f3 { 0 => Width::Byte, 1 => Width::Half, 2 => Width::Word, _ => return Err(DecodeError::Funct(f3)) };
+                Instr::Store { rs1, rs2, imm: sext(bits(w, 31, 25) << 5 | bits(w, 11, 7), 12), width }
+            }
             OP_ALUI => {
                 let shift = matches!(f3, 1 | 5);
                 let op = alu_from_funct(f3, if shift { f7 } else { 0 }, true)?;
@@ -154,8 +179,14 @@ impl Instr {
             Instr::Jal { rd, imm } => { d.rd = rd; d.imm = imm; d.is_jal = 1; d.writes_rd = wr(rd); }
             Instr::Jalr { rd, rs1, imm } => { d.rd = rd; d.rs1 = rs1; d.imm = imm; d.is_jalr = 1; d.is_imm = 1; d.writes_rd = wr(rd); }
             Instr::Branch { cond, rs1, rs2, imm } => { d.rs1 = rs1; d.rs2 = rs2; d.imm = imm; d.is_branch = 1; d.br_op = cond.alu_op().code(); d.br_neg = cond.negate() as u32; }
-            Instr::Lw { rd, rs1, imm } => { d.rd = rd; d.rs1 = rs1; d.imm = imm; d.is_load = 1; d.is_imm = 1; d.writes_rd = wr(rd); }
-            Instr::Sw { rs1, rs2, imm } => { d.rs1 = rs1; d.rs2 = rs2; d.imm = imm; d.is_store = 1; d.is_imm = 1; }
+            Instr::Load { rd, rs1, imm, width, signed } => {
+                d.rd = rd; d.rs1 = rs1; d.imm = imm; d.is_imm = 1; d.writes_rd = wr(rd); d.signed = signed as u32;
+                match width { Width::Byte => d.is_lb = 1, Width::Half => d.is_lh = 1, Width::Word => d.is_lw = 1 }
+            }
+            Instr::Store { rs1, rs2, imm, width } => {
+                d.rs1 = rs1; d.rs2 = rs2; d.imm = imm; d.is_imm = 1;
+                match width { Width::Byte => d.is_sb = 1, Width::Half => d.is_sh = 1, Width::Word => d.is_sw = 1 }
+            }
             Instr::AluImm { op, rd, rs1, imm } => { d.rd = rd; d.rs1 = rs1; d.imm = imm; d.is_alu = 1; d.alu_op = op.code(); d.is_imm = 1; d.writes_rd = wr(rd); }
             Instr::AluReg { op, rd, rs1, rs2 } => { d.rd = rd; d.rs1 = rs1; d.rs2 = rs2; d.is_alu = 1; d.alu_op = op.code(); d.writes_rd = wr(rd); }
             Instr::Ecall => { d.rs1 = REG_A7; d.rs2 = REG_A0; d.rd = REG_A0; d.is_ecall = 1; }
@@ -171,14 +202,17 @@ pub struct Decoded {
     pub rd: u32, pub rs1: u32, pub rs2: u32, pub imm: u32,
     pub is_alu: u32, pub alu_op: u32, pub is_imm: u32,
     pub is_branch: u32, pub br_op: u32, pub br_neg: u32,
-    pub is_load: u32, pub is_store: u32, pub is_jal: u32, pub is_jalr: u32,
+    pub is_lb: u32, pub is_lh: u32, pub is_lw: u32,
+    pub is_sb: u32, pub is_sh: u32, pub is_sw: u32, pub signed: u32,
+    pub is_jal: u32, pub is_jalr: u32,
     pub is_lui: u32, pub is_auipc: u32, pub is_ecall: u32, pub writes_rd: u32,
 }
 impl Decoded {
-    pub const NUM_FIELDS: usize = 18;
-    pub fn to_fields(&self) -> [u32; 18] {
+    pub const NUM_FIELDS: usize = 23;
+    pub fn to_fields(&self) -> [u32; 23] {
         [self.rd, self.rs1, self.rs2, self.imm, self.is_alu, self.alu_op, self.is_imm, self.is_branch, self.br_op, self.br_neg,
-         self.is_load, self.is_store, self.is_jal, self.is_jalr, self.is_lui, self.is_auipc, self.is_ecall, self.writes_rd]
+         self.is_lb, self.is_lh, self.is_lw, self.is_sb, self.is_sh, self.is_sw, self.signed,
+         self.is_jal, self.is_jalr, self.is_lui, self.is_auipc, self.is_ecall, self.writes_rd]
     }
 }
 

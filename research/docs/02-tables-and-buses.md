@@ -39,74 +39,125 @@ with enough multiplicity, in the provider's table). `MEMORY` is a
 `PermutationCheckBus` — both sides are prover-supplied main-trace rows, and
 the argument proved is multiset equality, not a lookup into a fixed table.
 
-## `program` — preprocessed, `pre::WIDTH = 20` + `col::WIDTH = 1`
+## `program` — preprocessed, `pre::WIDTH = 25` + `col::WIDTH = 1`
 
-Preprocessed columns: `pc`, then the 18 `Decoded` fields in the fixed
+Preprocessed columns: `pc`, then the 23 `Decoded` fields in the fixed
 `to_fields` order (`rd rs1 rs2 imm is_alu alu_op is_imm is_branch br_op
-br_neg is_load is_store is_jal is_jalr is_lui is_auipc is_ecall writes_rd`),
-then `valid` (1 on real instruction rows, 0 on padding). One main column,
-`mult`: how many times this row was fetched. Constraint: a row with
-`valid = 0` must have `mult = 0` — padding can never be fetched. Provides
-`(pc, 18 fields…)` on `PROGRAM` with count `mult`.
+br_neg is_lb is_lh is_lw is_sb is_sh is_sw signed is_jal is_jalr is_lui
+is_auipc is_ecall writes_rd`), then `valid` (1 on real instruction rows, 0
+on padding). One main column, `mult`: how many times this row was fetched.
+Constraint: a row with `valid = 0` must have `mult = 0` — padding can never
+be fetched. Provides `(pc, 23 fields…)` on `PROGRAM` with count `mult`.
 
-## `cpu` — main, `col::WIDTH = 53`
+## `cpu` — main, `col::WIDTH = 76`
 
-Columns: `clk pc next_pc is_real`, the same 18 decoded fields (fetched, not
-recomputed), `a b c alu_out tgt` (operands and results), `mem_addr mem_val`,
+Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
+recomputed — `is_load`/`is_store` are *expressions* the AIR computes from
+the one-hot `is_lb/is_lh/is_lw`/`is_sb/is_sh/is_sw` fields, not columns of
+their own), `a b c alu_out tgt` (operands and results), `mem_addr mem_val`,
 three syscall flags `sys_halt sys_write sys_read`, eight one-hot output
-selectors `out_sel0..7` (indices 32–39), eight cumulative counters
-`written0..7` (40–47), four byte limbs `ma0..3` of `mem_addr` (48–51), and
-`ma3_hi` (52), `ma0+3`'s high nibble. This is the only table with public
-values: `pc_entry`, the tier index, and the eight output words.
+selectors `out_sel0..7`, eight cumulative counters `written0..7`, four byte
+limbs `ma0..3` of `mem_addr` (the WORD address) and `ma3_hi` (`ma0+3`'s high
+nibble, unchanged in role since M2.3/M2.4), then the M2.5 sub-word columns:
+`off0 off1` (the byte offset within the word, two booleans), `w0..3` (byte
+limbs of `mem_val` — the word actually in memory), `byte half` (the
+selected byte/halfword), `hi sgn` (the sign-relevant byte's high nibble and
+sign bit), `rb0..3` (byte limbs of `b`, rs2's value, on store rows), and
+`merged0..3` (the word a store writes back). This is the only table with
+public values: `pc_entry`, the tier index, and the eight output words.
 
 Constraints, in words: `is_real` is boolean and monotone (once 0, stays 0);
 `clk` starts at 0 and increments by 1 on real rows; the first row's `pc`
 equals the public `pc_entry`; the *last real row* is a `HALT`, and nothing
 runs after it — every row past it is padding. Every real row looks up its
-own `(pc, 18 fields)` on `PROGRAM` — the
+own `(pc, 23 fields)` on `PROGRAM` — the
 CPU never decodes an opcode bit itself, only trusts what the lookup
 returned. The second ALU operand is `imm` or `b` depending on `is_imm`; an
 ALU-using row (`is_alu`, branch, load, store, `jalr`) looks up `(op, a,
 b_eff, alu_out)` on `ALU`, and a second, independent ALU slot computes
 `pc + imm` for `branch`/`jal`/`auipc`. `c` (the value written to `rd`) is
-pinned by kind: `alu_out` for ALU ops, `mem_val` for loads, `pc+4` for
-`jal`/`jalr`, `imm` for `lui`, `tgt` for `auipc`. On every row whose kind
-does *not* define `c` (branches, stores, `HALT`/`WRITE_OUTPUT`), `c` is
-forced to 0 — the constraint that stops a cheating witness from smuggling a
-value through an unused column (`defines_c` in `cpu.rs`). A store's `mem_val` is pinned to `b`, the value
-just read from `rs2` — the one `MEMORY` message field the bus would otherwise accept
-unstated, letting a cheating witness store a value no register ever held and read it back
-through a later load as genuine memory contents. `next_pc` is
-`pc+4` unless the row is a taken branch, `jal`, or `jalr`. Register
-reads/writes and the one optional memory access go out on `MEMORY` below.
-`ECALL` rows pre-decode `rs1=17 (a7)`, `rs2=10 (a0)`, so the syscall number
-and first argument arrive through the ordinary register-read slots; the
-second argument (`a1`) is read through the memory-access slot.
-`WRITE_OUTPUT` constrains `public_values[2+slot] = word` via eight one-hot
-selectors on `slot`. The eight `written_i` columns accumulate `out_sel_i` down
-the table and are boolean on every row, which caps each slot at a single write
-(matching the emulator's `DoubleWrite` error) and lets the last row assert
-`(1 − written_i)·public_values[2+i] = 0`: a slot no `WRITE_OUTPUT` ever
-selected is zero, as the spec requires, instead of being a free public value.
+pinned by kind: `alu_out` for ALU ops, the sign/zero-extended loaded value
+for `lb`/`lh`/`lw` (below), `pc+4` for `jal`/`jalr`, `imm` for `lui`, `tgt`
+for `auipc`. On every row whose kind does *not* define `c` (branches,
+stores, `HALT`/`WRITE_OUTPUT`), `c` is forced to 0 — the constraint that
+stops a cheating witness from smuggling a value through an unused column
+(`defines_c` in `cpu.rs`). `next_pc` is `pc+4` unless the row is a taken
+branch, `jal`, or `jalr`. Register reads/writes and the memory access(es)
+go out on `MEMORY` below. `ECALL` rows pre-decode `rs1=17 (a7)`, `rs2=10
+(a0)`, so the syscall number and first argument arrive through the ordinary
+register-read slots; the second argument (`a1`) is read through the
+memory-access slot. `WRITE_OUTPUT` constrains `public_values[2+slot] =
+word` via eight one-hot selectors on `slot`. The eight `written_i` columns
+accumulate `out_sel_i` down the table and are boolean on every row, which
+caps each slot at a single write (matching the emulator's `DoubleWrite`
+error) and lets the last row assert `(1 − written_i)·public_values[2+i] =
+0`: a slot no `WRITE_OUTPUT` ever selected is zero, as the spec requires,
+instead of being a free public value.
 
-Word alignment of `LW`/`SW` is a stated constraint, not an accident.
-`mem_addr·4 = alu_out` on its own is a field identity — a misaligned `alu_out`
-would just give `mem_addr = alu_out·4⁻¹ mod p` — so `mem_addr` is additionally
-decomposed into the four byte limbs `ma0..3`, each range-checked on `RANGE8`,
-plus a nibble bound on the top limb: `ma3_hi` is `ma0+3`'s high nibble (an
-*isolated* extraction — `ma0+3`'s low nibble, `ma0+3 − 16·ma3_hi`, has no other
-lookup on this row, so it needs its own dummy `AND4[lo, 0, 0]` range check
-before `ma3_hi` can be trusted as the true high nibble; see the `alu` section
-below for why), and `AND4[ma3_hi, 0xC, 0]` masks the top two bits of that
-nibble — bits 6–7 of `mem_addr`'s top byte, the same bound the old
-`AND8[ma3, 0xC0, 0]` byte-table check gave. Since `alu_out` is already 32-bit
-(the ALU table's own limb range checks), `mem_addr·4 < 2^32` cannot wrap and
-the identity holds over the integers.
+### M2.5: sub-word loads and stores
 
-Sends: 4 `MEMORY` messages per row (two register reads, one optional
-RAM/`a1` access, one optional register write), 2 `ALU` lookups, and on
-load/store rows 4 `RANGE8` plus 2 `AND4` (the dummy low-nibble range check and
-the top-nibble extraction) for the address limbs. Receives: 1 `PROGRAM`
+Memory stays word-addressed. `mem_addr` (the word address) and `off0/off1`
+(the byte offset within the word, `off = off0 + 2·off1`) are ALU_OUT's
+quotient and remainder by 4, both *stated*, not just implied by
+`mem_addr·4 + off = alu_out` alone — that identity is a field relation only,
+satisfiable by `mem_addr = (alu_out − off)·4⁻¹ mod p` for any `off` a
+cheating witness likes. What rules that out, exactly as it did pre-M2.5:
+`mem_addr` is decomposed into the four byte limbs `ma0..3`, each
+range-checked on `RANGE8`, bounded below 2^30 by a nibble bound on the top
+limb (`ma3_hi` is `ma0+3`'s high nibble — an *isolated* extraction, so its
+low-nibble companion gets its own dummy `AND4[lo, 0, 0]` range check before
+`ma3_hi` can be trusted, see the `alu` section below — and `AND4[ma3_hi,
+0xC, 0]` masks the top two bits, the M2.3 replacement for the old
+`AND8[ma3, 0xC0, 0]` byte-table check). With `alu_out` already 32-bit (the
+ALU table's own limb checks) and `off` a sum of two booleans (`< 4`),
+`mem_addr·4 + off < 2^32` cannot wrap, so the identity holds over the
+integers, not just mod `p`. Width imposes its own alignment on top of that:
+`is_lw*(off0+off1) = 0`, `is_lh*off0 = 0` (and the `sw`/`sh` equivalents) —
+a full word must sit on a word boundary, a halfword on a 2-byte boundary, a
+byte is never misaligned.
+
+`mem_val` is the word actually in memory at `mem_addr` — the read value for
+a load, the *pre-store* value for a store (`emulator::execute` pushes
+exactly this as the row's `SLOT_MEM` read either way) — decomposed into
+`w0..3`, each `RANGE8`-checked, with `mem_val = word(w0..3)` pinned
+directly. `byte`/`half` select the addressed byte/halfword out of `w0..3`
+by `off0/off1`, pinned on `lb`/`sb` and `lh`/`sh` rows respectively. Sign
+extension for `lb`/`lh` runs through `hi`/`sgn`: the sign-relevant byte is
+`byte` itself for `lb`, and the top byte of whichever half `off1` selected
+for `lh` (reusing the already-committed `w1`/`w3` rather than dividing
+`half` back apart) — an isolated nibble extraction (`hi_lo`, that byte's
+low nibble, gets its own dummy `AND4[lo, 0, 0]` lookup, exactly the M2.4
+sign-bit pattern in `alu.rs`), then `AND4[hi, 8, sgn*8]` extracts the true
+top bit. The loaded value is `c = lb·(byte + sgn·signed·(2^32−2^8)) +
+lh·(half + sgn·signed·(2^32−2^16)) + lw·mem_val`, pinned when `is_load`
+(`defines_c` gains `is_lb+is_lh+is_lw` in place of the old single
+`is_load`).
+
+Stores decompose `b` (rs2's value, already read every row) into `rb0..3`,
+each `RANGE8`-checked on store rows, with `is_store·(b − word(rb0..3)) = 0`
+— exactly the M1 store-forgery invariant (`2c8a39d`), generalized: a
+store's written bytes must trace back to a value that was actually in a
+register. `merged0..3` is the read-modify-write result, spelled out per
+byte: `merged_k = w_k + selp(k)·(bp(k) − w_k)`, where `selp(k)` is 1 (`sw`),
+`off1`-selected (`sh`), or `off0/off1`-selected (`sb`) — which byte(s) this
+store overwrites — and `bp(k)` is the corresponding byte of `rb0..3`. This
+is the pin that replaces `2c8a39d`'s "a store's `mem_val` is the rs2
+value": now "the written value is `merged`, and `merged = b` when `is_sw`"
+— provable structurally from the formula above (when `is_sw=1`, `selp(k)=1`
+for every `k` and `bp(k)=rb_k`, so `merged_k = rb_k`, i.e. `merged =
+word(rb0..3) = b`).
+
+Sends: 2 `MEMORY` register-read messages every row; a `SLOT_MEM` message on
+load/store/ecall rows that is *always a read* (`is_write = 0`) — a load's
+or a store's own access reads the word (or, for `ecall`, `a1`) that was
+there, carrying `mem_val`; a `SLOT_W` message on `writes_rd`/`sys_read`/
+`is_store` rows that is either a register writeback (space 0, addr `rd`,
+value `c`) or a store's word write (space 1/RAM, addr `mem_addr`, value
+`merged`) — the two never coincide on one row, since a store never sets
+`writes_rd` or `sys_read`. 2 `ALU` lookups. On load/store rows: 4 `RANGE8`
+for `ma0..3`, 2 `AND4` for the address's top-nibble bound, 4 `RANGE8` for
+`w0..3`; additionally on store rows, 4 `RANGE8` for `rb0..3`; additionally
+on `lb`/`lh` rows, 2 `AND4` for the sign extraction. Receives: 1 `PROGRAM`
 lookup.
 
 ## `memory` — main, `col::WIDTH = 12`
@@ -262,7 +313,7 @@ valid `(a,b) ∈ [0,16)²` pair simply has no matching row. Provides `AND4`
 (`[a, b, a & b]`), `OR4` (`[a, b, a | b]`), and `XOR4` (`[a, b, a ^ b]`),
 each with its own multiplicity column. Consumed only by `alu` (bitwise
 operands and every isolated nibble extraction) and `cpu` (the memory
-alignment check).
+alignment check, and — since M2.5 — `lb`/`lh`'s sign-bit extraction).
 
 ## Why the program is preprocessed, and what that means for `hc`
 

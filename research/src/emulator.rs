@@ -53,7 +53,9 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
         let mut next_pc = pc.wrapping_add(4);
         let b_eff = if dec.is_imm == 1 { dec.imm } else { b };
         // slot-1 ALU
-        let op1 = if dec.is_alu == 1 { Some(AluOp::from_code(dec.alu_op)) } else if dec.is_branch == 1 { Some(AluOp::from_code(dec.br_op)) } else if dec.is_load + dec.is_store + dec.is_jalr == 1 { Some(AluOp::Add) } else { None };
+        let is_load = dec.is_lb + dec.is_lh + dec.is_lw;
+        let is_store = dec.is_sb + dec.is_sh + dec.is_sw;
+        let op1 = if dec.is_alu == 1 { Some(AluOp::from_code(dec.alu_op)) } else if dec.is_branch == 1 { Some(AluOp::from_code(dec.br_op)) } else if is_load + is_store + dec.is_jalr == 1 { Some(AluOp::Add) } else { None };
         if let Some(op) = op1 { alu_out = op.eval(a, b_eff); alu.push(AluEvent { op, a, b: b_eff, c: alu_out }); }
         // slot-2 ALU: pc + imm
         if dec.is_branch + dec.is_jal + dec.is_auipc == 1 { tgt = pc.wrapping_add(dec.imm); alu.push(AluEvent { op: AluOp::Add, a: pc, b: dec.imm, c: tgt }); }
@@ -64,15 +66,34 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
             Instr::Jal { .. } => { c = pc.wrapping_add(4); next_pc = tgt; }
             Instr::Jalr { .. } => { c = pc.wrapping_add(4); next_pc = alu_out; }
             Instr::Branch { .. } => { let taken = (alu_out == 1) != (dec.br_neg == 1); if taken { next_pc = tgt; } }
-            Instr::Lw { .. } => {
-                if alu_out % 4 != 0 { return Err(ExecError::Misaligned(alu_out)); }
-                mem_addr = alu_out / 4; mem_val = *ram.get(&mem_addr).unwrap_or(&0); c = mem_val;
+            Instr::Load { width, signed, .. } => {
+                let off = alu_out & 3;
+                let bad = match width { Width::Word => off != 0, Width::Half => off != 0 && off != 2, Width::Byte => false };
+                if bad { return Err(ExecError::Misaligned(alu_out)); }
+                mem_addr = alu_out >> 2;
+                mem_val = *ram.get(&mem_addr).unwrap_or(&0);
+                c = match width {
+                    Width::Byte => { let byte = (mem_val >> (8 * off)) & 0xff; if signed { sext(byte, 8) } else { byte } }
+                    Width::Half => { let half = (mem_val >> (8 * off)) & 0xffff; if signed { sext(half, 16) } else { half } }
+                    Width::Word => mem_val,
+                };
                 acc.push(MemAccess { space: SPACE_RAM, addr: mem_addr, slot: SLOT_MEM, value: mem_val, is_write: false });
             }
-            Instr::Sw { .. } => {
-                if alu_out % 4 != 0 { return Err(ExecError::Misaligned(alu_out)); }
-                mem_addr = alu_out / 4; mem_val = b; ram.insert(mem_addr, b);
-                acc.push(MemAccess { space: SPACE_RAM, addr: mem_addr, slot: SLOT_MEM, value: b, is_write: true });
+            Instr::Store { width, .. } => {
+                let off = alu_out & 3;
+                let bad = match width { Width::Word => off != 0, Width::Half => off != 0 && off != 2, Width::Byte => false };
+                if bad { return Err(ExecError::Misaligned(alu_out)); }
+                mem_addr = alu_out >> 2;
+                let old = *ram.get(&mem_addr).unwrap_or(&0);
+                let merged = match width {
+                    Width::Byte => (old & !(0xffu32 << (8 * off))) | ((b & 0xff) << (8 * off)),
+                    Width::Half => (old & !(0xffffu32 << (8 * off))) | ((b & 0xffff) << (8 * off)),
+                    Width::Word => b,
+                };
+                mem_val = old;
+                ram.insert(mem_addr, merged);
+                acc.push(MemAccess { space: SPACE_RAM, addr: mem_addr, slot: SLOT_MEM, value: old, is_write: false });
+                acc.push(MemAccess { space: SPACE_RAM, addr: mem_addr, slot: SLOT_W, value: merged, is_write: true });
             }
             Instr::Ecall => {
                 mem_addr = ECALL_MEM_REG; mem_val = regs[ECALL_MEM_REG as usize];

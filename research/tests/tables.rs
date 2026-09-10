@@ -237,7 +237,7 @@ fn cpu_trace_mirrors_events_and_pads() {
         assert_eq!(r[cpu::col::NEXT_PC], F::from_u32(ev.next_pc));
         assert_eq!(r[cpu::col::IS_REAL], F::ONE);
         let d = ev.dec.to_fields();
-        for k in 0..18 { assert_eq!(r[cpu::col::DEC0 + k], F::from_u32(d[k])); }
+        for k in 0..23 { assert_eq!(r[cpu::col::DEC0 + k], F::from_u32(d[k])); }
         assert_eq!((r[cpu::col::A], r[cpu::col::B], r[cpu::col::C]), (F::from_u32(ev.a), F::from_u32(ev.b), F::from_u32(ev.c)));
     }
     let last_real = e.events.len() - 1;
@@ -267,7 +267,10 @@ fn cpu_trace_limbs_and_counts_every_load_store_address() {
     let mut nibble = NibbleCounts::default();
     let t = cpu_trace(&e.events, 1 << 10, &mut range, &mut nibble);
     let w = cpu::col::WIDTH;
-    let mem_rows: Vec<usize> = (0..e.events.len()).filter(|i| e.events[*i].dec.is_load == 1 || e.events[*i].dec.is_store == 1).collect();
+    let is_mem = |i: usize| { let d = &e.events[i].dec; d.is_lb + d.is_lh + d.is_lw + d.is_sb + d.is_sh + d.is_sw == 1 };
+    let is_store = |i: usize| { let d = &e.events[i].dec; d.is_sb + d.is_sh + d.is_sw == 1 };
+    let mem_rows: Vec<usize> = (0..e.events.len()).filter(|i| is_mem(*i)).collect();
+    let n_stores = mem_rows.iter().filter(|i| is_store(**i)).count();
     assert!(!mem_rows.is_empty(), "memcpy loads and stores");
     for i in &mem_rows {
         let addr = e.events[*i].mem_addr;
@@ -276,10 +279,12 @@ fn cpu_trace_limbs_and_counts_every_load_store_address() {
             assert_eq!(t.values[i * w + cpu::col::MA0 + k], F::from_u32((addr >> (8 * k)) & 0xff), "row {i} limb {k}");
         }
     }
-    // Four RANGE8 lookups and two AND4 (the low-nibble dummy range check and the
-    // MA3_HI-against-0xC extraction) per load/store row, and none on any other kind of row:
-    // exactly what the AIR's `is_mem`-counted interactions declare.
-    assert_eq!(range.range.iter().sum::<u64>() as usize, 4 * mem_rows.len());
+    // Every load/store row RANGE8-checks its MA0..3 address limbs and its W0..3 word limbs
+    // (8), plus the store's own RB0..3 rs2 limbs (4 more) on store rows only; memcpy uses
+    // only LW/SW, so every load/store row also pays the same two AND4 lookups (the
+    // low-nibble dummy range check and the MA3_HI-against-0xC extraction) — sign-extraction
+    // AND4 lookups only fire on LB/LH rows, which memcpy never uses.
+    assert_eq!(range.range.iter().sum::<u64>() as usize, 8 * mem_rows.len() + 4 * n_stores);
     let nibble_total: u64 = nibble.and.iter().sum();
     assert_eq!(nibble_total as usize, 2 * mem_rows.len());
 }
