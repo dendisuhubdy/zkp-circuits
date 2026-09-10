@@ -9,8 +9,7 @@ selector fields the CPU trusts, and the syscall ABI.
 
 | Milestone | Instructions |
 |---|---|
-| M1+M2 (implemented) | `LUI AUIPC JAL JALR` · `BEQ BNE BLT BGE BLTU BGEU` · `LW SW` · `LB LH LBU LHU SB SH` · `ADDI SLTI SLTIU XORI ORI ANDI SLLI SRLI SRAI` · `ADD SUB SLL SLT SLTU XOR SRL SRA OR AND` · `ECALL` |
-| M2 (not yet implemented) | `MUL MULH MULHU MULHSU DIV DIVU REM REMU` |
+| M1+M2 (implemented) | `LUI AUIPC JAL JALR` · `BEQ BNE BLT BGE BLTU BGEU` · `LW SW` · `LB LH LBU LHU SB SH` · `ADDI SLTI SLTIU XORI ORI ANDI SLLI SRLI SRAI` · `ADD SUB SLL SLT SLTU XOR SRL SRA OR AND` · `MUL MULH MULHU MULHSU DIV DIVU REM REMU` (M2.6) · `ECALL` |
 | never | `FENCE`, CSR instructions, `EBREAK` (traps) |
 
 Memory stays word-addressed (M2.5): `Instr::Load { rd, rs1, imm, width, signed }` and
@@ -57,6 +56,26 @@ encodes it directly, and `alu_funct` panics if asked to. Branch conditions
 map onto two ALU comparisons plus a `br_neg` flag: `BLT`/`BGE` and
 `BLTU`/`BGEU` share `Slt`/`Sltu`, `BEQ`/`BNE` share `Eq`, and `br_neg` flips
 the result for `BNE`/`BGE`/`BGEU`.
+
+**M2.6 — the RV32M extension.** `MUL MULH MULHU MULHSU DIV DIVU REM REMU`
+decode from the R-type `OP_ALU` opcode (`0x33`) with `funct7 = 1` exclusively
+— standard RV32M `funct3` order (`MUL=0 MULH=1 MULHSU=2 MULHU=3 DIV=4
+DIVU=5 REM=6 REMU=7`). There is no RV32M immediate form: `OP_ALUI`'s decode
+path never even inspects `funct7` for non-shift ops (those bits are part of
+the 12-bit immediate), and for the shift-immediate family it only accepts
+`funct7 in {0, 0x20}` — `funct7 = 1` is simply not a producible `AluImm`
+encoding, checked directly by
+`tests/isa.rs::m_extension_is_register_register_only_alu_imm_rejects_reserved_shift_funct7`.
+Emulator semantics (`AluOp::eval`) follow the RISC-V spec's defined
+edge cases exactly: `DIV` by a zero divisor returns `0xffff_ffff`, `DIVU` by
+zero likewise; `REM`/`REMU` by zero return the original dividend unchanged;
+signed overflow (`i32::MIN / -1`) returns quotient `i32::MIN`, remainder
+`0`. See `docs/02-tables-and-buses.md`'s `alu` section and `src/tables/
+alu.rs`'s module doc comment for how the ALU table proves this — an exact
+integer identity over 16-bit halves for multiplication, and an
+unsigned-magnitude quotient/remainder identity with a final sign fix-up for
+division, including the soundness argument for the spec's own `HI =
+2^32-1` product-attack rejection.
 
 ## Why RV32, not RV64
 

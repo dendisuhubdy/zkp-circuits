@@ -288,3 +288,75 @@ fn cpu_trace_limbs_and_counts_every_load_store_address() {
     let nibble_total: u64 = nibble.and.iter().sum();
     assert_eq!(nibble_total as usize, 2 * mem_rows.len());
 }
+
+/// M2.6 mul family: `mul`/`mulhu` pay the standard 12 (A0..3/B0..3/C0..3, `g_ab`/`g_c` both
+/// include `is_mul`) plus 4 (`T0..3`, LO's own limbs, unconditional on every mul-family row
+/// — this is the fix that pins `CARRY` even when the row doesn't select `LO` as its output,
+/// see the `alu` module doc comment) plus 3 (`S1..3`, `CARRY`'s own limbs) = 19, no AND4
+/// (neither needs a sign bit). `mulh` additionally extracts both `SA` and `SB` (dummy +
+/// real each = 4 AND4); `mulhsu` extracts only `SA` (2 AND4, since it treats `B` as
+/// unsigned) — this is the exact per-op lookup-gate accounting the M2.4 table established
+/// for the RV32I ops, extended to M2.6.
+#[test]
+fn mul_family_lookup_counts_per_op() {
+    let cases = [
+        (AluOp::Mul, 0xdead_beefu32, 0x1234_5678u32, 19usize, 0usize),
+        (AluOp::Mulhu, 0xffff_ffffu32, 0xffff_ffffu32, 19, 0),
+        (AluOp::Mulh, (-2i32) as u32, (-3i32) as u32, 19, 4),
+        (AluOp::Mulhsu, (-1i32) as u32, 7u32, 19, 2),
+    ];
+    for (op, a, b, want_range, want_nibble) in cases {
+        let mut range = RangeCounts::default();
+        let mut nibble = NibbleCounts::default();
+        let c = op.eval(a, b);
+        let mut row = vec![F::ZERO; alu::col::WIDTH];
+        fill_row(&mut row, &AluEvent { op, a, b, c }, &mut range, &mut nibble);
+        assert_eq!(range.range.iter().sum::<u64>() as usize, want_range, "{op:?} RANGE8 count");
+        let nibble_total: u64 = nibble.and.iter().sum::<u64>() + nibble.or.iter().sum::<u64>() + nibble.xor.iter().sum::<u64>();
+        assert_eq!(nibble_total as usize, want_nibble, "{op:?} AND4/OR4/XOR4 count");
+    }
+}
+
+/// M2.6 div family: every op pays the standard 12 (A0..3/B0..3/C0..3) plus 8 (`Q0..3`/
+/// `S0..3`, the quotient/remainder core limbs, unconditional on every `is_div` row
+/// regardless of `DIVZ`) = 20, plus (only when `B != 0`, `normal` gated) 4 more for the
+/// `R < |B|` diff limbs = 24. `div`/`rem` additionally extract both `SA` and `SB` (4 AND4);
+/// `divu`/`remu` extract neither.
+#[test]
+fn div_family_lookup_counts_per_op() {
+    // B != 0: the R < |B| diff-limb check fires.
+    let cases = [
+        (AluOp::Divu, 10u32, 3u32, 24usize, 0usize),
+        (AluOp::Remu, 10u32, 3u32, 24, 0),
+        (AluOp::Div, (-7i32) as u32, 2u32, 24, 4),
+        (AluOp::Rem, (-7i32) as u32, 2u32, 24, 4),
+    ];
+    for (op, a, b, want_range, want_nibble) in cases {
+        let mut range = RangeCounts::default();
+        let mut nibble = NibbleCounts::default();
+        let c = op.eval(a, b);
+        let mut row = vec![F::ZERO; alu::col::WIDTH];
+        fill_row(&mut row, &AluEvent { op, a, b, c }, &mut range, &mut nibble);
+        assert_eq!(range.range.iter().sum::<u64>() as usize, want_range, "{op:?} RANGE8 count (B != 0)");
+        let nibble_total: u64 = nibble.and.iter().sum::<u64>() + nibble.or.iter().sum::<u64>() + nibble.xor.iter().sum::<u64>();
+        assert_eq!(nibble_total as usize, want_nibble, "{op:?} AND4 count (B != 0)");
+    }
+    // B == 0 (DIVZ): the R < |B| diff-limb check does not fire (nothing to compare
+    // against), dropping 4 RANGE8 lookups relative to the B != 0 case above.
+    let divz_cases = [
+        (AluOp::Divu, 10u32, 0u32, 20usize, 0usize),
+        (AluOp::Remu, 10u32, 0u32, 20, 0),
+        (AluOp::Div, (-7i32) as u32, 0u32, 20, 4),
+        (AluOp::Rem, (-7i32) as u32, 0u32, 20, 4),
+    ];
+    for (op, a, b, want_range, want_nibble) in divz_cases {
+        let mut range = RangeCounts::default();
+        let mut nibble = NibbleCounts::default();
+        let c = op.eval(a, b);
+        let mut row = vec![F::ZERO; alu::col::WIDTH];
+        fill_row(&mut row, &AluEvent { op, a, b, c }, &mut range, &mut nibble);
+        assert_eq!(range.range.iter().sum::<u64>() as usize, want_range, "{op:?} RANGE8 count (B == 0)");
+        let nibble_total: u64 = nibble.and.iter().sum::<u64>() + nibble.or.iter().sum::<u64>() + nibble.xor.iter().sum::<u64>();
+        assert_eq!(nibble_total as usize, want_nibble, "{op:?} AND4 count (B == 0)");
+    }
+}

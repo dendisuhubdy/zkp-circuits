@@ -24,8 +24,8 @@ growing its own proof system.
 ```
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
-cargo run --release     # the narrated demo, ~5-6 minutes wall time (eleven proofs, one at production FRI parameters)
-cargo test              # 70 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
+cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
+cargo test              # 81 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -200,9 +200,10 @@ boundary: `docs/03-privacy.md`.
    disagree, the AIR is wrong.
 3. `src/tables/cpu.rs` — one row per cycle, fetch/decode-selectors/pc.
 4. `src/tables/memory.rs` — registers and RAM in one sorted table.
-5. `src/tables/alu.rs` — byte-limb arithmetic, shifts, compares (52 main
-   columns; RANGE8 limb checks are op-gated — see `docs/02` for the exact
-   per-op lookup counts).
+5. `src/tables/alu.rs` — byte-limb arithmetic, shifts, compares, and (M2.6)
+   the RV32M extension as exact integer identities (64 main columns; RANGE8
+   limb checks are op-gated — see `docs/02` for the exact per-op lookup
+   counts).
 6. `src/machine.rs` — the Plonky3 config, tiers, `prove`/`verify`.
 7. `src/notes.rs`, `src/viewing.rs`, `src/ledger.rs` — keys, notes, envelopes,
    disclosures, and the simulated chain the transfer guest is checked against.

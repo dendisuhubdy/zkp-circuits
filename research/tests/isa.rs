@@ -19,6 +19,40 @@ fn alu_ops_match_reference_semantics() {
 }
 
 #[test]
+fn m_extension_matches_riscv_semantics() {
+    assert_eq!(AluOp::Mul.eval(0xffff_ffff, 2), 0xffff_fffe);
+    assert_eq!(AluOp::Mulhu.eval(0xffff_ffff, 0xffff_ffff), 0xffff_fffe);
+    assert_eq!(AluOp::Mulh.eval((-2i32) as u32, (-3i32) as u32), 0);
+    assert_eq!(AluOp::Mulhsu.eval((-1i32) as u32, 1), 0xffff_ffff);
+    assert_eq!(AluOp::Divu.eval(10, 0), 0xffff_ffff);
+    assert_eq!(AluOp::Remu.eval(10, 0), 10);
+    assert_eq!(AluOp::Div.eval(0x8000_0000, 0xffff_ffff), 0x8000_0000);
+    assert_eq!(AluOp::Rem.eval(0x8000_0000, 0xffff_ffff), 0);
+    assert_eq!(AluOp::Divu.eval(10, 3), 3);
+    assert_eq!(AluOp::Remu.eval(10, 3), 1);
+    // DIV/REM by zero, signed side too.
+    assert_eq!(AluOp::Div.eval((-5i32) as u32, 0), 0xffff_ffff);
+    assert_eq!(AluOp::Rem.eval((-5i32) as u32, 0), (-5i32) as u32);
+    // ordinary signed division/remainder, truncating toward zero.
+    assert_eq!(AluOp::Div.eval((-7i32) as u32, 2), (-3i32) as u32);
+    assert_eq!(AluOp::Rem.eval((-7i32) as u32, 2), (-1i32) as u32);
+    assert_eq!(AluOp::Div.eval((-4i32) as u32, 2), (-2i32) as u32);
+    assert_eq!(AluOp::Rem.eval((-4i32) as u32, 2), 0);
+}
+
+#[test]
+fn m_extension_is_register_register_only_alu_imm_rejects_reserved_shift_funct7() {
+    // The immediate opcode has no funct7 concept for non-shift ops (those bits are part of
+    // the 12-bit immediate); the only place funct7 is meaningful in an I-type ALU encoding
+    // is the shift-immediate family (SLLI/SRLI/SRAI), where it must be 0 or 0x20. This locks
+    // in that funct7 = 1 (the M-extension's selector on the R-type opcode) is never a valid
+    // shift-immediate encoding: `slli x1, x2, 5` = 0x0051_1093; forcing its funct7 bits to 1
+    // (reserved, matching neither SLLI's 0 nor SRAI's 0x20) must be rejected.
+    let w = 0x0051_1093 | (1 << 25);
+    assert!(Instr::decode(w).is_err());
+}
+
+#[test]
 fn encode_decode_roundtrip_every_variant() {
     let cases = vec![
         Instr::Lui { rd: 5, imm: 0xdead_b000 },
@@ -41,6 +75,14 @@ fn encode_decode_roundtrip_every_variant() {
         Instr::AluImm { op: AluOp::Sltu, rd: 1, rs1: 1, imm: 1 },
         Instr::AluReg { op: AluOp::Sub, rd: 9, rs1: 10, rs2: 11 },
         Instr::AluReg { op: AluOp::Sra, rd: 9, rs1: 10, rs2: 11 },
+        Instr::AluReg { op: AluOp::Mul, rd: 9, rs1: 10, rs2: 11 },
+        Instr::AluReg { op: AluOp::Mulh, rd: 9, rs1: 10, rs2: 11 },
+        Instr::AluReg { op: AluOp::Mulhu, rd: 9, rs1: 10, rs2: 11 },
+        Instr::AluReg { op: AluOp::Mulhsu, rd: 9, rs1: 10, rs2: 11 },
+        Instr::AluReg { op: AluOp::Div, rd: 9, rs1: 10, rs2: 11 },
+        Instr::AluReg { op: AluOp::Divu, rd: 9, rs1: 10, rs2: 11 },
+        Instr::AluReg { op: AluOp::Rem, rd: 9, rs1: 10, rs2: 11 },
+        Instr::AluReg { op: AluOp::Remu, rd: 9, rs1: 10, rs2: 11 },
         Instr::Ecall,
     ];
     for i in cases {
@@ -75,6 +117,12 @@ fn known_encodings_match_the_riscv_spec() {
     assert_eq!(Instr::Store { rs1: 2, rs2: 5, imm: 4, width: Width::Byte }.encode(), 0x0051_0223);
     // sh x5, 4(x2) = 0x00511223
     assert_eq!(Instr::Store { rs1: 2, rs2: 5, imm: 4, width: Width::Half }.encode(), 0x0051_1223);
+    // mul x3, x1, x2 = 0x022081b3 (funct7 = 1, funct3 = 0)
+    assert_eq!(Instr::AluReg { op: AluOp::Mul, rd: 3, rs1: 1, rs2: 2 }.encode(), 0x0220_81b3);
+    // div x3, x1, x2 = 0x0220c1b3 (funct7 = 1, funct3 = 4)
+    assert_eq!(Instr::AluReg { op: AluOp::Div, rd: 3, rs1: 1, rs2: 2 }.encode(), 0x0220_c1b3);
+    // remu x3, x1, x2 = 0x0220f1b3 (funct7 = 1, funct3 = 7)
+    assert_eq!(Instr::AluReg { op: AluOp::Remu, rd: 3, rs1: 1, rs2: 2 }.encode(), 0x0220_f1b3);
 }
 
 #[test]

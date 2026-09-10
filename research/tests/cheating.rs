@@ -4,7 +4,7 @@
 //! visible across AIR instances, like an unpaid extra table multiplicity) the
 //! global lookup-balance check; in release builds it produces a proof that
 //! fails to verify. `rejects` accepts any of these — and nothing else.
-use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::Matrix;
 use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::emulator::{execute, SLOT_W};
@@ -480,5 +480,189 @@ fn a_sb_that_changes_a_byte_outside_its_offset_is_rejected() {
     let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
     // Also corrupt byte 2 (outside off=1), leaving byte 1 correct.
     t.cpu.values[sb_row * w + cpu::col::MERGED0 + 2] = F::from_u32(0x00);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+// ---------------------------------------------------------------------------------------
+// M2.6: the RV32M extension.
+// ---------------------------------------------------------------------------------------
+
+fn find_alu_row(t: &Traces, op: rand_zkvm::isa::AluOp) -> usize {
+    let w = alu::col::WIDTH;
+    (0..t.alu.height())
+        .find(|r| t.alu.values[r * w + alu::col::FLAG0 + op.code() as usize] == F::ONE)
+        .unwrap_or_else(|| panic!("no ALU row for {op:?}"))
+}
+
+/// The spec's own `HI = 2^32-1, LO = A*B + 1` product attack: `MULHU(3, 4)` has true
+/// `HI = 0` (3*4 = 12 fits in 32 bits). Forging `HI = 0xffff_ffff` needs `CARRY =
+/// 0xffff_ffff` (since `T2 = 0` here), but `CARRY`'s own decomposition is only 3 RANGE8
+/// limbs (`S1..3`, bounding it to `< 2^24`) — a 4-byte value has no valid encoding there,
+/// so `CARRY - carry_limbs = 0` fails directly.
+#[test]
+fn mulhu_cannot_claim_hi_equals_2_32_minus_1_for_a_small_product() {
+    let mut a = Assembler::new(0);
+    a.extend(li(5, 3)); a.extend(li(6, 4));
+    a.push(mulhu(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    assert_eq!(e.outputs[0], 0);
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let w = alu::col::WIDTH;
+    let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulhu);
+    let forged_carry = 0xffff_ffffu32; // would make HI = T2 + CARRY = 0xffff_ffff
+    t.alu.values[row * w + alu::col::Q0 + 3] = F::from_u32(forged_carry); // CARRY column
+    // Only 3 limb columns exist for CARRY (S1..3): the forged value's low 3 bytes, dropping
+    // the 4th — carry_limbs can only ever reconstruct a < 2^24 value.
+    t.alu.values[row * w + alu::col::S0 + 1] = F::from_u32(forged_carry & 0xff);
+    t.alu.values[row * w + alu::col::S0 + 2] = F::from_u32((forged_carry >> 8) & 0xff);
+    t.alu.values[row * w + alu::col::S0 + 3] = F::from_u32((forged_carry >> 16) & 0xff);
+    t.alu.values[row * w + alu::col::C] = F::from_u32(0xffff_ffff);
+    for k in 0..4 { t.alu.values[row * w + alu::col::C0 + k] = F::from_u32(0xff); }
+    t.public_values[cpu::pv::OUT0] = F::from_u32(0xffff_ffff);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// A supplementary test for the fix this table needed beyond the spec sketch: `LO`'s own
+/// byte limbs (`T0..3`) are range-checked *unconditionally* on every mul-family row, not
+/// just `mul` rows — without that, a `MULHU`-only row's `HI = T2 + CARRY` check alone does
+/// not pin `CARRY` (see the `alu` module doc comment's uniqueness argument), so a forged
+/// `CARRY` that still fits the 3-limb `< 2^24` bound (unlike the attack above) would
+/// otherwise pass. `MULHU(3, 4)`: honest `CARRY = 0`; forging `CARRY = 100` (well within
+/// the 3-limb bound) must still be rejected, this time via the `LO` recomposition
+/// (`word(T0..3) = T0 + 2^16*T1 - 2^32*CARRY`) disagreeing.
+#[test]
+fn a_small_in_range_forged_carry_on_a_mulhu_row_is_still_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(5, 3)); a.extend(li(6, 4));
+    a.push(mulhu(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    assert_eq!(e.outputs[0], 0);
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let w = alu::col::WIDTH;
+    let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulhu);
+    let forged_carry = 100u32; // < 2^24, so the CARRY-limb check alone does not catch this
+    t.alu.values[row * w + alu::col::Q0 + 3] = F::from_u32(forged_carry);
+    t.alu.values[row * w + alu::col::S0 + 1] = F::from_u32(forged_carry & 0xff);
+    t.alu.values[row * w + alu::col::S0 + 2] = F::ZERO;
+    t.alu.values[row * w + alu::col::S0 + 3] = F::ZERO;
+    t.alu.values[row * w + alu::col::C] = F::from_u32(100); // T2 (= 0 here) + forged CARRY
+    t.alu.values[row * w + alu::col::C0] = F::from_u32(100);
+    t.public_values[cpu::pv::OUT0] = F::from_u32(100);
+    // T0..3 (LO's own limbs) are left at their honest value (12, from the real 3*4 = 12),
+    // which now disagrees with `T0 + 2^16*T1 - 2^32*CARRY` for the forged CARRY.
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// `R >= B`: `REMU(17, 5) = 2` (`17 = 3*5 + 2`). Re-decompose as `q=2, r=7` — the core
+/// identity `|A| = Q*|B| + R` still holds (`17 = 2*5 + 7`) — but `7 >= 5` violates
+/// `R < |B|`. Kept otherwise self-consistent (`C`, the magnitude-zero gadget's `INV`) so the
+/// only constraint that can catch this is the `R < |B|` range check on `|B| - R - 1`, which
+/// has no valid witness once `R >= |B|` (the difference is not representable as 4
+/// non-negative bytes for any choice of the diff-limb columns).
+#[test]
+fn a_remainder_not_smaller_than_the_divisor_is_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(5, 17)); a.extend(li(6, 5));
+    a.push(remu(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    assert_eq!(e.outputs[0], 2);
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let w = alu::col::WIDTH;
+    let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Remu);
+    t.alu.values[row * w + alu::col::Q0] = F::from_u32(2); // quotient core: 3 -> 2
+    t.alu.values[row * w + alu::col::S0] = F::from_u32(7); // remainder core: 2 -> 7 (>= B = 5)
+    t.alu.values[row * w + alu::col::C] = F::from_u32(7);
+    t.alu.values[row * w + alu::col::C0] = F::from_u32(7);
+    t.alu.values[row * w + alu::col::INV] = F::from_u32(7).inverse(); // keep the mag-zero gadget honest
+    t.public_values[cpu::pv::OUT0] = F::from_u32(7);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// A wrong `DIVZ` on a nonzero divisor: `DIVU(10, 3) = 3` (`B = 3 != 0`). The naive
+/// single-equation is-zero gadget (`B*INVB = 1-DIVZ`) alone is bypassable — set `INVB = 0`
+/// and `DIVZ = 1`, satisfying `3*0 = 1-1 = 0` — which is exactly why the table also asserts
+/// `DIVZ*B = 0`: with `B = 3` and `DIVZ = 1` forged, `1*3 = 3 != 0` catches it.
+#[test]
+fn a_wrong_divz_on_a_nonzero_divisor_is_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(5, 10)); a.extend(li(6, 3));
+    a.push(divu(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    assert_eq!(e.outputs[0], 3);
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let w = alu::col::WIDTH;
+    let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Divu);
+    t.alu.values[row * w + alu::col::DIVZ] = F::ONE; // B = 3 != 0, but claim DIVZ
+    t.alu.values[row * w + alu::col::INVB] = F::ZERO; // ... and try to smuggle it past B*INVB=1-DIVZ
+    t.alu.values[row * w + alu::col::C] = F::from_u32(0xffff_ffff);
+    for k in 0..4 { t.alu.values[row * w + alu::col::C0 + k] = F::from_u32(0xff); }
+    t.public_values[cpu::pv::OUT0] = F::from_u32(0xffff_ffff);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// M2.6 regression: the padding-row invariant (`(1-IS_REAL)*MULT = 0`, `a_tuple_forged_
+/// through_an_alu_padding_row_is_rejected`'s Add-flag case) generalizes to the new,
+/// higher-indexed M-extension flags too — the one-hot sum/boolean loop (`for i in
+/// 0..AluOp::COUNT`) must actually run over all 19 flags, not silently stay at the old 11.
+/// Plants a forged `(Mul, a_in, 0, forged)` tuple (flag index 11) on `muldiv`'s padding row,
+/// mirroring `forge_fib_output_through_an_alu_padding_row`'s structure but targeting `Mul`
+/// specifically.
+#[test]
+fn a_mul_tuple_forged_on_an_alu_padding_row_is_rejected() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::muldiv();
+    let e = execute(&p, &[], 10_000).unwrap();
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let wa = alu::col::WIDTH;
+    // Retire one honest provider of a real `Mul` tuple, plant a forged one on padding.
+    let honest_row = (0..t.alu.height())
+        .find(|r| {
+            let row = &t.alu.values[r * wa..(r + 1) * wa];
+            row[alu::col::FLAG0 + rand_zkvm::isa::AluOp::Mul.code() as usize] == F::ONE && row[alu::col::MULT] != F::ZERO
+        })
+        .expect("muldiv issues a real Mul");
+    let (a_in, honest_c) = (t.alu.values[honest_row * wa + alu::col::A], t.alu.values[honest_row * wa + alu::col::C]);
+    t.alu.values[honest_row * wa + alu::col::MULT] = F::ZERO;
+    let pad = t.alu.height() - 1;
+    assert_eq!(t.alu.values[pad * wa + alu::col::IS_REAL], F::ZERO, "last alu row is padding");
+    let forged = honest_c + F::ONE;
+    t.alu.values[pad * wa + alu::col::A] = a_in;
+    t.alu.values[pad * wa + alu::col::B] = F::ZERO;
+    t.alu.values[pad * wa + alu::col::C] = forged;
+    t.alu.values[pad * wa + alu::col::A0] = a_in;
+    t.alu.values[pad * wa + alu::col::C0] = forged;
+    t.alu.values[pad * wa + alu::col::MULT] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// A sign flip on `MULH`: `MULH(-2, -3) = 0` (`(-2)*(-3) = 6`, fits in the low word). Flip
+/// `SA` (claim `A`'s sign is positive when it is actually negative) while leaving the
+/// sign-correction `borrow` and `C` as the honest solver found them — the `HI_signed = HI -
+/// SA*B - SB*A + borrow*2^32` identity now disagrees with `C`.
+#[test]
+fn a_sign_flipped_mulh_is_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(5, -2)); a.extend(li(6, -3)); // (-2)*(-3) = 6, MULH = 0
+    a.push(mulh(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
+    let p = a.assemble();
+    let m = Machine::new(FriProfile::Test);
+    let e = execute(&p, &[], 10_000).unwrap();
+    assert_eq!(e.outputs[0], 0);
+    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let w = alu::col::WIDTH;
+    let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulh);
+    assert_eq!(t.alu.values[row * w + alu::col::SA], F::ONE, "A = -2 is negative");
+    t.alu.values[row * w + alu::col::SA] = F::ZERO; // flip A's claimed sign
+    // `C` (0) and `borrow` are left as the honest solver set them: `rejects()` only needs a
+    // genuine mismatch, and the public output stays whatever the (now-inconsistent) row
+    // claims so `verify` doesn't reject on a public-value mismatch instead.
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }

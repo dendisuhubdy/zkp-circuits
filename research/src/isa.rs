@@ -16,11 +16,19 @@ pub const NUM_OUTPUTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
-pub enum AluOp { Add = 0, Sub = 1, And = 2, Or = 3, Xor = 4, Sll = 5, Srl = 6, Sra = 7, Slt = 8, Sltu = 9, Eq = 10 }
+pub enum AluOp {
+    Add = 0, Sub = 1, And = 2, Or = 3, Xor = 4, Sll = 5, Srl = 6, Sra = 7, Slt = 8, Sltu = 9, Eq = 10,
+    // M2.6: the RV32M extension. Register-register only (`OP_ALU` with `funct7 = 1`) — RISC-V
+    // has no immediate form of any of these.
+    Mul = 11, Mulh = 12, Mulhu = 13, Mulhsu = 14, Div = 15, Divu = 16, Rem = 17, Remu = 18,
+}
 
 impl AluOp {
-    pub const COUNT: usize = 11;
-    pub const ALL: [AluOp; 11] = [AluOp::Add, AluOp::Sub, AluOp::And, AluOp::Or, AluOp::Xor, AluOp::Sll, AluOp::Srl, AluOp::Sra, AluOp::Slt, AluOp::Sltu, AluOp::Eq];
+    pub const COUNT: usize = 19;
+    pub const ALL: [AluOp; 19] = [
+        AluOp::Add, AluOp::Sub, AluOp::And, AluOp::Or, AluOp::Xor, AluOp::Sll, AluOp::Srl, AluOp::Sra, AluOp::Slt, AluOp::Sltu, AluOp::Eq,
+        AluOp::Mul, AluOp::Mulh, AluOp::Mulhu, AluOp::Mulhsu, AluOp::Div, AluOp::Divu, AluOp::Rem, AluOp::Remu,
+    ];
     pub fn code(self) -> u32 { self as u32 }
     pub fn from_code(c: u32) -> AluOp { Self::ALL[c as usize] }
     /// Reference semantics. The ALU table proves exactly this function.
@@ -38,6 +46,22 @@ impl AluOp {
             AluOp::Slt => ((a as i32) < (b as i32)) as u32,
             AluOp::Sltu => (a < b) as u32,
             AluOp::Eq => (a == b) as u32,
+            AluOp::Mul => a.wrapping_mul(b),
+            AluOp::Mulh => (((a as i32 as i64) * (b as i32 as i64)) >> 32) as u32,
+            AluOp::Mulhu => (((a as u64) * (b as u64)) >> 32) as u32,
+            AluOp::Mulhsu => (((a as i32 as i64) * (b as u64 as i64)) >> 32) as u32,
+            AluOp::Div => {
+                if b == 0 { 0xffff_ffff }
+                else if a == 0x8000_0000 && b == 0xffff_ffff { 0x8000_0000 }
+                else { ((a as i32).wrapping_div(b as i32)) as u32 }
+            }
+            AluOp::Divu => if b == 0 { 0xffff_ffff } else { a / b },
+            AluOp::Rem => {
+                if b == 0 { a }
+                else if a == 0x8000_0000 && b == 0xffff_ffff { 0 }
+                else { ((a as i32).wrapping_rem(b as i32)) as u32 }
+            }
+            AluOp::Remu => if b == 0 { a } else { a % b },
         }
     }
 }
@@ -81,12 +105,31 @@ const OP_LUI: u32 = 0x37; const OP_AUIPC: u32 = 0x17; const OP_JAL: u32 = 0x6f; 
 const OP_BRANCH: u32 = 0x63; const OP_LOAD: u32 = 0x03; const OP_STORE: u32 = 0x23;
 const OP_ALUI: u32 = 0x13; const OP_ALU: u32 = 0x33; const OP_SYSTEM: u32 = 0x73;
 
+/// M-extension `funct3` order (standard RV32M): `MUL=0 MULH=1 MULHSU=2 MULHU=3 DIV=4 DIVU=5
+/// REM=6 REMU=7`, always `funct7 = 1`. Register-register only — there is no RV32M immediate
+/// form, so this is only ever reached from `Instr::AluReg`'s encode/decode path.
+fn m_funct(op: AluOp) -> (u32, u32) {
+    let f3 = match op {
+        AluOp::Mul => 0, AluOp::Mulh => 1, AluOp::Mulhsu => 2, AluOp::Mulhu => 3,
+        AluOp::Div => 4, AluOp::Divu => 5, AluOp::Rem => 6, AluOp::Remu => 7,
+        _ => unreachable!("m_funct called on a non-M-extension op"),
+    };
+    (f3, 1)
+}
+fn m_from_funct3(f3: u32) -> Result<AluOp, DecodeError> {
+    Ok(match f3 {
+        0 => AluOp::Mul, 1 => AluOp::Mulh, 2 => AluOp::Mulhsu, 3 => AluOp::Mulhu,
+        4 => AluOp::Div, 5 => AluOp::Divu, 6 => AluOp::Rem, 7 => AluOp::Remu,
+        _ => return Err(DecodeError::Funct(f3)),
+    })
+}
 fn alu_funct(op: AluOp) -> (u32, u32) {
     // (funct3, funct7)
     match op {
         AluOp::Add => (0, 0), AluOp::Sub => (0, 0x20), AluOp::Sll => (1, 0), AluOp::Slt => (2, 0), AluOp::Sltu => (3, 0),
         AluOp::Xor => (4, 0), AluOp::Srl => (5, 0), AluOp::Sra => (5, 0x20), AluOp::Or => (6, 0), AluOp::And => (7, 0),
         AluOp::Eq => unreachable!("EQ is not an encodable instruction"),
+        AluOp::Mul | AluOp::Mulh | AluOp::Mulhu | AluOp::Mulhsu | AluOp::Div | AluOp::Divu | AluOp::Rem | AluOp::Remu => m_funct(op),
     }
 }
 fn alu_from_funct(f3: u32, f7: u32, imm_form: bool) -> Result<AluOp, DecodeError> {
@@ -164,7 +207,13 @@ impl Instr {
                 let imm = if shift { if f7 != 0 && f7 != 0x20 { return Err(DecodeError::Shamt(f7)); } rs2 } else { imm_i };
                 Instr::AluImm { op, rd, rs1, imm }
             }
-            OP_ALU => Instr::AluReg { op: alu_from_funct(f3, f7, false)?, rd, rs1, rs2 },
+            OP_ALU => {
+                // funct7 = 1 selects the M extension exclusively; every other funct7 goes
+                // through the RV32I decode table, which already rejects funct7 = 1 (no
+                // pattern in `alu_from_funct` matches it).
+                let op = if f7 == 1 { m_from_funct3(f3)? } else { alu_from_funct(f3, f7, false)? };
+                Instr::AluReg { op, rd, rs1, rs2 }
+            }
             OP_SYSTEM if w == OP_SYSTEM => Instr::Ecall,
             _ => return Err(DecodeError::Opcode(op)),
         })

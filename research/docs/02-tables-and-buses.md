@@ -183,20 +183,34 @@ first read of a fresh address must return 0. Receives `(space, addr, ts,
 value, is_write)` on `MEMORY` with count `is_real`. Sends four `RANGE8`
 lookups per row (the gap limbs).
 
-## `alu` — main, `col::WIDTH = 52`
+## `alu` — main, `col::WIDTH = 64`
 
-Columns: 11 one-hot op flags (`add sub and or xor sll srl sra slt sltu eq`),
-`a b c`, three 4-limb decompositions `a0..3 b0..3 c0..3`, scratch limbs
-`q0..3` (shift quotient / `sll` high word / bitwise `a`'s low nibbles),
-`s0..3` (compare difference / right-shift remainder / bitwise `b`'s low
-nibbles), `t0..3` (`pow2 − 1 − remainder` / bitwise `c`'s low nibbles), sign
-bits `sa sb`, `shh` (the shift amount's bit 4), `pow2 = 2^sh`, four adder
-carries, an inverse column for `eq`, `is_real`, `mult` (how many times the
-CPU hit this exact tuple), and three more isolated-extraction scratch
-columns: `ah3` (`a0+3`'s high nibble, `slt`/`sra`), `bh_n` (`b0+3`'s high
-nibble on `slt` rows for `sb`, or `b0`'s high nibble on shift rows for
-`shh` — the two never collide since `slt` and shift never co-occur), and
-`qh3` (`sll`'s `q0+3`'s high nibble, its overflow check).
+Columns: 19 one-hot op flags (`add sub and or xor sll srl sra slt sltu eq`
+plus, since M2.6, `mul mulh mulhu mulhsu div divu rem remu`), `a b c`, three
+4-limb decompositions `a0..3 b0..3 c0..3`, scratch limbs `q0..3` (shift
+quotient / `sll` high word / bitwise `a`'s low nibbles / M2.6 `mul`'s three
+cross-term products + carry, as whole field values, not byte limbs / M2.6
+`div`'s quotient-magnitude limbs), `s0..3` (compare difference / right-shift
+remainder / bitwise `b`'s low nibbles / M2.6 `mul`'s sign-correction borrow
+(`s0`) plus its carry's own three byte limbs (`s1..3`) / M2.6 `div`'s
+remainder-magnitude limbs), `t0..3` (`pow2 − 1 − remainder` / bitwise `c`'s
+low nibbles / M2.6 `mul`'s `LO` byte limbs, populated on *every* mul-family
+row regardless of which op is selected — see the per-op reuse table below),
+sign bits `sa sb` (M2.6: also used by `mulh`/`mulhsu`/`div`/`rem`), `shh`
+(the shift amount's bit 4 / M2.6 `div`'s `R < |B|` diff-byte 0), `pow2 =
+2^sh` (M2.6 `div`'s diff-byte 1), four adder carries, an inverse column for
+`eq` (M2.6: also `div`'s magnitude-zero-check inverse), `is_real`, `mult`
+(how many times the CPU hit this exact tuple), three more isolated-extraction
+scratch columns — `ah3` (`a0+3`'s high nibble, `slt`/`sra`/M2.6
+`mulh`/`mulhsu`/`div`/`rem`), `bh_n` (`b0+3`'s high nibble on `slt`/M2.6
+`mulh`/`div`/`rem` rows for `sb`, or `b0`'s high nibble on shift rows for
+`shh` — the roles never collide, since `slt`/shift/`mul`-family/`div`-family
+never co-occur), `qh3` (`sll`'s `q0+3`'s high nibble, its overflow check /
+M2.6 `div`'s magnitude-zero flag, reusing the same is-zero-gadget pattern as
+`eq`'s `inv`) — and, new in M2.6, `divz` (`[b = 0]`, a two-constraint
+is-zero gadget on `b`/`invb`), `invb` (`b`'s inverse when `b != 0`), and
+`db2`/`db3` (the third and fourth byte of `div`'s `R < |B|` diff, alongside
+the reused `shh`/`pw` for the first two).
 
 Constraints: exactly one op flag set per real row; every limb decomposition
 recomposes to its word, and `a0..3`/`b0..3` are range-checked on `RANGE8`
@@ -289,6 +303,93 @@ be forced to zero wherever the message columns are unconstrained.**
 are preprocessed with no padding rows at all — every one of their rows is a
 genuine table entry, so their `table_entry` counts are never structurally
 "unconstrained" the way a consumer's padding row is.
+
+### M2.6 — the RV32M extension
+
+`AluOp` grows from 11 to 19 variants (`Mul Mulh Mulhu Mulhsu Div Divu Rem
+Remu`, codes 11–18); every later column index in the table above shifts by
++8 from the M2.3/M2.4 layout. `g_ab`/`g_c` are unchanged — `is_mul`/`is_div`
+are not excluded, so `a0..3`/`b0..3`/`c0..3` keep their ordinary `RANGE8`
+checks on mul/div rows exactly like `add`/`sub`, since `c` there is a
+genuine 32-bit arithmetic result, not a compare bit or a bitwise byte the
+nibble table already binds.
+
+**Multiplication** (`mul mulh mulhu mulhsu`). Split `a = al + 2^16·ah`,
+`b = bl + 2^16·bh` (16-bit halves, sums of the existing byte limbs). The
+schoolbook identity `a·b = t0 + 2^16·t1 + 2^32·t2` (`t0=al·bl, t1=al·bh+
+ah·bl, t2=ah·bh`) is exact over the integers, and since `a·b ≤ (2^32-1)² <
+p`, it is an exact field equation too. Writing the true 64-bit product as
+`lo + 2^32·hi`, algebra gives `lo = t0 + 2^16·t1 - 2^32·carry` and
+`hi = t2 + carry` for `carry := hi - t2` (honestly `< 2^17`). `t0,t1,t2` are
+*forced* — not free — by the identity, given `al,ah,bl,bh < 2^16`; `carry`
+is the one free witness, bounded to `< 2^24` by its own 3-byte `RANGE8`
+decomposition (looser than the honest `< 2^17`, but sufficient — see the
+uniqueness argument below). The spec's own attack — claim `hi = 2^32-1`
+for a small product — is exactly what the 3-limb bound forecloses: a
+4-byte value has no valid 3-limb encoding
+(`tests/cheating.rs::mulhu_cannot_claim_hi_equals_2_32_minus_1_for_a_small_
+product`).
+
+That alone only pins `carry` on rows where the `mul` flag's own `c = lo`
+check actually fires — a `mulhu`-only row's `c = hi` check is *additive* in
+`carry` (not the `2^32`-amplified map `lo` gets), so a small forged `carry`
+gives a small, still-plausible, still-wrong `hi`
+(`tests/cheating.rs::a_small_in_range_forged_carry_on_a_mulhu_row_is_still_
+rejected` demonstrates exactly this against the naive design). The fix:
+`lo`'s own byte limbs (`t0..3`) are `RANGE8`-checked and pinned
+*unconditionally* on every mul-family row, not just `mul` rows — every op
+inherits the uniqueness argument regardless of which output it selects.
+Sign correction for `mulh`/`mulhsu`: `hi_signed = hi - sa·b - [mulh]·sb·a`
+(mod `2^32`, `mulhsu` uses only `sa`), with a single boolean `borrow`
+column reintroducing `2^32` on underflow — sufficient by a case analysis
+over `(sa,sb)` (`src/tables/alu.rs`'s module doc comment has the full
+argument). No dedicated `mul`/`div` overflow tracking beyond that: every
+term stays inside the field's `< p` bound throughout.
+
+**Division** (`div divu rem remu`). `|a|`, `|b|` are *expressions*
+(`a + sa·(2^32-2a)`, similarly for `b`), not separately byte-decomposed —
+deliberately: `t0..3` is `mul`'s `lo` limbs and `carry0..3` is the
+add/sub/cmp adder's own unconditionally-boolean carries, so neither is free
+for this purpose, and neither is needed, since `a`/`b`'s existing `RANGE8`
+checks plus `sa`/`sb` being genuine sign bits already bound `|a|`,`|b| <
+2^32`. `q` (quotient magnitude) and `r` (remainder magnitude) are their own
+`RANGE8`-decomposed limbs, satisfying `|a| = q·|b| + r` and `r < |b|`
+(checked via a direct `RANGE8` decomposition of `|b| - r - 1`, not a
+per-limb borrow chain — the same "small values can't wrap the field"
+argument as everywhere else in this table) whenever `b != 0`.
+`divz := [b = 0]` via a two-constraint is-zero gadget on `b`/`invb`
+(`b·invb = 1-divz` *and* `divz·b = 0` — the first equation alone is
+bypassable with `invb = 0`, which is exactly what
+`tests/cheating.rs::a_wrong_divz_on_a_nonzero_divisor_is_rejected` forges).
+Final sign fix-up selects `mag` (`q` for div/divu, `r` for rem/remu) and
+negates it when the op-appropriate sign flag calls for it, gated by
+`1 - qh3` where `qh3 := [mag = 0]` (another is-zero gadget, reusing
+`qh3`/`inv`): without that gate the naive `mag + (2^32 - 2·mag)` formula
+gives exactly `2^32` (unrepresentable) whenever `mag = 0` and negation is
+called for — an ordinary case (`REM(-4, 2) = 0`), not just `i32::MIN / -1`.
+That MIN/-1 overflow case needs no dedicated selector at all: `|MIN| =
+2^31`, `|-1| = 1`, so the unsigned core already gives `q = 2^31, r = 0`,
+and leaving `2^31` unnegated (same-sign quotient) *is* `0x8000_0000` in
+32-bit arithmetic — representing `+2^31` is impossible in two's complement,
+so "don't negate" and "wrap to MIN" coincide by construction.
+
+Per-op lookup counts (`RANGE8` + `AND4`, counted directly from `fill_row`'s
+`RangeCounts`/`NibbleCounts` calls — see `tests/tables.rs::mul_family_
+lookup_counts_per_op` and `::div_family_lookup_counts_per_op`, which assert
+these totals against the honest witness `fill_row` actually builds):
+
+| Op | Standard `a0..3`/`b0..3`/`c0..3` | Op-specific `RANGE8` | Sign-bit `AND4` | Total/row |
+|---|---|---|---|---|
+| `mul`/`mulhu` | 12 | 7 (`t0..3` + `carry`'s `s1..3`) | 0 | **19** |
+| `mulhsu` | 12 | 7 | 2 (`sa` only) | **21** |
+| `mulh` | 12 | 7 | 4 (`sa` and `sb`) | **23** |
+| `divu`/`remu` | 12 | 8 (`q0..3`/`s0..3`) + 4 if `b != 0` (`r < \|b\|` diff) | 0 | **24** (**20** if `b = 0`) |
+| `div`/`rem` | 12 | 8 + 4 if `b != 0` | 4 (`sa` and `sb`) | **28** (**24** if `b = 0`) |
+
+Well past the M2.4 ≤14-lookups/row target — an explicitly out-of-scope
+note for this task, not a miss: M2.6 is not held to the 56-column-width or
+14-lookup budgets that scoped M2.3/M2.4, since the RV32M flag growth alone
+(11→19 one-hot columns) exceeds them regardless of any lookup accounting.
 
 ## `range` — preprocessed, `pre::WIDTH = 3` + `col::WIDTH = 2`
 

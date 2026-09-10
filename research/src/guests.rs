@@ -198,6 +198,46 @@ pub fn sub_word_checksum() -> Program {
     a.assemble()
 }
 
+/// M2.6: exercises every `AluOp` M-extension variant. `out0` is an XOR fold of every
+/// result (mirrors `alu_mix`'s checksum style). Covers: an ordinary unsigned product
+/// (`MUL`), all three high-word forms on `-1 * -1` and `-1 * 7` (`MULH MULHU MULHSU`),
+/// ordinary unsigned division/remainder (`DIVU REMU`), a negative-dividend signed
+/// division/remainder that truncates toward zero (`DIV REM`), division by zero for both
+/// signed and unsigned forms, the `MIN / -1` signed overflow case, a negative dividend
+/// that divides evenly (remainder exactly zero — the case the remainder sign fix-up's
+/// zero-gate exists for), and a small negative dividend with a larger positive divisor
+/// (quotient exactly zero with opposite signs — the case the quotient sign fix-up's
+/// zero-gate exists for).
+pub fn muldiv() -> Program {
+    let mut a = Assembler::new(0);
+    a.extend(li(S0, 0)); // acc
+    a.extend(li(T0, 6)); a.extend(li(T1, 7));
+    let acc = |a: &mut Assembler| a.push(xor(S0, S0, T2));
+    a.push(mul(T2, T0, T1)); acc(&mut a);                  // 6*7 = 42
+    a.extend(li(T3, -1));                                  // 0xffff_ffff
+    a.push(mulh(T2, T3, T3)); acc(&mut a);                 // (-1)*(-1) = 1, mulh = 0
+    a.push(mulhu(T2, T3, T3)); acc(&mut a);                // 0xffffffff * 0xffffffff, high word nonzero
+    a.push(mulhsu(T2, T3, T1)); acc(&mut a);                // (-1) *s 7 *u
+    a.push(divu(T2, T0, T1)); acc(&mut a);                 // 6u/7u = 0
+    a.push(remu(T2, T0, T1)); acc(&mut a);                 // 6u%7u = 6
+    a.push(div(T2, T3, T1)); acc(&mut a);                  // -1/7 = 0 (truncates toward 0)
+    a.push(rem(T2, T3, T1)); acc(&mut a);                  // -1%7 = -1
+    a.push(divu(T2, T0, REG_ZERO)); acc(&mut a);           // 6u/0 = 0xffff_ffff
+    a.push(remu(T2, T0, REG_ZERO)); acc(&mut a);           // 6u%0 = 6
+    a.extend(li(T5, -2147483648i32));                      // 0x8000_0000 = i32::MIN
+    a.push(div(T2, T5, T3)); acc(&mut a);                  // MIN / -1 = MIN (signed overflow)
+    a.push(rem(T2, T5, T3)); acc(&mut a);                  // MIN % -1 = 0
+    a.extend(li(T4, -4)); a.extend(li(T6, 2));
+    a.push(div(T2, T4, T6)); acc(&mut a);                  // -4/2 = -2
+    a.push(rem(T2, T4, T6)); acc(&mut a);                  // -4%2 = 0, dividend negative
+    a.extend(li(T4, -3)); a.extend(li(T6, 10));
+    a.push(div(T2, T4, T6)); acc(&mut a);                  // -3/10 = 0, opposite signs
+    a.push(rem(T2, T4, T6)); acc(&mut a);                  // -3%10 = -3
+    a.extend(write_output(0, S0));
+    a.extend(halt());
+    a.assemble()
+}
+
 /// (name, program, private inputs)
 pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
     vec![
@@ -207,6 +247,7 @@ pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
         ("balance_check", balance_check(1000), vec![400, 250, 300, 75]),
         ("alu_mix", alu_mix(), vec![]),
         ("sub_word_checksum", sub_word_checksum(), vec![]),
+        ("muldiv", muldiv(), vec![]),
     ]
 }
 

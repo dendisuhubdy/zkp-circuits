@@ -181,11 +181,14 @@ fn alu_mix_covers_every_op_and_jalr() {
     let e = run(&p, &[]);
     assert!(e.halted);
 
-    // Every AluOp variant really reaches the ALU bus, `Eq` included — it has no encoding of
-    // its own, so it can only arrive through a branch.
+    // Every RV32I AluOp variant really reaches the ALU bus, `Eq` included — it has no
+    // encoding of its own, so it can only arrive through a branch. The M-extension variants
+    // (M2.6) are `alu_mix`'s successor's job — see `muldiv_covers_every_op`.
     let mut seen = std::collections::HashSet::new();
     for ev in &e.events { for a in &ev.alu { seen.insert(a.op); } }
-    for op in AluOp::ALL { assert!(seen.contains(&op), "{op:?} never executed"); }
+    for op in [AluOp::Add, AluOp::Sub, AluOp::And, AluOp::Or, AluOp::Xor, AluOp::Sll, AluOp::Srl, AluOp::Sra, AluOp::Slt, AluOp::Sltu, AluOp::Eq] {
+        assert!(seen.contains(&op), "{op:?} never executed");
+    }
 
     // Exactly one JALR, through a register target, linking pc + 4 and skipping one word.
     assert_eq!(e.events.iter().filter(|ev| ev.dec.is_jalr == 1).count(), 1);
@@ -210,4 +213,42 @@ fn alu_mix_covers_every_op_and_jalr() {
     // The `bad` and `skipped` arms both write 0x7ff, so 4 also proves neither ran.
     assert_eq!(e.outputs[1], 4);
     assert_eq!(e.outputs[2..], [0; 6]);
+}
+
+#[test]
+fn muldiv_covers_every_op() {
+    let p = guests::muldiv();
+    let e = run(&p, &[]);
+    assert!(e.halted);
+
+    let mut seen = std::collections::HashSet::new();
+    for ev in &e.events { for a in &ev.alu { seen.insert(a.op); } }
+    for op in [AluOp::Mul, AluOp::Mulh, AluOp::Mulhu, AluOp::Mulhsu, AluOp::Div, AluOp::Divu, AluOp::Rem, AluOp::Remu] {
+        assert!(seen.contains(&op), "{op:?} never executed");
+    }
+
+    // Recomputed straight from `AluOp::eval` — the reference semantics — not copied out of
+    // a run, mirroring `alu_mix_covers_every_op_and_jalr`'s style.
+    let neg1 = 0xffff_ffffu32;
+    let min = 0x8000_0000u32;
+    let folded: [(AluOp, u32, u32); 16] = [
+        (AluOp::Mul, 6, 7),
+        (AluOp::Mulh, neg1, neg1),
+        (AluOp::Mulhu, neg1, neg1),
+        (AluOp::Mulhsu, neg1, 7),
+        (AluOp::Divu, 6, 7),
+        (AluOp::Remu, 6, 7),
+        (AluOp::Div, neg1, 7),
+        (AluOp::Rem, neg1, 7),
+        (AluOp::Divu, 6, 0),
+        (AluOp::Remu, 6, 0),
+        (AluOp::Div, min, neg1),
+        (AluOp::Rem, min, neg1),
+        (AluOp::Div, (-4i32) as u32, 2),
+        (AluOp::Rem, (-4i32) as u32, 2),
+        (AluOp::Div, (-3i32) as u32, 10),
+        (AluOp::Rem, (-3i32) as u32, 10),
+    ];
+    let acc = folded.iter().fold(0u32, |a, (op, l, r)| a ^ op.eval(*l, *r));
+    assert_eq!(e.outputs[0], acc);
 }
