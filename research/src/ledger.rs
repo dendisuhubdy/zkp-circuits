@@ -101,6 +101,14 @@ impl CommitmentTree {
         levels
     }
 
+    /// MINOR: appends unconditionally, even if `cm` is already a leaf — the new leaf is
+    /// pushed regardless, but `self.index.insert` then overwrites the existing index entry to
+    /// point at the *new* position, leaving the old leaf still physically in the tree but
+    /// unreachable through `index`/`path_for`. This method does not itself guard against that;
+    /// `Ledger::mint`/`Ledger::apply` are what actually make duplicate commitments impossible
+    /// in practice, by checking `self.tree.index.contains_key(&cm)` and returning
+    /// `LedgerError::Duplicate` before ever calling `append`. Rejecting duplicates is therefore
+    /// the caller's responsibility, not this method's.
     pub fn append(&mut self, cm: Word8) -> usize {
         let idx = self.leaves.len();
         self.leaves.push(cm);

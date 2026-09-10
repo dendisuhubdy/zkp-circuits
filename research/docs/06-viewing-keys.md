@@ -235,6 +235,14 @@ against a past root is true forever), but once that root has scrolled out
 of the window `apply` rejects it (`LedgerError::UnknownAnchor`) — a ledger
 bookkeeping decision, not a cryptographic one.
 
+**Testing note.** `MERKLE_VERIFY` compiles down to the same `POSEIDON2`
+syscall (and the same `cpu` absorb/write-back hash rows) any other call to
+`asm::ops::call_poseidon2` produces — it adds no new AIR surface of its
+own — so tamper coverage at the hash-row level (a row forging its absorb
+state, claiming to be more than one row kind at once, etc.) is inherited
+directly from `tests/cheating.rs`'s M3.2 `POSEIDON2` cheating tests rather
+than needing its own copies for the Merkle-verification call site.
+
 ## Rows and verification
 
 `scan(ledger, disclosure)` walks the chain in order and returns one `Row` per

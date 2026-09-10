@@ -1010,3 +1010,22 @@ fn an_undigested_reachable_program_tail_is_rejected() {
     // VALID = 1, MULT_WORD = 0: the exact witness the old, one-sided constraint accepted.
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
+
+/// IMPORTANT regression: mirrors `a_row_claiming_to_be_both_an_absorb_and_a_write_back_row_is_rejected`
+/// above, one selector pair over — `IS_DIGEST` must be exclusive with `IS_HASH` too (and,
+/// symmetrically, with `IS_HASH_OUT`; both are pinned in `tables::cpu.rs`). `Count::bounded(is_hash
+/// + is_digest, 1)` (the shared `POSEIDON2` lookup both row kinds feed) is only a valid 0/1
+/// selector if a row can never claim both at once — otherwise it would double-count one
+/// `POSEIDON2` call's worth of bus demand while also falling through both row kinds' own
+/// selector-gated constraints half-unconstrained on whichever half its own logic doesn't cover.
+/// Take an honest absorb row from a `POSEIDON2` call and additionally claim `IS_DIGEST`: trips
+/// `is_digest · is_hash = 0` directly, a local `CONSTRAINT_PANIC`.
+#[test]
+fn a_row_claiming_to_be_both_a_digest_and_an_absorb_row_is_rejected() {
+    let (m, p, mut t) = setup_poseidon2(&[1, 2, 3, 4]);
+    let w = cpu::col::WIDTH;
+    let (_, absorbs, _) = hash_rows(&t);
+    assert_eq!(absorbs.len(), 1, "n=4 is exactly one full block");
+    t.cpu.values[absorbs[0] * w + cpu::col::IS_DIGEST] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}

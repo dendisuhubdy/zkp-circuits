@@ -221,6 +221,16 @@ where
         // their product), so a row with both set would otherwise fall through every one of
         // them unconstrained on whichever half its own logic doesn't already cover.
         b.assert_zero(is_hash.clone() * is_hash_out.clone());
+        // IMPORTANT (fix): `IS_DIGEST` is likewise exclusive with both hash-row selectors.
+        // `is_hash_or_digest = is_hash + is_digest` (below, feeding e.g. the `POSEIDON2`
+        // lookup's `Count::bounded(is_hash_or_digest, 1)`) is only a valid 0/1 selector — and
+        // only correctly counts "this row makes one POSEIDON2 call" — if a row can never claim
+        // both `is_hash` and `is_digest` (or `is_hash_out` and `is_digest`) at once; without
+        // these, a row doing so would double a bus count `Count::bounded` assumes is at most 1
+        // while also falling through both rows' selector-gated constraints half-unconstrained,
+        // the same gap the `is_hash · is_hash_out` case above closes.
+        b.assert_zero(is_digest.clone() * is_hash.clone());
+        b.assert_zero(is_digest.clone() * is_hash_out.clone());
         // 1 on every row of a `POSEIDON2` row-group except its very last (the `HASH_FIN`
         // write-back row): the ecall row, every absorb row, and the first write-back row. Used
         // below to (a) carry `HASH_PTR`/`HASH_N` forward across the whole group and (b) pin
