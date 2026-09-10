@@ -11,6 +11,7 @@ use p3_goldilocks::Goldilocks;
 use p3_matrix::bitrev::{BitReversalPerm, BitReversedMatrixView};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_util::log2_strict_usize;
 use std::sync::Arc;
 
 pub struct Dft<E: NttEngine>(pub Arc<E>);
@@ -50,6 +51,17 @@ fn place(dst: &mut [u64], w: usize, c0: usize, c1: usize, block: &[u64]) {
     }
 }
 
+/// The twiddle tables are built for subgroups up to 2^LOG_MAX; a taller transform would index
+/// past them and read garbage roots of unity rather than fail.
+fn check_height(n: usize) {
+    assert!(
+        log2_strict_usize(n) <= crate::ntt::LOG_MAX,
+        "DFT height 2^{} exceeds the twiddle tables' 2^{}",
+        log2_strict_usize(n),
+        crate::ntt::LOG_MAX
+    );
+}
+
 impl<E: NttEngine> Dft<E> {
     /// Run `f` over column chunks that fit the engine; `f` maps an n_in×wc block to an n_out×wc block.
     fn chunked(&self, values: &[u64], w: usize, n_in: usize, n_out: usize, f: impl Fn(&[u64], usize) -> Vec<u64>) -> Vec<u64> {
@@ -83,6 +95,7 @@ impl<E: NttEngine + Default> TwoAdicSubgroupDft<Goldilocks> for Dft<E> {
 
     fn dft_batch(&self, mat: RowMajorMatrix<Goldilocks>) -> Self::Evaluations {
         let (n, w) = (mat.height(), mat.width());
+        check_height(n);
         let out = self.chunked(&raw(&mat), w, n, n, |block, wc| {
             let mut buf = self.0.upload_row_major(block, n, wc);
             self.0.dif(&mut buf, n, wc, false);
@@ -93,11 +106,13 @@ impl<E: NttEngine + Default> TwoAdicSubgroupDft<Goldilocks> for Dft<E> {
 
     fn idft_batch(&self, mat: RowMajorMatrix<Goldilocks>) -> RowMajorMatrix<Goldilocks> {
         let (n, w) = (mat.height(), mat.width());
+        check_height(n);
         wrap(self.chunked(&raw(&mat), w, n, n, |b, wc| self.inverse_block(b, n, wc, 1)), w)
     }
 
     fn coset_idft_batch(&self, mat: RowMajorMatrix<Goldilocks>, shift: Goldilocks) -> RowMajorMatrix<Goldilocks> {
         let (n, w) = (mat.height(), mat.width());
+        check_height(n);
         let s_inv = shift.inverse().as_canonical_u64();
         wrap(self.chunked(&raw(&mat), w, n, n, |b, wc| self.inverse_block(b, n, wc, s_inv)), w)
     }
@@ -105,6 +120,7 @@ impl<E: NttEngine + Default> TwoAdicSubgroupDft<Goldilocks> for Dft<E> {
     fn coset_lde_batch(&self, mat: RowMajorMatrix<Goldilocks>, added_bits: usize, shift: Goldilocks) -> Self::Evaluations {
         let (n, w) = (mat.height(), mat.width());
         let n_ext = n << added_bits;
+        check_height(n_ext);
         let s = shift.as_canonical_u64();
         let out = self.chunked(&raw(&mat), w, n, n_ext, |block, wc| {
             let e = &self.0;

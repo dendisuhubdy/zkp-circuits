@@ -25,6 +25,8 @@ cuda-core = { version = "=0.3.1", optional = true }
 
 [features]
 default = []
+# `cuda` and `mock-driver` are mutually exclusive: enabling both is a `compile_error!` in
+# src/gpu/driver/mod.rs rather than a silent fallback to the host mock.
 cuda = ["dep:cuda-core"]
 mock-driver = []
 cuda-hw = ["cuda"]

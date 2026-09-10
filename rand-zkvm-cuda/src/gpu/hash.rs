@@ -12,7 +12,13 @@ impl CudaHashEngine { fn ok<T>(r: Result<T, super::CudaError>) -> T { r.unwrap_o
 
 impl HashEngine for CudaHashEngine {
     type Mat = Buffer; type Dig = Buffer;
-    fn upload(&self, values: &[u64], _width: usize) -> Buffer { Self::ok(self.gpu.dev.upload(values).map_err(super::CudaError::Copy)) }
+    fn upload(&self, values: &[u64], _width: usize) -> Buffer {
+        // Report an oversized matrix as an allocation failure (which carries the "use a lower
+        // tier" hint) rather than letting the driver fail the copy with a bare `Copy` error.
+        let bytes = values.len() * 8;
+        if bytes > self.gpu.free_bytes { Self::ok::<()>(Err(super::CudaError::Alloc { bytes, free: self.gpu.free_bytes })); }
+        Self::ok(self.gpu.dev.upload(values).map_err(super::CudaError::Copy))
+    }
     fn concat(&self, parts: &[(&Buffer, usize)], n: usize) -> (Buffer, usize) {
         let total: usize = parts.iter().map(|p| p.1).sum();
         let dst = Self::ok(self.gpu.alloc(n * total));

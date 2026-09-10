@@ -23,6 +23,10 @@ impl NttEngine for CudaNttEngine {
         ((self.gpu.free_bytes / 2) / (n * 8 * 4)).max(1)
     }
     fn upload_row_major(&self, values: &[u64], n: usize, w: usize) -> Buffer {
+        // Report an oversized upload as an allocation failure (which carries the "use a lower
+        // tier" hint) rather than letting the driver fail the copy with a bare `Copy` error.
+        let bytes = values.len() * 8;
+        if bytes > self.gpu.free_bytes { Self::ok::<()>(Err(super::CudaError::Alloc { bytes, free: self.gpu.free_bytes })); }
         let src = Self::ok(self.gpu.dev.upload(values).map_err(super::CudaError::Copy));
         let dst = Self::ok(self.gpu.alloc(n * w));
         Self::ok(self.gpu.launch("to_col_major", n * w, BLOCK, &[Arg::Buf(&src), Arg::Buf(&dst), Arg::U32(n as u32), Arg::U32(w as u32)]));

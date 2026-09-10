@@ -1,3 +1,5 @@
+use p3_util::log2_ceil_usize;
+
 pub mod cpu;
 pub mod prune;
 pub mod mmcs;
@@ -42,7 +44,23 @@ pub struct Tree { pub digest_layers: Vec<Vec<Digest>>, pub arity_schedule: Vec<u
 
 /// `mats[i] = (device matrix, width, height)` in commit order.
 pub fn build_tree<E: HashEngine>(e: &E, mats: &[(&E::Mat, usize, usize)]) -> Tree {
+    assert!(!mats.is_empty(), "build_tree: no matrices to commit");
     let heights: Vec<usize> = mats.iter().map(|m| m.2).collect();
+    // Plonky3's `validate_commit_reachable_heights` ladder. `plan` only ever injects a matrix at
+    // the layer whose length is `height.next_power_of_two()`, so a height that is not exactly the
+    // one reachable by halving `max_height` down that many times would be hashed against the wrong
+    // layer (or silently dropped). Reject it here rather than produce a tree Plonky3 disagrees
+    // with.
+    let max_height = *heights.iter().max().unwrap();
+    let log_max = log2_ceil_usize(max_height);
+    for &h in &heights {
+        assert!(h > 0, "build_tree: matrix height 0 is not on the commit ladder (max height {max_height})");
+        let expected = ((max_height - 1) >> (log_max - log2_ceil_usize(h))) + 1;
+        assert!(
+            h == expected,
+            "build_tree: height {h} is not reachable on the commit ladder from max height {max_height} (expected {expected})"
+        );
+    }
     let p = plan(&heights);
     let max = heights[p.order[0]];
     let tallest: Vec<usize> = p.order.iter().copied().take_while(|&i| heights[i] == max).collect();

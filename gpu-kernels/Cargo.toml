@@ -9,4 +9,4 @@ name = "rand-zkvm-kernels"
 path = "src/main.rs"
 
 [dependencies]
-cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "26754ae52c26c097dc1c465a1e42c4c5d05a3d40" }

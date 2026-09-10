@@ -64,7 +64,11 @@ impl GpuProver {
         let path = Self::ptx_path();
         let src = std::fs::read_to_string(&path).map_err(|_| CudaError::MissingPtx(path.clone()))?;
         let module = dev.load_ptx(&src).map_err(CudaError::PtxLoad)?;
-        let free_bytes = dev.free_bytes().map_err(CudaError::Driver)?;
+        // A device that will not report its free memory is not a reason to refuse to prove: the
+        // figure only sizes the column chunks (`max_columns`) and the upload guards. Fall back to
+        // a conservative 2 GiB, which every board this backend targets has, and carry on.
+        const FALLBACK_FREE_BYTES: usize = 2 << 30;
+        let free_bytes = dev.free_bytes().unwrap_or(FALLBACK_FREE_BYTES);
         let tw = crate::ntt::twiddles();
         let up = |v: &[u64]| dev.upload(v).map_err(CudaError::Copy);
         Ok(Arc::new(Self {

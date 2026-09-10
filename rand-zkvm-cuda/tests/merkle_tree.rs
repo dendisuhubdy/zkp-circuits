@@ -49,3 +49,17 @@ fn caps_equal_plonky3_for_every_tier_shape() {
         assert_eq!(ours, theirs, "shape {shape:?}");
     }
 }
+
+/// The commit geometry gate: `plan` only injects a matrix at the layer whose length is
+/// `height.next_power_of_two()`, so a height off Plonky3's `validate_commit_reachable_heights`
+/// ladder has no layer to land on. 48 is not reachable from 64 (the ladder there is 64, 32, ...).
+#[test]
+#[should_panic(expected = "not reachable on the commit ladder")]
+fn build_tree_rejects_a_height_off_the_commit_ladder() {
+    let e = CpuHashEngine::new(SEED);
+    let mut rng = StdRng::seed_from_u64(48);
+    let mats: Vec<(Vec<u64>, usize, usize)> = [64usize, 48].iter().map(|&h| (rand_mat(&mut rng, h, 2), 2, h)).collect();
+    let up: Vec<_> = mats.iter().map(|(v, w, _)| e.upload(v, *w)).collect();
+    let refs: Vec<_> = up.iter().zip(&mats).map(|(u, (_, w, h))| (u, *w, *h)).collect();
+    let _ = build_tree(&e, &refs);
+}

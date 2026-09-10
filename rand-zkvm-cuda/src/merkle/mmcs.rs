@@ -24,7 +24,14 @@ pub const SALT_ELEMS: usize = 4;
 /// crate actually hashed, and the digest layers of our own tree.
 pub struct ProverData<M> { pub originals: Vec<M>, pub salted: Vec<RowMajorMatrix<Val>>, pub tree: Tree }
 
-pub struct HidingMmcs<E: HashEngine> { engine: Arc<E>, verifier: P3Hiding, cap_height: usize, rng: Arc<Mutex<StdRng>> }
+pub struct HidingMmcs<E: HashEngine> {
+    engine: Arc<E>,
+    /// Verifier-side only — see `new`: its salt RNG is seeded 0 and never drawn from, because
+    /// nothing calls `commit`/`open_*` on this instance, only `verify_batch`/`verify_multi_batch`.
+    verifier: P3Hiding,
+    cap_height: usize,
+    rng: Arc<Mutex<StdRng>>,
+}
 
 /// Cloning *forks* the salt stream — a fresh seed drawn from the source RNG — exactly as
 /// `MerkleTreeHidingMmcs::clone` does. This is not a stylistic choice: `ExtensionMmcs::new(
@@ -40,8 +47,17 @@ impl<E: HashEngine> Clone for HidingMmcs<E> {
 }
 
 impl<E: HashEngine> HidingMmcs<E> {
+    /// `perm_seed` must be the *same* seed the `engine` was built with: the prover side hashes
+    /// with the engine's own Poseidon2 round constants and the verifier side hashes with
+    /// `constants::permutation(perm_seed)`, so a mismatch produces a commitment this MMCS's own
+    /// `verify_batch` rejects. There is no way to check it here — the engine does not expose its
+    /// seed — so it is the caller's obligation.
     pub fn new(engine: Arc<E>, perm_seed: u64, cap_height: usize, rng: StdRng) -> Self {
         let perm = crate::constants::permutation(perm_seed);
+        // The `StdRng::seed_from_u64(0)` handed to the verifier instance is *unused*: it is
+        // `MerkleTreeHidingMmcs`'s salt stream, and only the `verify_*` methods of this instance
+        // are ever called (all committing goes through our own `commit` above, with `self.rng`).
+        // A fixed seed here is therefore not a salt-reuse hazard.
         let verifier = P3Hiding::new(Hash::new(perm.clone()), Compress::new(perm), cap_height, StdRng::seed_from_u64(0));
         Self { engine, verifier, cap_height, rng: Arc::new(Mutex::new(rng)) }
     }
