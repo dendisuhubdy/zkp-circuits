@@ -21,13 +21,36 @@ round constants are likewise derived from a fixed development seed
 — a placeholder for the same reason: correct math, wrong constants for
 production.
 
-`Machine::new` takes a `FriProfile`: `Production` (80 FRI queries, 20
-proof-of-work bits — the whitepaper numbers) or `Test` (16 queries, 4 PoW
-bits, for a fast `cargo test`). Both use blowup 8 and the same hiding PCS;
-only the query count and grinding difficulty differ, which is why a
-`Production` proof is roughly four times the bytes of a `Test` proof of the
-same trace (Part 8 of the demo prints both) without either one being any
-less zero-knowledge than the other.
+`Machine::new` takes a `FriProfile`: `Production` (27 FRI queries, 20
+proof-of-work bits, `max_log_arity: 3` — folding arity 8) or `Test` (16
+queries, 4 PoW bits, for a fast `cargo test`). Both use blowup 8 and the same
+hiding PCS; only the query count, grinding difficulty, and folding arity
+differ. `Production`'s numbers (M2.2) are tuned to the ethSTARK conjectured-
+soundness bound `log_blowup·num_queries + query_pow_bits ≥ 100`:
+`3·27+20 = 101`; `Test`'s (`3·16+4 = 52`) is not a production target, only
+fast enough for the suite. Neither profile is any less zero-knowledge than
+the other — only proof size and conjectured soundness change with the query
+count.
+
+Before M2.2, `Production` ran 80 queries / 20 PoW bits with `max_log_arity:
+1` — conjectured soundness `3·80+20 = 260` bits, far past the 100-bit
+target, at a proportional cost in proof size. Measured on `guests::fib` at
+tier 10 and tier 12 (`cargo test --release --test e2e
+measure_production_profile_at_tier_10_and_12 -- --ignored --nocapture`,
+`tests/e2e.rs`):
+
+| | tier 10 (before → after) | tier 12 (before → after) |
+| --- | --- | --- |
+| proof size | 892 578 → 290 403 bytes | 886 246 → 291 366 bytes |
+| prove time | 21.61 s → 20.88 s | 29.69 s → 29.45 s |
+| verify time | 2.166 s → 2.148 s | 2.178 s → 2.141 s |
+
+Retuning to the 100-bit target cuts proof size to roughly a third (not the
+"roughly four times the bytes" this section used to estimate before either
+side was actually measured), at the same conjectured soundness margin;
+prove and verify times move by noise, not by the query-count change — the
+dominant costs (trace commitment, Merkle proofs at fixed folding depth) are
+not what fewer queries or a wider fold shrink.
 
 ## Private inputs are witness, not yet bound to anything
 

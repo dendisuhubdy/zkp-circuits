@@ -55,3 +55,22 @@ fn verifier_key_is_cached_after_first_verify() {
     );
     assert_eq!(m.cached_keys(), 1);
 }
+
+#[test]
+#[ignore]
+fn measure_production_profile_at_tier_10_and_12() {
+    let m = Machine::new(FriProfile::Production);
+    // `fib(650)` runs 3910 cycles: past tier 10's max (1023) and within tier 12's max
+    // (4095), so `prove(.., Some(Tier(12)))` actually exercises tier 12's padded height
+    // rather than erroring `TooManyCycles` (as `fib(900)`, 5410 cycles, does).
+    for (label, tier, n) in [("tier 10", Tier(10), 10u32), ("tier 12", Tier(12), 650u32)] {
+        let p = guests::fib(n);
+        let t0 = std::time::Instant::now();
+        let (proof, _) = m.prove(&p, &[], Some(tier)).unwrap();
+        let prove_time = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        m.verify(&p, &proof).unwrap();
+        let verify_time = t1.elapsed();
+        println!("{label}: proof size = {} bytes, prove = {:?}, verify = {:?}", proof.size(), prove_time, verify_time);
+    }
+}

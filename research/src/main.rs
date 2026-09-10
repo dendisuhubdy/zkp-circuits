@@ -45,7 +45,7 @@ fn main() {
     ] { println!("{name:<10}{h:>10}{w:>8}   {role}"); }
     println!("buses: PROGRAM MEMORY ALU RANGE8 AND8 OR8 XOR8 POW2 (LogUp, verified globally)");
 
-    hr("Part 5 · Prove and verify (production FRI: blowup 8, 80 queries, 20 PoW bits, ZK on)");
+    hr("Part 5 · Prove and verify (production FRI: blowup 8, 27 queries, 20 PoW bits, ZK on)");
     let m = Machine::new(FriProfile::Production);
     let hc = m.code_hash(&program, tier);
     println!("hc = {hc}");

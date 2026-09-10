@@ -25,15 +25,18 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (eleven proofs, one at production FRI parameters)
-cargo test              # 51 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
+cargo test              # 52 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
 it up automatically. `cargo test` uses `FriProfile::Test` throughout (16
 queries, 4 proof-of-work bits) so the suite runs in well under a minute per
-proving test; the demo runs one full `FriProfile::Production` proof (80
-queries, 20 PoW bits) to show the real numbers, and one `FriProfile::Test`
-proof of the same trace so you can see the parameter effect directly.
+proving test; the demo runs one full `FriProfile::Production` proof (27
+queries, 20 PoW bits, folding arity 8 — tuned in M2.2 to a 100-bit
+conjectured soundness target, roughly a third the proof size of the earlier
+80-query profile at the same target margin: see `docs/03-privacy.md`) to
+show the real numbers, and one `FriProfile::Test` proof of the same trace so
+you can see the parameter effect directly.
 
 ## The machine in one picture
 

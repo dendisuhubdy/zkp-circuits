@@ -32,9 +32,11 @@ const PERM_SEED: u64 = 0x5261_6e64_5a4b; // "RandZK"
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FriProfile {
-    /// 16 queries, 4 PoW bits — for `cargo test`.
+    /// 16 queries, 4 PoW bits — for `cargo test`. 3·16+4 = 52 conjectured bits; not a
+    /// production target, only fast enough for the suite.
     Test,
-    /// 80 queries, 20 PoW bits, blowup 8 — the whitepaper table.
+    /// 27 queries, 20 PoW bits, blowup 8. Chosen so the ethSTARK conjectured bound
+    /// `log_blowup·num_queries + query_pow_bits ≥ 100`: 3·27+20 = 101.
     Production,
 }
 
@@ -42,7 +44,7 @@ impl FriProfile {
     pub fn num_queries(self) -> usize {
         match self {
             Self::Test => 16,
-            Self::Production => 80,
+            Self::Production => 27,
         }
     }
     pub fn pow_bits(self) -> usize {
@@ -89,7 +91,7 @@ where
     let fri = FriParameters {
         log_blowup: 3,
         log_final_poly_len: 0,
-        max_log_arity: 1,
+        max_log_arity: 3,
         num_queries: profile.num_queries(),
         commit_proof_of_work_bits: 0,
         query_proof_of_work_bits: profile.pow_bits(),
@@ -523,5 +525,30 @@ impl Machine {
         let pvs: Vec<Vec<Val>> = (0..5).map(|i| if i == 1 { pv.clone() } else { vec![] }).collect();
         let common = self.verifier_key(program, proof.tier);
         verify_batch(&self.config, &airs, &proof.batch, &pvs, &common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
+    }
+}
+
+#[cfg(test)]
+mod fri_soundness_tests {
+    use super::*;
+    use p3_fri::FriParameters;
+
+    /// `log_blowup` here mirrors the literal in `generic_config` — if that literal ever
+    /// changes, this test's own `log_blowup` must change with it. `mmcs: ()` is valid
+    /// because `conjectured_soundness_bits` has no bound on `M`.
+    #[test]
+    fn production_profile_meets_the_100_bit_conjectured_target() {
+        let fri: FriParameters<()> = FriParameters {
+            log_blowup: 3,
+            log_final_poly_len: 0,
+            max_log_arity: 3,
+            num_queries: FriProfile::Production.num_queries(),
+            commit_proof_of_work_bits: 0,
+            query_proof_of_work_bits: FriProfile::Production.pow_bits(),
+            mmcs: (),
+        };
+        assert_eq!(FriProfile::Production.num_queries(), 27);
+        assert_eq!(FriProfile::Production.pow_bits(), 20);
+        assert!(fri.conjectured_soundness_bits() >= 100, "got {}", fri.conjectured_soundness_bits());
     }
 }
