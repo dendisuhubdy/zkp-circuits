@@ -37,20 +37,26 @@ Before M2.2, `Production` ran 80 queries / 20 PoW bits with `max_log_arity:
 target, at a proportional cost in proof size. Measured on `guests::fib` at
 tier 10 and tier 12 (`cargo test --release --test e2e
 measure_production_profile_at_tier_10_and_12 -- --ignored --nocapture`,
-`tests/e2e.rs`):
+`tests/e2e.rs`). The verify times below are each program's *first* verify on
+a fresh `Machine` — an uncached `verifier_key` recomputation, which
+dominates them (see "What `verify` actually checks" below); a cached verify
+of the same proof runs under 10% of that, per
+`tests/e2e.rs::verifier_key_is_cached_after_first_verify`:
 
 | | tier 10 (before → after) | tier 12 (before → after) |
 | --- | --- | --- |
 | proof size | 892 578 → 290 403 bytes | 886 246 → 291 366 bytes |
 | prove time | 21.61 s → 20.88 s | 29.69 s → 29.45 s |
-| verify time | 2.166 s → 2.148 s | 2.178 s → 2.141 s |
+| verify time (first, uncached) | 2.166 s → 2.148 s | 2.178 s → 2.141 s |
 
 Retuning to the 100-bit target cuts proof size to roughly a third (not the
 "roughly four times the bytes" this section used to estimate before either
 side was actually measured), at the same conjectured soundness margin;
-prove and verify times move by noise, not by the query-count change — the
-dominant costs (trace commitment, Merkle proofs at fixed folding depth) are
-not what fewer queries or a wider fold shrink.
+prove and first-verify times move by noise, not by the query-count change —
+both are dominated by costs the query count and fold width don't touch:
+trace commitment and, for that first verify, the uncached `verifier_key`
+recomputation (its own fixed cost, independent of `FriProfile` — see the
+caching paragraph below).
 
 ## Private inputs are witness, not yet bound to anything
 
