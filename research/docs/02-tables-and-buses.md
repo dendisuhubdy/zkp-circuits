@@ -61,7 +61,7 @@ be fetched. Provides `(pc, 23 fields…)` on `PROGRAM` with count `mult`.
 absorb/write-back rows, which share their ecall row's `pc` without being
 separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 
-## `cpu` — main, `col::WIDTH = 120`
+## `cpu` — main, `col::WIDTH = 129`
 
 Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
 recomputed — `is_load`/`is_store` are *expressions* the AIR computes from
@@ -80,9 +80,12 @@ sign bit), `rb0..3` (byte limbs of `b`, rs2's value, on store rows), and
 hash_fin`, `hash_ptr hash_n hash_left hash_idx`, eight state lanes
 `hs0..7`, four per-row words `hv0..3`, four absorb-row lane-activity
 booleans `act0..3`, byte limbs `left0..1`/`idx0..1` of `hash_left`/
-`hash_idx`, and 16 byte limbs `hvl0..15` of `hv0..3` (write-back rows
-only). This is the only table with public values: `pc_entry`, the tier
-index, and the eight output words.
+`hash_idx`, 16 byte limbs `hvl0..15` of `hv0..3` (write-back rows only),
+five byte limbs `hp0..3`/`hp3_hi` of `hash_ptr` (ecall row only — the
+`ma0..3`/`ma3_hi` pattern, bounding `hash_ptr < 2^30`), and the
+canonical-digest-encoding gadget's four columns `himax0..1`/`inv0..1`
+(write-back rows only). This is the only table with public values:
+`pc_entry`, the tier index, and the eight output words.
 
 Constraints, in words: `is_real` is boolean and monotone (once 0, stays 0);
 `clk` starts at 0 and increments by 1 on real rows; the first row's `pc`
@@ -221,13 +224,62 @@ honest lo/hi split (`hv_2j + hv_2j+1·2^32 = hs_lane_j`, byte-decomposed via
 `hvl0..15` and `RANGE8`-checked) of two `hs` lanes — 0/1 on the first row,
 2/3 on the second.
 
+**Address bound.** `hash_ptr` is otherwise just the raw `a0` register
+value — an unbounded field element. Since it feeds directly into every
+hash-row `MEMORY` message's `addr`, and `memory.rs`'s own consistency
+check only range-checks the *delta* between consecutive sorted
+`(space, addr)` keys (never an address's absolute magnitude), an
+unbounded `hash_ptr` would let a witness pick it so that `SPACE_RAM`'s
+sort key (`1·2^30 + hash_ptr`, `memory.rs::KEY_SHIFT`) wraps, mod the
+Goldilocks prime, into any other key — a register cell, or an
+out-of-bounds RAM word — redirecting a hash row's reads/writes away from
+the `n` words it claims to hash. `hp0..3`/`hp3_hi` close this exactly the
+way `ma0..3`/`ma3_hi` close it for `MEM_ADDR`: `RANGE8` on each byte plus
+`AND4[hp3_hi, 0xC, 0]` masking the top two bits, bounding `hash_ptr <
+2^30`. Checked once, on the ecall row only — `hash_ptr` is copied
+unchanged across the rest of the row-group (below), so bounding it there
+bounds it (and every derived hash address, at most `hash_ptr + 4099`)
+everywhere it is used.
+
+**The `n = 0` escape.** The `final_absorb` drain rule (previous
+paragraph) only ever fires on an `is_hash` transition — with zero absorb
+rows in the group (the honest `n = 0` case), it never fires at all. Two
+more rules close the gap it would otherwise leave open (a witness routing
+straight from the ecall row to a write-back row for *any* `hash_n`,
+publishing the empty-input digest regardless): the row right after the
+ecall row must be either an absorb row or a write-back row, never
+anything else (`sys_hash·(n(is_hash) + n(is_hash_out) - 1) = 0`), and it
+can only be a write-back row when `hash_n = 0`
+(`sys_hash·n(is_hash_out)·hash_n = 0`). A witness that instead nests an
+absorb row somewhere but never actually absorbs anything is separately
+caught by the first write-back row's own `hash_left = 0` requirement
+(below) — the routing rules alone don't yet pin *that* row's `hash_left`
+to match, since nothing but the `sys_hash -> next` copy otherwise touches
+it, and a witness is free to set the copied value to whatever it likes.
+
+**Canonical digest encoding.** `hv_lo + hv_hi·2^32 = hs_lane` is only a
+*field* identity — for any lane value `v < 2^32 - 1` the non-canonical
+pair `(v + 1, 2^32 - 1)` satisfies it too (`(v+1) + (2^32-1)·2^32 = v + p
+≡ v mod p`), and both words are still individually `< 2^32`, so `hvl0..15`
+does not catch it either. The only *canonical* (base-`2^32`) pair with
+`hi = 2^32 - 1` is `lo = 0` (the field's single largest element, `p - 1`)
+— every other value with that `hi` is some smaller lane's non-canonical
+alternate. `himax_j` (a zero-check flag on `d = hi - (2^32-1)`, `inv_j`
+its inverse witness) forces exactly that: `d·inv_j = 1 - himax_j` forces
+`himax_j = 1` whenever `d = 0`, regardless of `inv_j` (its term vanishes);
+`himax_j·lo = 0` then forces `lo = 0` whenever `himax_j = 1` — closing the
+non-canonical case while leaving every ordinary lane (`inv_j = d⁻¹`,
+`himax_j = 0`) and the one legitimate `hi = 2^32-1` case (`lo = 0`)
+satisfiable.
+
 **Per-row-kind invariant argument** (AGENTS.md: every bus message column
 constrained on every row kind that sends it; every count forced to zero
 wherever its message is unconstrained):
 - *ecall row*: `sys_hash·(a - POSEIDON2)`, `hash_ptr = b`, `hash_n = mem_val`,
   `hash_left = hash_n`, `hash_idx = 0`, `hs0..7 = 0` are all pinned
   directly; its own `MEMORY`/`ALU`/`PROGRAM` sends are the ordinary-ecall
-  formulas, untouched.
+  formulas, untouched; `hp0..3`/`hp3_hi` bound `hash_ptr < 2^30` (above);
+  the two routing rules above bind the next row's kind to `hash_n`.
 - *absorb, non-final*: `act3 = 1` is forced (a witness cannot split one
   block into two smaller ones — a different, non-standard hash of the same
   message), so the row always absorbs a full 4-word block; `hash_left`/
@@ -237,12 +289,17 @@ wherever its message is unconstrained):
   drain to exactly 0 on the *next* row — no early stop leaving words
   unabsorbed, no over-absorption (which would otherwise only be caught by
   a `RANGE8`-rejected field wraparound); inactive lanes' `hv_k = hs_k`.
-- *write-back 1*: `hash_fin = 0`; `hs0..7` is whatever the last absorb's
-  `POSEIDON2` lookup pinned it to (the digest, lanes 0..3); `hv0..3` splits
-  `hs0..1`; all four `MEMORY` slots write unconditionally.
+- *write-back 1*: `hash_fin = 0`; `hash_left = 0` is required directly
+  (not just via propagation — the `n = 0` escape above); `hs0..7` is
+  whatever the last absorb's `POSEIDON2` lookup pinned it to (the digest,
+  lanes 0..3); `hv0..3` splits `hs0..1`, canonically (`himax0..1`/
+  `inv0..1` above); all four `MEMORY` slots write unconditionally.
 - *write-back 2*: `hash_fin = 1`, ending the row-group (`next_pc = pc + 4`
   here, nowhere else in the group); `hs0..7` is copied forward from
-  write-back 1 unchanged; `hv0..3` splits `hs2..3`.
+  write-back 1 unchanged; `hv0..3` splits `hs2..3`, canonically. `is_hash`
+  and `is_hash_out` are also mutually exclusive on every row
+  (`is_hash·is_hash_out = 0`) — nothing else stops a row claiming to be
+  both an absorb and a write-back row at once.
 - *padding*: `sys_hash is_hash is_hash_out hash_fin` are `SELECTORS`
   entries, so `(1 - is_real)·v = 0` forces all four to 0 — no lookup on
   either bus fires with a nonzero count there.
@@ -588,11 +645,14 @@ same-bus-packed lookup contexts: `program` 2, `cpu` 8, `memory` 4, `alu` 8,
 sign-fix identity, `cpu`'s from its packed lookup fraction-pins rather than
 its own row logic (whose costliest single constraint is only degree 6),
 `poseidon2`'s from its S-box split (see that table's own section). M3.2's
-hash-row columns and constraints (below) keep every individual product at
-or under what the existing worst case already spent — the biggest single
-new terms are the `not_final`/`final_absorb` absorb-chain gates (degree 3)
-and the write-back copy-forward pin (degree 3) — so `cpu`'s measured degree
-is unchanged at 8, not raised past it. This
+hash-row columns and constraints (below), including the address bound,
+`n = 0` escape, and canonical-digest-encoding fixes, keep every individual
+product at or under what the existing worst case already spent — the
+biggest single new terms are all degree 3 (the `not_final`/`final_absorb`
+absorb-chain gates, the write-back `hs` copy-forward pin, the `sys_hash·
+n(is_hash_out)·hash_n` routing rule, the write-back `hash_left = 0` rule,
+and the `himax`/`inv` canonical-encoding equations) — so `cpu`'s measured
+degree is unchanged at 8, not raised past it. This
 config's ceiling is degree 8 (`generic_config`'s `log_blowup = 3` plus this
 machine's `is_zk = 1` hiding: `constraint_degree = max_degree + 1 ≤ 9` ⇒
 `log2_ceil(8) = 3` quotient chunks, `p3-batch-stark`'s cap), so `alu` and

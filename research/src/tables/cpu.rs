@@ -98,7 +98,22 @@ pub mod col {
     /// 16: 4 byte limbs each of `HV0..3`, write-back rows only — what lets `HV0..3` be pinned
     /// as an honest `u32` decomposition of two `HS` lanes (`hs_lane_j = HV_2j + HV_2j+1·2^32`).
     pub const HVL0_0: usize = IDX0 + 2;                              // 104..119
-    pub const WIDTH: usize = HVL0_0 + 16;                            // 120 = 76 + 44
+    /// 4 byte limbs of `HASH_PTR` plus `HP0+3`'s high nibble — the exact `MA0..3`/`MA3_HI`
+    /// pattern, bounding `HASH_PTR < 2^30`. Checked once, on the ecall row only: `HASH_PTR`
+    /// is copied unchanged across the rest of the row-group (the `continues` transition), so
+    /// bounding it there bounds every row's `HASH_PTR`, and with it every derived hash
+    /// address (`HASH_PTR + 4·HASH_IDX + k <= HASH_PTR + 4099` for the worst-case `HASH_IDX <
+    /// 1024`, `HASH_PTR + k <= HASH_PTR + 7` for a write) — comfortably under `2^32` with no
+    /// wraparound, exactly as `MA0..3`'s own comment argues for `MEM_ADDR·4 + off`.
+    pub const HP0: usize = HVL0_0 + 16;                              // 120..123
+    pub const HP3_HI: usize = HP0 + 4;                               // 124
+    /// The "is this lane's high word the maximum u32 value" flag and its zero-check inverse
+    /// witness, one pair per write-back row's two digest lanes (`j = 0`: `HV0/HV1`; `j = 1`:
+    /// `HV2/HV3`) — the gadget that rules out the non-canonical `(lo+1, 2^32-1)` alternate
+    /// encoding of any lane `< 2^32-1` (see the write-back constraints in `eval`).
+    pub const HIMAX0: usize = HP3_HI + 1;                            // 125,126
+    pub const INV0: usize = HIMAX0 + 2;                              // 127,128
+    pub const WIDTH: usize = INV0 + 2;                               // 129 = 76 + 53
     /// Columns that must be zero on padding rows.
     pub const SELECTORS: [usize; 24] = [
         IS_ALU, IS_IMM, IS_BRANCH, IS_LB, IS_LH, IS_LW, IS_SB, IS_SH, IS_SW, SIGNED,
@@ -156,6 +171,12 @@ where
         let is_hash = v(IS_HASH);
         let is_hash_out = v(IS_HASH_OUT);
         let is_hash_any = is_hash.clone() + is_hash_out.clone();
+        // MINOR (fix): explicit mutual exclusivity. Nothing else directly forbids a row
+        // claiming to be *both* an absorb row and a write-back row at once; every other
+        // hash-row constraint happens to be gated by one selector or the other (never by
+        // their product), so a row with both set would otherwise fall through every one of
+        // them unconstrained on whichever half its own logic doesn't already cover.
+        b.assert_zero(is_hash.clone() * is_hash_out.clone());
         // 1 on every row of a `POSEIDON2` row-group except its very last (the `HASH_FIN`
         // write-back row): the ecall row, every absorb row, and the first write-back row. Used
         // below to (a) carry `HASH_PTR`/`HASH_N` forward across the whole group and (b) pin
@@ -386,6 +407,29 @@ where
         b.assert_zero(v(SYS_HASH) * (v(HASH_LEFT) - v(HASH_N)));
         b.assert_zero(v(SYS_HASH) * v(HASH_IDX));
         for i in 0..8 { b.assert_zero(v(SYS_HASH) * v(HS0 + i)); }
+        // CRITICAL 1 (fix): `HASH_PTR` is otherwise just the raw `a0` register value — an
+        // unbounded field element on the `MEMORY` bus. `MEMORY`'s own consistency check only
+        // range-checks the *delta* between consecutive sorted `(space, addr)` keys (via
+        // `D0..3`), never an address's absolute magnitude, so an unbounded `HASH_PTR` could
+        // alias any other address the key arithmetic `space·2^30 + addr` (`memory.rs::
+        // KEY_SHIFT`) wraps into mod `p` — exactly the failure `MA0..3`/`MA3_HI` already rule
+        // out for ordinary `MEM_ADDR`. Bound `HASH_PTR` the same way, decomposed into `HP0..3`
+        // (`RANGE8`) plus `HP3_HI`'s top-nibble mask (`AND4[HP3_HI, 0xC, 0]`), checked once on
+        // the ecall row: `HASH_PTR < 2^30` there, and `continues` below copies it unchanged to
+        // every other row of the group, so every row's `HASH_PTR` — and hence every derived
+        // hash address, `HASH_PTR + 4·HASH_IDX + k <= HASH_PTR + 4099` (absorb, `HASH_IDX <
+        // 2^16` via `IDX0..1`) or `HASH_PTR + k <= HASH_PTR + 7` (write-back) — stays comfortably
+        // under `2^32` with no wraparound, the same argument `MA0..3`'s doc comment makes for
+        // `MEM_ADDR·4 + off`.
+        {
+            let mut hp = AB::Expr::ZERO;
+            for i in 0..4 { hp += v(HP0 + i) * AB::Expr::from_u32(1 << (8 * i)); }
+            b.assert_zero(v(SYS_HASH) * (v(HASH_PTR) - hp));
+            for i in 0..4 { bus::RANGE8.lookup_key(b, [v(HP0 + i)], Count::bounded(v(SYS_HASH), 1)); }
+            let hp3_lo = v(HP0 + 3) - AB::Expr::from_u32(16) * v(HP3_HI);
+            bus::AND4.lookup_key(b, [hp3_lo, AB::Expr::ZERO, AB::Expr::ZERO], Count::bounded(v(SYS_HASH), 1));
+            bus::AND4.lookup_key(b, [v(HP3_HI), AB::Expr::from_u32(0xC), AB::Expr::ZERO], Count::bounded(v(SYS_HASH), 1));
+        }
         {
             let mut t = b.when_transition();
             // `HASH_PTR`/`HASH_N` are constant across the whole row-group.
@@ -399,6 +443,16 @@ where
             for i in 0..8 { t.assert_zero(v(SYS_HASH) * n(HS0 + i)); }
             t.assert_zero(v(SYS_HASH) * (n(HASH_LEFT) - v(HASH_LEFT)));
             t.assert_zero(v(SYS_HASH) * (n(HASH_IDX) - v(HASH_IDX)));
+            // CRITICAL 2 (fix): without a rule tying the ecall row's routing to `HASH_N`, a
+            // witness could go straight from the ecall row to a write-back row (skipping every
+            // absorb row) for *any* `HASH_N`, publishing the empty-input digest for a nonzero
+            // word count — the `final_absorb` drain rule below never fires, since it lives on
+            // `IS_HASH` transitions and there would be no absorb row at all. Two rules close
+            // this: the row after the ecall row must be either an absorb row or a write-back
+            // row (never anything else, e.g. an ordinary row splicing the group), and it can
+            // only be a write-back row when `HASH_N = 0`.
+            t.assert_zero(v(SYS_HASH) * (n(IS_HASH) + n(IS_HASH_OUT) - one.clone()));
+            t.assert_zero(v(SYS_HASH) * n(IS_HASH_OUT) * v(HASH_N));
             // The second write-back row needs the same `HS0..7` (specifically lanes 2/3, the
             // digest's third/fourth field elements) the first row established from the last
             // absorb's `POSEIDON2` lookup — nothing else propagates it there.
@@ -462,6 +516,17 @@ where
         let state_out: Vec<AB::Expr> = (0..8).map(|i| n(HS0 + i)).collect();
         bus::POSEIDON2.lookup_key(b, state_in.into_iter().chain(state_out).collect::<Vec<_>>(), Count::bounded(is_hash.clone(), 1));
 
+        // CRITICAL 2 (fix, continued): the first write-back row's own `HASH_LEFT` must be 0,
+        // full stop — regardless of how it got there. This is what actually closes the escape:
+        // the `SYS_HASH` transition rules above stop a witness from *routing* around the
+        // absorb rows, but without this, a witness that does exactly that could still set the
+        // copied-forward `HASH_LEFT` (via the `SYS_HASH -> next` copy) to whatever the ecall
+        // row claims and nothing would ever check it against 0. In the honest trace this is
+        // always already true — `cpu_trace` leaves write-back rows' `HASH_LEFT` at its
+        // `zero_vec` default, and the `n = 0` case's own copy from the ecall row is 0 too — so
+        // this cannot reject any honest witness.
+        b.assert_zero(is_hash_out.clone() * (one.clone() - v(HASH_FIN)) * v(HASH_LEFT));
+
         // Write-back rows: `HV0..3` is this row's 4 written machine words, which must be an
         // honest `u32` decomposition (`HVL0..15`, RANGE8-checked) of two `HS` lanes — lanes
         // 0/1 on the first write-back row, 2/3 on the second (`hs_lane_j` below), i.e. exactly
@@ -472,9 +537,26 @@ where
             b.assert_zero(is_hash_out.clone() * (v(HV0 + k) - byte_sum));
         }
         let two32 = AB::Expr::from_u64(1u64 << 32);
+        // CRITICAL 3 (fix): `hv_lo + hv_hi·2^32 = hs_lane` alone is only a *field* identity —
+        // for any lane value `v < 2^32 - 1` the non-canonical pair `(v+1, 2^32-1)` also
+        // satisfies it (`(v+1) + (2^32-1)·2^32 = v + p ≡ v mod p`), and both words are still
+        // individually `< 2^32` so the existing `RANGE8`/`HVL` check does not catch it either.
+        // The only *canonical* (base-`2^32`) representation with `hi = 2^32-1` is `lo = 0`
+        // (the field's single largest element, `p - 1`) — every other value with that `hi` is
+        // the non-canonical alternate of some smaller lane. `HIMAX_j` (a zero-check flag on
+        // `d = hi - (2^32-1)`, `INV_j` its inverse witness) forces exactly that: `d = 0` always
+        // forces `HIMAX_j = 1` regardless of `INV_j` (the first equation's left side vanishes),
+        // and `HIMAX_j·lo = 0` then forces `lo = 0` whenever `HIMAX_j = 1` — closing the
+        // non-canonical case (`hi = 2^32-1, lo != 0`) while leaving every ordinary lane
+        // (`hi != 2^32-1`, `INV_j = d⁻¹`, `HIMAX_j = 0`) and the one legitimate `hi = 2^32-1`
+        // case (`lo = 0`) satisfiable.
         for j in 0..2usize {
             let hs_lane = (one.clone() - v(HASH_FIN)) * v(HS0 + j) + v(HASH_FIN) * v(HS0 + j + 2);
             b.assert_zero(is_hash_out.clone() * (v(HV0 + 2 * j) + v(HV0 + 2 * j + 1) * two32.clone() - hs_lane));
+            b.assert_bool(v(HIMAX0 + j));
+            let d = v(HV0 + 2 * j + 1) - AB::Expr::from_u32(0xFFFF_FFFF);
+            b.assert_zero(is_hash_out.clone() * (d * v(INV0 + j) - (one.clone() - v(HIMAX0 + j))));
+            b.assert_zero(is_hash_out.clone() * v(HIMAX0 + j) * v(HV0 + 2 * j));
         }
         let mut sel_sum = AB::Expr::ZERO;
         for i in 0..NUM_OUTPUTS {
@@ -590,6 +672,16 @@ pub fn cpu_trace(events: &[CycleEvent], height: usize, range: &mut RangeCounts, 
                     r[HASH_LEFT] = F::from_u32(n);
                     // HASH_IDX and HS0..7 stay at the `zero_vec` default — the AIR pins both to
                     // 0 on the ecall row directly.
+                    // CRITICAL 1 (fix): HASH_PTR's own RANGE8/AND4-checked byte decomposition —
+                    // the MA0..3/MA3_HI pattern, checked once here since HASH_PTR is copied
+                    // unchanged across the rest of the row-group.
+                    let hpl = limbs(ptr);
+                    for k in 0..4 { r[HP0 + k] = hpl[k]; range.range8((ptr >> (8 * k)) & 0xff); }
+                    let hp3 = (ptr >> 24) & 0xff;
+                    let (hp3_lo, hp3_hi) = (hp3 & 0xf, hp3 >> 4);
+                    r[HP3_HI] = F::from_u32(hp3_hi);
+                    nibble.and4(hp3_lo, 0);
+                    nibble.and4(hp3_hi, 0xC);
                 }
                 HashRow::Absorb { idx, left_before, words, active, state_in, .. } => {
                     r[IS_HASH] = F::ONE;
@@ -621,6 +713,19 @@ pub fn cpu_trace(events: &[CycleEvent], height: usize, range: &mut RangeCounts, 
                         r[HV0 + k] = F::from_u32(words[k]);
                         let bl = limbs(words[k]);
                         for j in 0..4 { r[HVL0_0 + 4 * k + j] = bl[j]; range.range8((words[k] >> (8 * j)) & 0xff); }
+                    }
+                    // CRITICAL 3 (fix): HIMAX_j/INV_j, the canonical-encoding zero-check gadget
+                    // — see the AIR comment. `hi == u32::MAX` is the one case that needs the
+                    // flag set (and no inverse, since `d = 0` there); every other `hi` gets the
+                    // genuine field inverse of `d`.
+                    for j in 0..2usize {
+                        let hi = words[2 * j + 1];
+                        if hi == u32::MAX {
+                            r[HIMAX0 + j] = F::ONE;
+                        } else {
+                            let d = F::from_u32(hi) - F::from_u32(u32::MAX);
+                            r[INV0 + j] = d.inverse();
+                        }
                     }
                 }
             }

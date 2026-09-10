@@ -9,9 +9,9 @@ use p3_matrix::Matrix;
 use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::emulator::{execute, SLOT_W};
 use rand_zkvm::guests;
-use rand_zkvm::isa::REG_A1;
+use rand_zkvm::isa::{REG_A0, REG_A1};
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, Traces};
-use rand_zkvm::tables::{alu, cpu, memory, nibble, poseidon2, program, range, F};
+use rand_zkvm::tables::{alu, cpu, limbs, memory, nibble, poseidon2, program, range, F};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// The panic `p3-batch-stark`'s debug constraint checker raises when a row violates a
@@ -774,4 +774,89 @@ fn bumping_a_new_hash_selector_on_a_padding_row_is_rejected() {
         t.cpu.values[pad * w + sel] = F::ONE;
         assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }), "selector column {sel}");
     }
+}
+
+/// CRITICAL 1 regression: before `HASH_PTR` got its own `RANGE8`/`AND4` byte decomposition
+/// (`HP0..3`/`HP3_HI`, the `MA0..3`/`MA3_HI` pattern), it was just the raw `a0` register
+/// value — an unbounded field element on the `MEMORY` bus. A witness could pick it so that
+/// `SPACE_RAM`'s sort key (`1·2^30 + HASH_PTR`, `memory.rs::KEY_SHIFT`) wraps, mod the
+/// Goldilocks prime, to alias *any* other key — here, register `a0`'s own key
+/// (`0·2^30 + REG_A0`) — letting a hash row's memory access land wherever the witness likes
+/// instead of the `n` words it claims to hash. `HP0..3`/`HP3_HI` are deliberately left at
+/// their honest (small) values, so this must trip the new recomposition equation
+/// (`v(SYS_HASH)·(HASH_PTR - hp) = 0`) directly — a local `CONSTRAINT_PANIC` on the ecall row,
+/// not a downstream `MEMORY`-bus imbalance.
+#[test]
+fn an_unbounded_hash_ptr_that_aliases_a_register_key_is_rejected() {
+    let (m, p, mut t) = setup_poseidon2(&[1, 2, 3, 4]);
+    let w = cpu::col::WIDTH;
+    let (ecall, _, _) = hash_rows(&t);
+    let alias = F::from_u32(REG_A0) - F::from_u64(1u64 << 30);
+    t.cpu.values[ecall * w + cpu::col::HASH_PTR] = alias;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// CRITICAL 2 regression: without a rule binding the ecall row's routing to `HASH_N`, a
+/// witness could skip every absorb row entirely and go straight from the ecall row to a
+/// write-back row, publishing the empty-input digest for a nonzero `n` — the `final_absorb`
+/// drain rule never fires, since it only lives on `IS_HASH` transitions and there would be no
+/// absorb row at all. Relabel `n = 5`'s first absorb row as a write-back row instead (leaving
+/// its columns otherwise untouched, in particular its own `HASH_LEFT = 5`, the "left before
+/// this row" value an honest absorb row carries): this trips both new rules directly — the
+/// ecall row's own `SYS_HASH·n(IS_HASH_OUT)·HASH_N = 0` (now `1·1·5 != 0`) and the write-back
+/// row's own `IS_HASH_OUT·(1-HASH_FIN)·HASH_LEFT = 0` (now `1·1·5 != 0`) — local
+/// `CONSTRAINT_PANIC`s, not a `PROGRAM`/`POSEIDON2`-bus imbalance.
+#[test]
+fn skipping_every_absorb_row_for_a_nonzero_hash_n_is_rejected() {
+    let (m, p, mut t) = setup_poseidon2(&[1, 2, 3, 4, 5]);
+    let w = cpu::col::WIDTH;
+    let (ecall, absorbs, _) = hash_rows(&t);
+    assert_eq!(absorbs.len(), 2, "n=5 needs two absorb rows");
+    assert_eq!(absorbs[0], ecall + 1, "the first absorb row follows the ecall row directly");
+    assert_eq!(t.cpu.values[absorbs[0] * w + cpu::col::HASH_LEFT], F::from_u32(5));
+    t.cpu.values[absorbs[0] * w + cpu::col::IS_HASH] = F::ZERO;
+    t.cpu.values[absorbs[0] * w + cpu::col::IS_HASH_OUT] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// CRITICAL 3 regression: `hv_lo + hv_hi·2^32 = hs_lane` is only a field identity, and for any
+/// lane `< 2^32-1` the non-canonical pair `(lane+1, 2^32-1)` satisfies it too (`(lane+1) +
+/// (2^32-1)·2^32 = lane + p ≡ lane mod p`) with both words still individually `< 2^32` — so the
+/// existing `RANGE8`/`HVL` byte check does not catch it either. `n = 0`'s digest is all-zero,
+/// so lane 0 is exactly `0`, one of the rare values with such an alternate: `1 +
+/// (2^32-1)·2^32 = p ≡ 0`. Re-encode it as `(lo=1, hi=2^32-1)`, including the gadget columns a
+/// "smart" cheating witness would also have to update to keep the canonical-check gadget's
+/// first equation satisfied (`d = hi-(2^32-1) = 0` forces `HIMAX = 1` regardless of `INV`, so
+/// there is no way to leave `HIMAX = 0` here) — only the second equation, `HIMAX·lo = 0`, is
+/// left to catch `lo = 1 != 0`.
+#[test]
+fn a_non_canonical_digest_word_encoding_is_rejected() {
+    let (m, p, mut t) = setup_poseidon2(&[]);
+    let w = cpu::col::WIDTH;
+    let (_, absorbs, writes) = hash_rows(&t);
+    assert!(absorbs.is_empty(), "n=0 has no absorb rows");
+    let row = writes[0];
+    assert_eq!(t.cpu.values[row * w + cpu::col::HS0], F::ZERO, "n=0's digest is all-zero");
+    t.cpu.values[row * w + cpu::col::HV0] = F::ONE;
+    t.cpu.values[row * w + cpu::col::HV0 + 1] = F::from_u32(0xFFFF_FFFF);
+    let (lo_limbs, hi_limbs) = (limbs(1), limbs(0xFFFF_FFFF));
+    for j in 0..4 {
+        t.cpu.values[row * w + cpu::col::HVL0_0 + j] = lo_limbs[j];
+        t.cpu.values[row * w + cpu::col::HVL0_0 + 4 + j] = hi_limbs[j];
+    }
+    t.cpu.values[row * w + cpu::col::HIMAX0] = F::ONE;
+    t.cpu.values[row * w + cpu::col::INV0] = F::ZERO;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// MINOR regression: `is_hash` and `is_hash_out` set together on the same row must be
+/// rejected outright, not merely fall through whichever half's constraints happen to notice.
+#[test]
+fn a_row_claiming_to_be_both_an_absorb_and_a_write_back_row_is_rejected() {
+    let (m, p, mut t) = setup_poseidon2(&[1, 2, 3, 4]);
+    let w = cpu::col::WIDTH;
+    let (_, absorbs, _) = hash_rows(&t);
+    assert_eq!(absorbs.len(), 1, "n=4 is exactly one full block");
+    t.cpu.values[absorbs[0] * w + cpu::col::IS_HASH_OUT] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
