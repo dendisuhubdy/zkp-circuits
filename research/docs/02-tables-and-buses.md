@@ -7,21 +7,21 @@ verifier checks that every bus balances globally.
 
 ```
                                   ┌───────────┐
-                                  │  PROGRAM  │ preprocessed; commitment = hc
+                                  │  PROGRAM  │ main; in-circuit decoder; hc is proved, not preprocessed
                                   └───────────┘
-                                        │ PROGRAM bus (lookup: cpu fetches, program provides)
-                  MEMORY bus            ▼             ALU bus
-                            ◄─────┌───────────┐─────►
-                 (permutation)    │    CPU    │    (lookup)
-                                  └───────────┘
-                                        │
-                    ┌───────────────────┴───────────────────┐
-                    ▼                                       ▼
-               ┌───────────┐                           ┌───────────┐
-               │  MEMORY   │                           │    ALU    │
-               └───────────┘                           └───────────┘
-                     │ RANGE8                                │ RANGE8 AND4 OR4 XOR4 POW2
-                     └──────────────────┬────────────────────┘
+                                   │ PROGRAM (instruction fetch)  │ PROGRAM_WORD (M3.4 digest rows)
+                                   ▼                              ▼
+                  MEMORY bus            ┌───────────┐             ALU bus
+                            ◄─────      │    CPU    │      ─────►
+                 (permutation)          └───────────┘            (lookup)
+                                        │        │
+                    ┌───────────────────┘        └───────────────┐
+                    ▼                                             ▼
+               ┌───────────┐                                 ┌───────────┐
+               │  MEMORY   │                                 │    ALU    │
+               └───────────┘                                 └───────────┘
+                     │ RANGE8                                      │ RANGE8 AND4 OR4 XOR4 POW2
+                     └──────────────────┬──────────────────────────┘
                               ┌──────────┴──────────┐
                               ▼                     ▼
                         ┌───────────┐         ┌───────────┐
@@ -33,35 +33,81 @@ verifier checks that every bus balances globally.
                         ┌─────────────┐
                         │  POSEIDON2  │  main; height = tier.poseidon2_height()
                         └─────────────┘
-                    provides POSEIDON2 (lookup); no consumer yet — the
-                    emulator doesn't call the syscall until M3.2, so this
-                    table's trace is all padding (see its own section below)
+                    provides POSEIDON2 (lookup); consumed by cpu's hash rows
+                    (a POSEIDON2 syscall) *and* its digest rows (M3.4, hc)
 ```
 
-Nine buses in total: `PROGRAM`, `MEMORY`, `ALU`, `RANGE8` and `POW2`
-(carried by the range table), `AND4`, `OR4`, `XOR4` (carried by the nibble
-table), and `POSEIDON2` (carried by the poseidon2 table). `PROGRAM`, `ALU`,
-`RANGE8`, `AND4`, `OR4`, `XOR4`, `POW2`, `POSEIDON2` are `LookupBus`es (a
-subset check: every value a consumer sends must appear, with enough
-multiplicity, in the provider's table). `MEMORY` is a
-`PermutationCheckBus` — both sides are prover-supplied main-trace rows, and
-the argument proved is multiset equality, not a lookup into a fixed table.
+Ten buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `MEMORY`, `ALU`,
+`RANGE8` and `POW2` (carried by the range table), `AND4`, `OR4`, `XOR4`
+(carried by the nibble table), and `POSEIDON2` (carried by the poseidon2
+table). Every one of these except `MEMORY` is a `LookupBus` (a subset
+check: every value a consumer sends must appear, with enough multiplicity,
+in the provider's table). `MEMORY` is a `PermutationCheckBus` — both sides
+are prover-supplied main-trace rows, and the argument proved is multiset
+equality, not a lookup into a fixed table.
 
-## `program` — preprocessed, `pre::WIDTH = 25` + `col::WIDTH = 1`
+## `program` — main, `col::WIDTH = 108`
 
-Preprocessed columns: `pc`, then the 23 `Decoded` fields in the fixed
-`to_fields` order (`rd rs1 rs2 imm is_alu alu_op is_imm is_branch br_op
-br_neg is_lb is_lh is_lw is_sb is_sh is_sw signed is_jal is_jalr is_lui
-is_auipc is_ecall writes_rd`), then `valid` (1 on real instruction rows, 0
-on padding). One main column, `mult`: how many times this row was fetched.
-Constraint: a row with `valid = 0` must have `mult = 0` — padding can never
-be fetched. Provides `(pc, 23 fields…)` on `PROGRAM` with count `mult`.
-`program_trace` (the witness builder, not the AIR) counts a fetch per
+M3.4: the program table is a **witness** trace with an in-circuit decoder,
+not a preprocessed ROM the verifier holds in the clear. Each row carries a
+raw 32-bit instruction `WORD`, its 32-bit decomposition (`bit0..31`, each
+boolean, `WORD = Σ bit_i·2^i`), the same 23 `Decoded` fields the old
+preprocessed table carried (`rd rs1 rs2 imm is_alu alu_op is_imm is_branch
+br_op br_neg is_lb is_lh is_lw is_sb is_sh is_sw signed is_jal is_jalr
+is_lui is_auipc is_ecall writes_rd`), `valid`, and two multiplicities:
+`mult` (ordinary instruction-fetch count, `PROGRAM` bus) and `mult_word`
+(digest-row fetch count, the new `PROGRAM_WORD` bus, M3.4). Plus decoder
+scratch: an is-zero gadget on the final `rd` field (`rd_is_zero`/`rd_inv`,
+for `writes_rd`) and 46 one-hot legality/decode flags (`flags` module in
+`tables/program.rs`), one per `(opcode, funct3, funct7)` case
+`isa::Instr::decode` recognizes.
+
+**The decoder.** Every `Decoded` field is a flag-weighted sum of raw bit
+sums (rd/rs1/rs2, the six immediate-format formulas — U/I/S/B/J-type plus
+the raw 5-bit shamt for ALUI shifts, each a *linear* expression in the bit
+columns, sign-extended by adding `sign_bit·(2^32 − 2^width)`) or fixed
+overrides (`Ecall` sets `rd = REG_A0`, `rs1 = REG_A7`, `rs2 = REG_A0`, the
+same values `Instr::decoded()` hard-codes). Each of the 46 flags is pinned
+by an opcode-match constraint (`flag·(op − code) = 0`) and, where needed, a
+funct3/funct7-match constraint — so a flag can only be forced nonzero when
+its exact bit pattern actually appears in `WORD`. `valid` is the sum of all
+46 flags (at most one can ever be forced nonzero on a real row, since the
+patterns are pairwise disjoint); a word matching none of them forces
+`valid = 0`. The M-extension ops (`Mul..Remu`) are reachable **only**
+through the `OP_ALU, funct7 = 1` flags — no `OP_ALUI` flag ever maps to
+one, mirroring `isa::Instr::decode`'s own `funct7 = 1` gate exactly (an
+`OP_ALUI` word can never be legally read as an M op, regardless of its
+`funct7` bits, which are just part of its sign-extended immediate there).
+Every constraint here is at most degree 2 in the columns (a flag times a
+linear bit-sum, or a flag times a fixed constant).
+
+**No address aliasing without a host-trusted `pc`.** Since `PC` is now a
+witness column, every row's `PC` is pinned to be exactly 4 more than the
+row before it (unconditional, including across the padding boundary) —
+over any realistic table height this makes every row's `PC` distinct
+regardless of what absolute value the sequence starts at, so `PROGRAM`/
+`PROGRAM_WORD` lookups can never land on the "wrong" row. The starting
+value needs no separate check: the cpu table's own digest-row and
+ordinary-fetch `pc` values only balance against *some* base the two tables
+agree on, and the ordinary lookup-balance mechanism rejects any mismatch.
+
+**Padding.** `mult`/`mult_word` are both forced to 0 wherever `valid = 0` —
+a padding row (all-zero, whose `WORD = 0` decodes as no known opcode) can
+never be fetched *or* digested, and `program_trace` panics if any real word
+is undecodable (the same invariant the old preprocessed builder enforced).
+The table's height is `Tier::program_height()` (= `cpu_height()`, a
+function of the tier alone — see `Machine::verifier_key`'s doc comment on
+why the verifier key must be program-independent now).
+
+`program_trace` (the witness builder) counts an ordinary-fetch `mult` per
 `CycleEvent` whose `pc` matches — except, since M3.2, a `POSEIDON2` call's
 absorb/write-back rows, which share their ecall row's `pc` without being
 separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
+`mult_word` is unconditionally 1 for every real row: every proof includes
+exactly one traversal of the whole program for `hc`, regardless of how the
+program actually ran.
 
-## `cpu` — main, `col::WIDTH = 129`
+## `cpu` — main, `col::WIDTH = 170`
 
 Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
 recomputed — `is_load`/`is_store` are *expressions* the AIR computes from
@@ -84,8 +130,12 @@ booleans `act0..3`, byte limbs `left0..1`/`idx0..1` of `hash_left`/
 five byte limbs `hp0..3`/`hp3_hi` of `hash_ptr` (ecall row only — the
 `ma0..3`/`ma3_hi` pattern, bounding `hash_ptr < 2^30`), and the
 canonical-digest-encoding gadget's four columns `himax0..1`/`inv0..1`
-(write-back rows only). This is the only table with public values:
-`pc_entry`, the tier index, and the eight output words.
+(write-back rows only), then the M3.4 digest-row columns (their own
+subsection below): `is_digest`, `digest_last`, 32 byte limbs `dhvl0..31` of
+the 8 output words, and the canonical-encoding gadget's `dhimax0..3`/
+`dinv0..3` (last digest row only). This is the only table with public
+values: `pc_entry`, the tier index, the eight output words, and (M3.4) the
+eight `hc` words, `pv::HC0..HC7`.
 
 Constraints, in words: `is_real` is boolean and monotone (once 0, stays 0);
 `clk` starts at 0 and increments by 1 on real rows; the first row's `pc`
@@ -326,6 +376,80 @@ wherever its message is unconstrained):
 - *padding*: `sys_hash is_hash is_hash_out hash_fin` are `SELECTORS`
   entries, so `(1 - is_real)·v = 0` forces all four to 0 — no lookup on
   either bus fires with a nonzero count there.
+
+### M3.4: the digest-row prefix — `hc` in-circuit
+
+`Program::digest_rows()` (`⌈len/4⌉`, at least 1) rows precede the first
+instruction row: row 0 of the cpu table is always a digest row, never an
+instruction. They reuse hash rows' absorb machinery wholesale — `hs0..7`
+(sponge state), `hv0..3` (this row's up to 4 absorbed words), `act0..3`
+(lane activity), `hash_left`/`hash_idx` and their byte limbs — gated by a
+new selector `is_digest` instead of `is_hash`; the two are mutually
+exclusive (they never occur on the same row) and share every generic
+"this row absorbs something" constraint (`act0..3` well-formed, the
+`POSEIDON2` bus lookup, inactive-lane carry-forward). The differences from
+a hash row:
+
+- **No memory sends at all.** A digest row's four words come from the new
+  `PROGRAM_WORD` bus (`program_word_lookup(pc_k, hv_k)` for each active
+  lane `k`, `pc_k = pc + 4·(4·hash_idx + k)` — `pc` here is `base_pc`,
+  constant across the whole group), not a memory read — `is_digest` is
+  folded into the same `off_cpu` exclusion hash rows already use for the
+  four `MEMORY`-slot sends, the `DEC0..22` zeroing, and the ordinary
+  `PROGRAM`-fetch count.
+- **No preceding ecall row.** A `POSEIDON2` syscall's absorb rows inherit
+  `hash_ptr`/`hash_n` and the all-zero starting state from their ecall row;
+  a digest group has none, so `pc` (= `base_pc`) and `hash_n` (reused to
+  carry `len`) are free witness values pinned only on `when_first_row`,
+  and the starting sponge state is seeded there too — **not** all-zero:
+  `hs4..6 = [HC_DOMAIN, base_pc, len]`, `hs0..3 = hs7 = 0`. This is what
+  makes `hc` length- and base-bound without spending a rate slot (and
+  hence a row) on a header block — see `hash::program_digest`'s doc
+  comment for the exact construction and why it costs exactly
+  `digest_rows()` permutations, not `⌈(len+3)/4⌉`.
+- **`pc` is carried forward one row further than `hash_ptr` would be.**
+  Every digest row pins `next_pc = pc` (constant across the group,
+  including its own last row) — combined with the ordinary `n(pc) =
+  next_pc` transition rule (already true on every real-row-to-real-row
+  transition), this is what makes the *first instruction row's* `pc`
+  equal to the digest group's `base_pc`, with no separate "boundary"
+  constraint needed. `pv::PC_ENTRY` is bound to row 0's `pc` on
+  `when_first_row`, exactly as it always was — it just now names the
+  first *digest* row instead of the first instruction row.
+- **`hash_idx`'s bound is looser.** A `POSEIDON2` syscall is capped at
+  `POSEIDON2_MAX_WORDS = 4096` words (1024 blocks), so hash rows tighten
+  `idx1` (the top byte of `hash_idx`) to `< 4` via an `AND4` lookup
+  (`docs` above). A program can run to many thousands of words, so digest
+  rows use only the plain `RANGE8[idx1]` bound instead (`hash_idx <
+  65536`) — gated by `is_digest` alone, not reusing the hash-only AND4
+  check.
+- **`hash_n` (`len`) does not survive into the first instruction row.**
+  Its copy-forward constraint is gated by `is_digest · n(is_digest)` (not
+  bare `is_digest`), so it only has to persist digest-row-to-digest-row;
+  the first instruction row's own `hash_n` column stays at its unrelated
+  `zero_vec` default. (`pc` and `hash_left` do not need this distinction —
+  `pc`'s constant-carry is meant to continue one row further, and
+  `hash_left` naturally lands on 0 at the boundary, matching that row's
+  own default.)
+- **The last digest row (`digest_last = 1`, a dedicated witness column —
+  see its doc comment for why not the degree-2 expression
+  `is_digest·(1 − n(is_digest))`) publishes `hc`.** `n(hs0..3)` — the
+  state after this row's own `POSEIDON2` permutation, i.e. the state
+  entering the first instruction row — is encoded into 8 lo/hi machine
+  words (`dhvl0..31`, `RANGE8`-checked; `dhimax0..3`/`dinv0..3` the same
+  canonical-encoding gadget hash write-back rows use, one pair per lane
+  here instead of two rows of two) and pinned equal to `pv::HC0..HC7`.
+- **Digest rows count as cycles** (`Machine::build_traces`'s cycle check,
+  `Tier::for_cycles`): a program's `digest_rows()` is added to its
+  `Execution::cycles()` before comparing against `Tier::max_cycles()`.
+
+`IS_DIGEST` is a contiguous prefix, enforced the same way `is_real`'s own
+padding suffix is: 1 on row 0 (`when_first_row`), and once it drops to 0 it
+never returns to 1. Skipping a digest row (ending the group early) is
+rejected the same way M3.2's absorb-row `n`-binding is: `hash_left` cannot
+reach exactly 0 early without absorbing a full 4-word block every row but
+the last, and `digest_last`'s own pin desyncs the moment the group ends
+somewhere the witness didn't mark.
 
 ## `memory` — main, `col::WIDTH = 12`
 
@@ -590,11 +714,18 @@ permutation, **one row per round**, in fixed 32-row blocks — 30 round rows
 (4 initial full rounds, 22 partial rounds, 4 terminal full rounds —
 `p3_goldilocks`'s own `GOLDILOCKS_POSEIDON2_HALF_FULL_ROUNDS`/
 `GOLDILOCKS_POSEIDON2_PARTIAL_ROUNDS_8`) plus 2 idle rows. Height is
-`tier.poseidon2_height()`, decoupled from `tier.cpu_height()` since M3.3:
-`2^(t+1)` (a tier-10 proof has 64 permutation slots, tier-12 has 256).
+`tier.poseidon2_height()`, decoupled from `tier.cpu_height()` since M3.3.
 M3.3 measured the `transfer` guest at 190 permutations at tier 12 — more
 than the `2^t` = 128 slots `poseidon2_height` gave through M3.2, so it
-gained the extra bit of height (`docs/06-viewing-keys.md`'s cost table).
+gained a bit of height, to `2^(t+1)`. M3.4 added the program digest's own
+`⌈len/4⌉` permutations to every proof (`transfer`'s program is 4 554 words,
+1 139 digest-row permutations on top of its 190 execution ones, 1 329
+total) and made digest rows count as cycles too, forcing `transfer` to
+tier 14 regardless — where even `2^(t+1)` (1 024 slots) falls short of
+1 329, so `poseidon2_height` gained one more bit, to `2^(t+2)` (2 048
+slots at tier 14; a tier-10 proof now has 128 slots, tier-12 has 512).
+See `machine::Tier::poseidon2_height`'s doc comment and
+`docs/06-viewing-keys.md`'s cost table for the full numbers.
 
 Preprocessed columns (period 32, `pre::WIDTH = 13`): `rc0..7` (this round's
 constants — only lane 0 is nonzero on a partial round), `is_full`,
@@ -680,56 +811,72 @@ new term is degree 3 or lower (the `not_final`/`final_absorb` absorb-chain
 gates, the write-back `hs` copy-forward pin, the three `n(hash_fin) = 0`/
 routing rules, the write-back `hash_left = 0` rule, and the `himax`/`inv`
 canonical-encoding equations) — so `cpu`'s measured degree is unchanged at
-8, not raised past it. This
-config's ceiling is degree 8 (`generic_config`'s `log_blowup = 3` plus this
+8, not raised past it.
+
+M3.4's additions land the same way. `program`'s in-circuit decoder is
+entirely degree ≤ 2 (a one-hot flag column, degree 1, times a linear
+bit-sum or a fixed constant) — the table's own measured max stays 2,
+unchanged from the old preprocessed-only padding invariant. `cpu`'s digest
+rows reuse hash rows' machinery at the same or lower degree throughout,
+with one deliberate exception called out in the column doc comment:
+`digest_last` is a **dedicated witness column**, not the degree-2
+expression `is_digest·(1 - n(is_digest))` it's defined equal to — every
+downstream use (32 `RANGE8` gates, the 8 `pv::HC` pins, the 4 canonical-
+encoding lane checks) reads that column directly instead, so none of them
+inherits an extra degree from redefining "last digest row" inline
+everywhere it's needed. `cpu`'s measured degree stays 8, not raised past it,
+by the same margin argument M3.2's additions already relied on.
+
+This config's ceiling is degree 8 (`generic_config`'s `log_blowup = 3` plus this
 machine's `is_zk = 1` hiding: `constraint_degree = max_degree + 1 ≤ 9` ⇒
 `log2_ceil(8) = 3` quotient chunks, `p3-batch-stark`'s cap), so `alu` and
 `cpu` are both already at the edge — any new constraint with a higher degree
 needs `log_blowup` raised (and the FRI soundness/cost tradeoff that comes
 with it) alongside it.
 
-## Why the program is preprocessed, and what that means for `hc`
+## Why the program digest is in-circuit, and what that means for `hc`
 
-Plonky3 commits a preprocessed trace once, independent of any witness, and
-the verifier holds that commitment permanently in its `CommonData`. Because
-`program`'s decoded columns are preprocessed, **that commitment is `hc`**:
-registering a confidential program on-chain means publishing this one
-Merkle root, and the constraint system and verifier code stay identical for
-every program. `Machine::code_hash` recomputes it directly from the program
-via `verifier_key`, so any verifier — not just the original prover — can
-derive `hc` standalone. That recomputation always includes the range,
-nibble, and (since M3.1) poseidon2 tables too, since they are also
-preprocessed and fold into the same `CommonData` — poseidon2's preprocessed
-trace is a pure function of `PERM_SEED` and the tier's height, not of the
-program, so it does not make `hc` program-sensitive in a new way, but it
-does become part of the one combined root every verifier recomputes.
-`Machine::verifier_key` caches this per `(program digest, tier)`
-(64-entry, FIFO-evicted) — `tests/e2e.rs::verifier_key_is_cached_after_first_verify`
-measures the cached hit at under 40% of the first, uncached recomputation
-(retuned in M2.3: splitting the 2^16-row byte table into two 256-row tables
-made the uncached build cheap enough that the old 10% bound no longer held —
-see the test's own comment for the measured numbers).
+Through M3.3, `program` was a *preprocessed* trace: Plonky3 commits it once,
+independent of any witness, and the verifier holds that commitment
+permanently in its `CommonData` — so `hc` was literally that Merkle root,
+and `verify` had to take the whole `Program` in the clear to reproduce it
+(`docs/03-privacy.md`'s "not a milestone-1 property" framing). M3.4 replaces
+that with an **in-circuit digest**: `program` is now a witness trace (the
+in-circuit decoder above), and `hc` is a sponge computed row by row over
+`cpu`'s digest-row prefix and pinned to public values `pv::HC0..HC7` —
+`Machine::verify(hc, proof)` checks those against a caller-supplied `hc` it
+never has to derive from a program at all.
 
-Recomputability depends on one deliberate choice in `machine.rs::key_config`:
-the hiding MMCS's per-commit salt (and the PCS's own random codewords) are
-seeded not from OS entropy but from a deterministic 64-bit digest of the
-program (`program_digest`, which folds `base_pc`, the word count, and every
-word). Every actual `prove_batch` call still runs against `make_config`'s
+This makes the verifier key — `Machine::verifier_key(tier)` — **program-
+independent**. The only preprocessed columns left are the range and nibble
+tables (fixed, 256 rows each) and the Poseidon2 chip's round-constant table
+(a pure function of `PERM_SEED` and the tier's height) — none of which
+depend on any specific program, so `CommonData` is now a pure function of
+the tier alone. `Machine::verifier_key`'s cache collapses from "one entry
+per `(program digest, tier)`" (a 64-entry, FIFO-evicted `KeyCache`) to "one
+entry per tier" (`TIERS.len() == 6`, so it never actually evicts anything)
+— `tests/e2e.rs::verifier_key_is_cached_after_first_verify` still measures
+the cached hit at under 40% of the first, uncached recomputation.
+
+`key_config`'s hiding MMCS salt (and the PCS's random codewords) no longer
+need to be seeded from the program either — they are seeded from a fixed
+constant (`machine::KEY_SEED`, documented alongside `PERM_SEED`), since the
+preprocessed trace they salt no longer varies by program, only by tier.
+Every actual `prove_batch` call still runs against `make_config`'s
 fresh-entropy config for the main-trace, quotient, and permutation
-commitments — that is what keeps zero knowledge intact, and is why two proofs
-of the same run are still different bytes (`docs/03-privacy.md`). Only the
-*preprocessed* commitment — `program`, `range`, `nibble`, and `poseidon2` —
-is deterministic, and that determinism is exactly what lets `hc` be
-recomputed by any verifier without having witnessed the original proving
-session.
+commitments — that is what keeps zero knowledge intact, and is why two
+proofs of the same run are still different bytes (`docs/03-privacy.md`).
 
-The reason this is safe is **not** that "the program table is public, so no
-privacy is lost." A commitment whose randomness is a function of the message
-is binding but not hiding: it is brute-forceable over any guessable program
-space, and two deployments of the same program yield the same `hc` and are
-therefore linkable. It is harmless in milestone 1 for a more basic reason —
-program confidentiality is not a milestone-1 property at all. `verify` takes
-the whole `Program` in the clear, so the verifier already holds every word and
-there is nothing left for a salt to hide. See `docs/03-privacy.md`; a hiding
-program commitment is a milestone-3 question, alongside the in-circuit digest
-that stops the verifier from holding the code.
+`hc` itself: `Program::digest()` (host-side, `isa.rs`) and `hash::
+program_digest` compute exactly what the digest rows compute in-circuit —
+a Poseidon2 sponge whose capacity lanes are seeded with `[HC_DOMAIN,
+base_pc, len]` before any word is absorbed (rather than spending a rate
+slot on that header), then `⌈len/4⌉` blocks of up to 4 program words each.
+`Program::code_hash()` formats it as hex — the M3.4 replacement for the old
+`Machine::code_hash`, which hashed the (now program-independent)
+preprocessed commitment and can no longer serve as a program identity at
+all.
+
+The privacy question this reopens — the verifier no longer holds the
+program, so what does `hc` leak, and is it still just "binding, not
+hiding"? — is answered in `docs/03-privacy.md`, not here.

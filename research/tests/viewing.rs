@@ -134,11 +134,18 @@ fn transfer_guest_proves_membership_and_computes_the_reference_outputs() {
 }
 
 /// M3.3's measured cost (`docs/06-viewing-keys.md`'s cost table): 190 Poseidon2 permutations
-/// (5 non-Merkle hash calls at `Word8` widths plus 32 Merkle levels at 5 permutations each
-/// plus the 7-permutation output-commitment digest) and 3 764 cycles, both within tier 12
-/// (4 095 max cycles; `poseidon2_height` bumped to `2^13` = 256 slots so 190 permutations
-/// fit — `machine::Tier::poseidon2_height`). Pinned so a future change to the guest or the
-/// hash is caught here rather than surfacing as a mysterious `NoTier`/`TooManyCycles`.
+/// from `execute()` itself (5 non-Merkle hash calls at `Word8` widths plus 32 Merkle levels at
+/// 5 permutations each plus the 7-permutation output-commitment digest) and 3 764 cycles.
+///
+/// M3.4 adds `Program::digest_rows()` permutations to *every* proof (the program's own `hc`,
+/// unconditional on how the guest ran) and counts them as cycles too: `transfer`'s program is
+/// 4 554 words, i.e. 1 139 digest rows. Total: 3 764 + 1 139 = 4 903 cycles (over tier 12's
+/// 4 095-cycle budget — `transfer` now needs at least tier 14) and 190 + 1 139 = 1 329
+/// permutations (over tier 12's `poseidon2_height() / 32` = 512 slots, and even tier 14's
+/// unmodified `2^(t+1)` would only give 1 024 — this is why `Tier::poseidon2_height` is
+/// `2^(t+2)`, not `2^(t+1)`, as of M3.4: 2 048 slots at tier 14, comfortably enough). Pinned so
+/// a future change to the guest, the hash, or the digest-row cost model is caught here rather
+/// than surfacing as a mysterious `NoTier`/`TooManyCycles`.
 #[test]
 fn transfer_guest_permutation_and_row_counts_are_measured() {
     let alice = Party::new();
@@ -156,9 +163,14 @@ fn transfer_guest_permutation_and_row_counts_are_measured() {
     assert_eq!(hash_calls, 5 + DEPTH + 1, "5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest");
     assert_eq!(permutations, 190);
     assert_eq!(e.cycles(), 3764);
-    assert_eq!(Tier::for_cycles(e.cycles()), Some(Tier(12)));
-    assert!(e.cycles() <= Tier(12).max_cycles());
-    assert!(permutations <= Tier(12).poseidon2_height() / 32, "must fit the tier's permutation slots, not just its cycle budget");
+    assert_eq!(program.digest_rows(), 1139, "transfer's word count, hence its hc cost, is pinned here");
+    let total_cycles = e.cycles() + program.digest_rows();
+    let total_permutations = permutations + program.digest_rows();
+    assert_eq!(total_cycles, 4903);
+    assert_eq!(total_permutations, 1329);
+    assert_eq!(Tier::for_cycles(total_cycles), Some(Tier(14)));
+    assert!(total_cycles <= Tier(14).max_cycles());
+    assert!(total_permutations <= Tier(14).poseidon2_height() / 32, "must fit the tier's permutation slots, not just its cycle budget");
 }
 
 #[test]
@@ -196,7 +208,7 @@ fn scenario() -> Scenario {
     // Alice → Bob
     let (alice_created, env, alice_key, inputs, anchor, nf) = build_transfer(&alice, &alice_note, &bob.vk, ledger.now, &ledger);
     let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
-    assert_eq!(proof.tier, Tier(12));
+    assert_eq!(proof.tier, Tier(14));
     let (cm_out, time) = (alice_created.commitment(), alice_created.time);
     let tx = ledger.apply(&m, &proof, anchor, nf, cm_out, time, env.clone()).unwrap();
     assert_eq!(tx, 2);
@@ -309,9 +321,9 @@ fn a_viewing_key_cannot_spend() {
     // actually computed) is a constraint failure: the write-back rows pin `MEM_VAL` to what
     // the emulator put in RAM, and the public-value columns are pinned to that.
     let real = notes::expected_outputs(&alice.sk, &note, &note, anchor);
-    let mut t = build_traces(&ledger.program, &e, Tier(12)).unwrap();
+    let mut t = build_traces(&ledger.program, &e, Tier(14)).unwrap();
     t.public_values[cpu::pv::OUT0] = F::from_u32(real[0]);
-    assert!(rejects(|| { let p = m.prove_traces(&ledger.program, &t, Tier(12)); m.verify(&ledger.program, &p) }));
+    assert!(rejects(|| { let p = m.prove_traces(&ledger.program, &t, Tier(14)); m.verify(&ledger.program.digest(), &p) }));
 }
 
 /// A wrong Merkle witness (a tampered sibling) makes the guest honestly compute a different
@@ -336,7 +348,7 @@ fn a_transfer_with_a_wrong_merkle_path_is_rejected() {
     let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
     // The STARK itself verifies fine — the guest faithfully computed *a* root, just not the
     // real one.
-    assert!(m.verify(&ledger.program, &proof).is_ok());
+    assert!(m.verify(&ledger.program.digest(), &proof).is_ok());
     // Recompute what the guest actually derived so `apply` is handed a self-consistent
     // (anchor, nf, cm_out, time) — the tampered witness's own honest outputs, which is exactly
     // what a real submitter would (have to) supply alongside this proof.
@@ -369,7 +381,7 @@ fn a_stale_anchor_is_rejected_by_the_ledger() {
     // Capture the witness and anchor now, while the note's tree position is still current.
     let (created, env, _, inputs, anchor, nf) = build_transfer(&alice, &note, &bob.vk, ledger.now, &ledger);
     let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
-    assert!(m.verify(&ledger.program, &proof).is_ok(), "the proof is valid math regardless of what the ledger does next");
+    assert!(m.verify(&ledger.program.digest(), &proof).is_ok(), "the proof is valid math regardless of what the ledger does next");
     // Push the tree far enough that `anchor` falls out of the 16-entry recent-roots window
     // (one root recorded per mint).
     for _ in 0..20 {

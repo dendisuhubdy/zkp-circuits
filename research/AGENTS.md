@@ -8,7 +8,7 @@ the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (107 tests). Everything uses
+- `cargo test` — the whole suite (111 tests). Everything uses
   `FriProfile::Test`; the two proof-backed viewing tests take ~70 s and
   `tests/zk.rs` ~50 s. All green is the bar before any commit.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one
@@ -51,11 +51,26 @@ the emulator disagree, the AIR is wrong.
 
 - `PERM_SEED` Poseidon2 round constants (a fixed development seed, not the
   published `GOLDILOCKS_POSEIDON2_RC_8_*` constants — swapping them is a
-  config change, not a rewrite); statistical (not perfect) ZK from
-  Plonky3 0.7's hiding PCS; `hc` binding-but-not-hiding; `READ_INPUT`
-  existential (unbound witness).
-- `hc`, the program commitment, is still verifier-side, not yet an
-  in-circuit public value (`docs/05-roadmap.md`'s "Known deviations").
+  config change, not a rewrite); `machine::KEY_SEED` similarly (M3.4: the
+  verifier-key config's fixed seed, replacing the old program-derived one
+  now that the preprocessed trace no longer depends on the program);
+  statistical (not perfect) ZK from Plonky3 0.7's hiding PCS; `hc`
+  binding-but-not-hiding (M3.4: still true — `hc` is now an in-circuit
+  digest, not a verifier-side commitment, but it still has no hiding salt
+  of its own, see `docs/03-privacy.md`); `READ_INPUT` existential (unbound
+  witness).
+- **One fixed message length per hash domain** (padding-free sponge). Every
+  `PaddingFreeSponge` absorb this crate does — `notes::hash`'s
+  domain-tagged calls, `hash::sponge_hash`, the M3.4 program digest — must
+  keep each domain's message at a length fixed by the call site (never
+  attacker-influenced), because a padding-free sponge cannot distinguish a
+  message from itself with trailing zero words appended within the same
+  rate block. `notes.rs`'s domain table documents this per domain; the
+  M3.4 program digest closes the one domain where the *length itself*
+  would otherwise have been attacker-chosen (the program's word count) by
+  absorbing `len` into the sponge's own capacity lanes before any word
+  content, making two different lengths produce different digests by
+  construction rather than by convention.
 
 ## Commits
 

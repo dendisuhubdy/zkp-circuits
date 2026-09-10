@@ -11,7 +11,7 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use rand_zkvm::tables::F;
 use rand_zkvm::isa::Instr;
-use rand_zkvm::tables::program::{self, program_trace, ProgramAir};
+use rand_zkvm::tables::program::{self, program_trace};
 use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::tables::memory::{self, memory_trace};
@@ -101,21 +101,22 @@ fn nibble_table_answers_and4_or4_xor4_lookups() {
 #[test]
 fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
     let p = guests::fib(5);
-    let air = ProgramAir { program: p.clone() };
-    let pre: RowMajorMatrix<F> = <ProgramAir as BaseAir<F>>::preprocessed_trace(&air).unwrap();
-    assert_eq!(pre.height(), air.height());
-    assert_eq!(pre.height(), 16);
+    let e = execute(&p, &[], 10_000).unwrap();
+    let t = program_trace(&p, &e.events, 16);
+    assert_eq!(t.height(), 16);
+    let w = program::col::WIDTH;
     // row 2 is the third instruction
     let d = Instr::decode(p.words[2]).unwrap().decoded().to_fields();
-    let row: Vec<F> = pre.values[2 * program::pre::WIDTH..3 * program::pre::WIDTH].to_vec();
-    assert_eq!(row[program::pre::PC], F::from_u32(8));
-    for (i, f) in d.iter().enumerate() { assert_eq!(row[program::pre::FIELDS + i], F::from_u32(*f), "field {i}"); }
-    assert_eq!(row[program::pre::VALID], F::ONE);
-    let last = pre.height() - 1;
-    assert_eq!(pre.values[last * program::pre::WIDTH + program::pre::VALID], F::ZERO);
-    let e = execute(&p, &[], 10_000).unwrap();
-    let t = program_trace(&p, &e.events);
-    let total: u64 = t.values.iter().map(|x| x.as_canonical_u64()).sum();
+    let row: Vec<F> = t.values[2 * w..3 * w].to_vec();
+    assert_eq!(row[program::col::PC], F::from_u32(8));
+    assert_eq!(row[program::col::WORD], F::from_u32(p.words[2]));
+    for (i, f) in d.iter().enumerate() { assert_eq!(row[program::col::RD + i], F::from_u32(*f), "field {i}"); }
+    assert_eq!(row[program::col::VALID], F::ONE);
+    assert_eq!(row[program::col::MULT_WORD], F::ONE);
+    let last = t.height() - 1;
+    assert_eq!(t.values[last * w + program::col::VALID], F::ZERO, "padding row must be invalid");
+    assert_eq!(t.values[last * w + program::col::MULT], F::ZERO);
+    let total: u64 = (0..t.height()).map(|r| t.values[r * w + program::col::MULT].as_canonical_u64()).sum();
     assert_eq!(total as usize, e.events.len(), "every cycle fetched exactly one row");
 }
 
@@ -124,7 +125,7 @@ fn memory_trace_is_sorted_and_consistent() {
     let p = guests::memcpy(4);
     let e = execute(&p, &[], 10_000).unwrap();
     let mut counts = RangeCounts::default();
-    let t = memory_trace(&e.events, 1 << 12, &mut counts);
+    let t = memory_trace(&e.events, 0, 1 << 12, &mut counts);
     let w = memory::col::WIDTH;
     let accesses: usize = e.events.iter().map(|c| c.accesses.len()).sum();
     let real: usize = (0..t.height()).filter(|r| t.values[r * w + memory::col::IS_REAL] == F::ONE).count();
@@ -227,22 +228,26 @@ fn cpu_trace_mirrors_events_and_pads() {
     let e = execute(&p, &[], 10_000).unwrap();
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
-    let t = cpu_trace(&e.events, 64, &mut range, &mut nibble);
+    let t = cpu_trace(&p, &e.events, 64, &mut range, &mut nibble);
     let w = cpu::col::WIDTH;
+    let dr = p.digest_rows();
     assert_eq!(t.height(), 64);
+    // Row 0 is the first of the `dr` M3.4 digest rows; ordinary events start at row `dr`.
+    assert_eq!(t.values[cpu::col::IS_DIGEST], F::ONE);
     for (i, ev) in e.events.iter().enumerate() {
-        let r = &t.values[i * w..(i + 1) * w];
-        assert_eq!(r[cpu::col::CLK], F::from_u32(ev.clk));
+        let r = &t.values[(dr + i) * w..(dr + i + 1) * w];
+        assert_eq!(r[cpu::col::CLK], F::from_u32(dr as u32 + ev.clk));
         assert_eq!(r[cpu::col::PC], F::from_u32(ev.pc));
         assert_eq!(r[cpu::col::NEXT_PC], F::from_u32(ev.next_pc));
         assert_eq!(r[cpu::col::IS_REAL], F::ONE);
+        assert_eq!(r[cpu::col::IS_DIGEST], F::ZERO);
         let d = ev.dec.to_fields();
         for k in 0..23 { assert_eq!(r[cpu::col::DEC0 + k], F::from_u32(d[k])); }
         assert_eq!((r[cpu::col::A], r[cpu::col::B], r[cpu::col::C]), (F::from_u32(ev.a), F::from_u32(ev.b), F::from_u32(ev.c)));
     }
-    let last_real = e.events.len() - 1;
+    let last_real = dr + e.events.len() - 1;
     assert_eq!(t.values[last_real * w + cpu::col::SYS_HALT], F::ONE);
-    let write_row = e.events.iter().position(|ev| matches!(ev.sys, Some(rand_zkvm::emulator::Syscall::WriteOutput { .. }))).unwrap();
+    let write_row = dr + e.events.iter().position(|ev| matches!(ev.sys, Some(rand_zkvm::emulator::Syscall::WriteOutput { .. }))).unwrap();
     assert_eq!(t.values[write_row * w + cpu::col::OUT_SEL0], F::ONE);
     // Padding rows are all-zero except the `written` accumulators, which must carry the
     // final per-slot write counts through to the last row for the unwritten-slot constraint.
@@ -254,7 +259,7 @@ fn cpu_trace_mirrors_events_and_pads() {
     let last = &t.values[(t.height() - 1) * w..t.height() * w];
     assert_eq!(last[cpu::col::WRITTEN0], F::ONE, "slot 0 was written");
     for k in 1..8 { assert_eq!(last[cpu::col::WRITTEN0 + k], F::ZERO, "slot {k} was not"); }
-    let pv = public_values(0, 10, &e.outputs);
+    let pv = public_values(0, 10, &e.outputs, &p.digest());
     assert_eq!(pv.len(), cpu::pv::NUM);
     assert_eq!(pv[cpu::pv::OUT0], F::from_u32(2));
 }
@@ -265,8 +270,9 @@ fn cpu_trace_limbs_and_counts_every_load_store_address() {
     let e = execute(&p, &[], 10_000).unwrap();
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
-    let t = cpu_trace(&e.events, 1 << 10, &mut range, &mut nibble);
+    let t = cpu_trace(&p, &e.events, 1 << 10, &mut range, &mut nibble);
     let w = cpu::col::WIDTH;
+    let dr = p.digest_rows();
     let is_mem = |i: usize| { let d = &e.events[i].dec; d.is_lb + d.is_lh + d.is_lw + d.is_sb + d.is_sh + d.is_sw == 1 };
     let is_store = |i: usize| { let d = &e.events[i].dec; d.is_sb + d.is_sh + d.is_sw == 1 };
     let mem_rows: Vec<usize> = (0..e.events.len()).filter(|i| is_mem(*i)).collect();
@@ -275,16 +281,23 @@ fn cpu_trace_limbs_and_counts_every_load_store_address() {
     for i in &mem_rows {
         let addr = e.events[*i].mem_addr;
         assert!(addr < 1 << 30, "row {i}: mem_addr must fit the AND4 bound");
+        let row = dr + i;
         for k in 0..4 {
-            assert_eq!(t.values[i * w + cpu::col::MA0 + k], F::from_u32((addr >> (8 * k)) & 0xff), "row {i} limb {k}");
+            assert_eq!(t.values[row * w + cpu::col::MA0 + k], F::from_u32((addr >> (8 * k)) & 0xff), "row {i} limb {k}");
         }
     }
     // Every load/store row RANGE8-checks its MA0..3 address limbs and its W0..3 word limbs
     // (8), plus the store's own RB0..3 rs2 limbs (4 more) on store rows only; memcpy uses
     // only LW/SW, so every load/store row also pays the same two AND4 lookups (the
     // low-nibble dummy range check and the MA3_HI-against-0xC extraction) — sign-extraction
-    // AND4 lookups only fire on LB/LH rows, which memcpy never uses.
-    assert_eq!(range.range.iter().sum::<u64>() as usize, 8 * mem_rows.len() + 4 * n_stores);
+    // AND4 lookups only fire on LB/LH rows, which memcpy never uses. M3.4: `range` is shared
+    // with the digest-row prefix too (`fill_digest_rows`) — 3 RANGE8 lookups per digest row
+    // (`LEFT0`/`LEFT0+1`/`IDX0`) plus 32 more on the last one (`DHVL0..31`, the canonical
+    // 8-word digest encoding). `LEFT0`/`LEFT0+1`/`IDX0`/`IDX0+1` are all four RANGE8-checked
+    // on a digest row (unlike a hash row, whose `IDX0+1` uses the tighter hash-only AND4
+    // bound instead) — 4 per digest row.
+    let digest_range8 = 4 * dr + 32;
+    assert_eq!(range.range.iter().sum::<u64>() as usize, 8 * mem_rows.len() + 4 * n_stores + digest_range8);
     let nibble_total: u64 = nibble.and.iter().sum();
     assert_eq!(nibble_total as usize, 2 * mem_rows.len());
 }
@@ -384,16 +397,16 @@ fn div_family_lookup_counts_per_op() {
 #[test]
 fn alu_max_constraint_degree_is_pinned() {
     use rand_zkvm::machine::{max_constraint_degrees, Tier};
-    let p = guests::fib(5);
     // Tier-invariant: no table here uses periodic columns, so the symbolic degree doesn't
     // depend on trace height — any tier gives the same numbers. `Tier(10)` (the smallest) is
-    // used only because `max_constraint_degrees` needs one to size the ALU/CPU/memory traces.
-    let degrees = max_constraint_degrees(&p, Tier(10));
+    // used only because `max_constraint_degrees` needs one to size the tables. M3.4: no
+    // longer program-dependent either — every chip's shape is a pure function of the tier.
+    let degrees = max_constraint_degrees(Tier(10));
     assert_eq!(degrees.len(), 7, "one degree per chip in machine::chips() order");
 
-    // program: preprocessed-only chip. Its one main-AIR constraint is the padding invariant
-    // `(1 - valid) * mult == 0` (AGENTS.md's invariant 2) — degree 2. The packed PROGRAM-bus
-    // lookup fraction-pin doesn't exceed that either.
+    // program: M3.4's main-trace in-circuit decoder. Every one-hot flag pin
+    // (`flag*(op-code)=0`) and field-consistency equation is at most degree 2 in the
+    // columns; the packed PROGRAM/PROGRAM_WORD lookup fraction-pins don't exceed that either.
     assert_eq!(degrees[0], 2, "program table max constraint degree");
 
     // cpu: measured max is 8 — but (checked via get_symbolic_constraints directly) it comes

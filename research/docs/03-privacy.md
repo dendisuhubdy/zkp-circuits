@@ -100,58 +100,87 @@ the on-chain commitments and nullifiers rather than trusting whoever handed
 it over. The construction, the checks, and the honest list of what it does
 not yet cover are in `docs/06-viewing-keys.md`.
 
-## `hc` is binding, not hiding — and the program is not secret in M1
+## `hc` is now an in-circuit digest — the verifier never holds the program
 
-`hc` is the preprocessed Merkle root, and `machine.rs::key_config` seeds its
-salt from `program_digest`, a deterministic function of the program itself. A
-commitment whose randomness is derived from the message it commits to is
-**binding but not hiding**: anyone who can guess a candidate program can
-recompute `hc` and confirm the guess, and two deployments of the same program
-produce the same `hc` and are trivially linkable. The earlier framing — "no
-privacy is lost because the program table is public" — was the wrong reason
-for the right mechanism.
+Through M3.3, `hc` was the preprocessed program table's Merkle root, and the
+verifier held the whole `Program` in the clear to recompute it — so the
+section below (still accurate as *history*) argued `hc` was "binding, not
+hiding" for the boring reason that there was nothing left to hide once the
+verifier already had every word. M3.4 changes the mechanism: `program` is a
+witness trace now (`docs/02-tables-and-buses.md`'s in-circuit decoder), and
+`hc` is a Poseidon2 sponge computed by `cpu`'s digest-row prefix and pinned
+to `pv::HC0..HC7` — `Machine::verify(hc, proof)` takes the digest directly,
+never the program.
 
-The right reason is simpler: **program confidentiality is not a milestone-1
-property.** `Machine::verify(program, proof)` takes the entire `Program` in
-the clear; every verifier holds every instruction word. There is nothing for a
-salt to hide, so a deterministic non-hiding digest costs nothing here, and the
-determinism buys something real — any verifier can recompute `hc` standalone
-without having witnessed the proving session.
+**What that does and doesn't change about what `hc` leaks.** `hc` still
+identifies a program — `Program::digest()` is a pure, deterministic function
+of `base_pc` and every word, so anyone who can guess a candidate program can
+still recompute `hc` and confirm the guess, and two deployments of the same
+program still produce the same `hc` and are still trivially linkable. That
+part of "binding, not hiding" is unchanged, and for the same underlying
+reason: `hc` has no independent salt of its own, in-circuit or out. What
+*has* changed is where the hiding gap actually lives. Before M3.4, the gap
+was "the verifier holds the program in the clear" — a much larger leak than
+`hc` alone, and the reason the M1 framing above was correct to call program
+confidentiality "not a milestone-1 property" at all. After M3.4, the
+verifier holds *only* `hc` (an 8-word digest) and never sees a single
+instruction word — a real privacy gain — but `hc` itself is still not
+hiding: nothing about the *digest's own construction* blinds it, so a
+verifier who can enumerate candidate programs (a small fixed set of known
+guest binaries, say) can still test each one against a published `hc`. A
+genuinely hiding program commitment — a fresh per-deployment salt folded
+into the digest, checked in-circuit against a value the guest itself
+attests to — is not something this milestone adds; `hc` is exactly as
+guessable as it always was, just now guessed against a smaller, in-circuit
+witness instead of a publicly-held one.
 
-That changes in milestone 3, where the code digest moves in-circuit and the
-verifier stops holding the program (`docs/05-roadmap.md`). That is the point
-at which a *hiding* program commitment — a salt from real entropy, published
-alongside the program's ciphertext, or a digest computed under the proof —
-becomes both necessary and possible. Until then, treat `hc` as an identifier
-for a public program, not as a secret-keeping commitment.
+The preprocessed tables that remain (`range`, `nibble`, the Poseidon2
+round-constant table) are the ones M3.4's "no salt to hide" argument now
+actually applies to cleanly: they are fixed, program-independent data, so
+`Machine::verifier_key`'s deterministic salt (`machine::KEY_SEED`, replacing
+the old program-derived one) hides nothing because there is nothing
+program-specific left in what it salts.
 
 ## What `verify` actually checks
 
-`Machine::verify(program, proof)` — the code a node runs — checks, in order:
-the proof carries exactly 10 public values; every one of them is a canonical
-Goldilocks residue (`< p`, so `out0` and `out0 + p` are not two spellings of
-the same proof); `public_values[PC_ENTRY]` equals `program.base_pc`; `public_values[TIER]` equals `proof.tier`; `proof.tier` is
-one of the six values in `TIERS` (an attacker-chosen out-of-range tier is
-rejected here, before it can be used to compute a table height and panic);
-the proof's degree bits match the heights that tier implies for all six
-tables; and finally the batch STARK itself, against a verifier key recomputed
-from the program. Both `verify` and `code_hash` go through `verifier_key`,
-which includes the range and nibble tables' preprocessed commitments (256
-rows each, since M2.3 split the 2^16-row byte table in two);
-`Machine::verifier_key` caches this per `(program digest, tier)` (64-entry,
-FIFO-evicted) — `tests/e2e.rs::verifier_key_is_cached_after_first_verify`
-measures the cached hit at under 40% of the first, uncached recomputation
-(retuned in M2.3 — the uncached build is now cheap enough that the old 10%
-bound no longer held; see the test's own comment).
+`Machine::verify(hc, proof)` — the code a node runs — checks, in order: the
+proof carries exactly `pv::NUM` (18) public values; every one of them is a
+canonical Goldilocks residue (`< p`, so `out0` and `out0 + p` are not two
+spellings of the same proof); `public_values[HC0..HC7]` equals the
+caller-supplied `hc`, word for word; `public_values[TIER]` equals
+`proof.tier`; `proof.tier` is one of the six values in `TIERS` (an
+attacker-chosen out-of-range tier is rejected here, before it can be used to
+compute a table height and panic); the proof's degree bits match the
+heights that tier implies for all seven tables; and finally the batch STARK
+itself, against a verifier key recomputed from the tier alone —
+`Machine::verifier_key(tier)`, which includes the range and nibble tables'
+preprocessed commitments (256 rows each, since M2.3 split the 2^16-row byte
+table in two) and the Poseidon2 chip's round-constant table. M3.4:
+`pc_entry` is no longer independently checked here — the verifier has no
+`base_pc` to check it against — it is read out of the proof and bound only
+in-circuit, to the digest group's own `pc` (and, indirectly, to `hc` itself,
+since `Program::digest` absorbs `base_pc`). `Machine::verifier_key` caches
+this per tier alone now (a 6-entry cache, `TIERS.len()`, that never actually
+evicts) — `tests/e2e.rs::verifier_key_is_cached_after_first_verify` still
+measures the cached hit at under 40% of the first, uncached recomputation.
 
 ## Tiers: what padding hides
 
 Trace height never reflects the actual cycle count; it is padded up to the
 smallest tier that fits. `cpu` and `alu` pad to `2^ℓ` and `2^(ℓ+1)` rows,
-`memory` to `2^(ℓ+2)` (four accesses per cycle, worst case); `program` pads
-to the next power of two above the program's own length (minimum 16 rows);
-`range` and `nibble` are each always the fixed 256 rows. Padding rows carry
-`is_real = 0` and emit nothing on any bus.
+`memory` to `2^(ℓ+2)` (four accesses per cycle, worst case), `poseidon2` to
+`2^(ℓ+2)` (M3.4: bumped from `2^(ℓ+1)` to fit the program digest's own
+`⌈len/4⌉` permutations on top of any guest hashing — `docs/02`'s
+`Tier::poseidon2_height` comment has the exact numbers); `program` (M3.4:
+now a main table, no longer sized by the specific program) pads to
+`Tier::program_height()` = `2^ℓ`, the same height as `cpu` — every cycle
+fetches at most one instruction, so no program can outgrow this; `range`
+and `nibble` are each always the fixed 256 rows. Padding rows carry
+`is_real = 0` (or, for `program`, `valid = 0`) and emit nothing on any bus.
+Digest rows are **not** padding — they are real, `is_real = 1` rows that
+count against the tier's cycle budget just like ordinary instructions do
+(`Program::digest_rows()` added to `Execution::cycles()` before choosing a
+tier).
 
 | Tier `ℓ` | `cpu` rows | `alu` rows | `memory` rows | max cycles |
 |---|---|---|---|---|
@@ -169,8 +198,8 @@ refused by `build_traces`, not silently truncated.
 
 | Data | Status |
 |---|---|
-| The program itself | public — `verify` takes it in the clear; `hc` identifies it, it does not hide it |
-| Code hash `hc` | public — the preprocessed commitment, binding but not hiding |
+| The program itself | hidden (M3.4) — `verify` takes only `hc`, never a word of the program; the *prover* still needs the program to build the witness, same as any other private input |
+| Code hash `hc` | public — an in-circuit digest (M3.4), binding but not hiding: it still identifies the program to anyone who can guess it |
 | Entry point `pc_entry` | public |
 | Gas tier `ℓ` | public per proof (the proof's own size already reveals its trace height, so hiding the tier index buys nothing at the single-proof level; a batch-level histogram, as the whitepaper describes, is a property of the aggregation layer, not of one proof) |
 | Eight output words | public |

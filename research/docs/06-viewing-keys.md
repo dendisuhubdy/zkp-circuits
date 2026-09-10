@@ -144,9 +144,11 @@ documents this precisely).
 
 **Measured cost** (`tests/viewing.rs::transfer_guest_permutation_and_row_counts_are_measured`):
 4 554 instructions, 3 764 cycles, 38 `POSEIDON2` calls (5 note/key/nullifier
-hashes + 32 Merkle levels + 1 output-commitment digest), 190 total
-permutations. See "Public outputs" and "Cost" below for what that meant for
-the gas tier.
+hashes + 32 Merkle levels + 1 output-commitment digest), 190 permutations
+from execution itself. M3.4 adds the program's own `hc` digest to every
+proof — 1 139 more digest rows (`⌈4554/4⌉`), counted as cycles too — for a
+total of 4 903 cycles and 1 329 permutations. See "Public outputs" and
+"Cost" below for what that meant for the gas tier.
 
 ## Public outputs
 
@@ -294,29 +296,36 @@ commitment.)
   its round constants (`machine::PERM_SEED`) are a fixed development seed,
   not the published `GOLDILOCKS_POSEIDON2_RC_8_*` constants — swapping them
   is a config change, not a rewrite (`docs/05-roadmap.md`).
-- **`hc`, the program commitment, is still verifier-side**, not an
-  in-circuit public value — unchanged by M3.3; tracked in
-  `docs/05-roadmap.md`'s "Known deviations from the whitepaper" list.
+- **Closed in M3.4.** `hc` is now an in-circuit public value — the program
+  table's digest rows compute it with the Poseidon2 chip, and
+  `Machine::verify(hc, proof)` checks it directly, no per-program verifier
+  key involved. See `docs/03-privacy.md` for what that does and doesn't
+  change about what `hc` leaks.
 
 ## Cost
 
 | | |
 |---|---|
 | `transfer` program | 4 554 instructions |
-| cycles | 3 764 → tier 12 (max 4 095) |
-| `POSEIDON2` calls | 38 (5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest) |
-| permutations | 190 total — 1 (`nk`, 3-word message) + 3 (`pk`, 9 words) + 7 (`cm_in`, 28 words) + 5 (`nf`, 17 words) + 7 (`cm_out`, 28 words) + 32 × 5 (Merkle levels, 17 words each) + 7 (output digest, 26 words) |
-| gas tier | 12 — cycles fit tier 12's 4 095-cycle budget, but 190 permutations exceed the `2^t` = 128 permutation slots tier 12's Poseidon2 table would otherwise have (`machine::Tier::poseidon2_height`, previously `cpu_height()`). **M3.3 decouples it**: `poseidon2_height(t) = 2^(t+1)`, giving tier 12 256 slots — one line in `machine.rs`, per the M3 plan's own contingency. |
+| cycles (execution only) | 3 764 |
+| digest rows (M3.4, `hc`) | 1 139 (`⌈4554/4⌉`) — count as cycles too |
+| total cycles | 4 903 → tier 14 (max 16 383; no longer fits tier 12's 4 095) |
+| `POSEIDON2` calls (execution only) | 38 (5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest) |
+| permutations (execution only) | 190 total — 1 (`nk`, 3-word message) + 3 (`pk`, 9 words) + 7 (`cm_in`, 28 words) + 5 (`nf`, 17 words) + 7 (`cm_out`, 28 words) + 32 × 5 (Merkle levels, 17 words each) + 7 (output digest, 26 words) |
+| total permutations | 190 + 1 139 (digest rows) = 1 329 |
+| gas tier | 14 — forced by the cycle count alone (M3.4: digest rows count as cycles); at tier 14, even the unmodified `poseidon2_height(t) = 2^(t+1)` (1 024 slots) falls short of 1 329, so M3.4 bumps it once more, to `2^(t+2)` (2 048 slots at tier 14) — `machine::Tier::poseidon2_height`'s doc comment has the full trade-off argument (cheaper in proof size than moving to tier 16, whose unmodified `2^(t+1)` would also clear 1 329 but at every other table's much larger tier-16 height too) |
 | envelope | 1 088 (KEM) + 3 × (12 + 16) + 32 + 32 + 40 bytes ≈ 1.3 KB |
-| test-profile proof | tens of seconds in `cargo test` (opt-level 1, debug constraint checking) at the now-larger tier-12 Poseidon2 table; the proof-backed viewing tests are correspondingly slower than the M1.5/M3.2 baseline — expected, not a regression |
+| test-profile proof | tens of seconds in `cargo test` (opt-level 1, debug constraint checking) at tier 14's larger tables; the proof-backed viewing tests are correspondingly slower than the M1.5/M3.2/M3.3 baseline — expected, not a regression |
 
 The M3 design spec's own estimate for the transfer guest was "≈5 + 32·(1+4)
 ≈ 165 permutations" (treating each of the five non-Merkle hash calls as
-roughly one permutation). The measured count is higher, 190, because at
-`Word8` widths the note-commitment calls (28-word messages, 7 permutations
-each) and the nullifier call (17 words, 5 permutations) cost more than one
-permutation apiece, and the output-commitment digest (`Public outputs`,
-above) adds 7 more. Both numbers exceed tier 12's original 128-slot budget,
-so the contingency the plan called out (`poseidon2_height = 2^(t+1)`)
-applies either way; 190 is the number pinned by
+roughly one permutation). The measured execution-only count is higher, 190,
+because at `Word8` widths the note-commitment calls (28-word messages, 7
+permutations each) and the nullifier call (17 words, 5 permutations) cost
+more than one permutation apiece, and the output-commitment digest (`Public
+outputs`, above) adds 7 more. M3.4 then adds the program's own digest cost
+on top — 1 139 more permutations, dwarfing the execution-only count — since
+`transfer`'s compiled program is itself large (4 554 words, dominated by
+the guest-level `NOTE_COMMIT`/`NULLIFY`/`MERKLE_VERIFY` routines' unrolled
+Merkle-level loop). 190 and 1 329 are the numbers pinned by
 `tests/viewing.rs::transfer_guest_permutation_and_row_counts_are_measured`.

@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 107 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
+cargo test              # 111 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -42,26 +42,26 @@ you can see the parameter effect directly.
 
 The relation is proved as one batch of seven AIR tables under a single
 commitment and a single FRI opening. Tables never call each other directly;
-they exchange facts through nine named LogUp buses, and the batch verifier
+they exchange facts through ten named LogUp buses, and the batch verifier
 checks that every bus balances globally.
 
 ```
                                   ┌───────────┐
-                                  │  PROGRAM  │ preprocessed; commitment = hc
+                                  │  PROGRAM  │ witness trace, in-circuit decoder; hc is proved, not preprocessed
                                   └───────────┘
-                                        │ PROGRAM bus (lookup: cpu fetches, program provides)
-                  MEMORY bus            ▼             ALU bus
-                            ◄─────┌───────────┐─────►
-                 (permutation)    │    CPU    │    (lookup)
-                                  └───────────┘
-                                        │
-                    ┌───────────────────┴───────────────────┐
-                    ▼                                       ▼
-               ┌───────────┐                           ┌───────────┐
-               │  MEMORY   │                           │    ALU    │
-               └───────────┘                           └───────────┘
-                     │ RANGE8                                │ RANGE8 AND4 OR4 XOR4 POW2
-                     └──────────────────┬────────────────────┘
+                                   │ PROGRAM (fetch)  │ PROGRAM_WORD (digest rows)
+                                   ▼                   ▼
+                  MEMORY bus            ┌───────────┐  ALU bus
+                            ◄─────      │    CPU    │  ─────►
+                 (permutation)          └───────────┘ (lookup)
+                                        │        │
+                    ┌───────────────────┘        └───────────────┐
+                    ▼                                             ▼
+               ┌───────────┐                                 ┌───────────┐
+               │  MEMORY   │                                 │    ALU    │
+               └───────────┘                                 └───────────┘
+                     │ RANGE8                                      │ RANGE8 AND4 OR4 XOR4 POW2
+                     └──────────────────┬──────────────────────────┘
                               ┌──────────┴──────────┐
                               ▼                     ▼
                         ┌───────────┐         ┌───────────┐
@@ -70,15 +70,17 @@ checks that every bus balances globally.
                     preprocessed, 256 rows   preprocessed, 256 rows
 
                         ┌─────────────┐
-                        │  POSEIDON2  │  provides POSEIDON2; unconnected — no
-                        └─────────────┘  syscall calls it until M3.2
+                        │  POSEIDON2  │  provides POSEIDON2; consumed by cpu's
+                        └─────────────┘  hash rows and its digest rows (hc)
 ```
 
-`program`, `range`, and `nibble` are preprocessed (committed once, independent
-of any witness); `cpu`, `memory`, `alu`, and `poseidon2` are main traces,
+`range` and `nibble` are preprocessed (committed once, independent of any
+witness, and of any program — since M3.4 that's true of every preprocessed
+table); `program`, `cpu`, `memory`, `alu`, and `poseidon2` are main traces,
 rebuilt per execution (`poseidon2`'s own round-constant/row-kind columns are
-preprocessed too, but its state/S-box columns are not). Full column lists
-and constraints: `docs/02-tables-and-buses.md`.
+preprocessed too, but its state/S-box columns are not; `program`'s decoder
+columns are all main now — M3.4 retired its preprocessed half entirely).
+Full column lists and constraints: `docs/02-tables-and-buses.md`.
 
 ## How confidential arbitrary computation works
 
@@ -90,9 +92,11 @@ regardless), and a fixed-length array of output words. Everything else —
 every register, every memory cell, every branch, the exact cycle count, and
 every private input — stays inside the witness and is never seen by a
 verifier (Part 1 of the demo). The *program* is not among the hidden things:
-`verify` takes the whole `Program` in the clear, so `hc` identifies a public
-program rather than hiding a secret one. Program confidentiality is not a
-milestone-1 property (`docs/03-privacy.md`).
+`verify` takes only `hc` (M3.4: the program table is a witness trace and its
+digest is computed in-circuit, not held by the verifier at all) — `hc` still
+identifies the program to anyone who can guess it, but the verifier itself
+never sees a single instruction word. See `docs/03-privacy.md` for exactly
+what that does and doesn't buy.
 
 Private inputs enter through the `READ_INPUT idx` syscall: the prover
 supplies whatever word it wants at that index, and the constraint system
@@ -189,10 +193,12 @@ boundary: `docs/03-privacy.md`.
 
 ## Deviations from the whitepaper
 
-1. `hc` is a verifier-side (per-program) commitment in this milestone, not
-   yet a public value the universal verifier consumes — milestone 3 moves
-   it in-circuit. It is also binding but not hiding, which is only acceptable
-   because `verify` holds the program in the clear today.
+1. **Closed in M3.4.** `hc` is now an ordinary public value, computed
+   in-circuit by the program table's digest rows with the Poseidon2 chip,
+   and checked by the universal, program-independent verifier key
+   (`Machine::verifier_key(tier)`). It is still binding but not hiding — a
+   verifier who can guess the program can still confirm the guess against
+   a published `hc` — see `docs/03-privacy.md`.
 2. The gas tier is public per proof, not only as a batch-level histogram.
 3. Zero knowledge is statistical in Plonky3 0.7, not perfect.
 4. The transcript hash is Poseidon2, not the whitepaper's SHA3-384/BLAKE3-384
@@ -204,15 +210,21 @@ boundary: `docs/03-privacy.md`.
 ## Reading order
 
 1. `src/isa.rs` — the instruction set, encoding, and the 23-field selector
-   set the program table commits.
+   set the program table commits (and, M3.4, `Program::digest`/`digest_rows`
+   — the host-side twin of the in-circuit `hc` computation).
 2. `src/emulator.rs` — the reference semantics; if the AIR and this
    disagree, the AIR is wrong.
-3. `src/tables/cpu.rs` — one row per cycle, fetch/decode-selectors/pc.
-4. `src/tables/memory.rs` — registers and RAM in one sorted table.
-5. `src/tables/alu.rs` — byte-limb arithmetic, shifts, compares, and (M2.6)
+3. `src/tables/program.rs` — the in-circuit decoder (M3.4): a raw
+   instruction word, its bit decomposition, and every `Decoded` field
+   proved as a function of those bits, mirroring `Instr::decode` opcode by
+   opcode.
+4. `src/tables/cpu.rs` — one row per cycle, fetch/decode-selectors/pc, plus
+   (M3.4) the digest-row prefix that computes `hc`.
+5. `src/tables/memory.rs` — registers and RAM in one sorted table.
+6. `src/tables/alu.rs` — byte-limb arithmetic, shifts, compares, and (M2.6)
    the RV32M extension as exact integer identities (64 main columns; RANGE8
    limb checks are op-gated — see `docs/02` for the exact per-op lookup
    counts).
-6. `src/machine.rs` — the Plonky3 config, tiers, `prove`/`verify`.
-7. `src/notes.rs`, `src/viewing.rs`, `src/ledger.rs` — keys, notes, envelopes,
+7. `src/machine.rs` — the Plonky3 config, tiers, `prove`/`verify(hc, proof)`.
+8. `src/notes.rs`, `src/viewing.rs`, `src/ledger.rs` — keys, notes, envelopes,
    disclosures, and the simulated chain the transfer guest is checked against.

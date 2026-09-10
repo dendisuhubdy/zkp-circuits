@@ -8,7 +8,7 @@ fn every_guest_proves_and_verifies() {
         let (proof, exec) = m.prove(&program, &inputs, None).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(proof.tier, Tier(10), "{name} should fit the smallest tier");
         assert_eq!(proof.public_values[2], exec.outputs[0] as u64);
-        m.verify(&program, &proof).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        m.verify(&program.digest(), &proof).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert!(proof.size() > 0);
     }
 }
@@ -20,8 +20,8 @@ fn tier_padding_hides_cycle_count() {
     let (p10, e) = m.prove(&p, &[], Some(Tier(10))).unwrap();
     let (p12, _) = m.prove(&p, &[], Some(Tier(12))).unwrap();
     assert!(e.cycles() < 100);
-    m.verify(&p, &p10).unwrap();
-    m.verify(&p, &p12).unwrap();
+    m.verify(&p.digest(), &p10).unwrap();
+    m.verify(&p.digest(), &p12).unwrap();
     assert_ne!(p10.batch.degree_bits, p12.batch.degree_bits);
     assert_eq!(p10.public_values[1], 10);
     assert_eq!(p12.public_values[1], 12);
@@ -33,9 +33,12 @@ fn a_fresh_verifier_accepts_the_proof() {
     let verifier = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
     let (proof, _) = prover.prove(&p, &[], None).unwrap();
-    verifier.verify(&p, &proof).unwrap();
-    assert_eq!(prover.code_hash(&p, proof.tier), verifier.code_hash(&p, proof.tier));
-    assert_ne!(prover.code_hash(&p, proof.tier), verifier.code_hash(&guests::fib(11), proof.tier));
+    // M3.4: the verifier never touches `p`'s words at all — only its digest, `hc`, which
+    // both sides compute identically (`Program::digest` is a pure host-side function, no
+    // `Machine` involved) and which the proof itself carries as a public value.
+    verifier.verify(&p.digest(), &proof).unwrap();
+    assert_eq!(p.code_hash(), p.digest().iter().map(|w| format!("{w:08x}")).collect::<String>());
+    assert_ne!(p.code_hash(), guests::fib(11).code_hash());
 }
 
 #[test]
@@ -44,10 +47,10 @@ fn verifier_key_is_cached_after_first_verify() {
     let p = guests::fib(10);
     let (proof, _) = m.prove(&p, &[], None).unwrap();
     let t0 = std::time::Instant::now();
-    m.verify(&p, &proof).unwrap();
+    m.verify(&p.digest(), &proof).unwrap();
     let first = t0.elapsed();
     let t1 = std::time::Instant::now();
-    m.verify(&p, &proof).unwrap();
+    m.verify(&p.digest(), &proof).unwrap();
     let second = t1.elapsed();
     // Threshold retuned in M2.3: splitting the 2^16-row byte table into the 256-row range
     // and nibble tables made the uncached key build itself much cheaper, so the fixed
@@ -75,7 +78,7 @@ fn measure_production_profile_at_tier_10_and_12() {
         let (proof, _) = m.prove(&p, &[], Some(tier)).unwrap();
         let prove_time = t0.elapsed();
         let t1 = std::time::Instant::now();
-        m.verify(&p, &proof).unwrap();
+        m.verify(&p.digest(), &proof).unwrap();
         let verify_time = t1.elapsed();
         println!("{label}: proof size = {} bytes, prove = {:?}, verify = {:?}", proof.size(), prove_time, verify_time);
     }

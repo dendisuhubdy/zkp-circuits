@@ -88,10 +88,15 @@ tax for a guest, not a reason to widen the machine.
 
 ## The `Decoded` selector set
 
-The program table is preprocessed: it holds every instruction word's decode
-already worked out, and the CPU table only ever reads these fields off the
-`PROGRAM` bus — it never inspects opcode bits itself. `Decoded::to_fields`
-fixes the order (`isa.rs`), 23 fields in total (M2.5 replaced the single
+The program table holds every instruction word's decode already worked
+out, and the CPU table only ever reads these fields off the `PROGRAM`
+bus — it never inspects opcode bits itself. Through M3.3 the program table
+was preprocessed (host-trusted); M3.4 moved it into the main trace with an
+in-circuit decoder that proves each field as a function of the word's own
+bits, mirroring `Instr::decode` (`docs/02-tables-and-buses.md`) — the
+*shape* of what the CPU table consumes is unchanged, only who vouches for
+it. `Decoded::to_fields` fixes the order (`isa.rs`), 23 fields in total
+(M2.5 replaced the single
 `is_load`/`is_store` booleans with a one-hot per load/store mnemonic, plus a
 `signed` flag):
 

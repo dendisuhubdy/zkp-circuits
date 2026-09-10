@@ -9,7 +9,7 @@ use p3_matrix::Matrix;
 use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::emulator::{execute, SLOT_W};
 use rand_zkvm::guests;
-use rand_zkvm::isa::{REG_A0, REG_A1};
+use rand_zkvm::isa::{AluOp, Instr, REG_A0, REG_A1};
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, Traces};
 use rand_zkvm::tables::{alu, cpu, limbs, memory, nibble, poseidon2, program, range, F};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -82,14 +82,14 @@ fn setup() -> (Machine, rand_zkvm::isa::Program, Traces) {
 fn honest_traces_pass() {
     let (m, p, t) = setup();
     let proof = m.prove_traces(&p, &t, Tier(10));
-    m.verify(&p, &proof).unwrap();
+    m.verify(&p.digest(), &proof).unwrap();
 }
 
 #[test]
 fn claiming_a_wrong_output_is_rejected() {
     let (m, p, mut t) = setup();
     t.public_values[cpu::pv::OUT0] = F::from_u32(56);   // fib(10) is 55
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn tampering_a_register_value_is_rejected() {
     let (m, p, mut t) = setup();
     let w = cpu::col::WIDTH;
     t.cpu.values[3 * w + cpu::col::C] += F::ONE;         // row 3 writes a wrong rd
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 #[test]
@@ -107,14 +107,14 @@ fn skipping_a_cycle_is_rejected() {
     let last = (0..t.cpu.height()).rev().find(|r| t.cpu.values[r * w + cpu::col::IS_REAL] == F::ONE).unwrap();
     // mark the row before HALT as padding: the chain of pcs breaks
     t.cpu.values[(last - 1) * w + cpu::col::IS_REAL] = F::ZERO;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 #[test]
 fn proof_for_one_program_does_not_verify_another() {
     let m = Machine::new(FriProfile::Test);
     let (proof, _) = m.prove(&guests::fib(10), &[], None).unwrap();
-    assert!(rejects(|| m.verify(&guests::fib(11), &proof)));
+    assert!(rejects(|| m.verify(&guests::fib(11).digest(), &proof)));
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn wrong_tier_claim_is_rejected() {
     let p = guests::fib(10);
     let (mut proof, _) = m.prove(&p, &[], None).unwrap();
     proof.tier = Tier(12);
-    assert!(rejects(|| m.verify(&p, &proof)));
+    assert!(rejects(|| m.verify(&p.digest(), &proof)));
 }
 
 #[test]
@@ -142,16 +142,22 @@ fn out_of_range_tier_is_an_error_not_a_panic() {
     let (mut proof, _) = m.prove(&p, &[], None).unwrap();
     proof.tier = Tier(99);
     proof.public_values[cpu::pv::TIER] = 99;
-    assert!(matches!(m.verify(&p, &proof), Err(rand_zkvm::machine::VerifyError::Tier)));
+    assert!(matches!(m.verify(&p.digest(), &proof), Err(rand_zkvm::machine::VerifyError::Tier)));
 }
 
+/// M3.4: `pc_entry` is no longer independently checked against anything the verifier holds
+/// (there is no `program.base_pc` on the verifier's side any more) — it is read out of the
+/// proof and only bound *in-circuit* to the digest group's own `PC` (`tables::cpu`'s `eval`).
+/// So tampering it post-hoc (without re-proving) is still rejected, but now because the
+/// tampered public value no longer matches what the committed trace actually proves — a
+/// genuine STARK batch-verification failure, not the early `PublicValues` sanity check.
 #[test]
 fn wrong_entry_point_claim_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
     let (mut proof, _) = m.prove(&p, &[], None).unwrap();
     proof.public_values[cpu::pv::PC_ENTRY] = 4;
-    assert!(matches!(m.verify(&p, &proof), Err(rand_zkvm::machine::VerifyError::PublicValues)));
+    assert!(rejects(|| m.verify(&p.digest(), &proof)));
 }
 
 /// Rewrite an honest `fib(10)` witness so that it claims `out0 = forged`, using nothing
@@ -227,7 +233,7 @@ fn a_tuple_forged_on_an_alu_padding_row_is_rejected() {
     let (m, p, mut t) = setup();
     forge_fib_output_through_an_alu_padding_row(&mut t, 999); // fib(10) is 55
     assert_eq!(t.public_values[cpu::pv::OUT0], F::from_u32(999));
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 
@@ -237,7 +243,7 @@ fn claiming_a_word_in_an_unwritten_output_slot_is_rejected() {
     // `fib` writes slot 0 only; spec §3.4 says every slot no WRITE_OUTPUT selected is zero.
     assert_eq!(t.public_values[cpu::pv::OUT0 + 1], F::ZERO);
     t.public_values[cpu::pv::OUT0 + 1] = F::from_u32(7);
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 #[test]
@@ -245,11 +251,11 @@ fn non_canonical_public_values_are_an_error_not_a_panic() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
     let (mut proof, _) = m.prove(&p, &[], None).unwrap();
-    m.verify(&p, &proof).unwrap();
+    m.verify(&p.digest(), &proof).unwrap();
     // `Val::from_u64` does not reduce, so `out0 + p` is the same field element and would
     // otherwise verify — with a different `to_bytes()` and a different apparent output.
     proof.public_values[cpu::pv::OUT0] += F::ORDER_U64;
-    assert!(matches!(m.verify(&p, &proof), Err(rand_zkvm::machine::VerifyError::PublicValues)));
+    assert!(matches!(m.verify(&p.digest(), &proof), Err(rand_zkvm::machine::VerifyError::PublicValues)));
 }
 
 #[test]
@@ -259,7 +265,7 @@ fn bumping_a_program_multiplicity_on_a_padding_row_is_rejected() {
     let pad = t.program.height() - 1; // the table is padded past the last instruction
     assert!(pad >= p.len(), "last program row is padding");
     t.program.values[pad * w + program::col::MULT] += F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 #[test]
@@ -272,7 +278,7 @@ fn swapping_two_adjacent_memory_rows_is_rejected() {
     // both buses still balance: the only thing that can catch this is the ordering AIR.
     let r = real / 2;
     for k in 0..w { t.memory.values.swap(r * w + k, (r + 1) * w + k); }
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 #[test]
@@ -281,7 +287,7 @@ fn bumping_a_range_pow2_multiplicity_on_a_non_pow2_row_is_rejected() {
     let w = range::col::WIDTH;
     let row = 200usize; // a=200 ≥ 32, so is_pow2 is 0 here
     t.range.values[row * w + range::col::M_POW2] += F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 #[test]
@@ -290,7 +296,7 @@ fn bumping_a_nibble_and_multiplicity_on_a_padding_row_is_rejected() {
     let w = nibble::col::WIDTH;
     let row = nibble::row_of(9, 6); // an arbitrary valid nibble pair the honest trace never counts
     t.nibble.values[row * w + nibble::col::M_AND] += F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// The memory-path mirror of `forge_fib_output_through_an_alu_padding_row`, ported to
@@ -352,7 +358,7 @@ fn storing_a_value_that_was_never_in_a_register_is_rejected() {
     let mut t = build_traces(&p, &e, Tier(10)).unwrap();
     forge_a_store(&mut t, 0x0500_0000);
     assert_eq!(t.public_values[cpu::pv::OUT0], F::from_u32(0x0500_0000));
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// M2.4 regression: bitwise rows (`and`/`or`/`xor`) no longer RANGE8-check their
@@ -373,7 +379,7 @@ fn bumping_range8_on_a_bitwise_rows_now_unconstrained_a_limb_is_rejected() {
     let e = execute(&p, &[], 10_000).unwrap();
     let mut t = build_traces(&p, &e, Tier(10)).unwrap();
     t.range.values[0x12 * range::col::WIDTH + range::col::M_RANGE] += F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// M2.4 regression: `slt`/`sltu`/`eq` rows no longer RANGE8-check their `C0..3`
@@ -391,7 +397,7 @@ fn bumping_range8_on_an_slt_rows_now_unconstrained_c_limb_is_rejected() {
     let e = execute(&p, &[], 10_000).unwrap();
     let mut t = build_traces(&p, &e, Tier(10)).unwrap();
     t.range.values[range::col::WIDTH + range::col::M_RANGE] += F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// M2.5: a store's `MERGED0..3` is the read-modify-write result, bound per byte by
@@ -414,7 +420,7 @@ fn a_store_that_replaces_the_wrong_byte_is_rejected() {
     let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
     t.cpu.values[sb_row * w + cpu::col::MERGED0] = F::from_u32(0x44);     // put the old byte 0 back
     t.cpu.values[sb_row * w + cpu::col::MERGED0 + 1] = F::from_u32(0xff); // and corrupt byte 1 instead
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// M2.5: `LB`'s sign extension runs through `SGN`, itself bound to the sign-relevant
@@ -437,7 +443,7 @@ fn a_load_byte_with_flipped_sign_extension_is_rejected() {
     t.cpu.values[lb_row * w + cpu::col::SGN] = F::ZERO; // flip: claim unsigned-looking zero-extend
     t.cpu.values[lb_row * w + cpu::col::C] = F::from_u32(0xff);
     t.public_values[cpu::pv::OUT0] = F::from_u32(0xff);
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// M2.5: `IS_LH*OFF0 = 0` is the stated alignment constraint for halfwords — a retagged
@@ -459,7 +465,7 @@ fn a_misaligned_lh_is_rejected_by_the_air() {
     t.cpu.values[lw_row * w + cpu::col::IS_LW] = F::ZERO;
     t.cpu.values[lw_row * w + cpu::col::IS_LH] = F::ONE;
     t.cpu.values[lw_row * w + cpu::col::OFF0] = F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// M2.5: `SB`'s per-byte `MERGED` formula pins `selp(k)=0` for every byte outside `off`,
@@ -480,7 +486,7 @@ fn a_sb_that_changes_a_byte_outside_its_offset_is_rejected() {
     let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
     // Also corrupt byte 2 (outside off=1), leaving byte 1 correct.
     t.cpu.values[sb_row * w + cpu::col::MERGED0 + 2] = F::from_u32(0x00);
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -521,7 +527,7 @@ fn mulhu_cannot_claim_hi_equals_2_32_minus_1_for_a_small_product() {
     t.alu.values[row * w + alu::col::C] = F::from_u32(0xffff_ffff);
     for k in 0..4 { t.alu.values[row * w + alu::col::C0 + k] = F::from_u32(0xff); }
     t.public_values[cpu::pv::OUT0] = F::from_u32(0xffff_ffff);
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// A supplementary test for the fix this table needed beyond the spec sketch: `LO`'s own
@@ -554,7 +560,7 @@ fn a_small_in_range_forged_carry_on_a_mulhu_row_is_still_rejected() {
     t.public_values[cpu::pv::OUT0] = F::from_u32(100);
     // T0..3 (LO's own limbs) are left at their honest value (12, from the real 3*4 = 12),
     // which now disagrees with `T0 + 2^16*T1 - 2^32*CARRY` for the forged CARRY.
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// `R >= B`: `REMU(17, 5) = 2` (`17 = 3*5 + 2`). Re-decompose as `q=2, r=7` — the core
@@ -581,7 +587,7 @@ fn a_remainder_not_smaller_than_the_divisor_is_rejected() {
     t.alu.values[row * w + alu::col::C0] = F::from_u32(7);
     t.alu.values[row * w + alu::col::INV] = F::from_u32(7).inverse(); // keep the mag-zero gadget honest
     t.public_values[cpu::pv::OUT0] = F::from_u32(7);
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// A wrong `DIVZ` on a nonzero divisor: `DIVU(10, 3) = 3` (`B = 3 != 0`). The naive
@@ -605,7 +611,7 @@ fn a_wrong_divz_on_a_nonzero_divisor_is_rejected() {
     t.alu.values[row * w + alu::col::C] = F::from_u32(0xffff_ffff);
     for k in 0..4 { t.alu.values[row * w + alu::col::C0 + k] = F::from_u32(0xff); }
     t.public_values[cpu::pv::OUT0] = F::from_u32(0xffff_ffff);
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// M2.6 regression. An earlier version of this test set `MULT = 1` on the forged row, which
@@ -644,7 +650,7 @@ fn a_mul_flag_set_on_an_otherwise_all_zero_padding_row_is_rejected() {
     // Set only the `Mul` flag; `A`, `B`, `C` (and every other column) stay at the padding
     // row's default zero, and `MULT` stays 0 — `(1-IS_REAL)*MULT = 0` holds regardless.
     t.alu.values[pad * wa + alu::col::FLAG0 + rand_zkvm::isa::AluOp::Mul.code() as usize] = F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// A sign flip on `MULH`: `MULH(-2, -3) = 0` (`(-2)*(-3) = 6`, fits in the low word). Flip
@@ -668,7 +674,7 @@ fn a_sign_flipped_mulh_is_rejected() {
     // `C` (0) and `borrow` are left as the honest solver set them: `rejects()` only needs a
     // genuine mismatch, and the public output stays whatever the (now-inconsistent) row
     // claims so `verify` doesn't reject on a public-value mismatch instead.
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// M3.1: the Poseidon2 table's round-transition constraints are gated by the *preprocessed*
@@ -684,7 +690,7 @@ fn tampering_a_poseidon2_x7_column_is_rejected() {
     // Row 0 of block 0 is the first full round; flip lane 0's X7 (the S-box output half of
     // `x7 = x3*x3*(mds_light(s)+rc)`, checked unconditionally on every `IS_FULL` row).
     t.poseidon2.values[poseidon2::col::X7_0] += F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 #[test]
@@ -694,19 +700,24 @@ fn tampering_the_poseidon2_in_copy_is_rejected() {
     // Row 1 of block 0 must copy row 0's IN down (the "same block" transition invariant);
     // flip it.
     t.poseidon2.values[w + poseidon2::col::IN0] += F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 #[test]
 fn bumping_poseidon2_mult_on_an_idle_row_is_rejected() {
     let (m, p, mut t) = setup();
     let w = poseidon2::col::WIDTH;
-    // Rows 30/31 of block 0 are idle (ROUND_ROWS = 30); MULT there must stay 0 via
-    // `MULT * (1 - IS_LAST) = 0`, a purely local (`CONSTRAINT_PANIC`) constraint. `setup()`'s
-    // guest (`fib(10)`) never calls `POSEIDON2`, so this table is still all padding for it.
-    assert_eq!(t.poseidon2.values[30 * w + poseidon2::col::IS_REAL], F::ZERO, "fib(10) never calls POSEIDON2");
-    t.poseidon2.values[30 * w + poseidon2::col::MULT] = F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    // Rows 30/31 of a block are idle (ROUND_ROWS = 30); MULT there must stay 0 via
+    // `MULT * (1 - IS_LAST) = 0`, a purely local (`CONSTRAINT_PANIC`) constraint. M3.4:
+    // `setup()`'s guest (`fib(10)`) now calls `POSEIDON2` once per digest row (its own hc,
+    // `Program::digest_rows()` blocks), so block 0 is real — pick the first genuinely idle
+    // block instead of assuming block 0 is padding.
+    let idle_block = (0..t.poseidon2.height() / rand_zkvm::tables::poseidon2::BLOCK)
+        .find(|b| t.poseidon2.values[b * rand_zkvm::tables::poseidon2::BLOCK * w + poseidon2::col::IS_REAL] == F::ZERO)
+        .expect("some block must be idle padding");
+    let idle_row = idle_block * rand_zkvm::tables::poseidon2::BLOCK + 30;
+    t.poseidon2.values[idle_row * w + poseidon2::col::MULT] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// M3.2: `guests::poseidon2_demo` for `msg`, traced at tier 10.
@@ -739,7 +750,7 @@ fn tampering_a_hash_digest_word_is_rejected() {
     let (_, _, writes) = hash_rows(&t);
     assert_eq!(writes.len(), 2, "one POSEIDON2 call always has two write-back rows");
     t.cpu.values[writes[0] * w + cpu::col::HV0] += F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// `n = 5` absorbs a full block then a one-word block, so the final absorb row's lane 1 is
@@ -756,7 +767,7 @@ fn tampering_a_hash_state_lane_between_absorb_rows_is_rejected() {
     let last = absorbs[1];
     assert_eq!(t.cpu.values[last * w + cpu::col::ACT0 + 1], F::ZERO, "lane 1 is inactive on the final (partial) block");
     t.cpu.values[last * w + cpu::col::HV0 + 1] += F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// Every new selector (`SYS_HASH`, `IS_HASH`, `IS_HASH_OUT`, `HASH_FIN`) must be zero on a
@@ -772,7 +783,7 @@ fn bumping_a_new_hash_selector_on_a_padding_row_is_rejected() {
         let pad = t.cpu.height() - 1;
         assert_eq!(t.cpu.values[pad * w + cpu::col::IS_REAL], F::ZERO, "last cpu row is padding");
         t.cpu.values[pad * w + sel] = F::ONE;
-        assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }), "selector column {sel}");
+        assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }), "selector column {sel}");
     }
 }
 
@@ -793,7 +804,7 @@ fn an_unbounded_hash_ptr_that_aliases_a_register_key_is_rejected() {
     let (ecall, _, _) = hash_rows(&t);
     let alias = F::from_u32(REG_A0) - F::from_u64(1u64 << 30);
     t.cpu.values[ecall * w + cpu::col::HASH_PTR] = alias;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// CRITICAL 2 regression: without a rule binding the ecall row's routing to `HASH_N`, a
@@ -816,7 +827,7 @@ fn skipping_every_absorb_row_for_a_nonzero_hash_n_is_rejected() {
     assert_eq!(t.cpu.values[absorbs[0] * w + cpu::col::HASH_LEFT], F::from_u32(5));
     t.cpu.values[absorbs[0] * w + cpu::col::IS_HASH] = F::ZERO;
     t.cpu.values[absorbs[0] * w + cpu::col::IS_HASH_OUT] = F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// CRITICAL 3 regression: `hv_lo + hv_hi·2^32 = hs_lane` is only a field identity, and for any
@@ -846,7 +857,7 @@ fn a_non_canonical_digest_word_encoding_is_rejected() {
     }
     t.cpu.values[row * w + cpu::col::HIMAX0] = F::ONE;
     t.cpu.values[row * w + cpu::col::INV0] = F::ZERO;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// MINOR regression: `is_hash` and `is_hash_out` set together on the same row must be
@@ -858,7 +869,7 @@ fn a_row_claiming_to_be_both_an_absorb_and_a_write_back_row_is_rejected() {
     let (_, absorbs, _) = hash_rows(&t);
     assert_eq!(absorbs.len(), 1, "n=4 is exactly one full block");
     t.cpu.values[absorbs[0] * w + cpu::col::IS_HASH_OUT] = F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// CRITICAL 2b regression (round 2): before the three `n(HASH_FIN) = 0`/"followed by
@@ -879,5 +890,68 @@ fn skipping_the_first_write_back_row_is_rejected() {
     assert_eq!(writes[0], ecall + 1, "the first write-back row follows the ecall row directly");
     assert_eq!(t.cpu.values[writes[0] * w + cpu::col::HASH_FIN], F::ZERO);
     t.cpu.values[writes[0] * w + cpu::col::HASH_FIN] = F::ONE;
-    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// M3.4: the program table as a witness trace with an in-circuit decoder, and the digest
+// prefix that computes `hc`.
+
+/// Flip one `BIT` column on a real instruction row without touching `WORD` (or the `FIELDS`
+/// that were honestly derived from the *original* bits) — the bit-decomposition constraint
+/// `WORD == Σ bit_i·2^i` is what this table is built on, so any single flipped bit trips it
+/// directly, independent of what that bit even controls.
+#[test]
+fn tampering_a_program_bit_column_changes_the_digest_and_is_rejected() {
+    let (m, p, mut t) = setup();
+    assert!(!p.is_empty(), "fib(10) has instructions");
+    t.program.values[program::col::BIT0] += F::ONE; // row 0's bit 0
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// `verify` checks `pv[HC0..HC7]` against the caller-supplied `hc` *before* the STARK batch
+/// check even runs — a proof for `fib(10)` checked against `fib(11)`'s digest is rejected
+/// structurally (`VerifyError::PublicValues`), which `rejects()` still accepts (it takes any
+/// `VerifyError`, not just a constraint-system panic).
+#[test]
+fn claiming_a_digest_that_does_not_match_the_program_is_rejected() {
+    let (m, p, t) = setup();
+    let proof = m.prove_traces(&p, &t, Tier(10));
+    let wrong_hc = guests::fib(11).digest();
+    assert_ne!(wrong_hc, p.digest());
+    assert!(rejects(|| m.verify(&wrong_hc, &proof)));
+}
+
+/// M3.4 ruling: the eight M-extension ops are legal only under `OP_ALU` with `funct7 = 1` —
+/// no flag in the decoder ever maps an `OP_ALUI`-opcode word to an M op (the `funct7` bits of
+/// an ALUI word are just part of its sign-extended immediate, never a "claim M-extension"
+/// signal, exactly mirroring `isa::Instr::decode`). Tamper an honest ALUI row's `ALU_OP`
+/// field to claim `MUL` directly: no combination of (legitimately derivable) flags can
+/// produce that value on an `OP_ALUI` row, so the field-consistency equation `ALU_OP ==
+/// (flag-weighted sum)` must fail.
+#[test]
+fn an_alui_word_claiming_mul_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = program::col::WIDTH;
+    let row = (0..p.len())
+        .find(|&i| { let d = Instr::decode(p.words[i]).unwrap().decoded(); d.is_alu == 1 && d.is_imm == 1 })
+        .expect("fib(10) uses at least one ALUI op (e.g. an ADDI)");
+    t.program.values[row * w + program::col::ALU_OP] = F::from_u32(AluOp::Mul.code());
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// The digest-row count is bound to the program's length exactly like M3.2's absorb-row
+/// count is bound to `n` (`skipping_every_absorb_row_for_a_nonzero_hash_n_is_rejected`
+/// above): ending the digest group one row early — turning the true last digest row back into
+/// an ordinary row — desyncs `DIGEST_LAST`'s own pin (`is_digest*(DIGEST_LAST-(1-n(IS_DIGEST)))
+/// = 0`, now violated one row earlier than the witness updated it) and, even if it hadn't,
+/// would leave the program table's now-unconsumed `PROGRAM_WORD` provides for the dropped
+/// words unpaid.
+#[test]
+fn skipping_a_digest_row_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = cpu::col::WIDTH;
+    let dr = p.digest_rows();
+    assert!(dr > 1, "fib(10)'s program needs more than one digest row");
+    t.cpu.values[(dr - 1) * w + cpu::col::IS_DIGEST] = F::ZERO;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
