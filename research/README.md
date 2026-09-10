@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (eleven proofs, one at production FRI parameters)
-cargo test              # 50 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
+cargo test              # 51 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
