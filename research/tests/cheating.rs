@@ -608,13 +608,20 @@ fn a_wrong_divz_on_a_nonzero_divisor_is_rejected() {
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
 
-/// M2.6 regression: the padding-row invariant (`(1-IS_REAL)*MULT = 0`, `a_tuple_forged_
-/// through_an_alu_padding_row_is_rejected`'s Add-flag case) generalizes to the new,
-/// higher-indexed M-extension flags too — the one-hot sum/boolean loop (`for i in
-/// 0..AluOp::COUNT`) must actually run over all 19 flags, not silently stay at the old 11.
-/// Plants a forged `(Mul, a_in, 0, forged)` tuple (flag index 11) on `muldiv`'s padding row,
-/// mirroring `forge_fib_output_through_an_alu_padding_row`'s structure but targeting `Mul`
-/// specifically.
+/// M2.6 regression: the one-hot sum/boolean loop (`for i in 0..AluOp::COUNT { assert_bool;
+/// sum += flag_i }`, checked against `sum == is_real`) must actually run over all 19 flags,
+/// not silently stay at the old 11 — a bug that would leave indices 11..18 (every
+/// M-extension flag) both unchecked for booleanness and uncounted toward `sum`. This plants
+/// a padding row (`IS_REAL = 0`) with the `Mul` flag (index 11) set to `1`: with the loop
+/// covering the full 19, `sum = 1 != is_real = 0` fails directly. The row also forges a
+/// `(Mul, a_in, 0, forged)` tuple with `MULT = 1` (mirroring `forge_fib_output_through_an_
+/// alu_padding_row`'s structure), so this is also still a genuine instance of the older,
+/// independent `(1-IS_REAL)*MULT = 0` padding-row invariant — both are real, simultaneously
+/// violated constraints on this row; see the ablation evidence in the task-6 fix report for
+/// why isolating the flag/sum loop specifically as the *sole* rejecting constraint isn't
+/// achievable without also threading the forged tuple through the CPU/register side (as
+/// `forge_fib_output_through_an_alu_padding_row` does), which this lighter-weight test does
+/// not attempt.
 #[test]
 fn a_mul_tuple_forged_on_an_alu_padding_row_is_rejected() {
     let m = Machine::new(FriProfile::Test);
@@ -634,6 +641,10 @@ fn a_mul_tuple_forged_on_an_alu_padding_row_is_rejected() {
     let pad = t.alu.height() - 1;
     assert_eq!(t.alu.values[pad * wa + alu::col::IS_REAL], F::ZERO, "last alu row is padding");
     let forged = honest_c + F::ONE;
+    // Set the `Mul` flag (index 11) itself — this is the whole point of the test: a padding
+    // row (`IS_REAL` stays `0`) claiming a set op flag must be rejected by the sum/boolean
+    // loop running over the *full* 19-flag range, not just the original 11.
+    t.alu.values[pad * wa + alu::col::FLAG0 + rand_zkvm::isa::AluOp::Mul.code() as usize] = F::ONE;
     t.alu.values[pad * wa + alu::col::A] = a_in;
     t.alu.values[pad * wa + alu::col::B] = F::ZERO;
     t.alu.values[pad * wa + alu::col::C] = forged;
