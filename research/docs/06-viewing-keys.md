@@ -14,6 +14,9 @@ true and testable (`tests/viewing.rs`):
 | **Scoped disclosure.** One party's history, or one transaction — never the whole chain. | Two disclosure objects with two scopes; every other envelope on the chain fails authentication under either. |
 | **Verifiability.** Every row is checkable against on-chain commitments and nullifiers by anyone holding the same key. | A row carries the note opening; `verify_row` recomputes the commitment (and, for a spend, the nullifier) and compares with the ledger. |
 
+All four claims are currently only as strong as the development hash and widths they are
+built on (`Arx8`, 64-bit digests) — see "What this milestone does not do" below.
+
 Code: `src/arx.rs` (the hash), `src/notes.rs` (keys, notes, commitments,
 nullifiers), `src/guests.rs::transfer` (the guest), `src/viewing.rs`
 (envelopes, disclosures, rows), `src/ledger.rs` (the simulated chain). Part 9
@@ -44,7 +47,7 @@ envelope.
 ```
 sk  ──H_NK──▶  nk  (the viewing key)  ──H_PK──▶  pk  (the address)
                 │
-                ├──H_NF(nk, ρ)──▶  nf        nullifier of the party's note with nonce ρ
+                ├──H_NF(nk, cm)──▶  nf       nullifier of the party's note with commitment cm
                 ├──H_OVK───────▶  ovk       symmetric key over the party's outgoing envelopes
                 └──H_KEM_SEED──▶  (dk, ek)  ML-KEM-768 keypair; ek is part of the address
 ```
@@ -65,10 +68,10 @@ the 1184-byte ML-KEM-768 encapsulation key envelopes are sealed to.
 
 ## Notes and what the guest proves
 
-A note is ten machine words:
+A note is nine machine words:
 
 ```
-pk (2)   from (2)   amount   asset   time   ρ   r (2)
+pk (2)   from (2)   amount   asset   time   r (2)
 ```
 
 `from` is the address of whoever created the note. It is there so the sender
@@ -79,22 +82,26 @@ the sender's input note is needed, which matters — disclosing the input
 note's opening to a receiver would hand them the sender's previous
 transaction.
 
-`guests::transfer` reads 16 private words (`notes::input`), and computes with
+`guests::transfer` reads 14 private words (`notes::input`), and computes with
 `arx::emit_hash`:
 
 ```
 nk     = H_NK(sk)
 pk     = H_PK(nk)
-nf     = H_NF(nk, ρ_in)
-cm_in  = H_CM(pk,      from_in, amount, asset, time_in,  ρ_in,  r_in)
-cm_out = H_CM(pk_out,  pk,      amount, asset, time_out, ρ_out, r_out)
+cm_in  = H_CM(pk,      from_in, amount, asset, time_in,  r_in)
+nf     = H_NF(nk, cm_in)
+cm_out = H_CM(pk_out,  pk,      amount, asset, time_out, r_out)
 ```
 
 and writes `cm_in, nf, cm_out, time_out` to output slots 0–6
 (`notes::output`). Amount and asset conservation is structural — the same
 input words feed both commitments — and the sender's ownership of the spent
 note is structural too: `cm_in` is computed with the derived `pk` as owner.
-543 instructions, 3 276 cycles, gas tier 12.
+The nullifier is bound to the *commitment*, not to a sender-chosen nonce:
+the ledger already rejects duplicate commitments, so two notes minted for
+the same owner can never collide to one nullifier, and a sender cannot
+brick a receiver's note by reusing a nonce. 534 instructions, 3 267 cycles,
+gas tier 12.
 
 `time` is both inside `cm_out` and a public output. The ledger pins the public
 value to its own clock, so a disclosed row's time is authenticated twice: the
@@ -152,11 +159,11 @@ set of rows confirms each row independently of whoever produced it:
 | `row.time == ledger.tx.time` | `Time` |
 | `row.cm_in`, `row.nf` equal the chain's | `Nullifier` |
 | `Received`: `note.pk == vk.pk()`; `Sent`: `note.from == vk.pk()` | `Party` |
-| `Sent`: `H_CM(spent) == cm_in` and `H_NF(nk, spent.ρ) == nf` (a mint has neither, and must carry no `spent`) | `Nullifier` |
+| `Sent`: `H_CM(spent) == cm_in` and `H_NF(nk, cm_in) == nf` (a mint has neither, and must carry no `spent`) | `Nullifier` |
 | the row's role is one this disclosure can produce | `Scope` |
 
 Who can check what follows from who holds `nk`. The sender's viewing key
-verifies the nullifier, because `nf = H_NF(nk_sender, ρ)`. A receiver, or a
+verifies the nullifier, because `nf = H_NF(nk_sender, cm_in)`. A receiver, or a
 holder of `K_tx`, verifies the commitment and sees that `nf` and `cm_in` were
 published in the same transaction, but cannot recompute `nf` — nor should
 they be able to, since that would let them compute the nullifiers of every
@@ -175,7 +182,7 @@ other note the sender owns.
   transaction graph.
 - **One in, one out, full value.** No change note, no fee, no multi-asset
   balancing. Adding outputs is more hash calls (each commitment is 3 blocks,
-  ≈ 1 040 cycles) and a tier step.
+  ≈ 1 060 cycles) and a tier step.
 - **`Arx8` is a development hash.** RV32I has no multiplier and M1 has no
   hash syscall, so the only hash a guest can afford is add/xor/rotate. `Arx8`
   is a ChaCha-style 256-bit permutation — the ChaCha quarter-round, four
@@ -206,9 +213,9 @@ other note the sender owns.
 
 | | |
 |---|---|
-| `transfer` program | 543 words (program table 1 024 rows) |
-| cycles | 3 276 → tier 12 (max 4 095) |
-| `Arx8` permutation | 321 instructions; 2-word hash ≈ 350 cycles, 10-word (a commitment) ≈ 1 040 |
+| `transfer` program | 534 words (program table 1 024 rows) |
+| cycles | 3 267 → tier 12 (max 4 095) |
+| `Arx8` permutation | 321 instructions; 2-word hash ≈ 380 cycles, 9-word (a commitment) ≈ 1 060 |
 | hashes per transfer | 5 calls, 9 permutations |
 | envelope | 1 088 (KEM) + 3 × (12 + 16) + 32 + 32 + 40 bytes ≈ 1.3 KB |
 | test-profile proof | ≈ 30 s in `cargo test` (opt-level 1, debug constraint checking); the two proof-backed tests take 70 s together |

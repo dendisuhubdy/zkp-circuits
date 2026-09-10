@@ -123,7 +123,7 @@ fn disclosure_scopes_and_row_verification() {
     let s = scenario();
     let l = &s.ledger;
     assert!(l.has_commitment(&s.alice_created.commitment()));
-    assert!(l.has_nullifier(&s.alice.vk.nullifier(s.alice_note.rho)));
+    assert!(l.has_nullifier(&s.alice.vk.nullifier(&s.alice_note.commitment())));
 
     // One party's history: Alice sees the mint she received and the transfer she sent — not Carol's.
     let alice = Disclosure::Party(s.alice.vk);
@@ -169,7 +169,7 @@ fn disclosure_scopes_and_row_verification() {
     assert_eq!(verify_row(l, &alice, &r), Err(RowError::Commitment));
     let mut r = honest.clone(); r.spent = Some(s.alice_created);
     assert_eq!(verify_row(l, &alice, &r), Err(RowError::Party));
-    let mut r = honest.clone(); r.spent = Some(Note { rho: honest.spent.unwrap().rho ^ 1, ..honest.spent.unwrap() });
+    let mut r = honest.clone(); r.spent = Some(Note { r: [honest.spent.unwrap().r[0] ^ 1, honest.spent.unwrap().r[1]], ..honest.spent.unwrap() });
     assert_eq!(verify_row(l, &alice, &r), Err(RowError::Nullifier));
     // A row from one disclosure does not verify under another scope.
     assert_eq!(verify_row(l, &bob, &honest), Err(RowError::Party));

@@ -5,8 +5,8 @@
 //! ```text
 //!   sk  ──H_NK──▶  nk (= the viewing key)  ──H_PK──▶  pk (the address)
 //!                    │
-//!                    ├──H_NF(nk, rho)──▶  nf     (nullifier of the note with nonce rho)
-//!                    ├──H_OVK────────▶  ovk    (wraps outgoing envelopes, `viewing.rs`)
+//!                    ├──H_NF(nk, cm)──▶  nf    (nullifier of the note with commitment cm)
+//!                    ├──H_OVK───────▶  ovk    (wraps outgoing envelopes, `viewing.rs`)
 //!                    └──H_KEM_SEED───▶  ML-KEM keypair (receives envelopes, `viewing.rs`)
 //! ```
 //!
@@ -44,10 +44,14 @@ pub struct ViewingKey { pub nk: Word2 }
 impl ViewingKey {
     /// The public address, the field a note names its owner and its creator by.
     pub fn pk(&self) -> Word2 { hash(domain::PK, &self.nk) }
-    /// The nullifier of the party's note with nonce `rho`. Only `nk` can compute it,
-    /// which is why an auditor holding the sender's viewing key can check a spend row's
-    /// nullifier against the chain while a receiver, holding only the note, cannot.
-    pub fn nullifier(&self, rho: u32) -> Word2 { hash(domain::NF, &[self.nk[0], self.nk[1], rho]) }
+    /// The nullifier of the party's note with commitment `cm`. Binding the nullifier to
+    /// the commitment — rather than to a sender-chosen nonce — means two notes minted for
+    /// the same owner can never collide to one nullifier (the ledger already rejects
+    /// duplicate commitments, so distinct notes have distinct nullifiers). Only `nk` can
+    /// compute it, which is why an auditor holding the sender's viewing key can check a
+    /// spend row's nullifier against the chain while a receiver, holding only the note,
+    /// cannot.
+    pub fn nullifier(&self, cm: &Word2) -> Word2 { hash(domain::NF, &[self.nk[0], self.nk[1], cm[0], cm[1]]) }
     /// Outgoing viewing key: the symmetric key under which every envelope this party sends
     /// carries a copy of its transaction key.
     pub fn ovk(&self) -> [u8; 32] {
@@ -76,22 +80,20 @@ pub struct Note {
     pub asset: u32,
     /// Creation time, as the transaction that created the note published it.
     pub time: u32,
-    /// Nullifier nonce.
-    pub rho: u32,
     /// Commitment randomness.
     pub r: Word2,
 }
 
 impl Note {
-    pub const WORDS: usize = 10;
+    pub const WORDS: usize = 9;
     pub const BYTES: usize = 4 * Self::WORDS;
 
-    /// The word layout the guest hashes: `pk, from, amount, asset, time, rho, r`.
+    /// The word layout the guest hashes: `pk, from, amount, asset, time, r`.
     pub fn words(&self) -> [u32; Self::WORDS] {
-        [self.pk[0], self.pk[1], self.from[0], self.from[1], self.amount, self.asset, self.time, self.rho, self.r[0], self.r[1]]
+        [self.pk[0], self.pk[1], self.from[0], self.from[1], self.amount, self.asset, self.time, self.r[0], self.r[1]]
     }
     pub fn from_words(w: [u32; Self::WORDS]) -> Note {
-        Note { pk: [w[0], w[1]], from: [w[2], w[3]], amount: w[4], asset: w[5], time: w[6], rho: w[7], r: [w[8], w[9]] }
+        Note { pk: [w[0], w[1]], from: [w[2], w[3]], amount: w[4], asset: w[5], time: w[6], r: [w[7], w[8]] }
     }
     pub fn commitment(&self) -> Word2 { hash(domain::CM, &self.words()) }
     pub fn to_bytes(&self) -> Vec<u8> { words_to_bytes(&self.words()) }
@@ -101,10 +103,10 @@ impl Note {
         for (i, c) in b.chunks(4).enumerate() { w[i] = u32::from_le_bytes(c.try_into().unwrap()); }
         Some(Note::from_words(w))
     }
-    /// A fresh note for `owner`, created by `from`, with random `rho` and `r`.
+    /// A fresh note for `owner`, created by `from`, with random `r`.
     pub fn new(owner: Word2, from: Word2, amount: u32, asset: u32, time: u32) -> Note {
         let mut rng = rand::rng();
-        Note { pk: owner, from, amount, asset, time, rho: rng.next_u32(), r: [rng.next_u32(), rng.next_u32()] }
+        Note { pk: owner, from, amount, asset, time, r: [rng.next_u32(), rng.next_u32()] }
     }
 }
 
@@ -119,13 +121,11 @@ pub mod input {
     pub const IN_AMOUNT: usize = 4;
     pub const IN_ASSET: usize = 5;
     pub const IN_TIME: usize = 6;
-    pub const IN_RHO: usize = 7;
-    pub const IN_R: usize = 8;       // 2 words
-    pub const OUT_PK: usize = 10;    // 2 words
-    pub const OUT_TIME: usize = 12;
-    pub const OUT_RHO: usize = 13;
-    pub const OUT_R: usize = 14;     // 2 words
-    pub const COUNT: usize = 16;
+    pub const IN_R: usize = 7;       // 2 words
+    pub const OUT_PK: usize = 9;     // 2 words
+    pub const OUT_TIME: usize = 11;
+    pub const OUT_R: usize = 12;     // 2 words
+    pub const COUNT: usize = 14;
 }
 
 /// Output-slot layout of `guests::transfer`: the public values a ledger reads.
@@ -142,10 +142,10 @@ pub fn transfer_inputs(sk: &SpendKey, spent: &Note, created: &Note) -> [u32; inp
     let mut v = [0u32; input::COUNT];
     v[input::SK] = sk.0[0]; v[input::SK + 1] = sk.0[1];
     v[input::IN_FROM] = spent.from[0]; v[input::IN_FROM + 1] = spent.from[1];
-    v[input::IN_AMOUNT] = spent.amount; v[input::IN_ASSET] = spent.asset; v[input::IN_TIME] = spent.time; v[input::IN_RHO] = spent.rho;
+    v[input::IN_AMOUNT] = spent.amount; v[input::IN_ASSET] = spent.asset; v[input::IN_TIME] = spent.time;
     v[input::IN_R] = spent.r[0]; v[input::IN_R + 1] = spent.r[1];
     v[input::OUT_PK] = created.pk[0]; v[input::OUT_PK + 1] = created.pk[1];
-    v[input::OUT_TIME] = created.time; v[input::OUT_RHO] = created.rho;
+    v[input::OUT_TIME] = created.time;
     v[input::OUT_R] = created.r[0]; v[input::OUT_R + 1] = created.r[1];
     v
 }
@@ -155,7 +155,7 @@ pub fn transfer_inputs(sk: &SpendKey, spent: &Note, created: &Note) -> [u32; inp
 pub fn expected_outputs(sk: &SpendKey, spent: &Note, created: &Note) -> [u32; crate::isa::NUM_OUTPUTS] {
     let vk = sk.viewing_key();
     let cm_in = spent.commitment();
-    let nf = vk.nullifier(spent.rho);
+    let nf = vk.nullifier(&cm_in);
     let cm_out = created.commitment();
     [cm_in[0], cm_in[1], nf[0], nf[1], cm_out[0], cm_out[1], created.time, 0]
 }

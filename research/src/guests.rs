@@ -167,11 +167,12 @@ pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
 /// The shielded transfer: spends one note and creates one of the same amount and asset.
 ///
 /// Private inputs (`notes::input`): the spend key, the spent note's fields, and the created
-/// note's owner, time, nonce and randomness. The guest derives `nk = H_NK(sk)` and
-/// `pk = H_PK(nk)` itself, so the spent note's owner and the created note's `from` are the
-/// address of whoever holds `sk` — that is what authenticates the sender — and it recomputes
-/// both commitments and the nullifier with `arx::emit_hash`. Public outputs
-/// (`notes::output`): `cm_in`, `nf`, `cm_out`, and the created note's `time`.
+/// note's owner, time and randomness. The guest derives `nk = H_NK(sk)` and `pk = H_PK(nk)`
+/// itself, so the spent note's owner and the created note's `from` are the address of
+/// whoever holds `sk` — that is what authenticates the sender — and it recomputes both
+/// commitments plus the nullifier (bound to `cm_in`, not to a sender-chosen nonce) with
+/// `arx::emit_hash`. Public outputs (`notes::output`): `cm_in`, `nf`, `cm_out`, and the
+/// created note's `time`.
 ///
 /// What it does *not* do in milestone 1: prove `cm_in` is in a commitment tree — there is no
 /// `MERKLE_VERIFY` syscall yet, so the ledger checks membership against the public `cm_in`
@@ -182,7 +183,7 @@ pub fn transfer() -> Program {
     use crate::notes::{input, output, Note};
     const BASE: u32 = 25;                       // s9: RAM base register
     const BUF: i32 = 0;                         // hash message buffer (12 words, zero-padded)
-    const INP: i32 = 0x100;                     // the 16 private inputs
+    const INP: i32 = 0x100;                     // the 14 private inputs
     const NK: i32 = 0x200; const PK: i32 = 0x208; const NF: i32 = 0x210; const CM_IN: i32 = 0x218; const CM_OUT: i32 = 0x220;
     let inp = |i: usize| INP + 4 * i as i32;
     let mut a = Assembler::new(0);
@@ -203,19 +204,20 @@ pub fn transfer() -> Program {
     copy(&mut a, NK, BUF); copy(&mut a, NK + 4, BUF + 4);
     arx::emit_call_hash(&mut a, HEAP + BUF, 2, domain::PK);
     store_digest(&mut a, PK);
-    // nf = H_NF(nk, rho_in)
-    copy(&mut a, NK, BUF); copy(&mut a, NK + 4, BUF + 4); copy(&mut a, inp(input::IN_RHO), BUF + 8);
-    arx::emit_call_hash(&mut a, HEAP + BUF, 3, domain::NF);
-    store_digest(&mut a, NF);
-    // cm_in = H_CM(pk, in.from, in.amount, in.asset, in.time, in.rho, in.r)
-    let note_words: [i32; Note::WORDS] = [PK, PK + 4, inp(input::IN_FROM), inp(input::IN_FROM + 1), inp(input::IN_AMOUNT), inp(input::IN_ASSET), inp(input::IN_TIME), inp(input::IN_RHO), inp(input::IN_R), inp(input::IN_R + 1)];
+    // cm_in = H_CM(pk, in.from, in.amount, in.asset, in.time, in.r)
+    let note_words: [i32; Note::WORDS] = [PK, PK + 4, inp(input::IN_FROM), inp(input::IN_FROM + 1), inp(input::IN_AMOUNT), inp(input::IN_ASSET), inp(input::IN_TIME), inp(input::IN_R), inp(input::IN_R + 1)];
     for (i, src) in note_words.iter().enumerate() { copy(&mut a, *src, BUF + 4 * i as i32); }
-    zero(&mut a, BUF + 40); zero(&mut a, BUF + 44);
+    zero(&mut a, BUF + 36); zero(&mut a, BUF + 40); zero(&mut a, BUF + 44);
     arx::emit_call_hash(&mut a, HEAP + BUF, Note::WORDS, domain::CM);
     store_digest(&mut a, CM_IN);
-    // cm_out = H_CM(out.pk, pk, in.amount, in.asset, out.time, out.rho, out.r)
-    let note_words: [i32; Note::WORDS] = [inp(input::OUT_PK), inp(input::OUT_PK + 1), PK, PK + 4, inp(input::IN_AMOUNT), inp(input::IN_ASSET), inp(input::OUT_TIME), inp(input::OUT_RHO), inp(input::OUT_R), inp(input::OUT_R + 1)];
+    // nf = H_NF(nk, cm_in) — bound to the commitment, so two notes can never share one
+    copy(&mut a, NK, BUF); copy(&mut a, NK + 4, BUF + 4); copy(&mut a, CM_IN, BUF + 8); copy(&mut a, CM_IN + 4, BUF + 12);
+    arx::emit_call_hash(&mut a, HEAP + BUF, 4, domain::NF);
+    store_digest(&mut a, NF);
+    // cm_out = H_CM(out.pk, pk, in.amount, in.asset, out.time, out.r)
+    let note_words: [i32; Note::WORDS] = [inp(input::OUT_PK), inp(input::OUT_PK + 1), PK, PK + 4, inp(input::IN_AMOUNT), inp(input::IN_ASSET), inp(input::OUT_TIME), inp(input::OUT_R), inp(input::OUT_R + 1)];
     for (i, src) in note_words.iter().enumerate() { copy(&mut a, *src, BUF + 4 * i as i32); }
+    // the padding words are still zero from the cm_in block — nf's message stayed below BUF+16
     arx::emit_call_hash(&mut a, HEAP + BUF, Note::WORDS, domain::CM);
     store_digest(&mut a, CM_OUT);
     // Publish.

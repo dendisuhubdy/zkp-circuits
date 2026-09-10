@@ -231,7 +231,7 @@ pub fn verify_row(ledger: &Ledger, d: &Disclosure, row: &Row) -> Result<(), RowE
                 (None, None) => {}
                 (Some(cm_in), Some(spent)) => {
                     if spent.pk != vk.pk() { return Err(RowError::Party); }
-                    if spent.commitment() != cm_in || Some(vk.nullifier(spent.rho)) != t.nf { return Err(RowError::Nullifier); }
+                    if spent.commitment() != cm_in || Some(vk.nullifier(&cm_in)) != t.nf { return Err(RowError::Nullifier); }
                 }
                 _ => return Err(RowError::Nullifier),
             }

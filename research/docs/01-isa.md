@@ -109,7 +109,7 @@ needs one, is read through the row's memory-access slot as register `a1`
 | 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — a prover-chosen witness value, and two reads of the same `idx` are not constrained to agree; see `docs/03-privacy.md` |
 | 10 | `POSEIDON2 ptr_in ptr_out` | M3 (not implemented) | hashes 8 words at `ptr_in`, writes 4 at `ptr_out` |
 | 11 | `NOTE_COMMIT` | M3 (not implemented) | commitment of `(value, ρ, pk)` |
-| 12 | `NULLIFY` | M3 (not implemented) | `nf = H(sk ‖ ρ)` |
+| 12 | `NULLIFY` | M3 (not implemented) | `nf = H(nk ‖ cm)` — bound to the commitment, not to a sender-chosen nonce |
 | 13 | `MERKLE_VERIFY` | M3 (not implemented) | membership against a public root |
 
 There is no RISC-V cross toolchain on the development machine, so every guest
