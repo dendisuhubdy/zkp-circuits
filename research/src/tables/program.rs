@@ -11,8 +11,8 @@ use std::collections::HashMap;
 pub mod pre {
     pub const PC: usize = 0;
     pub const FIELDS: usize = 1;
-    pub const VALID: usize = 1 + crate::isa::Decoded::NUM_FIELDS; // 19
-    pub const WIDTH: usize = VALID + 1;                            // 20
+    pub const VALID: usize = 1 + crate::isa::Decoded::NUM_FIELDS; // 24
+    pub const WIDTH: usize = VALID + 1;                            // 25
 }
 pub mod col { pub const MULT: usize = 0; pub const WIDTH: usize = 1; }
 pub const MIN_HEIGHT: usize = 16;

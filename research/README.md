@@ -189,12 +189,12 @@ boundary: `docs/03-privacy.md`.
 4. The transcript hash is Poseidon2, not the whitepaper's SHA3-384/BLAKE3-384
    — a config swap, not a rewrite.
 5. Recursion and per-batch aggregation are out of scope until milestone 4+.
-6. Selector refinement: 18 pre-decoded semantic fields replace one flag per
+6. Selector refinement: 23 pre-decoded semantic fields replace one flag per
    mnemonic (`docs/01-isa.md`) — same trust model, fewer columns.
 
 ## Reading order
 
-1. `src/isa.rs` — the instruction set, encoding, and the 18-field selector
+1. `src/isa.rs` — the instruction set, encoding, and the 23-field selector
    set the program table commits.
 2. `src/emulator.rs` — the reference semantics; if the AIR and this
    disagree, the AIR is wrong.
