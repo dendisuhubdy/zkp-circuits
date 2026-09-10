@@ -26,8 +26,17 @@ pub struct ProverData<M> { pub originals: Vec<M>, pub salted: Vec<RowMajorMatrix
 
 pub struct HidingMmcs<E: HashEngine> { engine: Arc<E>, verifier: P3Hiding, cap_height: usize, rng: Arc<Mutex<StdRng>> }
 
+/// Cloning *forks* the salt stream — a fresh seed drawn from the source RNG — exactly as
+/// `MerkleTreeHidingMmcs::clone` does. This is not a stylistic choice: `ExtensionMmcs::new(
+/// val_mmcs.clone())` is how a FRI config builds its challenge MMCS, so the clone advances the
+/// original's stream by one `from_rng` draw. Sharing the `Arc` instead would leave the original
+/// un-advanced and every subsequent commit salted differently from Plonky3's, which shows up as
+/// a preprocessed commitment the CPU verifier cannot reproduce.
 impl<E: HashEngine> Clone for HidingMmcs<E> {
-    fn clone(&self) -> Self { Self { engine: self.engine.clone(), verifier: self.verifier.clone(), cap_height: self.cap_height, rng: self.rng.clone() } }
+    fn clone(&self) -> Self {
+        let forked = StdRng::from_rng(&mut *self.rng.lock().unwrap());
+        Self { engine: self.engine.clone(), verifier: self.verifier.clone(), cap_height: self.cap_height, rng: Arc::new(Mutex::new(forked)) }
+    }
 }
 
 impl<E: HashEngine> HidingMmcs<E> {

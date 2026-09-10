@@ -30,6 +30,20 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 ml-kem = "=0.3.2"
 chacha20poly1305 = "=0.11.0"
+rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
+
+[features]
+default = []
+# The GPU backend's CPU-twin engines: same Merkle/NTT code paths, no device needed.
+reference-backend = ["dep:rand-zkvm-cuda"]
+# `Backend::Cuda` against a real device. Pulls `cuda-core`, which needs a CUDA 13 toolkit
+# at build time.
+cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/cuda"]
+# `Backend::Cuda` end to end on the mock driver: the same kernel bodies run on the host.
+# Deliberately *not* `["cuda", ...]` — `rand-zkvm-cuda/cuda` is what pulls `cuda-core`, so
+# enabling it would put a CUDA toolkit back in the way of a no-GPU test run. The two features
+# are siblings; either one turns on `Backend::Cuda`.
+mock-cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/mock-driver"]
 
 [profile.release]
 opt-level = 3
