@@ -215,11 +215,15 @@ where
         // nibble is a real AND4/OR4/XOR4 lookup input, the high nibble is a field-forced
         // function of the byte and that low nibble, itself also looked up), so nothing is
         // free there. On an `slt`/`sltu`/`eq` row, `g_c` is 0, so C0..3 are not RANGE8
-        // message columns — but C itself is pinned to {0,1} by the boolean constraint a
-        // few lines below, and C0..3's recomposition (`word(C0) == C` above) forces
-        // C0=C∈{0,1} and C1=C2=C3=0, which is a valid byte regardless — so C0..3 can never
-        // smuggle an out-of-range value there either. On every other row kind (add/sub,
-        // shifts) both gates are 1, matching the pre-M2.4 unconditional behavior exactly.
+        // message columns. That is safe — but not because `word(C0) == C` (above) pins
+        // C0..3 individually: it's one linear equation in four field elements, so it does
+        // *not* force C0 = C ∈ {0,1} and C1 = C2 = C3 = 0 (infinitely many other C0..3
+        // solve it too). The real reason is that nothing else on an `slt`/`sltu`/`eq` row
+        // consumes C0..3, so an unconstrained decomposition there is harmless — unlike
+        // `add`/`sub`/`sll`/`mul`/`div` rows, where C0..3 (or `mul`'s alias T0..3) are
+        // load-bearing and stay RANGE8-checked. Any new consumer of C0..3 on a cmp/eq row
+        // must re-enable the RANGE8 checks. On every other row kind (add/sub, shifts) both
+        // gates are 1, matching the pre-M2.4 unconditional behavior exactly.
         let g_ab = is_real.clone() - and.clone() - or.clone() - xor.clone();
         let g_c = g_ab.clone() - slt.clone() - sltu.clone() - eq.clone();
         for i in 0..4 {
