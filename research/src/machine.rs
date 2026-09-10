@@ -243,7 +243,9 @@ impl Machine {
     }
 
     pub fn prove(&self, program: &Program, inputs: &[u32], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
-        let exec = execute(program, inputs, 1 << 20).map_err(ProveError::Exec)?;
+        // Run up to the largest tier's cycle budget; a program that has not halted by then
+        // can never be proved, so `OutOfCycles` and `TooManyCycles` agree on the limit.
+        let exec = execute(program, inputs, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
         let tier = match tier { Some(t) => t, None => Tier::for_cycles(exec.cycles()).ok_or(ProveError::NoTier(exec.cycles()))? };
         let traces = build_traces(program, &exec, tier)?;
         Ok((self.prove_traces(program, &traces, tier), exec))
