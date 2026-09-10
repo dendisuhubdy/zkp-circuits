@@ -11,7 +11,7 @@ use rand_zkvm::emulator::{execute, SLOT_W};
 use rand_zkvm::guests;
 use rand_zkvm::isa::REG_A1;
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, Traces};
-use rand_zkvm::tables::{alu, cpu, memory, nibble, program, range, F};
+use rand_zkvm::tables::{alu, cpu, memory, nibble, poseidon2, program, range, F};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// The panic `p3-batch-stark`'s debug constraint checker raises when a row violates a
@@ -668,5 +668,42 @@ fn a_sign_flipped_mulh_is_rejected() {
     // `C` (0) and `borrow` are left as the honest solver set them: `rejects()` only needs a
     // genuine mismatch, and the public output stays whatever the (now-inconsistent) row
     // claims so `verify` doesn't reject on a public-value mismatch instead.
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// M3.1: the Poseidon2 table's round-transition constraints are gated by the *preprocessed*
+/// `IS_FULL`/`IS_PARTIAL`/idle selectors, not by the main column `IS_REAL` — so they run on
+/// every block, including the all-padding blocks `build_traces` currently produces (the
+/// emulator doesn't call `POSEIDON2` until M3.2; see `tables::poseidon2`'s module doc
+/// comment). That means these three cheating tests need no real event at all: tampering any
+/// padding block's own honest, self-consistent permutation trace is already enough to trip
+/// the AIR.
+#[test]
+fn tampering_a_poseidon2_x7_column_is_rejected() {
+    let (m, p, mut t) = setup();
+    // Row 0 of block 0 is the first full round; flip lane 0's X7 (the S-box output half of
+    // `x7 = x3*x3*(mds_light(s)+rc)`, checked unconditionally on every `IS_FULL` row).
+    t.poseidon2.values[poseidon2::col::X7_0] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+#[test]
+fn tampering_the_poseidon2_in_copy_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = poseidon2::col::WIDTH;
+    // Row 1 of block 0 must copy row 0's IN down (the "same block" transition invariant);
+    // flip it.
+    t.poseidon2.values[w + poseidon2::col::IN0] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+#[test]
+fn bumping_poseidon2_mult_on_an_idle_row_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = poseidon2::col::WIDTH;
+    // Rows 30/31 of block 0 are idle (ROUND_ROWS = 30); MULT there must stay 0 via
+    // `MULT * (1 - IS_LAST) = 0`, a purely local (`CONSTRAINT_PANIC`) constraint.
+    assert_eq!(t.poseidon2.values[30 * w + poseidon2::col::IS_REAL], F::ZERO, "table isn't fed by the emulator yet (M3.2)");
+    t.poseidon2.values[30 * w + poseidon2::col::MULT] = F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }

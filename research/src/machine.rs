@@ -28,7 +28,14 @@ pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
 /// Fixed seed for the Poseidon2 round constants. Prover and verifier derive the
 /// same permutation from it. Production swaps this for the published
 /// `GOLDILOCKS_POSEIDON2_RC_8_*` constants; the circuit does not change.
-const PERM_SEED: u64 = 0x5261_6e64_5a4b; // "RandZK"
+///
+/// `pub(crate)`, not private: `tables::poseidon2::round_constants` reproduces the exact same
+/// `ExternalLayerConstants::new_from_rng`/internal-constants RNG draw that `permutation()`
+/// below makes, so the M3 Poseidon2 *chip*'s round constants are byte-identical to this
+/// machine's own hashing permutation — see that module's doc comment for why (`p3_poseidon2`
+/// consumes its constants into opaque `external_layer`/`internal_layer` fields with no
+/// accessor, so the only way to recover them is to redraw them from the same seed).
+pub(crate) const PERM_SEED: u64 = 0x5261_6e64_5a4b; // "RandZK"
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FriProfile {
@@ -154,6 +161,7 @@ use crate::tables::alu::{alu_trace, AluAir};
 use crate::tables::cpu::{cpu_trace, public_values, CpuAir};
 use crate::tables::memory::{memory_trace, MemoryAir};
 use crate::tables::nibble::{nibble_trace, NibbleAir, NibbleCounts};
+use crate::tables::poseidon2::{poseidon2_trace, Poseidon2Air};
 use crate::tables::program::{program_trace, ProgramAir};
 use crate::tables::range::{range_trace, RangeAir, RangeCounts};
 use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder};
@@ -178,20 +186,34 @@ impl Tier {
     pub fn mem_height(self) -> usize { 1 << (self.0 + 2) }
     /// One padding row is always kept.
     pub fn max_cycles(self) -> usize { self.cpu_height() - 1 }
+    /// `2^t`, i.e. `2^(t-5)` Poseidon2 permutation slots (each block is 32 rows). The M3 plan's
+    /// own estimate is that the transfer guest may need `2^(t+1)` at tier 12 (~165
+    /// permutations vs. 128 slots here) — M3.3 measures the real count; if it doesn't fit,
+    /// this is the one line that changes.
+    pub fn poseidon2_height(self) -> usize { self.cpu_height() }
 }
 
 #[derive(Clone)]
-pub enum Chip { Program(ProgramAir), Cpu(CpuAir), Memory(MemoryAir), Alu(AluAir), Range(RangeAir), Nibble(NibbleAir) }
+pub enum Chip { Program(ProgramAir), Cpu(CpuAir), Memory(MemoryAir), Alu(AluAir), Range(RangeAir), Nibble(NibbleAir), Poseidon2(Poseidon2Air, usize) }
 
 impl BaseAir<Val> for Chip {
     fn width(&self) -> usize {
-        match self { Chip::Program(a) => BaseAir::<Val>::width(a), Chip::Cpu(a) => BaseAir::<Val>::width(a), Chip::Memory(a) => BaseAir::<Val>::width(a), Chip::Alu(a) => BaseAir::<Val>::width(a), Chip::Range(a) => BaseAir::<Val>::width(a), Chip::Nibble(a) => BaseAir::<Val>::width(a) }
+        match self { Chip::Program(a) => BaseAir::<Val>::width(a), Chip::Cpu(a) => BaseAir::<Val>::width(a), Chip::Memory(a) => BaseAir::<Val>::width(a), Chip::Alu(a) => BaseAir::<Val>::width(a), Chip::Range(a) => BaseAir::<Val>::width(a), Chip::Nibble(a) => BaseAir::<Val>::width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::width(a) }
     }
     fn preprocessed_width(&self) -> usize {
-        match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Range(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Nibble(a) => BaseAir::<Val>::preprocessed_width(a), _ => 0 }
+        match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Range(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Nibble(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::preprocessed_width(a), _ => 0 }
     }
     fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
-        match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_trace(a), Chip::Range(a) => BaseAir::<Val>::preprocessed_trace(a), Chip::Nibble(a) => BaseAir::<Val>::preprocessed_trace(a), _ => None }
+        match self {
+            Chip::Program(a) => BaseAir::<Val>::preprocessed_trace(a),
+            Chip::Range(a) => BaseAir::<Val>::preprocessed_trace(a),
+            Chip::Nibble(a) => BaseAir::<Val>::preprocessed_trace(a),
+            // `Poseidon2Air`'s own `BaseAir::preprocessed_trace` deliberately panics (its
+            // preprocessed trace depends on the tier's height, which isn't available through
+            // that trait method) — go through the height-carrying inherent method instead.
+            Chip::Poseidon2(_, height) => Some(Poseidon2Air::preprocessed_trace_at(*height)),
+            _ => None,
+        }
     }
     fn num_public_values(&self) -> usize { match self { Chip::Cpu(a) => BaseAir::<Val>::num_public_values(a), _ => 0 } }
 }
@@ -201,21 +223,33 @@ where
     AB: AirBuilder<F = Val> + PermutationAirBuilder + InteractionBuilder,
 {
     fn eval(&self, b: &mut AB) {
-        match self { Chip::Program(a) => a.eval(b), Chip::Cpu(a) => a.eval(b), Chip::Memory(a) => a.eval(b), Chip::Alu(a) => a.eval(b), Chip::Range(a) => a.eval(b), Chip::Nibble(a) => a.eval(b) }
+        match self { Chip::Program(a) => a.eval(b), Chip::Cpu(a) => a.eval(b), Chip::Memory(a) => a.eval(b), Chip::Alu(a) => a.eval(b), Chip::Range(a) => a.eval(b), Chip::Nibble(a) => a.eval(b), Chip::Poseidon2(a, _) => a.eval(b) }
     }
 }
 
-pub fn chips(program: &Program) -> Vec<Chip> {
-    vec![Chip::Program(ProgramAir { program: program.clone() }), Chip::Cpu(CpuAir), Chip::Memory(MemoryAir), Chip::Alu(AluAir), Chip::Range(RangeAir), Chip::Nibble(NibbleAir)]
+/// `Poseidon2` is appended last: `i == 1` (`Cpu`) must stay the public-values slot that
+/// `prove_traces`/`verify` hard-code, so every new chip since M2 has gone at the end rather
+/// than disturbing that index.
+pub fn chips(program: &Program, tier: Tier) -> Vec<Chip> {
+    vec![
+        Chip::Program(ProgramAir { program: program.clone() }),
+        Chip::Cpu(CpuAir),
+        Chip::Memory(MemoryAir),
+        Chip::Alu(AluAir),
+        Chip::Range(RangeAir),
+        Chip::Nibble(NibbleAir),
+        Chip::Poseidon2(Poseidon2Air, tier.poseidon2_height()),
+    ]
 }
 
 pub struct Traces {
     pub program: RowMajorMatrix<Val>, pub cpu: RowMajorMatrix<Val>, pub memory: RowMajorMatrix<Val>,
-    pub alu: RowMajorMatrix<Val>, pub range: RowMajorMatrix<Val>, pub nibble: RowMajorMatrix<Val>, pub public_values: Vec<Val>,
+    pub alu: RowMajorMatrix<Val>, pub range: RowMajorMatrix<Val>, pub nibble: RowMajorMatrix<Val>,
+    pub poseidon2: RowMajorMatrix<Val>, pub public_values: Vec<Val>,
 }
 impl Traces {
-    pub fn as_slice(&self) -> [&RowMajorMatrix<Val>; 6] { [&self.program, &self.cpu, &self.memory, &self.alu, &self.range, &self.nibble] }
-    pub fn heights(&self) -> [usize; 6] { self.as_slice().map(|m| m.height()) }
+    pub fn as_slice(&self) -> [&RowMajorMatrix<Val>; 7] { [&self.program, &self.cpu, &self.memory, &self.alu, &self.range, &self.nibble, &self.poseidon2] }
+    pub fn heights(&self) -> [usize; 7] { self.as_slice().map(|m| m.height()) }
 }
 
 #[derive(Debug)]
@@ -234,7 +268,11 @@ pub fn build_traces(program: &Program, exec: &Execution, tier: Tier) -> Result<T
     let range_t = range_trace(&range);
     let nibble_t = nibble_trace(&nibble);
     let program_t = program_trace(program, &exec.events);
-    Ok(Traces { program: program_t, cpu, memory, alu, range: range_t, nibble: nibble_t, public_values: public_values(program.base_pc, tier.0, &exec.outputs) })
+    // M3.2 wires the emulator's own hash events in; until then the table is all padding
+    // (`IS_REAL = 0` throughout) but still a genuine, AIR-satisfying permutation trace — see
+    // `tables::poseidon2`'s module doc comment.
+    let poseidon2_t = poseidon2_trace(&[], tier.poseidon2_height());
+    Ok(Traces { program: program_t, cpu, memory, alu, range: range_t, nibble: nibble_t, poseidon2: poseidon2_t, public_values: public_values(program.base_pc, tier.0, &exec.outputs) })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -355,7 +393,8 @@ impl Machine {
     fn log_ext_degrees(&self, program: &Program, tier: Tier) -> Vec<usize> {
         let zk = self.config.is_zk();
         let prog_h = ProgramAir { program: program.clone() }.height();
-        [prog_h, tier.cpu_height(), tier.mem_height(), tier.alu_height(), crate::tables::range::HEIGHT, crate::tables::nibble::HEIGHT]
+        // Order matches `chips()`: program, cpu, memory, alu, range, nibble, poseidon2.
+        [prog_h, tier.cpu_height(), tier.mem_height(), tier.alu_height(), crate::tables::range::HEIGHT, crate::tables::nibble::HEIGHT, tier.poseidon2_height()]
             .iter().map(|h| h.trailing_zeros() as usize + zk).collect()
     }
 
@@ -371,7 +410,7 @@ impl Machine {
             return hit;
         }
         let common = Arc::new(
-            ProverData::from_airs_and_degrees(&key_config(self.profile, program), &chips(program), &self.log_ext_degrees(program, tier)).common,
+            ProverData::from_airs_and_degrees(&key_config(self.profile, program), &chips(program, tier), &self.log_ext_degrees(program, tier)).common,
         );
         self.keys.lock().unwrap().insert(key, common.clone());
         common
@@ -403,7 +442,7 @@ impl Machine {
     /// or a backend proof stops matching what the CPU verifier recomputes. Change one, change
     /// the other.
     pub fn prove_traces(&self, program: &Program, traces: &Traces, tier: Tier) -> Proof {
-        let airs = chips(program);
+        let airs = chips(program, tier);
         let mats = traces.as_slice();
         let instances: Vec<StarkInstance<'_, Config, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
@@ -488,7 +527,7 @@ impl Machine {
         let exec = execute(program, inputs, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
         let tier = match tier { Some(t) => t, None => Tier::for_cycles(exec.cycles()).ok_or(ProveError::NoTier(exec.cycles()))? };
         let traces = build_traces(program, &exec, tier)?;
-        let airs = chips(program);
+        let airs = chips(program, tier);
         let mats = traces.as_slice();
         let instances: Vec<StarkInstance<'_, SC, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
@@ -523,9 +562,9 @@ impl Machine {
         // debug builds for a large enough tier (e.g. `1usize << 99`).
         if !TIERS.contains(&proof.tier.0) { return Err(VerifyError::Tier); }
         if proof.batch.degree_bits != self.log_ext_degrees(program, proof.tier) { return Err(VerifyError::Tier); }
-        let airs = chips(program);
+        let airs = chips(program, proof.tier);
         let pv: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
-        let pvs: Vec<Vec<Val>> = (0..6).map(|i| if i == 1 { pv.clone() } else { vec![] }).collect();
+        let pvs: Vec<Vec<Val>> = (0..7).map(|i| if i == 1 { pv.clone() } else { vec![] }).collect();
         let common = self.verifier_key(program, proof.tier);
         verify_batch(&self.config, &airs, &proof.batch, &pvs, &common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
     }
@@ -545,7 +584,7 @@ impl Machine {
 pub fn max_constraint_degrees(program: &Program, tier: Tier) -> Vec<usize> {
     let machine = Machine::new(FriProfile::Test);
     let key_cfg = key_config(machine.profile, program);
-    let airs = chips(program);
+    let airs = chips(program, tier);
     let is_zk = machine.config.is_zk();
     let ext_degrees = machine.log_ext_degrees(program, tier);
     let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &ext_degrees);

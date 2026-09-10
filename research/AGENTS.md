@@ -1,14 +1,14 @@
 # AGENTS.md — `research` (rand_zkvm)
 
 The Rand reference zkVM: an RV32I subset under a zero-knowledge batch STARK
-(Plonky3 0.7, Goldilocks), proved as six AIR tables exchanging facts over
-eight LogUp buses, plus the M1.5 viewing-key layer (notes, envelopes, scoped
+(Plonky3 0.7, Goldilocks), proved as seven AIR tables exchanging facts over
+nine LogUp buses, plus the M1.5 viewing-key layer (notes, envelopes, scoped
 disclosure, simulated ledger). Design docs are `docs/01–06`; the README has
 the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (81 tests). Everything uses
+- `cargo test` — the whole suite (89 tests). Everything uses
   `FriProfile::Test`; the two proof-backed viewing tests take ~70 s and
   `tests/zk.rs` ~50 s. All green is the bar before any commit.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one

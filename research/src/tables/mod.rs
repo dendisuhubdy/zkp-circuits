@@ -1,10 +1,11 @@
-//! The six tables of the machine and the buses that connect them.
+//! The seven tables of the machine and the buses that connect them.
 pub mod range;
 pub mod nibble;
 pub mod program;
 pub mod memory;
 pub mod alu;
 pub mod cpu;
+pub mod poseidon2;
 
 pub type F = p3_goldilocks::Goldilocks;
 
@@ -25,6 +26,8 @@ pub mod bus {
     pub const XOR4: LookupBus<'static> = LookupBus::new("XOR4");
     /// (s, 2^s) for s < 32. Range provides.
     pub const POW2: LookupBus<'static> = LookupBus::new("POW2");
+    /// (in0..7, out0..7): a width-8 Poseidon2 permutation. Poseidon2 table provides.
+    pub const POSEIDON2: LookupBus<'static> = LookupBus::new("POSEIDON2");
 }
 
 /// Split a u32 into four little-endian bytes as field elements.

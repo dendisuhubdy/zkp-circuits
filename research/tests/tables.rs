@@ -374,7 +374,7 @@ fn div_family_lookup_counts_per_op() {
 /// what actually ships, not a hand-recount. No proving: `ProverData::from_airs_and_degrees`
 /// only commits the preprocessed columns and walks the symbolic constraint tree: sub-second.
 ///
-/// Chip order is `machine::chips()`'s: program, cpu, memory, alu, range, nibble.
+/// Chip order is `machine::chips()`'s: program, cpu, memory, alu, range, nibble, poseidon2.
 ///
 /// If any of these numbers moves, re-measure (this test will fail with the new number) and:
 /// - update the assertion and its comment below,
@@ -389,7 +389,7 @@ fn alu_max_constraint_degree_is_pinned() {
     // depend on trace height — any tier gives the same numbers. `Tier(10)` (the smallest) is
     // used only because `max_constraint_degrees` needs one to size the ALU/CPU/memory traces.
     let degrees = max_constraint_degrees(&p, Tier(10));
-    assert_eq!(degrees.len(), 6, "one degree per chip in machine::chips() order");
+    assert_eq!(degrees.len(), 7, "one degree per chip in machine::chips() order");
 
     // program: preprocessed-only chip. Its one main-AIR constraint is the padding invariant
     // `(1 - valid) * mult == 0` (AGENTS.md's invariant 2) — degree 2. The packed PROGRAM-bus
@@ -422,4 +422,262 @@ fn alu_max_constraint_degree_is_pinned() {
     // AGENTS.md's cheating-tests note; `LOOKUP_BALANCE_PANIC` is what catches an unpaid
     // multiplicity here). Its packed AND4/OR4/XOR4 lookup fraction-pins are degree 2.
     assert_eq!(degrees[5], 2, "nibble table max constraint degree");
+
+    // poseidon2: measured max is 4, exactly the M3.1 design's own degree estimate — the S-box
+    // split (`x3 = (s+rc)^3`, degree 3 in columns; `x7 = x3*x3*(s+rc)`, degree 3) gated by a
+    // degree-1 preprocessed selector lands at degree 4, and the packed `POSEIDON2` lookup
+    // (the table's only bus interaction) doesn't raise it further. Comfortably under the
+    // degree-8 ceiling `alu`/`cpu` already sit at.
+    assert_eq!(degrees[6], 4, "poseidon2 table max constraint degree");
+}
+
+mod poseidon2_tests {
+    use super::*;
+    use p3_air::PermutationAirBuilder;
+    use p3_field::Field;
+    use p3_symmetric::Permutation;
+    use rand::distr::{Distribution, StandardUniform};
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use rand_zkvm::machine::permutation;
+    use rand_zkvm::tables::poseidon2::{
+        self, permute_scalar, poseidon2_trace, round_constants, Poseidon2Air, Poseidon2Event,
+        BLOCK, HALF_FULL_ROUNDS, PARTIAL_ROUNDS, ROUND_ROWS,
+    };
+
+    fn random_state(rng: &mut StdRng) -> [F; 8] {
+        core::array::from_fn(|_| StandardUniform.sample(rng))
+    }
+
+    /// Step 1 — the M3-correctness anchor: `permute_scalar` (built only from `mds_light`/
+    /// `internal_matmul`/`cube` plus the RNG-reproduced `round_constants`) must equal
+    /// `Poseidon2Goldilocks::<8>::permute` from `machine::permutation()` (which is seeded from
+    /// the exact same `PERM_SEED`), on 10^4 random states. This is what proves the round-
+    /// constant reproduction (`round_constants`'s RNG replay) is correct, not just that the
+    /// linear-layer arithmetic happens to match in isolation.
+    #[test]
+    fn poseidon2_scalar_helpers_match_plonky3() {
+        let perm = permutation();
+        let mut rng = StdRng::seed_from_u64(0xC0FFEE);
+        for i in 0..10_000 {
+            let state = random_state(&mut rng);
+            let want = perm.permute(state);
+            let got = permute_scalar(state);
+            assert_eq!(got, want, "mismatch on random state {i}");
+        }
+    }
+
+    /// Step 2 — the preprocessed trace's row-kind one-hot pattern and round constants.
+    #[test]
+    fn poseidon2_preprocessed_trace_has_the_right_shape() {
+        let height = BLOCK * 4;
+        let pre: RowMajorMatrix<F> = Poseidon2Air::preprocessed_trace_at(height);
+        assert_eq!(pre.height(), height);
+        let row = |r: usize| -> &[F] { &pre.values[r * poseidon2::pre::WIDTH..(r + 1) * poseidon2::pre::WIDTH] };
+        // row 0: first full round, IS_FIRST set.
+        let r0 = row(0);
+        assert_eq!(r0[poseidon2::pre::IS_FULL], F::ONE);
+        assert_eq!(r0[poseidon2::pre::IS_PARTIAL], F::ZERO);
+        assert_eq!(r0[poseidon2::pre::IS_IDLE], F::ZERO);
+        assert_eq!(r0[poseidon2::pre::IS_FIRST], F::ONE);
+        assert_eq!(r0[poseidon2::pre::IS_LAST], F::ZERO);
+        // row 29: last round row (terminal full round), IS_LAST set.
+        let r29 = row(29);
+        assert_eq!(r29[poseidon2::pre::IS_FULL], F::ONE);
+        assert_eq!(r29[poseidon2::pre::IS_FIRST], F::ZERO);
+        assert_eq!(r29[poseidon2::pre::IS_LAST], F::ONE);
+        // rows 30, 31: idle.
+        for r in [30usize, 31] {
+            let row = row(r);
+            assert_eq!(row[poseidon2::pre::IS_IDLE], F::ONE, "row {r}");
+            assert_eq!(row[poseidon2::pre::IS_FULL], F::ZERO, "row {r}");
+            assert_eq!(row[poseidon2::pre::IS_PARTIAL], F::ZERO, "row {r}");
+            assert_eq!(row[poseidon2::pre::IS_FIRST], F::ZERO, "row {r}");
+            assert_eq!(row[poseidon2::pre::IS_LAST], F::ZERO, "row {r}");
+        }
+        // row 4: first partial round — only RC0 is nonzero.
+        let r4 = row(4);
+        assert_eq!(r4[poseidon2::pre::IS_PARTIAL], F::ONE);
+        let rc = round_constants();
+        assert_eq!(r4[poseidon2::pre::RC0], rc.internal[0]);
+        assert_ne!(r4[poseidon2::pre::RC0], F::ZERO, "RC0 should be a genuine round constant");
+        for i in 1..8 {
+            assert_eq!(r4[poseidon2::pre::RC0 + i], F::ZERO, "lane {i}");
+        }
+        // The pattern repeats identically at block 1 (row 32 == row 0's pattern).
+        assert_eq!(row(32), row(0));
+    }
+
+    /// Step 4 — `poseidon2_trace`'s row bookkeeping (not just its final output) matches an
+    /// independent round-by-round scalar replay built from the same verified helpers, catching
+    /// any off-by-one in which row gets which round's constants or output.
+    #[test]
+    fn poseidon2_trace_matches_plonky3_round_by_round() {
+        let mut rng = StdRng::seed_from_u64(0xFEED);
+        let inputs: Vec<[F; 8]> = (0..10).map(|_| random_state(&mut rng)).collect();
+        let events: Vec<Poseidon2Event> = inputs
+            .iter()
+            .map(|&input| Poseidon2Event { input, output: permute_scalar(input) })
+            .collect();
+        let height = BLOCK * events.len();
+        let trace = poseidon2_trace(&events, height);
+        let w = poseidon2::col::WIDTH;
+        let rc = round_constants();
+
+        for (b, ev) in events.iter().enumerate() {
+            let mut s = ev.input;
+            for r in 0..BLOCK {
+                let row = &trace.values[(b * BLOCK + r) * w..(b * BLOCK + r + 1) * w];
+                for i in 0..8 {
+                    assert_eq!(row[poseidon2::col::S0 + i], s[i], "block {b} row {r} lane {i}: S");
+                    assert_eq!(row[poseidon2::col::IN0 + i], ev.input[i], "block {b} row {r} lane {i}: IN");
+                }
+                if r < HALF_FULL_ROUNDS {
+                    let pre_state = if r == 0 { poseidon2::mds_light(s) } else { s };
+                    let round = rc.initial[r];
+                    let mut x7 = [F::ZERO; 8];
+                    for i in 0..8 {
+                        let p = pre_state[i] + round[i];
+                        let x3 = poseidon2::cube(p);
+                        assert_eq!(row[poseidon2::col::X3_0 + i], x3, "block {b} row {r} lane {i}: X3");
+                        x7[i] = x3 * x3 * p;
+                        assert_eq!(row[poseidon2::col::X7_0 + i], x7[i], "block {b} row {r} lane {i}: X7");
+                    }
+                    s = poseidon2::mds_light(x7);
+                } else if r < HALF_FULL_ROUNDS + PARTIAL_ROUNDS {
+                    let round0 = rc.internal[r - HALF_FULL_ROUNDS];
+                    let p0 = s[0] + round0;
+                    let x3_0 = poseidon2::cube(p0);
+                    assert_eq!(row[poseidon2::col::X3_0], x3_0, "block {b} row {r}: X3 lane 0");
+                    let mut x7 = s;
+                    x7[0] = x3_0 * x3_0 * p0;
+                    for i in 0..8 {
+                        assert_eq!(row[poseidon2::col::X7_0 + i], x7[i], "block {b} row {r} lane {i}: X7");
+                    }
+                    s = poseidon2::internal_matmul(x7);
+                } else if r < ROUND_ROWS {
+                    let k = r - HALF_FULL_ROUNDS - PARTIAL_ROUNDS;
+                    let round = rc.terminal[k];
+                    let mut x7 = [F::ZERO; 8];
+                    for i in 0..8 {
+                        let p = s[i] + round[i];
+                        let x3 = poseidon2::cube(p);
+                        assert_eq!(row[poseidon2::col::X3_0 + i], x3, "block {b} row {r} lane {i}: X3");
+                        x7[i] = x3 * x3 * p;
+                        assert_eq!(row[poseidon2::col::X7_0 + i], x7[i], "block {b} row {r} lane {i}: X7");
+                    }
+                    s = poseidon2::mds_light(x7);
+                }
+            }
+            assert_eq!(s, ev.output, "block {b}: final state disagrees with the event's own output");
+            // MULT == 1 exactly on the last round row (29), 0 elsewhere in the block.
+            for r in 0..BLOCK {
+                let row = &trace.values[(b * BLOCK + r) * w..(b * BLOCK + r + 1) * w];
+                let want = if r == ROUND_ROWS - 1 { F::ONE } else { F::ZERO };
+                assert_eq!(row[poseidon2::col::MULT], want, "block {b} row {r}: MULT");
+                assert_eq!(row[poseidon2::col::IS_REAL], F::ONE, "block {b} row {r}: IS_REAL");
+            }
+        }
+    }
+
+    /// A throwaway table that looks up `POSEIDON2`, mirroring
+    /// `tests/tables.rs::range_table_answers_range8_and_pow2_lookups`'s `RangeAsker` pattern:
+    /// main = `[gate, in0..7, out0..7]`; provides one weighted lookup per row.
+    #[derive(Clone)]
+    struct Poseidon2Asker;
+    impl<Fld> BaseAir<Fld> for Poseidon2Asker {
+        fn width(&self) -> usize { 17 }
+    }
+    impl<AB: AirBuilder + InteractionBuilder> Air<AB> for Poseidon2Asker
+    where
+        AB::F: Field,
+    {
+        fn eval(&self, b: &mut AB) {
+            let m = b.main();
+            let v = |i: usize| -> AB::Expr { m.current(i).unwrap().into() };
+            let gate = v(0);
+            b.assert_bool(gate.clone());
+            let msg: Vec<AB::Expr> = (1..17).map(v).collect();
+            bus::POSEIDON2.lookup_key(b, msg, Count::bounded(gate, 1));
+        }
+    }
+
+    /// Step 5 — a small table of `Poseidon2Event`s (some real, some padding), asked for over
+    /// `POSEIDON2` by a throwaway consumer AIR, proves and verifies under the real batch
+    /// STARK — the constraint-level counterpart to the two round-by-round tests above (those
+    /// check the arithmetic directly; this checks the AIR the prover/verifier actually run).
+    #[test]
+    fn poseidon2_table_answers_lookups_under_a_constraint_check() {
+        let mut rng = StdRng::seed_from_u64(0xA5A5);
+        let n_real = 3;
+        let n_blocks = 8; // height = 256, comfortably more blocks than real events
+        let height = BLOCK * n_blocks;
+        let events: Vec<Poseidon2Event> = (0..n_real)
+            .map(|_| {
+                let input = random_state(&mut rng);
+                Poseidon2Event { input, output: permute_scalar(input) }
+            })
+            .collect();
+        let trace = poseidon2_trace(&events, height);
+
+        let asker_height = 4usize; // power of two >= n_real
+        let mut asker = vec![F::ZERO; asker_height * 17];
+        for (i, ev) in events.iter().enumerate() {
+            asker[i * 17] = F::ONE;
+            for k in 0..8 {
+                asker[i * 17 + 1 + k] = ev.input[k];
+            }
+            for k in 0..8 {
+                asker[i * 17 + 9 + k] = ev.output[k];
+            }
+        }
+        let asker_trace = RowMajorMatrix::new(asker, 17);
+
+        #[derive(Clone)]
+        enum T {
+            P(Poseidon2Air, usize),
+            A(Poseidon2Asker),
+        }
+        impl<Fld: Field> BaseAir<Fld> for T {
+            fn width(&self) -> usize {
+                match self {
+                    T::P(a, _) => <Poseidon2Air as BaseAir<Fld>>::width(a),
+                    T::A(a) => <Poseidon2Asker as BaseAir<Fld>>::width(a),
+                }
+            }
+            fn preprocessed_width(&self) -> usize {
+                match self {
+                    T::P(a, _) => <Poseidon2Air as BaseAir<Fld>>::preprocessed_width(a),
+                    T::A(_) => 0,
+                }
+            }
+            fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Fld>> {
+                match self {
+                    T::P(_, h) => Some(Poseidon2Air::preprocessed_trace_at(*h)),
+                    T::A(_) => None,
+                }
+            }
+        }
+        impl<AB: AirBuilder + PermutationAirBuilder + InteractionBuilder> Air<AB> for T
+        where
+            AB::F: Field,
+        {
+            fn eval(&self, b: &mut AB) {
+                match self {
+                    T::P(a, _) => a.eval(b),
+                    T::A(a) => a.eval(b),
+                }
+            }
+        }
+
+        let airs = vec![T::P(Poseidon2Air, height), T::A(Poseidon2Asker)];
+        let instances = vec![
+            StarkInstance { air: &airs[0], trace: &trace, public_values: vec![] },
+            StarkInstance { air: &airs[1], trace: &asker_trace, public_values: vec![] },
+        ];
+        let config = make_config(FriProfile::Test);
+        let pd = ProverData::from_instances(&config, &instances);
+        let proof = prove_batch(&config, &instances, &pd);
+        verify_batch(&config, &airs, &proof, &[vec![], vec![]], &pd.common).unwrap();
+    }
 }

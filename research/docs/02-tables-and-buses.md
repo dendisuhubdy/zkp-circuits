@@ -1,6 +1,6 @@
 # The tables and their buses
 
-The relation is proved as one batch of six AIR tables under one commitment
+The relation is proved as one batch of seven AIR tables under one commitment
 and one FRI opening (`p3-batch-stark`). Tables never call each other
 directly; they exchange facts through named LogUp buses, and the batch
 verifier checks that every bus balances globally.
@@ -29,13 +29,21 @@ verifier checks that every bus balances globally.
                         └───────────┘         └───────────┘
                     preprocessed, 256 rows   preprocessed, 256 rows
                     every byte a; pow2(a)    every nibble pair (a,b)
+
+                        ┌─────────────┐
+                        │  POSEIDON2  │  main; height = tier.poseidon2_height()
+                        └─────────────┘
+                    provides POSEIDON2 (lookup); no consumer yet — the
+                    emulator doesn't call the syscall until M3.2, so this
+                    table's trace is all padding (see its own section below)
 ```
 
-Eight buses in total: `PROGRAM`, `MEMORY`, `ALU`, `RANGE8` and `POW2`
-(carried by the range table), and `AND4`, `OR4`, `XOR4` (carried by the
-nibble table). `PROGRAM`, `ALU`, `RANGE8`, `AND4`, `OR4`, `XOR4`, `POW2` are
-`LookupBus`es (a subset check: every value a consumer sends must appear,
-with enough multiplicity, in the provider's table). `MEMORY` is a
+Nine buses in total: `PROGRAM`, `MEMORY`, `ALU`, `RANGE8` and `POW2`
+(carried by the range table), `AND4`, `OR4`, `XOR4` (carried by the nibble
+table), and `POSEIDON2` (carried by the poseidon2 table). `PROGRAM`, `ALU`,
+`RANGE8`, `AND4`, `OR4`, `XOR4`, `POW2`, `POSEIDON2` are `LookupBus`es (a
+subset check: every value a consumer sends must appear, with enough
+multiplicity, in the provider's table). `MEMORY` is a
 `PermutationCheckBus` — both sides are prover-supplied main-trace rows, and
 the argument proved is multiset equality, not a lookup into a fixed table.
 
@@ -416,19 +424,96 @@ each with its own multiplicity column. Consumed only by `alu` (bitwise
 operands and every isolated nibble extraction) and `cpu` (the memory
 alignment check, and — since M2.5 — `lb`/`lh`'s sign-bit extraction).
 
+## `poseidon2` — main, `col::WIDTH = 34` + preprocessed, `pre::WIDTH = 13`
+
+M3.1 (approach A from the M3 design spec): a width-8 Goldilocks Poseidon2
+permutation, **one row per round**, in fixed 32-row blocks — 30 round rows
+(4 initial full rounds, 22 partial rounds, 4 terminal full rounds —
+`p3_goldilocks`'s own `GOLDILOCKS_POSEIDON2_HALF_FULL_ROUNDS`/
+`GOLDILOCKS_POSEIDON2_PARTIAL_ROUNDS_8`) plus 2 idle rows. Height is
+`tier.poseidon2_height() = tier.cpu_height()` (a tier-10 proof has 32
+permutation slots, tier-12 has 128; M3.3 measures whether the transfer guest
+actually fits, and doubles this if not — see the M3 ledger).
+
+Preprocessed columns (period 32, `pre::WIDTH = 13`): `rc0..7` (this round's
+constants — only lane 0 is nonzero on a partial round), `is_full`,
+`is_partial`, `is_first` (row 0 of the block), `is_last` (row 29, the last
+round row), `is_idle` (rows 30/31). These are generated once from
+`round_constants()`, which reproduces — by redrawing from the same
+`machine::PERM_SEED`-seeded RNG, in the exact order `Poseidon2::
+new_from_rng_128` draws them — the same round constants `machine::
+permutation()` uses for the proof system's own hashing; there are no new
+constants for this table (per the M3.1 design ruling).
+
+Main columns (`col::WIDTH = 34`): `is_real`, `mult`, `s0..7` (the state
+entering this row), `x3_0..7`/`x7_0..7` (S-box intermediates — see below),
+`in0..7` (this block's absorbed input, copied down every row of the block).
+
+**S-box degree split.** The Goldilocks S-box is `x^7`; splitting it
+`x3 = (s+rc)^3` then `x7 = x3·x3·(s+rc)` keeps every constraint that uses it
+at degree ≤ 3 in the columns, gated to degree 4 by the (degree-1,
+preprocessed) row-kind selector. The linear-layer output constraints
+(`s_next = mds_light(x7)` on full rounds, `internal_matmul(x7)` on partial
+rounds) are degree 1 in the columns, degree 2 gated. Measured (see below):
+**4**, the same number the M3.1 design's own degree note predicted.
+
+**Round arithmetic.** `mds_light` (the external/MDS-light linear layer:
+`mat4` on each half of the state, then add the cross-half column sums) and
+`internal_matmul` (the internal linear layer, `state[i] = sum +
+diag[i]·state[i]` for `diag = MATRIX_DIAG_8_GOLDILOCKS`) are generic helpers
+over any `PrimeCharacteristicRing`, used both in the AIR (`E = AB::Expr`)
+and in a plain-`Goldilocks` scalar replay (`permute_scalar`) that
+`tests/tables.rs::poseidon2_scalar_helpers_match_plonky3` checks against
+`Poseidon2Goldilocks::<8>::permute` on 10,000 random states — the anchor
+that the round-constant reproduction and the linear-layer arithmetic both
+match Plonky3 bit-for-bit. The same operation order is proven correct
+independently at `rand-zkvm-cuda/src/device/poseidon2.rs`.
+
+**Row semantics.** Row 0 of a block: `in = s` (the raw absorbed input). Full
+rounds: the S-box runs on all 8 lanes; row 0 additionally applies the
+initial MDS-light layer before its own round constant (Plonky3's
+`external_initial_permute_state`, fused into row 0 rather than costing a
+separate row). Partial rounds: the S-box runs on lane 0 only (`rc` on lanes
+1–7 is pinned to 0 in the preprocessed trace; `x7` on those lanes is `s`
+unchanged), matching `p3_poseidon2::internal_permute_state`. Idle rows
+constrain nothing beyond `mult = 0`. `in` and `is_real` persist across a
+block's rows (a transition constraint keyed off the *next* row's
+preprocessed `is_first`, not off `is_real` — see "Padding" below); once
+`is_real` drops to 0 across a block boundary it must stay 0, so real blocks
+are always a prefix and padding blocks a block-aligned suffix.
+
+**Bus.** On the last round row of a real block (`is_last · is_real`),
+provides `[in0..7, next-s0..7]` (`next-s` being the terminal round's output,
+read off the following idle row) on `POSEIDON2` with count `mult`; `mult` is
+forced to 0 everywhere else (`mult·(1-is_last) = 0` and `mult·(1-is_real) =
+0` — both invariants from `AGENTS.md`'s per-table checklist).
+
+**Padding.** `is_full`/`is_partial`/`is_idle` are *preprocessed* selectors
+with a fixed period, not gated by `is_real` — so the round-transition
+constraints they carry run on literally every block in the trace, real or
+not. A block with no real event still needs a genuine, self-consistent
+permutation trace (of a canonical all-zero input) to satisfy them; the trace
+builder (`poseidon2_trace`) fills every block this way, leaving only
+`is_real`/`mult` at zero to mark a block as padding. This is why
+`build_traces` can already produce a valid all-padding poseidon2 trace
+today, ahead of M3.2 wiring the emulator's own hash events in: every
+existing guest still proves and verifies with this table present but idle.
+
 ## Constraint degree budget
 
 Measured (`p3_batch_stark::symbolic::get_max_constraint_degree`, pinned by
 `tests/tables.rs::alu_max_constraint_degree_is_pinned`) against the real,
 same-bus-packed lookup contexts: `program` 2, `cpu` 8, `memory` 4, `alu` 8,
-`range` 2, `nibble` 2 — `alu`'s comes from the M2.6 `div` sign-fix identity,
-`cpu`'s from its packed lookup fraction-pins rather than its own row logic
-(whose costliest single constraint is only degree 6). This config's ceiling
-is degree 8 (`generic_config`'s `log_blowup = 3` plus this machine's `is_zk =
-1` hiding: `constraint_degree = max_degree + 1 ≤ 9` ⇒ `log2_ceil(8) = 3`
-quotient chunks, `p3-batch-stark`'s cap), so `alu` and `cpu` are both already
-at the edge — any new constraint with a higher degree needs `log_blowup`
-raised (and the FRI soundness/cost tradeoff that comes with it) alongside it.
+`range` 2, `nibble` 2, `poseidon2` 4 — `alu`'s comes from the M2.6 `div`
+sign-fix identity, `cpu`'s from its packed lookup fraction-pins rather than
+its own row logic (whose costliest single constraint is only degree 6),
+`poseidon2`'s from its S-box split (see that table's own section). This
+config's ceiling is degree 8 (`generic_config`'s `log_blowup = 3` plus this
+machine's `is_zk = 1` hiding: `constraint_degree = max_degree + 1 ≤ 9` ⇒
+`log2_ceil(8) = 3` quotient chunks, `p3-batch-stark`'s cap), so `alu` and
+`cpu` are both already at the edge — any new constraint with a higher degree
+needs `log_blowup` raised (and the FRI soundness/cost tradeoff that comes
+with it) alongside it.
 
 ## Why the program is preprocessed, and what that means for `hc`
 
@@ -439,9 +524,13 @@ registering a confidential program on-chain means publishing this one
 Merkle root, and the constraint system and verifier code stay identical for
 every program. `Machine::code_hash` recomputes it directly from the program
 via `verifier_key`, so any verifier — not just the original prover — can
-derive `hc` standalone. That recomputation always includes the range and
-nibble tables too, since they are also preprocessed and fold into the same
-`CommonData`; `Machine::verifier_key` caches this per `(program digest, tier)`
+derive `hc` standalone. That recomputation always includes the range,
+nibble, and (since M3.1) poseidon2 tables too, since they are also
+preprocessed and fold into the same `CommonData` — poseidon2's preprocessed
+trace is a pure function of `PERM_SEED` and the tier's height, not of the
+program, so it does not make `hc` program-sensitive in a new way, but it
+does become part of the one combined root every verifier recomputes.
+`Machine::verifier_key` caches this per `(program digest, tier)`
 (64-entry, FIFO-evicted) — `tests/e2e.rs::verifier_key_is_cached_after_first_verify`
 measures the cached hit at under 40% of the first, uncached recomputation
 (retuned in M2.3: splitting the 2^16-row byte table into two 256-row tables
@@ -456,9 +545,10 @@ word). Every actual `prove_batch` call still runs against `make_config`'s
 fresh-entropy config for the main-trace, quotient, and permutation
 commitments — that is what keeps zero knowledge intact, and is why two proofs
 of the same run are still different bytes (`docs/03-privacy.md`). Only the
-*preprocessed* commitment — `program`, `range`, and `nibble` — is
-deterministic, and that determinism is exactly what lets `hc` be recomputed
-by any verifier without having witnessed the original proving session.
+*preprocessed* commitment — `program`, `range`, `nibble`, and `poseidon2` —
+is deterministic, and that determinism is exactly what lets `hc` be
+recomputed by any verifier without having witnessed the original proving
+session.
 
 The reason this is safe is **not** that "the program table is public, so no
 privacy is lost." A commitment whose randomness is a function of the message

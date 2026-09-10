@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 81 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
+cargo test              # 89 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -40,9 +40,9 @@ you can see the parameter effect directly.
 
 ## The machine in one picture
 
-The relation is proved as one batch of six AIR tables under a single
+The relation is proved as one batch of seven AIR tables under a single
 commitment and a single FRI opening. Tables never call each other directly;
-they exchange facts through eight named LogUp buses, and the batch verifier
+they exchange facts through nine named LogUp buses, and the batch verifier
 checks that every bus balances globally.
 
 ```
@@ -68,11 +68,17 @@ checks that every bus balances globally.
                         │   RANGE   │         │  NIBBLE   │
                         └───────────┘         └───────────┘
                     preprocessed, 256 rows   preprocessed, 256 rows
+
+                        ┌─────────────┐
+                        │  POSEIDON2  │  provides POSEIDON2; unconnected — no
+                        └─────────────┘  syscall calls it until M3.2
 ```
 
 `program`, `range`, and `nibble` are preprocessed (committed once, independent
-of any witness); `cpu`, `memory`, and `alu` are main traces, rebuilt per
-execution. Full column lists and constraints: `docs/02-tables-and-buses.md`.
+of any witness); `cpu`, `memory`, `alu`, and `poseidon2` are main traces,
+rebuilt per execution (`poseidon2`'s own round-constant/row-kind columns are
+preprocessed too, but its state/S-box columns are not). Full column lists
+and constraints: `docs/02-tables-and-buses.md`.
 
 ## How confidential arbitrary computation works
 
