@@ -1,6 +1,6 @@
 //! One row per cycle. Fetches from PROGRAM, reads and writes through MEMORY,
 //! delegates arithmetic to ALU. The only table with public values.
-use super::{bus, byte::ByteCounts, limbs, program::MESSAGE_LEN, F};
+use super::{bus, limbs, nibble::NibbleCounts, program::MESSAGE_LEN, range::RangeCounts, F};
 use crate::emulator::{CycleEvent, Syscall, ECALL_MEM_REG, SLOT_MEM, SLOT_R1, SLOT_R2, SLOT_W};
 use crate::isa::{NUM_OUTPUTS, SYS_HALT as SYS_NUM_HALT, SYS_READ_INPUT, SYS_WRITE_OUTPUT};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
@@ -28,7 +28,9 @@ pub mod col {
     /// The four byte limbs of `MEM_ADDR` on load/store rows: what makes word alignment a
     /// stated constraint rather than a side effect of the memory table's key ordering.
     pub const MA0: usize = WRITTEN0 + crate::isa::NUM_OUTPUTS;       // 48
-    pub const WIDTH: usize = MA0 + 4;                                // 52
+    /// `MA0+3`'s high nibble, for the alignment bound (see the `is_mem` block in `eval`).
+    pub const MA3_HI: usize = MA0 + 4;                               // 52
+    pub const WIDTH: usize = MA3_HI + 1;                             // 53
     /// Columns that must be zero on padding rows.
     pub const SELECTORS: [usize; 15] = [IS_ALU, IS_IMM, IS_BRANCH, IS_LOAD, IS_STORE, IS_JAL, IS_JALR, IS_LUI, IS_AUIPC, IS_ECALL, WRITES_RD, SYS_HALT, SYS_WRITE, SYS_READ, BR_NEG];
 }
@@ -124,15 +126,22 @@ where
         // Alignment, stated. `MEM_ADDR·4 = ALU_OUT` alone is a field identity: a misaligned
         // `ALU_OUT` just yields `MEM_ADDR = ALU_OUT·4⁻¹ mod p`, and until now that was
         // defeated only by accident — such a key cannot be ordered in the memory table. The
-        // four byte limbs plus the `AND8` check of the top limb against `0xC0` bound
-        // `MEM_ADDR` to `[0, 2^30)`. With `ALU_OUT` already 32-bit (the ALU table's own limb
-        // range checks) the product `MEM_ADDR·4 < 2^32` cannot wrap, so the identity holds
-        // over the integers and `ALU_OUT` really is a multiple of 4.
+        // four byte limbs, plus a nibble bound on the top limb, bound `MEM_ADDR` to
+        // `[0, 2^30)`: `MA3_HI` is `MA0+3`'s high nibble (an isolated extraction — its low
+        // nibble gets its own dummy `AND4` range check, see `alu.rs`'s
+        // `nibble_lo_dummy_range` doc comment for why that's needed), and `AND4[MA3_HI, 0xC,
+        // 0]` masks the top two bits of that nibble — bits 6-7 of `MEM_ADDR`'s top byte —
+        // the same bound the old `AND8[MA3, 0xC0, 0]` byte-table check gave. With `ALU_OUT`
+        // already 32-bit (the ALU table's own limb range checks) the product
+        // `MEM_ADDR·4 < 2^32` cannot wrap, so the identity holds over the integers and
+        // `ALU_OUT` really is a multiple of 4.
         let mut ma = AB::Expr::ZERO;
         for i in 0..4 { ma += v(MA0 + i) * AB::Expr::from_u32(1 << (8 * i)); }
         b.assert_zero(is_mem.clone() * (v(MEM_ADDR) - ma));
         for i in 0..4 { bus::RANGE8.lookup_key(b, [v(MA0 + i)], Count::bounded(is_mem.clone(), 1)); }
-        bus::AND8.lookup_key(b, [v(MA0 + 3), AB::Expr::from_u32(0xC0), AB::Expr::ZERO], Count::bounded(is_mem.clone(), 1));
+        let ma3_lo = v(MA0 + 3) - AB::Expr::from_u32(16) * v(MA3_HI);
+        bus::AND4.lookup_key(b, [ma3_lo, AB::Expr::ZERO, AB::Expr::ZERO], Count::bounded(is_mem.clone(), 1));
+        bus::AND4.lookup_key(b, [v(MA3_HI), AB::Expr::from_u32(0xC), AB::Expr::ZERO], Count::bounded(is_mem.clone(), 1));
         b.assert_zero(v(IS_ECALL) * (v(MEM_ADDR) - AB::Expr::from_u32(ECALL_MEM_REG)));
         let ts = |slot: u32| v(CLK) * four.clone() + AB::Expr::from_u32(slot);
         let zero = AB::Expr::ZERO;
@@ -178,9 +187,9 @@ pub fn public_values(pc_entry: u32, tier_log2: usize, outputs: &[u32; NUM_OUTPUT
     v
 }
 
-/// `counts` receives the `RANGE8`/`AND8` lookups the alignment limbs declare, in lock-step
-/// with the interactions the AIR above evaluates.
-pub fn cpu_trace(events: &[CycleEvent], height: usize, counts: &mut ByteCounts) -> RowMajorMatrix<F> {
+/// `range`/`nibble` receive the `RANGE8`/`AND4` lookups the alignment limbs declare, in
+/// lock-step with the interactions the AIR above evaluates.
+pub fn cpu_trace(events: &[CycleEvent], height: usize, range: &mut RangeCounts, nibble: &mut NibbleCounts) -> RowMajorMatrix<F> {
     assert!(events.len() < height, "cpu table needs a padding row: {} cycles, height {height}", events.len());
     let mut v = F::zero_vec(height * WIDTH);
     let mut written = [0u32; NUM_OUTPUTS];
@@ -193,8 +202,12 @@ pub fn cpu_trace(events: &[CycleEvent], height: usize, counts: &mut ByteCounts) 
         r[MEM_ADDR] = F::from_u32(e.mem_addr); r[MEM_VAL] = F::from_u32(e.mem_val);
         if e.dec.is_load == 1 || e.dec.is_store == 1 {
             let ml = limbs(e.mem_addr);
-            for k in 0..4 { r[MA0 + k] = ml[k]; counts.range8((e.mem_addr >> (8 * k)) & 0xff); }
-            counts.and8((e.mem_addr >> 24) & 0xff, 0xC0);
+            for k in 0..4 { r[MA0 + k] = ml[k]; range.range8((e.mem_addr >> (8 * k)) & 0xff); }
+            let ma3 = (e.mem_addr >> 24) & 0xff;
+            let (ma3_lo, ma3_hi) = (ma3 & 0xf, ma3 >> 4);
+            r[MA3_HI] = F::from_u32(ma3_hi);
+            nibble.and4(ma3_lo, 0);
+            nibble.and4(ma3_hi, 0xC);
         }
         match e.sys {
             Some(Syscall::Halt) => r[SYS_HALT] = F::ONE,

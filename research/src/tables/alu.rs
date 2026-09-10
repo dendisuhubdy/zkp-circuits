@@ -1,7 +1,9 @@
 //! 32-bit ALU as four byte limbs. Add/sub/compare share one adder; bitwise ops
-//! and shifts go through the byte table; shifts are proved as exact integer
-//! identities that cannot wrap in Goldilocks.
-use super::{bus, byte::ByteCounts, limbs, F};
+//! go through the nibble table (two lookups per limb — low then derived high
+//! nibble); shifts are proved as exact integer identities that cannot wrap in
+//! Goldilocks, with the shift amount and a handful of isolated sign/overflow
+//! bits extracted through the nibble table too.
+use super::{bus, limbs, nibble::NibbleCounts, range::RangeCounts, F};
 use crate::emulator::{AluEvent, CycleEvent};
 use crate::isa::AluOp;
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
@@ -13,12 +15,20 @@ pub mod col {
     pub const FLAG0: usize = 0;   // 11 flags, AluOp code order
     pub const A: usize = 11; pub const B: usize = 12; pub const C: usize = 13;
     pub const A0: usize = 14; pub const B0: usize = 18; pub const C0: usize = 22;
-    pub const Q0: usize = 26;     // shift quotient / sll high word limbs
-    pub const S0: usize = 30;     // compare difference / right-shift remainder limbs
-    pub const T0: usize = 34;     // pw - 1 - r limbs
-    pub const SA: usize = 38; pub const SB: usize = 39; pub const SH: usize = 40; pub const PW: usize = 41;
+    pub const Q0: usize = 26;     // shift quotient / sll high word limbs / bitwise AL0..3
+    pub const S0: usize = 30;     // compare difference / right-shift remainder limbs / bitwise BL0..3
+    pub const T0: usize = 34;     // pw - 1 - r limbs / bitwise CL0..3
+    pub const SA: usize = 38; pub const SB: usize = 39; pub const SHH: usize = 40; pub const PW: usize = 41;
     pub const CARRY0: usize = 42; pub const INV: usize = 46; pub const IS_REAL: usize = 47; pub const MULT: usize = 48;
-    pub const WIDTH: usize = 49;
+    /// A's top-limb (A0+3) low nibble's high-nibble companion, used only on `slt`/`sra`
+    /// rows to extract A's sign bit.
+    pub const AH3: usize = 49;
+    /// B's relevant limb's high nibble: B's top limb (limb 3) on `slt` rows (for SB),
+    /// B's limb 0 on shift rows (for the shift-amount high bit).
+    pub const BH_N: usize = 50;
+    /// `sll`'s overflow check: Q's top limb (Q0+3)'s high nibble.
+    pub const QH3: usize = 51;
+    pub const WIDTH: usize = 52;
 }
 use col::*;
 
@@ -26,6 +36,40 @@ use col::*;
 pub struct AluAir;
 
 impl<Fld> BaseAir<Fld> for AluAir { fn width(&self) -> usize { WIDTH } }
+
+// A fixed Goldilocks constant: 16⁻¹ mod (2^64 - 2^32 + 1) = 17293822565076172801.
+// Used only to derive a nibble-pair's HIGH half from its LOW half as a pure
+// expression (never a witness column) in cases where BOTH nibbles already get an
+// independent, real lookup elsewhere on the same row (the bitwise case below) — see
+// the doc comment on `bitwise_high_nibble`.
+const INV16: u64 = 17_293_822_565_076_172_801;
+
+/// For bitwise rows only: given a byte limb `byte` and its already-looked-up low
+/// nibble `lo` (bound to [0,16) by the row's own low-nibble AND4/OR4/XOR4 lookup),
+/// the high nibble is `(byte - lo) * 16⁻¹` as a pure expression — no extra column,
+/// no extra lookup. This is sound *only* because `lo` already has an independent,
+/// non-dummy lookup on this row (the low-nibble AND4/OR4/XOR4 call): the map
+/// `byte ↦ (byte - lo) * 16⁻¹` is a field bijection, and only byte values in [0,256)
+/// map to a high-nibble result in [0,16) (the bijection's unique preimage for any
+/// target in [0,16) is exactly `lo + 16*target`, which is <256). So constraining the
+/// *derived* high nibble to a valid AND4/OR4/XOR4 row (its second, real lookup) is
+/// enough to force `byte < 256` with zero extra columns. This does NOT generalize to
+/// an isolated nibble extraction (sign bits, shift amount, memory alignment) where
+/// the low nibble has no other lookup of its own — those need an explicit dummy
+/// range-check lookup in addition (see `nibble_lo_dummy_range` below).
+fn bitwise_high_nibble<AB: AirBuilder>(byte: AB::Expr, lo: AB::Expr) -> AB::Expr {
+    (byte - lo) * AB::Expr::from_u64(INV16)
+}
+
+/// Isolated nibble extraction: the companion low nibble has no other lookup on this
+/// row, so it needs its own dummy range-check lookup (weight 0 used as an arbitrary
+/// in-range mask; the output slot is pinned to 0 — since the companion range check's
+/// own output value is unused, any consistent fixed constant works as long as the
+/// row exists in the table for every nibble; we key against 0 for simplicity, i.e.
+/// AND4[x, 0, 0] holds for every x in [0,16)).
+fn nibble_lo_dummy_range<AB: AirBuilder + InteractionBuilder>(b: &mut AB, lo: AB::Expr, gate: AB::Expr) {
+    bus::AND4.lookup_key(b, [lo, AB::Expr::ZERO, AB::Expr::ZERO], Count::bounded(gate, 1));
+}
 
 impl<AB: AirBuilder + InteractionBuilder> Air<AB> for AluAir
 where
@@ -86,13 +130,21 @@ where
             b.assert_zero(x + y + cin - z - v(CARRY0 + i) * AB::Expr::from_u32(256));
         }
         let borrow = v(CARRY0 + 3);
-        // sign bits
+
+        // sign bits: A's sign on slt/sra rows (AH3, from A0+3's high nibble), B's sign on
+        // slt rows only (BH_N, from B0+3's high nibble). Each isolated low-nibble
+        // companion (a3_lo/b3_lo) gets its own dummy range-check lookup since nothing else
+        // on these rows looks it up; see `nibble_lo_dummy_range`'s doc comment.
         b.assert_bool(v(SA));
         b.assert_bool(v(SB));
-        let c128 = AB::Expr::from_u32(128);
-        bus::AND8.lookup_key(b, [v(A0 + 3), c128.clone(), v(SA) * c128.clone()], Count::bounded(slt.clone() + sra.clone(), 1));
-        bus::AND8.lookup_key(b, [v(B0 + 3), c128.clone(), v(SB) * c128.clone()], Count::bounded(slt.clone(), 1));
+        let a3_lo = v(A0 + 3) - AB::Expr::from_u32(16) * v(AH3);
+        nibble_lo_dummy_range(b, a3_lo, slt.clone() + sra.clone());
+        bus::AND4.lookup_key(b, [v(AH3), AB::Expr::from_u32(8), v(SA) * AB::Expr::from_u32(8)], Count::bounded(slt.clone() + sra.clone(), 1));
+        let b3_lo = v(B0 + 3) - AB::Expr::from_u32(16) * v(BH_N);
+        nibble_lo_dummy_range(b, b3_lo, slt.clone());
+        bus::AND4.lookup_key(b, [v(BH_N), AB::Expr::from_u32(8), v(SB) * AB::Expr::from_u32(8)], Count::bounded(slt.clone(), 1));
         b.assert_zero(srl.clone() * v(SA));
+
         // compares
         b.assert_zero((cmp.clone() + eq.clone()) * v(C) * (v(C) - one.clone()));
         b.assert_zero(sltu.clone() * (v(C) - borrow.clone()));
@@ -101,21 +153,43 @@ where
         let diff = v(A) - v(B);
         b.assert_zero(eq.clone() * (diff.clone() * v(INV) + v(C) - one.clone()));
         b.assert_zero(eq.clone() * v(C) * diff);
-        // bitwise
+
+        // bitwise: low nibbles are stored scratch (Q0..3/S0..3/T0..3, meaningful only on
+        // bitwise rows — every other op either gates its own use of these columns to zero
+        // or leaves them unused), high nibbles are derived expressions bound by the row's
+        // own second lookup (`bitwise_high_nibble`). Two lookups per limb, eight per row.
         for i in 0..4 {
-            bus::AND8.lookup_key(b, [v(A0 + i), v(B0 + i), v(C0 + i)], Count::bounded(and.clone(), 1));
-            bus::OR8.lookup_key(b, [v(A0 + i), v(B0 + i), v(C0 + i)], Count::bounded(or.clone(), 1));
-            bus::XOR8.lookup_key(b, [v(A0 + i), v(B0 + i), v(C0 + i)], Count::bounded(xor.clone(), 1));
+            let (al, bl, cl) = (v(Q0 + i), v(S0 + i), v(T0 + i));
+            let ah = bitwise_high_nibble::<AB>(v(A0 + i), al.clone());
+            let bh = bitwise_high_nibble::<AB>(v(B0 + i), bl.clone());
+            let ch = bitwise_high_nibble::<AB>(v(C0 + i), cl.clone());
+            bus::AND4.lookup_key(b, [al.clone(), bl.clone(), cl.clone()], Count::bounded(and.clone(), 1));
+            bus::AND4.lookup_key(b, [ah.clone(), bh.clone(), ch.clone()], Count::bounded(and.clone(), 1));
+            bus::OR4.lookup_key(b, [al.clone(), bl.clone(), cl.clone()], Count::bounded(or.clone(), 1));
+            bus::OR4.lookup_key(b, [ah.clone(), bh.clone(), ch.clone()], Count::bounded(or.clone(), 1));
+            bus::XOR4.lookup_key(b, [al, bl, cl], Count::bounded(xor.clone(), 1));
+            bus::XOR4.lookup_key(b, [ah, bh, ch], Count::bounded(xor.clone(), 1));
         }
-        // shifts
-        bus::AND8.lookup_key(b, [v(B0), AB::Expr::from_u32(31), v(SH)], Count::bounded(shift.clone(), 1));
-        bus::POW2.lookup_key(b, [v(SH), v(PW)], Count::bounded(shift.clone(), 1));
+
+        // shifts. The shift amount `sh = b & 31` is decomposed as B0's low nibble
+        // (`b0_lo`, derived — not stored — from B0 and BH_N, exactly like the sign-bit
+        // extraction above; BH_N is reused here for B's limb-0 high nibble, safe because
+        // shift and slt never co-occur) plus 16 times SHH, B0's high nibble's bit 0.
+        let b0_lo = v(B0) - AB::Expr::from_u32(16) * v(BH_N);
+        nibble_lo_dummy_range(b, b0_lo.clone(), shift.clone());
+        bus::AND4.lookup_key(b, [v(BH_N), AB::Expr::ONE, v(SHH)], Count::bounded(shift.clone(), 1));
+        let sh = b0_lo + AB::Expr::from_u32(16) * v(SHH);
+        bus::POW2.lookup_key(b, [sh, v(PW)], Count::bounded(shift.clone(), 1));
         let q = word(Q0);
         let r = word(S0);
         let t = word(T0);
         let two32 = AB::Expr::from_u64(1 << 32);
         b.assert_zero(sll.clone() * (v(A) * v(PW) - q.clone() * two32 - v(C)));
-        bus::AND8.lookup_key(b, [v(Q0 + 3), c128, AB::Expr::ZERO], Count::bounded(sll.clone(), 1));
+        // sll's overflow check: Q's top limb's high nibble (QH3) must have its top bit
+        // clear, via the same isolated-extraction pattern as the sign bits above.
+        let q3_lo = v(Q0 + 3) - AB::Expr::from_u32(16) * v(QH3);
+        nibble_lo_dummy_range(b, q3_lo, sll.clone());
+        bus::AND4.lookup_key(b, [v(QH3), AB::Expr::from_u32(8), AB::Expr::ZERO], Count::bounded(sll.clone(), 1));
         // right shifts: complement when negative (sra), shift, complement back
         let flip = |x: AB::Expr| x.clone() + v(SA) * (AB::Expr::from_u32(255) - x * AB::Expr::TWO);
         let a_prime = flip(v(A0)) + flip(v(A0 + 1)) * c8(1) + flip(v(A0 + 2)) * c8(2) + flip(v(A0 + 3)) * c8(3);
@@ -130,19 +204,30 @@ where
     }
 }
 
-fn set_limbs(row: &mut [F], base: usize, x: u32, counts: &mut ByteCounts, count: bool) {
+fn set_limbs(row: &mut [F], base: usize, x: u32, range: &mut RangeCounts, count: bool) {
     let l = limbs(x);
-    for i in 0..4 { row[base + i] = l[i]; if count { counts.range8((x >> (8 * i)) & 0xff); } }
+    for i in 0..4 { row[base + i] = l[i]; if count { range.range8((x >> (8 * i)) & 0xff); } }
 }
 
-/// Fill one ALU row from an event and count its byte-table lookups.
-pub fn fill_row(row: &mut [F], ev: &AluEvent, counts: &mut ByteCounts) {
+/// Sets `hi_col` to `byte`'s high nibble and `sa_col` to its top bit, counting the
+/// dummy low-nibble range check and the real `AND4[hi,8,sa*8]` extraction lookup.
+fn sign_bit(row: &mut [F], byte: u32, hi_col: usize, sa_col: usize, nibble: &mut NibbleCounts) {
+    let lo = byte & 0xf;
+    let hi = byte >> 4;
+    row[hi_col] = F::from_u32(hi);
+    row[sa_col] = F::from_u32(hi >> 3); // top bit of the nibble == top bit of the byte
+    nibble.and4(lo, 0);
+    nibble.and4(hi, 8);
+}
+
+/// Fill one ALU row from an event and count its RANGE8/AND4/OR4/XOR4/POW2 lookups.
+pub fn fill_row(row: &mut [F], ev: &AluEvent, range: &mut RangeCounts, nibble: &mut NibbleCounts) {
     let AluEvent { op, a, b, c } = *ev;
     assert_eq!(c, op.eval(a, b), "ALU event {op:?}({a:#x}, {b:#x}) = {c:#x} does not match reference semantics");
     row[FLAG0 + op.code() as usize] = F::ONE;
     row[A] = F::from_u32(a); row[B] = F::from_u32(b); row[C] = F::from_u32(c);
     row[IS_REAL] = F::ONE; row[MULT] = F::ONE;
-    set_limbs(row, A0, a, counts, true); set_limbs(row, B0, b, counts, true); set_limbs(row, C0, c, counts, true);
+    set_limbs(row, A0, a, range, true); set_limbs(row, B0, b, range, true); set_limbs(row, C0, c, range, true);
     let (a3, b3, b0) = ((a >> 24) & 0xff, (b >> 24) & 0xff, b & 0xff);
     let adder = |row: &mut [F], x: u32, y: u32| {
         // carries of x + y limb-wise
@@ -158,40 +243,65 @@ pub fn fill_row(row: &mut [F], ev: &AluEvent, counts: &mut ByteCounts) {
         AluOp::Sub => adder(row, b, c),
         AluOp::Slt | AluOp::Sltu => {
             let d = a.wrapping_sub(b);
-            set_limbs(row, S0, d, counts, true);
+            set_limbs(row, S0, d, range, true);
             adder(row, b, d);
             if op == AluOp::Slt {
-                row[SA] = F::from_u32(a3 >> 7); row[SB] = F::from_u32(b3 >> 7);
-                counts.and8(a3, 128); counts.and8(b3, 128);
+                sign_bit(row, a3, AH3, SA, nibble);
+                sign_bit(row, b3, BH_N, SB, nibble);
             }
         }
         AluOp::Eq => { if a != b { row[INV] = (F::from_u32(a) - F::from_u32(b)).inverse(); } }
-        AluOp::And => for i in 0..4 { counts.and8((a >> (8 * i)) & 0xff, (b >> (8 * i)) & 0xff) },
-        AluOp::Or => for i in 0..4 { counts.or8((a >> (8 * i)) & 0xff, (b >> (8 * i)) & 0xff) },
-        AluOp::Xor => for i in 0..4 { counts.xor8((a >> (8 * i)) & 0xff, (b >> (8 * i)) & 0xff) },
+        AluOp::And | AluOp::Or | AluOp::Xor => {
+            for i in 0..4 {
+                let (ab, bb, cb) = ((a >> (8 * i)) & 0xff, (b >> (8 * i)) & 0xff, (c >> (8 * i)) & 0xff);
+                let (al, ah) = (ab & 0xf, ab >> 4);
+                let (bl, bh) = (bb & 0xf, bb >> 4);
+                let cl = cb & 0xf;
+                row[Q0 + i] = F::from_u32(al);
+                row[S0 + i] = F::from_u32(bl);
+                row[T0 + i] = F::from_u32(cl);
+                match op {
+                    AluOp::And => { nibble.and4(al, bl); nibble.and4(ah, bh); }
+                    AluOp::Or => { nibble.or4(al, bl); nibble.or4(ah, bh); }
+                    AluOp::Xor => { nibble.xor4(al, bl); nibble.xor4(ah, bh); }
+                    _ => unreachable!(),
+                }
+            }
+        }
         AluOp::Sll | AluOp::Srl | AluOp::Sra => {
             let sh = b & 31; let pw = 1u32 << sh;
-            row[SH] = F::from_u32(sh); row[PW] = F::from_u32(pw);
-            counts.and8(b0, 31); counts.pow2(sh);
+            row[PW] = F::from_u32(pw);
+            // shift-amount decomposition: b0's low nibble (implied, not stored — see the
+            // eval comment) plus BH_N (b0's high nibble) and SHH = BH_N's bottom bit.
+            let bh_n = b0 >> 4;
+            row[BH_N] = F::from_u32(bh_n);
+            row[SHH] = F::from_u32(bh_n & 1);
+            nibble.and4(b0 & 0xf, 0);
+            nibble.and4(bh_n, 1);
+            range.pow2(sh);
             if op == AluOp::Sll {
                 let hi = ((a as u64 * pw as u64) >> 32) as u32;
-                set_limbs(row, Q0, hi, counts, true);
-                counts.and8((hi >> 24) & 0xff, 128);
+                set_limbs(row, Q0, hi, range, true);
+                let hi3 = (hi >> 24) & 0xff;
+                let qh3 = hi3 >> 4;
+                row[QH3] = F::from_u32(qh3);
+                nibble.and4(hi3 & 0xf, 0);
+                nibble.and4(qh3, 8);
             } else {
                 let sa = if op == AluOp::Sra { a >> 31 } else { 0 };
-                if op == AluOp::Sra { row[SA] = F::from_u32(sa); counts.and8(a3, 128); }
+                if op == AluOp::Sra { sign_bit(row, a3, AH3, SA, nibble); }
                 let ap = if sa == 1 { !a } else { a };
                 let q = ap >> sh; let r = ap - q * pw; let t = pw - 1 - r;
-                set_limbs(row, Q0, q, counts, true); set_limbs(row, S0, r, counts, true); set_limbs(row, T0, t, counts, true);
+                set_limbs(row, Q0, q, range, true); set_limbs(row, S0, r, range, true); set_limbs(row, T0, t, range, true);
             }
         }
     }
 }
 
-pub fn alu_trace(events: &[CycleEvent], height: usize, counts: &mut ByteCounts) -> RowMajorMatrix<F> {
+pub fn alu_trace(events: &[CycleEvent], height: usize, range: &mut RangeCounts, nibble: &mut NibbleCounts) -> RowMajorMatrix<F> {
     let evs: Vec<&AluEvent> = events.iter().flat_map(|e| e.alu.iter()).collect();
     assert!(evs.len() < height, "alu table needs a padding row: {} ops, height {height}", evs.len());
     let mut v = F::zero_vec(height * WIDTH);
-    for (i, ev) in evs.iter().enumerate() { fill_row(&mut v[i * WIDTH..(i + 1) * WIDTH], ev, counts); }
+    for (i, ev) in evs.iter().enumerate() { fill_row(&mut v[i * WIDTH..(i + 1) * WIDTH], ev, range, nibble); }
     RowMajorMatrix::new(v, WIDTH)
 }

@@ -49,9 +49,15 @@ fn verifier_key_is_cached_after_first_verify() {
     let t1 = std::time::Instant::now();
     m.verify(&p, &proof).unwrap();
     let second = t1.elapsed();
+    // Threshold retuned in M2.3: splitting the 2^16-row byte table into the 256-row range
+    // and nibble tables made the uncached key build itself much cheaper, so the fixed
+    // per-verify FRI-opening cost that caching can't remove is now a bigger share of
+    // `first` — the measured ratio dropped from well under 10% to a consistent ~23-24%
+    // (repeated locally), so 10% is no longer a safe bound. 40% keeps a comfortable margin
+    // above that while still requiring a real, substantial caching win, not just noise.
     assert!(
-        second < first / 10,
-        "cached verify should be under 10% of the first: first={first:?} second={second:?}"
+        second < first * 2 / 5,
+        "cached verify should be under 40% of the first: first={first:?} second={second:?}"
     );
     assert_eq!(m.cached_keys(), 1);
 }

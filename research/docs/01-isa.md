@@ -18,9 +18,10 @@ address through the ALU and then divide by 4 in the CPU's memory constraint.
 Alignment is a *constraint*, not only an emulator error: `mem_addr·4 = alu_out`
 alone would be satisfied over the field by `mem_addr = alu_out·4⁻¹ mod p`, so
 the CPU table also decomposes `mem_addr` into four range-checked byte limbs and
-bounds it below 2^30 with an `AND8` lookup against `0xC0`. With `alu_out`
-already 32-bit, `mem_addr·4 < 2^32` cannot wrap, the identity holds over the
-integers, and a misaligned address is unprovable. The emulator (`emulator.rs`)
+bounds it below 2^30 with a nibble extraction against the top limb (`AND4`
+lookups, since M2.3). With `alu_out` already 32-bit, `mem_addr·4 < 2^32`
+cannot wrap, the identity holds over the integers, and a misaligned address
+is unprovable. The emulator (`emulator.rs`)
 returns `ExecError::Misaligned` for any address that is not a multiple of 4,
 so the two agree; there is no sub-word path yet. Data memory (the RAM half of
 the `memory` table) starts entirely zeroed — a guest that

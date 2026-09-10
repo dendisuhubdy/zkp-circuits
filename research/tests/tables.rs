@@ -1,5 +1,6 @@
 use rand_zkvm::machine::{make_config, FriProfile};
-use rand_zkvm::tables::byte::{byte_trace, ByteAir, ByteCounts};
+use rand_zkvm::tables::range::{self, range_trace, RangeAir, RangeCounts};
+use rand_zkvm::tables::nibble::{self, nibble_trace, NibbleCounts};
 use rand_zkvm::tables::bus;
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_batch_stark::{prove_batch, verify_batch, ProverData, StarkInstance};
@@ -18,55 +19,83 @@ use rand_zkvm::tables::alu::{self, fill_row};
 use rand_zkvm::emulator::AluEvent;
 use rand_zkvm::isa::AluOp;
 
-/// A throwaway table that asks the byte table questions. main: [x, y, z, is_real]
+/// A throwaway table that asks both of the range table's questions. main: [x, r_range, s,
+/// pw, r_pow2]. Two separate weighted lookups per row (rather than one column each for
+/// RANGE8 and POW2) so a row can exercise either, both, or neither independently — the
+/// fourth row here exercises RANGE8 only, since there are 4 range checks but only 3 pow2
+/// checks to answer.
 #[derive(Clone)]
-struct Asker;
-impl<Fld> BaseAir<Fld> for Asker { fn width(&self) -> usize { 4 } }
-impl<AB: AirBuilder + InteractionBuilder> Air<AB> for Asker where AB::F: p3_field::Field {
+struct RangeAsker;
+impl<Fld> BaseAir<Fld> for RangeAsker { fn width(&self) -> usize { 5 } }
+impl<AB: AirBuilder + InteractionBuilder> Air<AB> for RangeAsker where AB::F: p3_field::Field {
     fn eval(&self, b: &mut AB) {
         let m = b.main();
-        let (x, y, z, r) = (m.current(0).unwrap(), m.current(1).unwrap(), m.current(2).unwrap(), m.current(3).unwrap());
-        b.assert_bool(r);
-        bus::RANGE8.lookup_key(b, [x.into()], Count::bounded(r.into(), 1));
-        bus::AND8.lookup_key(b, [x.into(), y.into(), z.into()], Count::bounded(r.into(), 1));
+        let (x, rr, s, pw, rp) = (
+            m.current(0).unwrap(), m.current(1).unwrap(), m.current(2).unwrap(), m.current(3).unwrap(), m.current(4).unwrap(),
+        );
+        b.assert_bool(rr);
+        b.assert_bool(rp);
+        bus::RANGE8.lookup_key(b, [x.into()], Count::bounded(rr.into(), 1));
+        bus::POW2.lookup_key(b, [s.into(), pw.into()], Count::bounded(rp.into(), 1));
     }
 }
 
 #[test]
-fn byte_table_answers_range_and_and_lookups() {
+fn range_table_answers_range8_and_pow2_lookups() {
     let config = make_config(FriProfile::Test);
-    let mut counts = ByteCounts::default();
-    let rows: Vec<(u32, u32)> = vec![(0xf0, 0x3c), (7, 7), (255, 0), (1, 2)];
-    let mut asker = vec![F::ZERO; 16 * 4];
-    for (i, (x, y)) in rows.iter().enumerate() {
-        counts.range8(*x);
-        counts.and8(*x, *y);
-        asker[4 * i] = F::from_u32(*x);
-        asker[4 * i + 1] = F::from_u32(*y);
-        asker[4 * i + 2] = F::from_u32(x & y);
-        asker[4 * i + 3] = F::ONE;
+    let mut counts = RangeCounts::default();
+    let xs = [0u32, 7, 255, 31];
+    let pow2s = [(0u32, 1u32), (5, 32), (31, 1u32 << 31)];
+    for x in xs { counts.range8(x); }
+    for (s, _) in pow2s { counts.pow2(s); }
+    let mut asker = vec![F::ZERO; 16 * 5];
+    for (i, x) in xs.iter().enumerate() {
+        asker[5 * i] = F::from_u32(*x);
+        asker[5 * i + 1] = F::ONE;
+        if let Some((s, pw)) = pow2s.get(i) {
+            asker[5 * i + 2] = F::from_u32(*s);
+            asker[5 * i + 3] = F::from_u32(*pw);
+            asker[5 * i + 4] = F::ONE;
+        }
     }
-    let asker_trace = RowMajorMatrix::new(asker, 4);
-    let byte = byte_trace(&counts);
-    // prove with a two-AIR enum local to the test
+    let asker_trace = RowMajorMatrix::new(asker, 5);
+    let range = range_trace(&counts);
     #[derive(Clone)]
-    enum T { Byte(ByteAir), Ask(Asker) }
+    enum T { Range(RangeAir), Ask(RangeAsker) }
     impl<Fld: p3_field::Field> BaseAir<Fld> for T {
-        fn width(&self) -> usize { match self { T::Byte(a) => <ByteAir as BaseAir<Fld>>::width(a), T::Ask(a) => <Asker as BaseAir<Fld>>::width(a) } }
-        fn preprocessed_width(&self) -> usize { match self { T::Byte(a) => <ByteAir as BaseAir<Fld>>::preprocessed_width(a), _ => 0 } }
-        fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Fld>> { match self { T::Byte(a) => <ByteAir as BaseAir<Fld>>::preprocessed_trace(a), _ => None } }
+        fn width(&self) -> usize { match self { T::Range(a) => <RangeAir as BaseAir<Fld>>::width(a), T::Ask(a) => <RangeAsker as BaseAir<Fld>>::width(a) } }
+        fn preprocessed_width(&self) -> usize { match self { T::Range(a) => <RangeAir as BaseAir<Fld>>::preprocessed_width(a), _ => 0 } }
+        fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Fld>> { match self { T::Range(a) => <RangeAir as BaseAir<Fld>>::preprocessed_trace(a), _ => None } }
     }
     impl<AB: AirBuilder + p3_air::PermutationAirBuilder + InteractionBuilder> Air<AB> for T where AB::F: p3_field::Field {
-        fn eval(&self, b: &mut AB) { match self { T::Byte(a) => a.eval(b), T::Ask(a) => a.eval(b) } }
+        fn eval(&self, b: &mut AB) { match self { T::Range(a) => a.eval(b), T::Ask(a) => a.eval(b) } }
     }
-    let airs = vec![T::Byte(ByteAir), T::Ask(Asker)];
+    let airs = vec![T::Range(RangeAir), T::Ask(RangeAsker)];
     let instances = vec![
-        StarkInstance { air: &airs[0], trace: &byte, public_values: vec![] },
+        StarkInstance { air: &airs[0], trace: &range, public_values: vec![] },
         StarkInstance { air: &airs[1], trace: &asker_trace, public_values: vec![] },
     ];
     let pd = ProverData::from_instances(&config, &instances);
     let proof = prove_batch(&config, &instances, &pd);
     verify_batch(&config, &airs, &proof, &[vec![], vec![]], &pd.common).unwrap();
+}
+
+#[test]
+fn bumping_a_range_pow2_multiplicity_on_a_non_pow2_row_is_rejected_directly() {
+    // row_of(200,0) has a=200 ≥ 32, so is_pow2 is 0 there
+    let counts = RangeCounts::default();
+    let t = range_trace(&counts);
+    assert_eq!(t.values[200 * range::col::WIDTH + range::col::M_POW2], F::ZERO);
+}
+
+#[test]
+fn nibble_table_answers_and4_or4_xor4_lookups() {
+    let mut counts = NibbleCounts::default();
+    counts.and4(0xf, 0x3); counts.or4(0x5, 0xa); counts.xor4(0x1, 0x1);
+    let t = nibble_trace(&counts);
+    assert_eq!(t.values[nibble::row_of(0xf,0x3) * nibble::col::WIDTH + nibble::col::M_AND], F::ONE);
+    assert_eq!(t.values[nibble::row_of(0x5,0xa) * nibble::col::WIDTH + nibble::col::M_OR], F::ONE);
+    assert_eq!(t.values[nibble::row_of(0x1,0x1) * nibble::col::WIDTH + nibble::col::M_XOR], F::ONE);
 }
 
 #[test]
@@ -94,7 +123,7 @@ fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
 fn memory_trace_is_sorted_and_consistent() {
     let p = guests::memcpy(4);
     let e = execute(&p, &[], 10_000).unwrap();
-    let mut counts = ByteCounts::default();
+    let mut counts = RangeCounts::default();
     let t = memory_trace(&e.events, 1 << 12, &mut counts);
     let w = memory::col::WIDTH;
     let accesses: usize = e.events.iter().map(|c| c.accesses.len()).sum();
@@ -115,31 +144,33 @@ fn memory_trace_is_sorted_and_consistent() {
 
 #[test]
 fn alu_rows_recompose_and_carry() {
-    let mut counts = ByteCounts::default();
+    let mut range = RangeCounts::default();
+    let mut nibble = NibbleCounts::default();
     let mut row = vec![F::ZERO; alu::col::WIDTH];
-    fill_row(&mut row, &AluEvent { op: AluOp::Add, a: 0xffff_ffff, b: 1, c: 0 }, &mut counts);
+    fill_row(&mut row, &AluEvent { op: AluOp::Add, a: 0xffff_ffff, b: 1, c: 0 }, &mut range, &mut nibble);
     assert_eq!(row[alu::col::FLAG0 + AluOp::Add.code() as usize], F::ONE);
     assert_eq!(row[alu::col::C], F::ZERO);
     for i in 0..4 { assert_eq!(row[alu::col::CARRY0 + i], F::ONE, "carry {i}"); }
     let mut row = vec![F::ZERO; alu::col::WIDTH];
-    fill_row(&mut row, &AluEvent { op: AluOp::Sra, a: 0x8000_0000, b: 4, c: 0xf800_0000 }, &mut counts);
+    fill_row(&mut row, &AluEvent { op: AluOp::Sra, a: 0x8000_0000, b: 4, c: 0xf800_0000 }, &mut range, &mut nibble);
     assert_eq!(row[alu::col::SA], F::ONE);
-    assert_eq!(row[alu::col::SH], F::from_u32(4));
+    assert_eq!(row[alu::col::SHH], F::ZERO); // b=4 < 16, so bit4 of b is 0
     assert_eq!(row[alu::col::PW], F::from_u32(16));
     // q = (~a) >> 4 = 0x07ff_ffff ; c = ~q
     assert_eq!(row[alu::col::Q0], F::from_u32(0xff));
     assert_eq!(row[alu::col::C0 + 3], F::from_u32(0xf8));
     let mut row = vec![F::ZERO; alu::col::WIDTH];
-    fill_row(&mut row, &AluEvent { op: AluOp::Slt, a: 0xffff_ffff, b: 0, c: 1 }, &mut counts);
+    fill_row(&mut row, &AluEvent { op: AluOp::Slt, a: 0xffff_ffff, b: 0, c: 1 }, &mut range, &mut nibble);
     assert_eq!((row[alu::col::SA], row[alu::col::SB], row[alu::col::CARRY0 + 3]), (F::ONE, F::ZERO, F::ZERO));
 }
 
 #[test]
 #[should_panic(expected = "does not match")]
 fn alu_fill_rejects_wrong_result() {
-    let mut counts = ByteCounts::default();
+    let mut range = RangeCounts::default();
+    let mut nibble = NibbleCounts::default();
     let mut row = vec![F::ZERO; alu::col::WIDTH];
-    fill_row(&mut row, &AluEvent { op: AluOp::Add, a: 1, b: 1, c: 3 }, &mut counts);
+    fill_row(&mut row, &AluEvent { op: AluOp::Add, a: 1, b: 1, c: 3 }, &mut range, &mut nibble);
 }
 
 use rand_zkvm::tables::cpu::{self, cpu_trace, public_values};
@@ -148,8 +179,9 @@ use rand_zkvm::tables::cpu::{self, cpu_trace, public_values};
 fn cpu_trace_mirrors_events_and_pads() {
     let p = guests::fib(3);
     let e = execute(&p, &[], 10_000).unwrap();
-    let mut counts = ByteCounts::default();
-    let t = cpu_trace(&e.events, 64, &mut counts);
+    let mut range = RangeCounts::default();
+    let mut nibble = NibbleCounts::default();
+    let t = cpu_trace(&e.events, 64, &mut range, &mut nibble);
     let w = cpu::col::WIDTH;
     assert_eq!(t.height(), 64);
     for (i, ev) in e.events.iter().enumerate() {
@@ -185,20 +217,23 @@ fn cpu_trace_mirrors_events_and_pads() {
 fn cpu_trace_limbs_and_counts_every_load_store_address() {
     let p = guests::memcpy(4);
     let e = execute(&p, &[], 10_000).unwrap();
-    let mut counts = ByteCounts::default();
-    let t = cpu_trace(&e.events, 1 << 10, &mut counts);
+    let mut range = RangeCounts::default();
+    let mut nibble = NibbleCounts::default();
+    let t = cpu_trace(&e.events, 1 << 10, &mut range, &mut nibble);
     let w = cpu::col::WIDTH;
     let mem_rows: Vec<usize> = (0..e.events.len()).filter(|i| e.events[*i].dec.is_load == 1 || e.events[*i].dec.is_store == 1).collect();
     assert!(!mem_rows.is_empty(), "memcpy loads and stores");
     for i in &mem_rows {
         let addr = e.events[*i].mem_addr;
-        assert!(addr < 1 << 30, "row {i}: mem_addr must fit the AND8 bound");
+        assert!(addr < 1 << 30, "row {i}: mem_addr must fit the AND4 bound");
         for k in 0..4 {
             assert_eq!(t.values[i * w + cpu::col::MA0 + k], F::from_u32((addr >> (8 * k)) & 0xff), "row {i} limb {k}");
         }
     }
-    // Four RANGE8 lookups and one AND8 (top limb against 0xC0) per load/store row, and none
-    // on any other kind of row: exactly what the AIR's `is_mem`-counted interactions declare.
-    assert_eq!(counts.range.iter().sum::<u64>() as usize, 4 * mem_rows.len());
-    assert_eq!(counts.and.iter().sum::<u64>() as usize, mem_rows.len());
+    // Four RANGE8 lookups and two AND4 (the low-nibble dummy range check and the
+    // MA3_HI-against-0xC extraction) per load/store row, and none on any other kind of row:
+    // exactly what the AIR's `is_mem`-counted interactions declare.
+    assert_eq!(range.range.iter().sum::<u64>() as usize, 4 * mem_rows.len());
+    let nibble_total: u64 = nibble.and.iter().sum();
+    assert_eq!(nibble_total as usize, 2 * mem_rows.len());
 }

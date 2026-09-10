@@ -151,10 +151,11 @@ pub fn make_config(profile: FriProfile) -> Config {
 use crate::emulator::{execute, ExecError, Execution};
 use crate::isa::Program;
 use crate::tables::alu::{alu_trace, AluAir};
-use crate::tables::byte::{byte_trace, ByteAir, ByteCounts};
 use crate::tables::cpu::{cpu_trace, public_values, CpuAir};
 use crate::tables::memory::{memory_trace, MemoryAir};
+use crate::tables::nibble::{nibble_trace, NibbleAir, NibbleCounts};
 use crate::tables::program::{program_trace, ProgramAir};
+use crate::tables::range::{range_trace, RangeAir, RangeCounts};
 use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder};
 use p3_batch_stark::{prove_batch, verify_batch, BatchProof, CommonData, ProverData, StarkInstance};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
@@ -180,17 +181,17 @@ impl Tier {
 }
 
 #[derive(Clone)]
-pub enum Chip { Program(ProgramAir), Cpu(CpuAir), Memory(MemoryAir), Alu(AluAir), Byte(ByteAir) }
+pub enum Chip { Program(ProgramAir), Cpu(CpuAir), Memory(MemoryAir), Alu(AluAir), Range(RangeAir), Nibble(NibbleAir) }
 
 impl BaseAir<Val> for Chip {
     fn width(&self) -> usize {
-        match self { Chip::Program(a) => BaseAir::<Val>::width(a), Chip::Cpu(a) => BaseAir::<Val>::width(a), Chip::Memory(a) => BaseAir::<Val>::width(a), Chip::Alu(a) => BaseAir::<Val>::width(a), Chip::Byte(a) => BaseAir::<Val>::width(a) }
+        match self { Chip::Program(a) => BaseAir::<Val>::width(a), Chip::Cpu(a) => BaseAir::<Val>::width(a), Chip::Memory(a) => BaseAir::<Val>::width(a), Chip::Alu(a) => BaseAir::<Val>::width(a), Chip::Range(a) => BaseAir::<Val>::width(a), Chip::Nibble(a) => BaseAir::<Val>::width(a) }
     }
     fn preprocessed_width(&self) -> usize {
-        match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Byte(a) => BaseAir::<Val>::preprocessed_width(a), _ => 0 }
+        match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Range(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Nibble(a) => BaseAir::<Val>::preprocessed_width(a), _ => 0 }
     }
     fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
-        match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_trace(a), Chip::Byte(a) => BaseAir::<Val>::preprocessed_trace(a), _ => None }
+        match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_trace(a), Chip::Range(a) => BaseAir::<Val>::preprocessed_trace(a), Chip::Nibble(a) => BaseAir::<Val>::preprocessed_trace(a), _ => None }
     }
     fn num_public_values(&self) -> usize { match self { Chip::Cpu(a) => BaseAir::<Val>::num_public_values(a), _ => 0 } }
 }
@@ -200,21 +201,21 @@ where
     AB: AirBuilder<F = Val> + PermutationAirBuilder + InteractionBuilder,
 {
     fn eval(&self, b: &mut AB) {
-        match self { Chip::Program(a) => a.eval(b), Chip::Cpu(a) => a.eval(b), Chip::Memory(a) => a.eval(b), Chip::Alu(a) => a.eval(b), Chip::Byte(a) => a.eval(b) }
+        match self { Chip::Program(a) => a.eval(b), Chip::Cpu(a) => a.eval(b), Chip::Memory(a) => a.eval(b), Chip::Alu(a) => a.eval(b), Chip::Range(a) => a.eval(b), Chip::Nibble(a) => a.eval(b) }
     }
 }
 
 pub fn chips(program: &Program) -> Vec<Chip> {
-    vec![Chip::Program(ProgramAir { program: program.clone() }), Chip::Cpu(CpuAir), Chip::Memory(MemoryAir), Chip::Alu(AluAir), Chip::Byte(ByteAir)]
+    vec![Chip::Program(ProgramAir { program: program.clone() }), Chip::Cpu(CpuAir), Chip::Memory(MemoryAir), Chip::Alu(AluAir), Chip::Range(RangeAir), Chip::Nibble(NibbleAir)]
 }
 
 pub struct Traces {
     pub program: RowMajorMatrix<Val>, pub cpu: RowMajorMatrix<Val>, pub memory: RowMajorMatrix<Val>,
-    pub alu: RowMajorMatrix<Val>, pub byte: RowMajorMatrix<Val>, pub public_values: Vec<Val>,
+    pub alu: RowMajorMatrix<Val>, pub range: RowMajorMatrix<Val>, pub nibble: RowMajorMatrix<Val>, pub public_values: Vec<Val>,
 }
 impl Traces {
-    pub fn as_slice(&self) -> [&RowMajorMatrix<Val>; 5] { [&self.program, &self.cpu, &self.memory, &self.alu, &self.byte] }
-    pub fn heights(&self) -> [usize; 5] { self.as_slice().map(|m| m.height()) }
+    pub fn as_slice(&self) -> [&RowMajorMatrix<Val>; 6] { [&self.program, &self.cpu, &self.memory, &self.alu, &self.range, &self.nibble] }
+    pub fn heights(&self) -> [usize; 6] { self.as_slice().map(|m| m.height()) }
 }
 
 #[derive(Debug)]
@@ -225,13 +226,15 @@ pub enum VerifyError { PublicValues, Tier, Batch(String) }
 pub fn build_traces(program: &Program, exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
     let cycles = exec.cycles();
     if cycles > tier.max_cycles() { return Err(ProveError::TooManyCycles { cycles, tier }); }
-    let mut counts = ByteCounts::default();
-    let cpu = cpu_trace(&exec.events, tier.cpu_height(), &mut counts);
-    let memory = memory_trace(&exec.events, tier.mem_height(), &mut counts);
-    let alu = alu_trace(&exec.events, tier.alu_height(), &mut counts);
-    let byte = byte_trace(&counts);
+    let mut range = RangeCounts::default();
+    let mut nibble = NibbleCounts::default();
+    let cpu = cpu_trace(&exec.events, tier.cpu_height(), &mut range, &mut nibble);
+    let memory = memory_trace(&exec.events, tier.mem_height(), &mut range);
+    let alu = alu_trace(&exec.events, tier.alu_height(), &mut range, &mut nibble);
+    let range_t = range_trace(&range);
+    let nibble_t = nibble_trace(&nibble);
     let program_t = program_trace(program, &exec.events);
-    Ok(Traces { program: program_t, cpu, memory, alu, byte, public_values: public_values(program.base_pc, tier.0, &exec.outputs) })
+    Ok(Traces { program: program_t, cpu, memory, alu, range: range_t, nibble: nibble_t, public_values: public_values(program.base_pc, tier.0, &exec.outputs) })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -352,16 +355,16 @@ impl Machine {
     fn log_ext_degrees(&self, program: &Program, tier: Tier) -> Vec<usize> {
         let zk = self.config.is_zk();
         let prog_h = ProgramAir { program: program.clone() }.height();
-        [prog_h, tier.cpu_height(), tier.mem_height(), tier.alu_height(), crate::tables::byte::HEIGHT]
+        [prog_h, tier.cpu_height(), tier.mem_height(), tier.alu_height(), crate::tables::range::HEIGHT, crate::tables::nibble::HEIGHT]
             .iter().map(|h| h.trailing_zeros() as usize + zk).collect()
     }
 
-    /// The preprocessed commitment (program + byte table) for `(program, tier)`, cached by
-    /// `program_digest(program)` and `tier.0` — see `KeyCache`. Recomputing it from scratch
-    /// runs the full `ProverData::from_airs_and_degrees` preprocessing pass (in particular
-    /// building the 2^16-row byte table's Merkle tree every time), which is the cost this
-    /// cache exists to amortize across repeated `verify`/`code_hash` calls for the same
-    /// `(program, tier)`.
+    /// The preprocessed commitment (program + range + nibble tables) for `(program, tier)`,
+    /// cached by `program_digest(program)` and `tier.0` — see `KeyCache`. Recomputing it from
+    /// scratch runs the full `ProverData::from_airs_and_degrees` preprocessing pass (in
+    /// particular building the range and nibble tables' Merkle trees every time), which is
+    /// the cost this cache exists to amortize across repeated `verify`/`code_hash` calls for
+    /// the same `(program, tier)`.
     pub fn verifier_key(&self, program: &Program, tier: Tier) -> Arc<CommonData<Config>> {
         let key = (program_digest(program), tier.0);
         if let Some(hit) = self.keys.lock().unwrap().get(&key) {
@@ -377,7 +380,7 @@ impl Machine {
     /// Number of `(program, tier)` verifier keys currently cached.
     pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().map.len() }
 
-    /// The code hash hc: the Merkle root of the preprocessed columns (program + byte table).
+    /// The code hash hc: the Merkle root of the preprocessed columns (program + range + nibble tables).
     pub fn code_hash(&self, program: &Program, tier: Tier) -> String {
         let key = self.verifier_key(program, tier);
         let com = key.preprocessed.as_ref().expect("program table is preprocessed");
@@ -522,7 +525,7 @@ impl Machine {
         if proof.batch.degree_bits != self.log_ext_degrees(program, proof.tier) { return Err(VerifyError::Tier); }
         let airs = chips(program);
         let pv: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
-        let pvs: Vec<Vec<Val>> = (0..5).map(|i| if i == 1 { pv.clone() } else { vec![] }).collect();
+        let pvs: Vec<Vec<Val>> = (0..6).map(|i| if i == 1 { pv.clone() } else { vec![] }).collect();
         let common = self.verifier_key(program, proof.tier);
         verify_batch(&self.config, &airs, &proof.batch, &pvs, &common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
     }

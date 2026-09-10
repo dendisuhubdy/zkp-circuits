@@ -1,7 +1,9 @@
 //! Every test here builds a wrong witness and checks the verifier rejects it.
 //! In debug builds Plonky3 panics inside `prove_batch` on the first violated
-//! constraint; in release builds it produces a proof that fails to verify.
-//! `rejects` accepts either — and nothing else.
+//! constraint — either one AIR's own row constraint, or (for a violation only
+//! visible across AIR instances, like an unpaid extra table multiplicity) the
+//! global lookup-balance check; in release builds it produces a proof that
+//! fails to verify. `rejects` accepts any of these — and nothing else.
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::Matrix;
 use rand_zkvm::asm::{ops::*, Assembler};
@@ -9,7 +11,7 @@ use rand_zkvm::emulator::{execute, SLOT_W};
 use rand_zkvm::guests;
 use rand_zkvm::isa::REG_A1;
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, Traces};
-use rand_zkvm::tables::{alu, byte, cpu, memory, program, F};
+use rand_zkvm::tables::{alu, cpu, memory, nibble, program, range, F};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// The panic `p3-batch-stark`'s debug constraint checker raises when a row violates a
@@ -18,14 +20,29 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// the `panic!` at the end of the row loop in
 /// `~/.cargo/registry/src/index.crates.io-*/p3-batch-stark-0.7.0/src/check_constraints.rs`
 /// (line 132 in that release). Matching the fixed prefix is what separates "the constraint
-/// system caught this" from any other unwind.
+/// system caught this" from any other unwind. This check runs *per AIR instance*, using only
+/// that instance's own trace, so it only catches a violation that's local to one table's own
+/// row constraints (e.g. the range table's `mp·(1 − is_pow2) = 0`).
 const CONSTRAINT_PANIC: &str = "constraints not satisfied on row";
 
+/// The panic `p3-lookup`'s debug bus-balance checker
+/// (`p3_lookup::debug_util::check_lookups`, `check_lookups`'s `assert_empty`) raises when a
+/// *global* lookup — one whose provider and consumers live in different AIR instances, which
+/// is every bus in this crate except the ALU/CPU's shared-table cases — has a nonzero net
+/// multiplicity for some tuple, after every instance's own `CONSTRAINT_PANIC` pass has
+/// already run clean. For a table with no row-level validity marker of its own — the nibble
+/// table's every `(a, b)` row is a genuine AND/OR/XOR entry, unlike the range table's
+/// `is_pow2` flag — an unpaid extra multiplicity is *only* visible cross-instance: the row
+/// itself is perfectly well-formed, so `CONSTRAINT_PANIC` never fires, and this is the sole
+/// mechanism left to catch it. It is exactly as much "the constraint system caught this" as
+/// `CONSTRAINT_PANIC` — just checked at the scope of the whole batch instead of one row of
+/// one instance.
+const LOOKUP_BALANCE_PANIC: &str = "Lookup mismatch (";
+
 /// A tamper counts as rejected only if `verify` returned an error, or if the panic came from
-/// the constraint checker above. Anything else — a trace-builder `assert!`, an index out of
-/// bounds, a `Lookup mismatch` from the bus-balance checker — means the test tripped over
-/// something other than the constraint it was written for, so it must fail rather than pass
-/// for the wrong reason.
+/// one of the two constraint-system checks above. Anything else — a trace-builder `assert!`,
+/// an index out of bounds — means the test tripped over something other than the constraint
+/// it was written for, so it must fail rather than pass for the wrong reason.
 fn rejects(f: impl FnOnce() -> Result<(), rand_zkvm::machine::VerifyError>) -> bool {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(())) => false,
@@ -36,7 +53,7 @@ fn rejects(f: impl FnOnce() -> Result<(), rand_zkvm::machine::VerifyError>) -> b
                 .map(|s| (*s).to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            let is_constraint = msg.contains(CONSTRAINT_PANIC);
+            let is_constraint = msg.contains(CONSTRAINT_PANIC) || msg.contains(LOOKUP_BALANCE_PANIC);
             if !is_constraint { eprintln!("rejects(): panic was not a constraint failure: {msg}"); }
             is_constraint
         }
@@ -47,6 +64,7 @@ fn rejects(f: impl FnOnce() -> Result<(), rand_zkvm::machine::VerifyError>) -> b
 fn rejects_only_counts_a_constraint_failure_or_a_verify_error() {
     assert!(rejects(|| Err(rand_zkvm::machine::VerifyError::PublicValues)));
     assert!(rejects(|| panic!("constraints not satisfied on row 7: failed constraints = [#1]")));
+    assert!(rejects(|| panic!("Lookup mismatch (global lookup 'AND4'): tuple [\"9\", \"6\", \"0\"] has net multiplicity 1. Locations: []")));
     // A trace-builder `assert!` is not the constraint system catching anything.
     assert!(!rejects(|| panic!("alu table needs a padding row: 5 ops, height 4")));
     assert!(!rejects(|| Ok(())));
@@ -258,11 +276,20 @@ fn swapping_two_adjacent_memory_rows_is_rejected() {
 }
 
 #[test]
-fn bumping_a_byte_pow2_multiplicity_on_a_non_pow2_row_is_rejected() {
+fn bumping_a_range_pow2_multiplicity_on_a_non_pow2_row_is_rejected() {
     let (m, p, mut t) = setup();
-    let w = byte::col::WIDTH;
-    let row = byte::row_of(200, 5); // b != 0 and a >= 32, so is_pow2 is 0 here
-    t.byte.values[row * w + byte::col::M_POW2] += F::ONE;
+    let w = range::col::WIDTH;
+    let row = 200usize; // a=200 ≥ 32, so is_pow2 is 0 here
+    t.range.values[row * w + range::col::M_POW2] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+#[test]
+fn bumping_a_nibble_and_multiplicity_on_a_padding_row_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = nibble::col::WIDTH;
+    let row = nibble::row_of(9, 6); // an arbitrary valid nibble pair the honest trace never counts
+    t.nibble.values[row * w + nibble::col::M_AND] += F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
 

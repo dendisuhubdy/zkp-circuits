@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (eleven proofs, one at production FRI parameters)
-cargo test              # 52 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
+cargo test              # 55 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -40,7 +40,7 @@ you can see the parameter effect directly.
 
 ## The machine in one picture
 
-The relation is proved as one batch of five AIR tables under a single
+The relation is proved as one batch of six AIR tables under a single
 commitment and a single FRI opening. Tables never call each other directly;
 they exchange facts through eight named LogUp buses, and the batch verifier
 checks that every bus balances globally.
@@ -60,17 +60,19 @@ checks that every bus balances globally.
                ┌───────────┐                           ┌───────────┐
                │  MEMORY   │                           │    ALU    │
                └───────────┘                           └───────────┘
-                     │ RANGE8                                │ RANGE8 AND8 OR8 XOR8 POW2
-                     └───────────────────┴───────────────────┘
-                                         ▼
-                                    ┌───────────┐
-                                    │   BYTE    │ preprocessed, 2^16 rows: every (a,b) byte pair
-                                    └───────────┘
+                     │ RANGE8                                │ RANGE8 AND4 OR4 XOR4 POW2
+                     └──────────────────┬────────────────────┘
+                              ┌──────────┴──────────┐
+                              ▼                     ▼
+                        ┌───────────┐         ┌───────────┐
+                        │   RANGE   │         │  NIBBLE   │
+                        └───────────┘         └───────────┘
+                    preprocessed, 256 rows   preprocessed, 256 rows
 ```
 
-`program` and `byte` are preprocessed (committed once, independent of any
-witness); `cpu`, `memory`, and `alu` are main traces, rebuilt per execution.
-Full column lists and constraints: `docs/02-tables-and-buses.md`.
+`program`, `range`, and `nibble` are preprocessed (committed once, independent
+of any witness); `cpu`, `memory`, and `alu` are main traces, rebuilt per
+execution. Full column lists and constraints: `docs/02-tables-and-buses.md`.
 
 ## How confidential arbitrary computation works
 
@@ -101,7 +103,7 @@ Execution happens natively and in the clear on the prover's machine (Part
 3) — the emulator is the reference semantics, and nothing about running it
 is itself confidential; confidentiality is a property of the *proof*, not
 of the execution environment. Arithmetization (Part 4) turns that execution
-into five tables padded to the smallest gas tier that fits, which is why the
+into six tables padded to the smallest gas tier that fits, which is why the
 trace height — and hence the tier — is the only thing about "how much work
 happened" that a verifier can see. Proving and verifying (Part 5) run
 against Plonky3's hiding FRI PCS, so the main-trace and quotient commitments

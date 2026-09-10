@@ -1,7 +1,7 @@
 //! Registers and RAM in one table, sorted by (space, addr, ts). Read-after-write
 //! consistency is a transition constraint; the CPU's accesses reach here through
 //! the MEMORY multiset bus.
-use super::{bus, byte::ByteCounts, limbs, F};
+use super::{bus, limbs, range::RangeCounts, F};
 use crate::emulator::CycleEvent;
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
@@ -68,7 +68,7 @@ where
     }
 }
 
-pub fn memory_trace(events: &[CycleEvent], height: usize, counts: &mut ByteCounts) -> RowMajorMatrix<F> {
+pub fn memory_trace(events: &[CycleEvent], height: usize, counts: &mut RangeCounts) -> RowMajorMatrix<F> {
     // (key, ts, space, addr, value, is_write)
     let mut rows: Vec<(u64, u64, u32, u32, u32, bool)> = Vec::new();
     for e in events {

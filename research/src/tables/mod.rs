@@ -1,5 +1,6 @@
-//! The five tables of the machine and the buses that connect them.
-pub mod byte;
+//! The six tables of the machine and the buses that connect them.
+pub mod range;
+pub mod nibble;
 pub mod program;
 pub mod memory;
 pub mod alu;
@@ -16,13 +17,13 @@ pub mod bus {
     pub const MEMORY: PermutationCheckBus<'static> = PermutationCheckBus::new("MEMORY");
     /// cpu → alu: (op, a, b, c). Alu provides.
     pub const ALU: LookupBus<'static> = LookupBus::new("ALU");
-    /// x in [0,256). Byte provides.
+    /// x in [0,256). Range provides.
     pub const RANGE8: LookupBus<'static> = LookupBus::new("RANGE8");
-    /// (a, b, a&b). Byte provides.
-    pub const AND8: LookupBus<'static> = LookupBus::new("AND8");
-    pub const OR8: LookupBus<'static> = LookupBus::new("OR8");
-    pub const XOR8: LookupBus<'static> = LookupBus::new("XOR8");
-    /// (s, 2^s) for s < 32. Byte provides.
+    /// (a, b, a&b) with a,b in [0,16). Nibble provides.
+    pub const AND4: LookupBus<'static> = LookupBus::new("AND4");
+    pub const OR4: LookupBus<'static> = LookupBus::new("OR4");
+    pub const XOR4: LookupBus<'static> = LookupBus::new("XOR4");
+    /// (s, 2^s) for s < 32. Range provides.
     pub const POW2: LookupBus<'static> = LookupBus::new("POW2");
 }
 

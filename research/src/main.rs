@@ -5,7 +5,7 @@ use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::isa::Instr;
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, TIERS};
-use rand_zkvm::tables::{alu, byte, cpu, memory, program, F};
+use rand_zkvm::tables::{alu, cpu, memory, nibble, program, range, F};
 use std::time::Instant;
 
 fn hr(title: &str) { println!("\n══ {title} {}", "═".repeat(70usize.saturating_sub(title.len()))); }
@@ -31,7 +31,7 @@ fn main() {
     let exec = execute(&program, &inputs, 1 << 20).unwrap();
     println!("inputs {:?} → outputs {:?} in {} cycles ({:?})", inputs, &exec.outputs[..2], exec.cycles(), t.elapsed());
 
-    hr("Part 4 · Arithmetize: five tables on eight buses");
+    hr("Part 4 · Arithmetize: six tables on eight buses");
     let tier = Tier::for_cycles(exec.cycles()).unwrap();
     let traces = build_traces(&program, &exec, tier).unwrap();
     println!("tier {} → cpu 2^{} rows (actual {} cycles), padding hides the rest", tier.0, tier.0, exec.cycles());
@@ -41,9 +41,10 @@ fn main() {
         ("cpu", traces.cpu.height(), cpu::col::WIDTH, "one row per cycle; fetch, decode selectors, pc"),
         ("memory", traces.memory.height(), memory::col::WIDTH, "registers + RAM sorted by (addr, ts)"),
         ("alu", traces.alu.height(), alu::col::WIDTH, "byte-limb arithmetic, shifts, compares"),
-        ("byte", traces.byte.height(), byte::col::WIDTH + byte::pre::WIDTH, "2^16 byte pairs: range, and/or/xor, pow2"),
+        ("range", traces.range.height(), range::col::WIDTH + range::pre::WIDTH, "256 rows: byte range checks, pow2"),
+        ("nibble", traces.nibble.height(), nibble::col::WIDTH + nibble::pre::WIDTH, "256 rows: 16×16 and/or/xor"),
     ] { println!("{name:<10}{h:>10}{w:>8}   {role}"); }
-    println!("buses: PROGRAM MEMORY ALU RANGE8 AND8 OR8 XOR8 POW2 (LogUp, verified globally)");
+    println!("buses: PROGRAM MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 (LogUp, verified globally)");
 
     hr("Part 5 · Prove and verify (production FRI: blowup 8, 27 queries, 20 PoW bits, ZK on)");
     let m = Machine::new(FriProfile::Production);

@@ -40,23 +40,28 @@ measure_production_profile_at_tier_10_and_12 -- --ignored --nocapture`,
 `tests/e2e.rs`). The verify times below are each program's *first* verify on
 a fresh `Machine` — an uncached `verifier_key` recomputation, which
 dominates them (see "What `verify` actually checks" below); a cached verify
-of the same proof runs under 10% of that, per
+of the same proof runs under 40% of that, per
 `tests/e2e.rs::verifier_key_is_cached_after_first_verify`:
 
-| | tier 10 (before → after) | tier 12 (before → after) |
+| | tier 10 (M2.1 → M2.2 → M2.3) | tier 12 (M2.1 → M2.2 → M2.3) |
 | --- | --- | --- |
-| proof size | 892 578 → 290 403 bytes | 886 246 → 291 366 bytes |
-| prove time | 21.61 s → 20.88 s | 29.69 s → 29.45 s |
-| verify time (first, uncached) | 2.166 s → 2.148 s | 2.178 s → 2.141 s |
+| proof size | 892 578 → 290 403 → 268 288 bytes | 886 246 → 291 366 → 289 779 bytes |
+| prove time | 21.61 s → 20.88 s → 3.11 s | 29.69 s → 29.45 s → 11.44 s |
+| verify time (first, uncached) | 2.166 s → 2.148 s → 16.0 ms | 2.178 s → 2.141 s → 18.0 ms |
 
-Retuning to the 100-bit target cuts proof size to roughly a third (not the
-"roughly four times the bytes" this section used to estimate before either
-side was actually measured), at the same conjectured soundness margin;
-prove and first-verify times move by noise, not by the query-count change —
-both are dominated by costs the query count and fold width don't touch:
+M2.2 (80 → 27 queries, retuned to the 100-bit conjectured target) cut proof
+size to roughly a third at the same conjectured soundness margin; prove and
+first-verify times moved by noise, not by the query-count change, because
+both were dominated by costs the query count and fold width don't touch:
 trace commitment and, for that first verify, the uncached `verifier_key`
-recomputation (its own fixed cost, independent of `FriProfile` — see the
-caching paragraph below).
+recomputation. M2.3 (splitting the 2^16-row byte table into the 256-row
+range and nibble tables) is what actually moves those two rows: every
+`prove` rebuilds the preprocessed trace's Merkle commitment from scratch,
+and every *first* `verify` on a fresh `Machine` does too — shrinking that
+commitment by two orders of magnitude cuts prove time by roughly 3-7x and
+first-verify time by roughly 100-130x, independent of `FriProfile` (see the
+caching paragraph below). Proof size drops a little further too: fewer
+preprocessed columns means smaller opening proofs.
 
 ## Private inputs are witness, not yet bound to anything
 
@@ -127,13 +132,16 @@ Goldilocks residue (`< p`, so `out0` and `out0 + p` are not two spellings of
 the same proof); `public_values[PC_ENTRY]` equals `program.base_pc`; `public_values[TIER]` equals `proof.tier`; `proof.tier` is
 one of the six values in `TIERS` (an attacker-chosen out-of-range tier is
 rejected here, before it can be used to compute a table height and panic);
-the proof's degree bits match the heights that tier implies for all five
+the proof's degree bits match the heights that tier implies for all six
 tables; and finally the batch STARK itself, against a verifier key recomputed
 from the program. Both `verify` and `code_hash` go through `verifier_key`,
-which includes the full 2^16-row byte table's preprocessed commitment;
+which includes the range and nibble tables' preprocessed commitments (256
+rows each, since M2.3 split the 2^16-row byte table in two);
 `Machine::verifier_key` caches this per `(program digest, tier)` (64-entry,
 FIFO-evicted) — `tests/e2e.rs::verifier_key_is_cached_after_first_verify`
-measures the cached hit at under 10% of the first, uncached recomputation.
+measures the cached hit at under 40% of the first, uncached recomputation
+(retuned in M2.3 — the uncached build is now cheap enough that the old 10%
+bound no longer held; see the test's own comment).
 
 ## Tiers: what padding hides
 
@@ -141,8 +149,8 @@ Trace height never reflects the actual cycle count; it is padded up to the
 smallest tier that fits. `cpu` and `alu` pad to `2^ℓ` and `2^(ℓ+1)` rows,
 `memory` to `2^(ℓ+2)` (four accesses per cycle, worst case); `program` pads
 to the next power of two above the program's own length (minimum 16 rows);
-`byte` is always the fixed 65 536 rows. Padding rows carry `is_real = 0` and
-emit nothing on any bus.
+`range` and `nibble` are each always the fixed 256 rows. Padding rows carry
+`is_real = 0` and emit nothing on any bus.
 
 | Tier `ℓ` | `cpu` rows | `alu` rows | `memory` rows | max cycles |
 |---|---|---|---|---|
