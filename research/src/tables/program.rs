@@ -16,12 +16,45 @@
 //! ordinary cpu instruction-fetch row. `PROGRAM_WORD` (new): `(pc, word)`, consumed only by
 //! cpu's digest rows (`tables::cpu`'s `IS_DIGEST`) — kept separate so a digest row's raw-word
 //! lookups can never be mistaken for (or double-count against) an ordinary fetch's own
-//! multiplicity bookkeeping. Both share one multiplicity-gating invariant: `mult`/`mult_word`
-//! are forced to 0 wherever `VALID = 0` (AGENTS.md invariant 2) — a row that isn't a legal
-//! instruction can never be fetched *or* digested, which also means every real program word
-//! must decode (`program_trace` panics otherwise, exactly as the old preprocessed builder
-//! did) — this table cannot commit to a program containing an instruction the emulator could
-//! never execute.
+//! multiplicity bookkeeping. `MULT` (the `PROGRAM` fetch count) is forced to 0 wherever `VALID
+//! = 0` (AGENTS.md invariant 2) — a row that isn't a legal instruction can never be fetched,
+//! which also means every real program word must decode (`program_trace` panics otherwise,
+//! exactly as the old preprocessed builder did) — this table cannot commit to a program
+//! containing an instruction the emulator could never execute. `MULT_WORD` is pinned harder —
+//! see the next section.
+//!
+//! ## `hc` binds the whole executable program — every valid row is digested, not just `len` of them
+//!
+//! `MULT_WORD` is constrained to equal `VALID` *exactly* (`mult_word = valid`), not merely
+//! zeroed wherever `VALID = 0` the way an ordinary bus multiplicity gate would read (M2's ALU
+//! padding-row lesson, AGENTS.md invariant 2). The weaker, one-sided form —
+//! `mult_word · (1 − valid) = 0` — was this table's actual constraint through the first cut of
+//! M3.4 and was a real gap: it forces `mult_word = 0` on invalid rows but leaves it *free* on
+//! valid ones, so a `VALID = 1` row (a real, decodable instruction) could supply zero copies
+//! of its own `(pc, word)` to `PROGRAM_WORD` and simply never be digested — while remaining
+//! fully fetchable and executable via `PROGRAM`, e.g. as a `JALR` target past the honest
+//! `base_pc + 4·len` digest range. `hc` would then bind a strict prefix of the executable
+//! program, not the whole thing.
+//!
+//! With `mult_word = valid`, `PROGRAM_WORD`'s LogUp balance becomes a set-equality argument
+//! instead of a mere counting one. The consume side is exactly `len` distinct messages — one
+//! per `base_pc + 4·j` for each `j < len`, in the order `tables::cpu`'s digest rows absorb
+//! them. The provide side is now exactly one message per valid row, at that row's own `pc`
+//! (unique across the table — see "No address aliasing" below). LogUp balance requires every
+//! provided message to be matched by demand and vice versa, so the set of valid rows' `pc`
+//! values must *equal* `{base_pc + 4·j : j < len}`: `len` comes out equal to the number of
+//! valid rows, and each digested word is exactly the word the corresponding row actually
+//! holds. A prover who honestly sets `mult_word = 1` on an extra valid row placed outside that
+//! window supplies a message nothing demands, and the bus fails to balance —
+//! `LOOKUP_BALANCE_PANIC` on `PROGRAM_WORD`, the ordinary lookup-balance rejection every other
+//! bus relies on. The simpler witness — reproducing the original gap directly, a valid row
+//! left at `mult_word = 0` — never even reaches that global check: it trips the local
+//! `mult_word = valid` equation on its own row first (`CONSTRAINT_PANIC`), since `0 ≠ 1` there.
+//! Either way, there is no way to be `VALID = 1` and excluded from `hc`.
+//! `tests/cheating.rs::an_undigested_reachable_program_tail_is_rejected` reproduces the
+//! simpler (local) case, since that's the original gap verbatim; `docs/02-tables-and-buses.md`/
+//! `docs/03-privacy.md` carry the same set-equality argument at the bus and privacy level
+//! respectively.
 //!
 //! ## No address aliasing without knowing `base_pc`
 //!
@@ -188,14 +221,18 @@ pub const MAX_LOG_HEIGHT: u8 = 22;
 ///
 /// **Soundness**, since the verifier no longer bounds this against anything itself: `hc`
 /// (`hash::program_digest`) binds `(base_pc, len, words)` — the capacity-lane header commits
-/// to the exact word count and base address, and every digest row's `PROGRAM_WORD` lookups
-/// draw from real, `VALID = 1` program-table rows whose count (`mult_word = 1` each, M3.4's
-/// own invariant) must add up to exactly `len` for the bus to balance. A prover who declares
-/// a table too small to hold `len` real rows simply cannot build a balancing witness (some
-/// `PROGRAM_WORD` provide `hc` demands has nowhere to live); a prover who declares one larger
-/// than necessary only wastes their own proving time and the verifier's degree-bits check —
-/// the declared height *sizes* the table, it never lets a prover shrink or pad the program
-/// the digest itself is bound to. See `docs/03-privacy.md`.
+/// to the exact word count and base address — and `MULT_WORD = VALID` (this module's doc
+/// comment, "`hc` binds the whole executable program") turns `PROGRAM_WORD`'s balance into a
+/// set-equality argument, not a counting one: the digest rows demand exactly `len` distinct
+/// messages, one per `base_pc + 4·j` for `j < len`, and every valid program-table row supplies
+/// exactly one message at its own `pc` — so balancing forces the two sets equal, `len` rows for
+/// `len` demands, no fewer and no more (and no valid row left outside the digested window). A
+/// prover who declares a table too small to hold `len` real rows simply cannot build a
+/// balancing witness (some `PROGRAM_WORD` provide `hc` demands has nowhere to live); a prover
+/// who declares one larger than necessary only wastes their own proving time and the
+/// verifier's degree-bits check — the declared height *sizes* the table, it never lets a
+/// prover shrink, pad, or silently extend past the program the digest itself is bound to. See
+/// `docs/03-privacy.md`.
 pub fn program_log_height(len: usize) -> u8 {
     super::pad_height(len + 1, MIN_HEIGHT).trailing_zeros() as u8
 }
@@ -427,15 +464,20 @@ where
         b.assert_zero(v(WRITES_RD) - wr_rd * rd_writer_group);
 
         // The PROGRAM bus (ordinary instruction fetch, unchanged shape) and the new
-        // PROGRAM_WORD bus (M3.4 digest rows). Both counts are forced to 0 on any row where
+        // PROGRAM_WORD bus (M3.4 digest rows). `MULT` is forced to 0 on any row where
         // `VALID = 0` — a padding row, or a genuinely undecodable real word (which
         // `program_trace` never produces, since it panics on one, the same way the old
-        // preprocessed builder did) — AGENTS.md invariant 2, generalized to this table's two
-        // buses.
+        // preprocessed builder did) — AGENTS.md invariant 2. `MULT_WORD` is pinned to equal
+        // `VALID` *exactly* (not merely zeroed on invalid rows): every valid row must supply
+        // exactly one `PROGRAM_WORD` copy of its own `(pc, word)`, never zero. See this
+        // module's doc comment ("`hc` binds the whole executable program") for why a
+        // one-sided `mult_word · (1 − valid) = 0` bound is not enough — a `VALID = 1` row left
+        // free to supply zero copies could sit outside the digest entirely while still being
+        // fetchable and executable.
         let mult = v(MULT);
         let mult_word = v(MULT_WORD);
-        b.assert_zero(mult.clone() * (one.clone() - v(VALID)));
-        b.assert_zero(mult_word.clone() * (one - v(VALID)));
+        b.assert_zero(mult.clone() * (one - v(VALID)));
+        b.assert_zero(mult_word.clone() - v(VALID));
         let msg: Vec<AB::Expr> = std::iter::once(v(PC)).chain((0..Decoded::NUM_FIELDS).map(|k| v(RD + k))).collect();
         bus::PROGRAM.table_entry(b, msg, mult);
         bus::PROGRAM_WORD.table_entry(b, [v(PC), v(WORD)], mult_word);

@@ -134,6 +134,26 @@ attests to — is not something this milestone adds; `hc` is exactly as
 guessable as it always was, just now guessed against a smaller, in-circuit
 witness instead of a publicly-held one.
 
+**What makes `hc` bind the *whole* program, not just a prefix.** Calling
+`hc` "binding" is only as strong as what the digest rows actually absorb.
+`tables::program`'s `MULT_WORD` (the `PROGRAM_WORD` bus multiplicity) is
+constrained to equal `VALID` exactly, not merely zeroed on invalid rows —
+so every real, decodable instruction the program table holds supplies
+exactly one `(pc, word)` copy to the bus the digest rows draw from, never
+zero. `PROGRAM_WORD`'s LogUp balance then forces a set-equality: the `len`
+messages the digest rows demand (one per `base_pc + 4·j`, `j < len`) must
+coincide exactly with the set of valid rows' own `pc` values. A weaker,
+one-sided gate (`mult_word · (1 − valid) = 0`, the first cut of M3.4) would
+let a valid row opt out of the digest while staying executable — reachable
+by a computed jump past the digested window, say — so `hc` would bind only
+a *declared* prefix of the program, not the executable program as a whole,
+undermining "binding" as a security property even though `hc` still looked
+like a deterministic function of *something*. `src/tables/program.rs`'s
+module doc ("`hc` binds the whole executable program") and
+`docs/02-tables-and-buses.md`'s "`hc` binds the whole executable program"
+section have the full LogUp argument; `tests/cheating.rs`'s
+`an_undigested_reachable_program_tail_is_rejected` is the regression.
+
 The preprocessed tables that remain (`range`, `nibble`, the Poseidon2
 round-constant table) are the ones M3.4's "no salt to hide" argument now
 actually applies to cleanly: they are fixed, program-independent data, so

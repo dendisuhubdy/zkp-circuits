@@ -123,6 +123,25 @@ fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
     assert_eq!(total as usize, e.events.len(), "every cycle fetched exactly one row");
 }
 
+/// CRITICAL 1 regression (M3.4 fix, positive check): the honest trace builder must actually
+/// exercise the new `MULT_WORD == VALID` invariant on every row — not just the rows a
+/// hand-picked example touches — across every guest this crate ships
+/// (`an_undigested_reachable_program_tail_is_rejected` in `tests/cheating.rs` is the negative,
+/// tampered-witness counterpart).
+#[test]
+fn every_guest_program_trace_has_mult_word_equal_to_valid() {
+    for (name, program, inputs) in guests::all() {
+        let e = execute(&program, &inputs, 1 << 20).unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        let height = 1usize << program::program_log_height(program.len());
+        let t = program_trace(&program, &e.events, height);
+        let w = program::col::WIDTH;
+        for r in 0..t.height() {
+            let row = &t.values[r * w..(r + 1) * w];
+            assert_eq!(row[program::col::MULT_WORD], row[program::col::VALID], "{name}: row {r}: MULT_WORD != VALID");
+        }
+    }
+}
+
 /// Every legal encoding `asm::ops` can produce, each over random register/immediate operands —
 /// one instance per mnemonic, covering every `Instr` variant, every `AluOp` (RV32I and the
 /// M2.6 M-extension), every load/store width, and every branch condition.
@@ -156,6 +175,29 @@ fn every_legal_encoding(rng: &mut StdRng) -> Vec<u32> {
     out
 }
 
+/// A trivial `PROGRAM_WORD` consumer: requests exactly the message a program-table row at the
+/// same index provides, at count `VALID` (main columns `[pc, word, valid]`). Used only by
+/// `program_decoder_equals_instr_decode` below, so that test's lone `ProgramAir` instance can
+/// give the M3.4 fix's `MULT_WORD = VALID` a matching consumer — required for `PROGRAM_WORD`
+/// to balance now that a `VALID = 1` row's `MULT_WORD` can no longer sit at 0 — without pulling
+/// in the whole `cpu` table. Fed the program trace's own `PC`/`WORD`/`VALID` columns verbatim,
+/// so every message it asks for is one the program table actually provides, at the same count,
+/// by construction rather than by coincidence.
+#[derive(Clone)]
+struct WordEcho;
+impl<Fld> BaseAir<Fld> for WordEcho { fn width(&self) -> usize { 3 } }
+impl<AB: AirBuilder + InteractionBuilder> Air<AB> for WordEcho
+where
+    AB::F: p3_field::Field,
+{
+    fn eval(&self, b: &mut AB) {
+        let m = b.main();
+        let (pc, word, valid) = (m.current(0).unwrap(), m.current(1).unwrap(), m.current(2).unwrap());
+        b.assert_bool(valid.into());
+        bus::PROGRAM_WORD.lookup_key(b, [pc.into(), word.into()], Count::bounded(valid.into(), 1));
+    }
+}
+
 /// M3.4 review fix: the in-circuit decoder against `Instr::decode` directly, over 10⁴ random
 /// 32-bit words plus every legal encoding `asm::ops` can produce. For each word: `fill_word_row`
 /// (the same row-filling logic `program_trace` uses for every real program row) must produce
@@ -163,9 +205,14 @@ fn every_legal_encoding(rng: &mut StdRng) -> Vec<u32> {
 /// `Decoded::to_fields()` on success, `VALID = 0` — fields unconstrained by this test, since
 /// `Decoded` has no meaning for a word that doesn't decode — on error); and, built into one
 /// trace and run through a real `prove_batch`/`verify_batch` round trip, every row's own AIR
-/// constraints must hold (with `MULT`/`MULT_WORD` left at 0 throughout, so `PROGRAM`/
-/// `PROGRAM_WORD` trivially balance with no consumer table — this test is about the decoder's
-/// own row constraints, not the buses, which the other program-table tests already cover).
+/// constraints must hold. `MULT` stays 0 throughout, so `PROGRAM` trivially balances with no
+/// consumer table (that bus is untouched by the M3.4 fix this test now also exercises); `MULT_WORD`
+/// is set to `VALID` on every row (the fix: `mult_word = valid`, not merely zeroed on invalid
+/// rows — `an_undigested_reachable_program_tail_is_rejected` in `tests/cheating.rs` is the
+/// negative counterpart), which needs `WordEcho` (above) in the same batch as its matching
+/// consumer so `PROGRAM_WORD` balances too — this test is about the decoder's own row
+/// constraints (now including the fixed multiplicity gate), not the buses beyond what's needed
+/// to let `MULT_WORD = VALID` appear in a standalone batch at all.
 #[test]
 fn program_decoder_equals_instr_decode() {
     let mut rng = StdRng::seed_from_u64(0x5EC0DE);
@@ -188,23 +235,49 @@ fn program_decoder_equals_instr_decode() {
             }
             Err(_) => assert_eq!(row[program::col::VALID], F::ZERO, "word {word:#010x} should not decode"),
         }
+        // M3.4 fix: MULT_WORD must equal VALID exactly, not just be zeroed on invalid rows.
+        v[i * w + program::col::MULT_WORD] = row[program::col::VALID];
     }
     // Padding rows past the sampled words: `PC` still increments by 4 (the AIR's transition
     // rule is unconditional), and `RD_IS_ZERO` must still satisfy the is-zero gadget for
     // `RD = 0` (unconditional too, not gated by `VALID` — see `program_trace`'s own padding
-    // handling, which this mirrors).
+    // handling, which this mirrors). `VALID = 0` there already, so `MULT_WORD` stays at its
+    // `zero_vec` default of 0, already matching `VALID` with no extra assignment needed.
     for i in words.len()..height {
         v[i * w + program::col::PC] = F::from_u32(4 * i as u32);
         v[i * w + program::col::RD_IS_ZERO] = F::ONE;
     }
+    // `WordEcho`'s matching-consumer trace: the same `PC`/`WORD`/`VALID` columns, row for row.
+    let mut echo = F::zero_vec(height * 3);
+    for i in 0..height {
+        echo[3 * i] = v[i * w + program::col::PC];
+        echo[3 * i + 1] = v[i * w + program::col::WORD];
+        echo[3 * i + 2] = v[i * w + program::col::VALID];
+    }
+    let echo_trace = RowMajorMatrix::new(echo, 3);
     let trace = RowMajorMatrix::new(v, w);
 
+    #[derive(Clone)]
+    enum T { Program(ProgramAir), Echo(WordEcho) }
+    impl<Fld> BaseAir<Fld> for T {
+        fn width(&self) -> usize { match self { T::Program(a) => <ProgramAir as BaseAir<Fld>>::width(a), T::Echo(a) => <WordEcho as BaseAir<Fld>>::width(a) } }
+    }
+    impl<AB: AirBuilder + InteractionBuilder> Air<AB> for T
+    where
+        AB::F: p3_field::Field,
+    {
+        fn eval(&self, b: &mut AB) { match self { T::Program(a) => a.eval(b), T::Echo(a) => a.eval(b) } }
+    }
+
     let config = make_config(FriProfile::Test);
-    let airs = vec![ProgramAir];
-    let instances = vec![StarkInstance { air: &airs[0], trace: &trace, public_values: vec![] }];
+    let airs = vec![T::Program(ProgramAir), T::Echo(WordEcho)];
+    let instances = vec![
+        StarkInstance { air: &airs[0], trace: &trace, public_values: vec![] },
+        StarkInstance { air: &airs[1], trace: &echo_trace, public_values: vec![] },
+    ];
     let pd = ProverData::from_instances(&config, &instances);
     let proof = prove_batch(&config, &instances, &pd);
-    verify_batch(&config, &airs, &proof, &[vec![]], &pd.common).unwrap();
+    verify_batch(&config, &airs, &proof, &[vec![], vec![]], &pd.common).unwrap();
 }
 
 #[test]

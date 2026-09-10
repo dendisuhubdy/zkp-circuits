@@ -269,8 +269,9 @@ fn bumping_a_program_multiplicity_on_a_padding_row_is_rejected() {
 }
 
 /// The `MULT_WORD` (M3.4 digest-row fetch count) sibling of the test above: a padding row
-/// (`valid = 0`) must never answer a `PROGRAM_WORD` lookup either —
-/// `mult_word·(1 − valid) = 0`, the same invariant generalized to the second bus.
+/// (`valid = 0`) must never answer a `PROGRAM_WORD` lookup either — `mult_word = valid` (the
+/// fix in `an_undigested_reachable_program_tail_is_rejected`, below) forces `mult_word = 0`
+/// there too, same as the weaker constraint it replaced did on this padding-row case.
 #[test]
 fn a_bumped_program_word_multiplicity_on_a_padding_row_is_rejected() {
     let (m, p, mut t) = setup();
@@ -966,5 +967,46 @@ fn skipping_a_digest_row_is_rejected() {
     let dr = p.digest_rows();
     assert!(dr > 1, "fib(10)'s program needs more than one digest row");
     t.cpu.values[(dr - 1) * w + cpu::col::IS_DIGEST] = F::ZERO;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// CRITICAL regression (M3.4 fix): before `MULT_WORD` was pinned to equal `VALID` exactly,
+/// the table's own constraint was the one-sided `mult_word · (1 − valid) = 0` — a no-op on
+/// any `valid = 1` row (`mult_word · (1 − 1) = mult_word · 0 = 0` regardless of `mult_word`'s
+/// value). That let a real, decodable instruction sit in the program table with `valid = 1`
+/// but `mult_word = 0`: it would never be claimed by any digest row's `PROGRAM_WORD` lookup
+/// (so it would never enter `hc`), while remaining fully `valid = 1` — and hence fetchable,
+/// and at runtime reachable via a computed jump (`JALR`) past the honestly-digested
+/// `base_pc..base_pc+4·len` window — on the ordinary `PROGRAM` bus. Under the *old* AIR this
+/// witness was not merely undetected by this one constraint, it was a fully valid, verifying
+/// proof: `hc` would bind a strict prefix of the executable program, not the program actually
+/// run.
+///
+/// Reproduce exactly that witness against `fib(10)`, then check it against the *fixed* AIR.
+/// `fib(10)`'s program table (`MIN_HEIGHT = 16` floor) has spare padding rows past the last
+/// real instruction; overwrite the first one with a real, decodable instruction (reusing one
+/// of the program's own words) at the PC `program_trace` already continues the honest
+/// arithmetic sequence to (so the separate "no address aliasing" invariant is untouched) —
+/// `VALID` comes out `1` — and leave `MULT_WORD` at its padding-row default, `0`. This alone
+/// (no change to the cpu table needed — `program_trace`'s own honest `mult`/fetch bookkeeping
+/// for the *real* program is untouched, so this is "append an escaped instruction to the
+/// program table" in its simplest form) now violates `mult_word = valid` directly on the
+/// tampered row: a local `CONSTRAINT_PANIC` on the `program` table, not a downstream
+/// `PROGRAM_WORD` lookup-balance check — the row-level equality alone is now strong enough to
+/// catch the escape without needing anything to actually consume (or even fetch) the row.
+#[test]
+fn an_undigested_reachable_program_tail_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = program::col::WIDTH;
+    let extra = p.len(); // first padding row past the digested program
+    assert!(t.program.height() > extra, "fib(10)'s program table has spare padding rows");
+    let pc = p.pc_of(extra); // continues program_trace's own honest PC sequence
+    let word = p.words[0]; // reuse a real, decodable instruction
+    let mut row = vec![F::ZERO; w];
+    program::fill_word_row(&mut row, pc, word);
+    assert_eq!(row[program::col::VALID], F::ONE, "the reused word must decode");
+    assert_eq!(row[program::col::MULT_WORD], F::ZERO, "fill_word_row never sets MULT_WORD");
+    t.program.values[extra * w..(extra + 1) * w].copy_from_slice(&row);
+    // VALID = 1, MULT_WORD = 0: the exact witness the old, one-sided constraint accepted.
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }

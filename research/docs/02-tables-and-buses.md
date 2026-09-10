@@ -91,10 +91,35 @@ value needs no separate check: the cpu table's own digest-row and
 ordinary-fetch `pc` values only balance against *some* base the two tables
 agree on, and the ordinary lookup-balance mechanism rejects any mismatch.
 
-**Padding.** `mult`/`mult_word` are both forced to 0 wherever `valid = 0` —
-a padding row (all-zero, whose `WORD = 0` decodes as no known opcode) can
-never be fetched *or* digested, and `program_trace` panics if any real word
-is undecodable (the same invariant the old preprocessed builder enforced).
+**Padding.** `mult` is forced to 0 wherever `valid = 0` (a padding row,
+all-zero, whose `WORD = 0` decodes as no known opcode, can never be
+fetched), and `program_trace` panics if any real word is undecodable (the
+same invariant the old preprocessed builder enforced). `mult_word` is
+pinned harder still — see "`hc` binds the whole executable program" below.
+
+**`hc` binds the whole executable program.** `mult_word` is constrained to
+*equal* `valid` (`mult_word = valid`), not merely zeroed on invalid rows —
+the weaker `mult_word · (1 − valid) = 0` was this table's actual constraint
+through the first cut of M3.4, and it was a real gap: it left `mult_word`
+free on valid rows, so a real, decodable `valid = 1` row could supply zero
+copies of its own `(pc, word)` and simply never be digested while staying
+fully fetchable (and executable, e.g. as a `JALR` target) via `PROGRAM` —
+`hc` would then bind a strict prefix of the executable program, not all of
+it. With `mult_word = valid`, `PROGRAM_WORD`'s LogUp balance is a
+set-equality argument: the digest rows demand exactly `len` distinct
+messages, one per `base_pc + 4·j` for `j < len`; every valid row supplies
+exactly one message, at its own (unique — see "No address aliasing" above)
+`pc`. Balancing forces the two sets equal — `len` comes out equal to the
+number of valid rows, and a valid row honestly placed outside the digested
+window (`mult_word = 1`, matching its own `valid`) has a supplied message
+nothing demands, so the bus fails to balance (`LOOKUP_BALANCE_PANIC`) and
+the proof is rejected. The simpler witness — the original gap verbatim, a
+valid row left at `mult_word = 0` — never reaches that global check at
+all: it trips the local `mult_word = valid` equation on its own row first
+(`CONSTRAINT_PANIC`). Either way, there is no way to be `valid = 1` and
+excluded from `hc`. See `src/tables/program.rs`'s module doc and
+`tests/cheating.rs::an_undigested_reachable_program_tail_is_rejected`
+(which reproduces the simpler, local case).
 
 **Height (review fix): proof-declared, not tier-derived.** The table's
 height is `1 << Proof::program_log_height` — a value the *prover* declares
@@ -116,13 +141,14 @@ computable from the tier and the declared height alone).
 Soundness does not depend on the verifier checking the declared height
 against the program in any other way, because `hc` already does: it binds
 `(base_pc, len, words)` via the capacity-lane header
-(`hash::program_digest`), and every digest row's `PROGRAM_WORD` lookups
-draw from real, `valid = 1` program-table rows whose `mult_word = 1` each
-must sum to exactly `len` for the bus to balance. A prover who declares a
-table too small to hold `len` real rows simply cannot build a witness that
-balances (some word `hc` commits to has nowhere to live); one who declares
-a table larger than necessary only spends more of their own proving time
-and a slightly bigger verifier-side degree-bits check. The declared height
+(`hash::program_digest`), and `mult_word = valid` (above) makes the
+`PROGRAM_WORD` set-equality argument do the rest — the digested set and
+the valid-row set coincide, so `len` and the valid-row count are forced
+equal. A prover who declares a table too small to hold `len` real rows
+simply cannot build a witness that balances (some word `hc` commits to has
+nowhere to live); one who declares a table larger than necessary only
+spends more of their own proving time and a slightly bigger verifier-side
+degree-bits check. The declared height
 only *sizes* the table — it can never let a prover shrink or pad the
 program the digest is already bound to. See `docs/03-privacy.md`.
 
