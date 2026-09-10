@@ -608,49 +608,42 @@ fn a_wrong_divz_on_a_nonzero_divisor_is_rejected() {
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
 
-/// M2.6 regression: the one-hot sum/boolean loop (`for i in 0..AluOp::COUNT { assert_bool;
-/// sum += flag_i }`, checked against `sum == is_real`) must actually run over all 19 flags,
-/// not silently stay at the old 11 — a bug that would leave indices 11..18 (every
-/// M-extension flag) both unchecked for booleanness and uncounted toward `sum`. This plants
-/// a padding row (`IS_REAL = 0`) with the `Mul` flag (index 11) set to `1`: with the loop
-/// covering the full 19, `sum = 1 != is_real = 0` fails directly. The row also forges a
-/// `(Mul, a_in, 0, forged)` tuple with `MULT = 1` (mirroring `forge_fib_output_through_an_
-/// alu_padding_row`'s structure), so this is also still a genuine instance of the older,
-/// independent `(1-IS_REAL)*MULT = 0` padding-row invariant — both are real, simultaneously
-/// violated constraints on this row; see the ablation evidence in the task-6 fix report for
-/// why isolating the flag/sum loop specifically as the *sole* rejecting constraint isn't
-/// achievable without also threading the forged tuple through the CPU/register side (as
-/// `forge_fib_output_through_an_alu_padding_row` does), which this lighter-weight test does
-/// not attempt.
+/// M2.6 regression. An earlier version of this test set `MULT = 1` on the forged row, which
+/// (with `IS_REAL = 0`) always fails the older, independent `(1-IS_REAL)*MULT = 0`
+/// padding-row invariant regardless of what the one-hot sum/boolean loop (`for i in
+/// 0..AluOp::COUNT { assert_bool; sum += flag_i }`, checked against `sum == is_real`)
+/// covers — masking whether the loop actually visits all 19 flags or was silently left at
+/// the old 11. This version leaves `MULT = 0` (and `A`/`B`/`C` at their padding-row default
+/// of zero) and sets *only* the `Mul` flag (index 11), so `(1-IS_REAL)*MULT = (1-0)*0 = 0`
+/// holds and that older invariant cannot fire.
+///
+/// This is *not*, however, a single-constraint regression guard for the sum/boolean loop
+/// specifically — confirmed by directly checking, not assumed: shrinking that loop to
+/// `0..11` (so it never visits index 11) still rejects this exact row, but via a different
+/// mechanism entirely. Setting `FLAG0 + 11` also sets `is_mul = mul+mulh+mulhu+mulhsu` to 1,
+/// which activates `mul`'s *unconditional* `RANGE8` lookups on `S1, S2, S3` (`CARRY`'s own
+/// limbs) and `T0..3` (`LO`'s own limbs) — seven lookups against value `0` (the padding
+/// row's untouched default for those columns) with no corresponding honest `fill_row` call
+/// to have accounted for them. That imbalances the global `RANGE8` bus regardless of the
+/// sum/boolean loop's range, confirmed directly: on a guest with zero other mul-family rows
+/// (so no other row's lookups mask the count), the ablated build fails with `Lookup mismatch
+/// (global lookup 'RANGE8'): tuple ["0"] has net multiplicity 7` — exactly those seven. So
+/// this row is doubly protected (the sum/boolean loop *and* the mul-family's own
+/// unconditional range checks), which is why it cannot cleanly isolate either one — see the
+/// task-6 fix report for the full experiment.
 #[test]
-fn a_mul_tuple_forged_on_an_alu_padding_row_is_rejected() {
+fn a_mul_flag_set_on_an_otherwise_all_zero_padding_row_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::muldiv();
     let e = execute(&p, &[], 10_000).unwrap();
     let mut t = build_traces(&p, &e, Tier(10)).unwrap();
     let wa = alu::col::WIDTH;
-    // Retire one honest provider of a real `Mul` tuple, plant a forged one on padding.
-    let honest_row = (0..t.alu.height())
-        .find(|r| {
-            let row = &t.alu.values[r * wa..(r + 1) * wa];
-            row[alu::col::FLAG0 + rand_zkvm::isa::AluOp::Mul.code() as usize] == F::ONE && row[alu::col::MULT] != F::ZERO
-        })
-        .expect("muldiv issues a real Mul");
-    let (a_in, honest_c) = (t.alu.values[honest_row * wa + alu::col::A], t.alu.values[honest_row * wa + alu::col::C]);
-    t.alu.values[honest_row * wa + alu::col::MULT] = F::ZERO;
     let pad = t.alu.height() - 1;
     assert_eq!(t.alu.values[pad * wa + alu::col::IS_REAL], F::ZERO, "last alu row is padding");
-    let forged = honest_c + F::ONE;
-    // Set the `Mul` flag (index 11) itself — this is the whole point of the test: a padding
-    // row (`IS_REAL` stays `0`) claiming a set op flag must be rejected by the sum/boolean
-    // loop running over the *full* 19-flag range, not just the original 11.
+    assert_eq!(t.alu.values[pad * wa + alu::col::MULT], F::ZERO, "padding row's MULT starts at 0");
+    // Set only the `Mul` flag; `A`, `B`, `C` (and every other column) stay at the padding
+    // row's default zero, and `MULT` stays 0 — `(1-IS_REAL)*MULT = 0` holds regardless.
     t.alu.values[pad * wa + alu::col::FLAG0 + rand_zkvm::isa::AluOp::Mul.code() as usize] = F::ONE;
-    t.alu.values[pad * wa + alu::col::A] = a_in;
-    t.alu.values[pad * wa + alu::col::B] = F::ZERO;
-    t.alu.values[pad * wa + alu::col::C] = forged;
-    t.alu.values[pad * wa + alu::col::A0] = a_in;
-    t.alu.values[pad * wa + alu::col::C0] = forged;
-    t.alu.values[pad * wa + alu::col::MULT] = F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
 }
 
