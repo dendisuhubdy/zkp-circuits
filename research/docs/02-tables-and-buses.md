@@ -70,7 +70,10 @@ pinned by kind: `alu_out` for ALU ops, `mem_val` for loads, `pc+4` for
 `jal`/`jalr`, `imm` for `lui`, `tgt` for `auipc`. On every row whose kind
 does *not* define `c` (branches, stores, `HALT`/`WRITE_OUTPUT`), `c` is
 forced to 0 — the constraint that stops a cheating witness from smuggling a
-value through an unused column (`defines_c` in `cpu.rs`). `next_pc` is
+value through an unused column (`defines_c` in `cpu.rs`). A store's `mem_val` is pinned to `b`, the value
+just read from `rs2` — the one `MEMORY` message field the bus would otherwise accept
+unstated, letting a cheating witness store a value no register ever held and read it back
+through a later load as genuine memory contents. `next_pc` is
 `pc+4` unless the row is a taken branch, `jal`, or `jalr`. Register
 reads/writes and the one optional memory access go out on `MEMORY` below.
 `ECALL` rows pre-decode `rs1=17 (a7)`, `rs2=10 (a0)`, so the syscall number
