@@ -4,27 +4,38 @@
 //! Run as `cargo test --features reference-backend --test backend` (the CPU-twin engines of
 //! `rand-zkvm-cuda`) or `cargo test --features mock-cuda --test backend` (the full
 //! `Backend::Cuda` path driven by the mock CUDA driver).
-#![cfg(any(feature = "reference-backend", feature = "mock-cuda"))]
+#![cfg(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda"))]
 use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::machine::{Backend, FriProfile, Machine, Proof};
 
-/// `mock-cuda` exercises the full `Backend::Cuda` path; otherwise this is the reference
-/// backend. Two definitions rather than one with an inner `#[cfg]`, because under `mock-cuda`
-/// alone `Backend::Reference` is not a variant that exists.
-#[cfg(feature = "mock-cuda")]
+/// Either CUDA feature exercises the full `Backend::Cuda` path — `cuda` against a real device,
+/// `mock-cuda` against the host mock — and otherwise this is the reference backend. Two
+/// definitions rather than one with an inner `#[cfg]`, because under a CUDA feature alone
+/// `Backend::Reference` is not a variant that exists.
+#[cfg(any(feature = "cuda", feature = "mock-cuda"))]
 fn backend() -> Backend {
-    // `GpuProver::probe` only needs the PTX file to exist: the mock driver ignores its
-    // contents and runs the shared kernel bodies on the host.
-    let dir = std::env::temp_dir().join("rand-zkvm-cuda-mock");
-    std::fs::create_dir_all(&dir).unwrap();
-    let p = dir.join("k.ptx");
-    std::fs::write(&p, "// mock").unwrap();
-    std::env::set_var("RAND_ZKVM_PTX", &p);
+    // Only the mock driver needs a PTX file planted: `GpuProver::probe` just has to find one,
+    // since the mock ignores its contents and runs the shared kernel bodies on the host. A
+    // real `cuda` build must load the real PTX from its default path, so it is left alone.
+    //
+    // `set_var` writes process-global state while the other test's `probe` may be reading it
+    // on another thread, so it happens exactly once, before any `probe` this helper leads to.
+    #[cfg(feature = "mock-cuda")]
+    {
+        static PLANT_MOCK_PTX: std::sync::Once = std::sync::Once::new();
+        PLANT_MOCK_PTX.call_once(|| {
+            let dir = std::env::temp_dir().join("rand-zkvm-cuda-mock");
+            std::fs::create_dir_all(&dir).unwrap();
+            let p = dir.join("k.ptx");
+            std::fs::write(&p, "// mock").unwrap();
+            std::env::set_var("RAND_ZKVM_PTX", &p);
+        });
+    }
     Backend::Cuda
 }
 
-#[cfg(all(feature = "reference-backend", not(feature = "mock-cuda")))]
+#[cfg(all(feature = "reference-backend", not(any(feature = "cuda", feature = "mock-cuda"))))]
 fn backend() -> Backend {
     Backend::Reference
 }

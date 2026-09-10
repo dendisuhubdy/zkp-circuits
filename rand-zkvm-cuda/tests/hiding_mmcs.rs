@@ -79,3 +79,25 @@ fn get_matrices_returns_unsalted_originals() {
     for (a, b) in got.iter().zip(&m) { assert_eq!(a.width(), b.width()); assert_eq!(**a, *b); }
     assert_eq!(o.get_max_height(&pd), 64);
 }
+
+/// Cloning must *fork* the salt stream — draw a fresh seed from the source, advancing it —
+/// exactly as `MerkleTreeHidingMmcs::clone` does, not share one generator between the clone
+/// and the original. A FRI config builds its challenge MMCS as `ExtensionMmcs::new(
+/// val_mmcs.clone())`, so a shared stream leaves the original un-advanced and every later
+/// commit (the preprocessed trace's included) salted differently from Plonky3's.
+#[test]
+fn clone_forks_the_salt_stream_like_plonky3() {
+    let mut rng = StdRng::seed_from_u64(35);
+    let m = mats(&mut rng, SHAPES[0]);
+    let (ours_orig, p3_orig) = (ours(9), p3(9));
+    let (ours_clone, p3_clone) = (ours_orig.clone(), p3_orig.clone());
+    // The clone drew from the source, so the originals must still be in lockstep.
+    let (a, _) = ours_orig.commit(m.clone());
+    let (b, _) = p3_orig.commit(m.clone());
+    assert_eq!(a, b, "originals diverge from Plonky3 after one clone");
+    // ... and the forked streams must agree with each other, but not with the originals.
+    let (ac, _) = ours_clone.commit(m.clone());
+    let (bc, _) = p3_clone.commit(m.clone());
+    assert_eq!(ac, bc, "clones diverge from Plonky3's clone");
+    assert_ne!(a, ac, "the clone shares the original's salt stream instead of forking it");
+}
