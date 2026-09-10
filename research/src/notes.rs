@@ -47,7 +47,9 @@ pub mod domain {
     pub const KEM_SEED: u32 = 6;
     /// A commitment tree node: `H(NODE, left(8), right(8))`.
     pub const NODE: u32 = 7;
-    /// The preprocessed program commitment (reserved; not produced by this crate yet).
+    /// The in-circuit program commitment (M3.4): `hash::program_digest`'s capacity-lane
+    /// header, `[HC, base_pc, len]`, seeded into the very first digest-row permutation
+    /// before any program word is absorbed.
     pub const HC: u32 = 8;
     /// The `transfer` guest's output commitment: `H(OUT, anchor(8), nf(8), cm_out(8), time)`
     /// — see `output_digest` and `docs/06-viewing-keys.md`'s "Public outputs" section.

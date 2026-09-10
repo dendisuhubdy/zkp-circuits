@@ -186,13 +186,31 @@ impl Tier {
     pub fn mem_height(self) -> usize { 1 << (self.0 + 2) }
     /// One padding row is always kept.
     pub fn max_cycles(self) -> usize { self.cpu_height() - 1 }
-    /// `2^(t+1)`, i.e. `2^(t-4)` Poseidon2 permutation slots (each block is 32 rows) —
-    /// decoupled from `cpu_height` (was `2^t`/`2^(t-5)` slots through M3.2). M3.3 measured the
-    /// `transfer` guest at 190 permutations at tier 12 (`docs/06-viewing-keys.md`'s cost
-    /// table): the cycle count (3 764) fits tier 12's 4 095-cycle budget comfortably, but 190
-    /// permutations exceed the 128 slots `2^t` would give tier 12, so this table gets one
-    /// extra bit of height at every tier rather than sharing `cpu_height`'s.
-    pub fn poseidon2_height(self) -> usize { 1 << (self.0 + 1) }
+    /// `2^(t+2)`, i.e. `2^(t-3)` Poseidon2 permutation slots (each block is 32 rows) —
+    /// decoupled from `cpu_height`. History: M3.2 shipped `2^t` (`2^(t-5)` slots); M3.3
+    /// measured `transfer` at 190 permutations at tier 12 and bumped this to `2^(t+1)`
+    /// (256 slots, room to spare). M3.4 added the program digest's own `⌈len/4⌉`
+    /// permutations to *every* proof's cost, `transfer`'s included — and `transfer`'s program
+    /// is 4 554 words, i.e. 1 139 digest-row permutations on top of its 190 hash-syscall ones,
+    /// 1 329 total (`docs/06-viewing-keys.md`'s cost table). Digest rows also count as cycles
+    /// (M3.4 ruling), so `transfer`'s total cycle count (3 764 + 1 139 = 4 903) no longer fits
+    /// tier 12's 4 095-cycle budget either — it needs at least tier 14 regardless of the
+    /// Poseidon2 budget. At tier 14, `2^(t+1)` gives only 1 024 slots (still short of 1 329);
+    /// `2^(t+2)` gives 2 048, comfortably enough, so this is the smallest bump that clears the
+    /// measured need at the tier `transfer` is forced to anyway — cheaper in proof size than
+    /// moving to tier 16 (whose unmodified `2^(t+1)` would also clear it, but at every other
+    /// table's much larger tier-16 height too).
+    pub fn poseidon2_height(self) -> usize { 1 << (self.0 + 2) }
+    /// M3.4: the program table's height, now a function of the tier alone (it is a main
+    /// trace, no longer sized by a specific `Program`, and its verifier key must be
+    /// program-independent — see `Machine::verifier_key`). Chosen equal to `cpu_height()`:
+    /// every cycle fetches at most one instruction, so a program longer than `cpu_height() -
+    /// 1` words could never be fully executed within this tier's cycle budget anyway (the
+    /// digest prefix alone would exceed `max_cycles()`), making this the natural (and
+    /// simplest — one fewer independently-tracked height) upper bound rather than a smaller,
+    /// separately-tuned one. Revisit if a guest's *word count* (not cycle count) ever needs
+    /// more headroom than that at its chosen tier.
+    pub fn program_height(self) -> usize { self.cpu_height() }
 }
 
 #[derive(Clone)]
@@ -231,10 +249,12 @@ where
 
 /// `Poseidon2` is appended last: `i == 1` (`Cpu`) must stay the public-values slot that
 /// `prove_traces`/`verify` hard-code, so every new chip since M2 has gone at the end rather
-/// than disturbing that index.
-pub fn chips(program: &Program, tier: Tier) -> Vec<Chip> {
+/// than disturbing that index. M3.4: no longer takes a `Program` — `ProgramAir` is shape-only
+/// now (like `CpuAir`), so the whole chip set is a pure function of `tier`, and `verifier_key`
+/// collapses to one entry per tier.
+pub fn chips(tier: Tier) -> Vec<Chip> {
     vec![
-        Chip::Program(ProgramAir { program: program.clone() }),
+        Chip::Program(ProgramAir),
         Chip::Cpu(CpuAir),
         Chip::Memory(MemoryAir),
         Chip::Alu(AluAir),
@@ -260,16 +280,27 @@ pub enum ProveError { Exec(ExecError), NoTier(usize), TooManyCycles { cycles: us
 pub enum VerifyError { PublicValues, Tier, Batch(String) }
 
 pub fn build_traces(program: &Program, exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
-    let cycles = exec.cycles();
+    // M3.4: digest rows count as cycles too — the digest prefix is part of every proof's cpu
+    // table, not just `exec.events`.
+    let cycles = exec.cycles() + program.digest_rows();
     if cycles > tier.max_cycles() { return Err(ProveError::TooManyCycles { cycles, tier }); }
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
-    let cpu = cpu_trace(&exec.events, tier.cpu_height(), &mut range, &mut nibble);
-    let memory = memory_trace(&exec.events, tier.mem_height(), &mut range);
+    let cpu = cpu_trace(program, &exec.events, tier.cpu_height(), &mut range, &mut nibble);
+    let memory = memory_trace(&exec.events, program.digest_rows() as u32, tier.mem_height(), &mut range);
     let alu = alu_trace(&exec.events, tier.alu_height(), &mut range, &mut nibble);
     let range_t = range_trace(&range);
     let nibble_t = nibble_trace(&nibble);
-    let program_t = program_trace(program, &exec.events);
+    let program_t = program_trace(program, &exec.events, tier.program_height());
+    // M3.4: the digest prefix's own permutations, in the same row order `tables::cpu`'s
+    // `IS_DIGEST` rows issue them (`fill_digest_rows`) — these come *first*, since the digest
+    // rows precede every ordinary cycle in the cpu table.
+    let digest_blocks = crate::hash::program_digest_rows(program.base_pc, &program.words);
+    let digest_events: Vec<Poseidon2Event> = digest_blocks.iter().map(|blk| {
+        let mut input = blk.state_in;
+        for k in 0..4 { if blk.active[k] { input[k] = Val::from_u32(blk.words[k]); } }
+        Poseidon2Event { input, output: blk.state_out }
+    }).collect();
     // M3.2: one `Poseidon2Event` per absorbed block, in emission order — exactly the
     // permutations the cpu table's absorb rows ask for over the `POSEIDON2` bus (see
     // `tables::cpu`'s eval). Any block beyond these is padding, still a genuine,
@@ -285,8 +316,10 @@ pub fn build_traces(program: &Program, exec: &Execution, tier: Tier) -> Result<T
         }
         _ => None,
     }).collect();
-    let poseidon2_t = poseidon2_trace(&hash_events, tier.poseidon2_height());
-    Ok(Traces { program: program_t, cpu, memory, alu, range: range_t, nibble: nibble_t, poseidon2: poseidon2_t, public_values: public_values(program.base_pc, tier.0, &exec.outputs) })
+    let all_hash_events: Vec<Poseidon2Event> = digest_events.into_iter().chain(hash_events).collect();
+    let poseidon2_t = poseidon2_trace(&all_hash_events, tier.poseidon2_height());
+    let hc = program.digest();
+    Ok(Traces { program: program_t, cpu, memory, alu, range: range_t, nibble: nibble_t, poseidon2: poseidon2_t, public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc) })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -297,51 +330,36 @@ impl Proof {
     pub fn size(&self) -> usize { self.to_bytes().len() }
 }
 
-/// Deterministic 64-bit digest of a program: an FNV-1a-style fold over `base_pc` and every
-/// word. Used only to seed `key_config`'s RNGs, never for anything cryptographic in its own
-/// right — it just needs to be a pure function of the program.
-fn program_digest(program: &Program) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (program.base_pc as u64);
-    // Length first, so the fold cannot collide two programs that differ only in how many
-    // words they have. (`hc` itself is the preprocessed Merkle root, which already commits
-    // to the padded height; this digest only seeds that commitment's salt, but there is no
-    // reason to leave it length-extendable.)
-    h ^= program.words.len() as u64;
-    h = h.wrapping_mul(0x0000_0001_0000_01b3);
-    for &w in &program.words {
-        h ^= w as u64;
-        h = h.wrapping_mul(0x0000_0001_0000_01b3);
-    }
-    h
-}
+/// M3.4: the fixed seed behind `key_config`'s RNGs. Before M3.4 this was derived from the
+/// program (`program_digest`, an FNV-1a-style fold over `base_pc` and every word) — but the
+/// preprocessed columns are now the range/nibble tables and the Poseidon2 round-constant
+/// table alone (`Machine::verifier_key`'s doc comment), none of which depend on any specific
+/// program, so seeding from the program would only make the same `(tier)` verifier key
+/// non-reproducible from one build to the next for no benefit. A single fixed constant
+/// (arbitrary, like `machine::PERM_SEED`) is all a program-independent preprocessed
+/// commitment needs.
+const KEY_SEED: u64 = 0x4b45_595f_4d33_5f34; // "KEY_M3_4"
 
 /// A `Config` whose value-MMCS salts and PCS random codewords are both seeded deterministically
-/// from `program` (and nothing else) instead of OS entropy, so that the resulting preprocessed
-/// commitment (`Machine::verifier_key`/`code_hash`) is a pure function of the program: any
-/// verifier can recompute it standalone, without having witnessed the proving session.
+/// from `KEY_SEED` (M3.4: no longer the program — see that constant's doc comment) instead of
+/// OS entropy, so that the resulting preprocessed commitment (`Machine::verifier_key`) is a
+/// pure function of the tier: any verifier can recompute it standalone, without having
+/// witnessed the proving session or holding the program.
 ///
-/// A salt that is a function of the message is *binding but not hiding*: it is brute-forceable
-/// over any guessable program space, and two deployments of the same program produce the same
-/// `hc` and are therefore linkable. That is acceptable here only because milestone 1 is not
-/// trying to hide the program at all — `verify` takes the whole `Program` in the clear, so the
-/// verifier already holds every word (`docs/03-privacy.md`). It is *not* a claim that a
-/// program-derived salt costs nothing in general. A hiding program commitment belongs with
-/// milestone 3's in-circuit digest, where the verifier stops holding the code. Never
-/// used for the actual `prove_batch` call, whose main-trace/quotient/permutation commitments
-/// must keep fresh entropy (see `make_config`) or two proofs of the same run would be
-/// distinguishable, breaking zero-knowledge.
-fn key_config(profile: FriProfile, program: &Program) -> Config {
-    let (mmcs_rng, pcs_rng) = key_rngs(program);
+/// Never used for the actual `prove_batch` call, whose main-trace/quotient/permutation
+/// commitments must keep fresh entropy (see `make_config`) or two proofs of the same run
+/// would be distinguishable, breaking zero-knowledge.
+fn key_config(profile: FriProfile) -> Config {
+    let (mmcs_rng, pcs_rng) = key_rngs();
     build_config(profile, mmcs_rng, pcs_rng)
 }
 
 /// The deterministic `(mmcs_rng, pcs_rng)` pair behind `key_config`, factored out so every
 /// backend seeds its own key config identically and therefore produces a preprocessed
 /// commitment byte-identical to the one `verifier_key` recomputes on the CPU.
-fn key_rngs(program: &Program) -> (StdRng, StdRng) {
-    let seed = program_digest(program);
+fn key_rngs() -> (StdRng, StdRng) {
     // XOR with an arbitrary odd constant so the two RNG streams don't start identically.
-    (StdRng::seed_from_u64(seed), StdRng::seed_from_u64(seed ^ 0x9E37_79B9_7F4A_7C15))
+    (StdRng::seed_from_u64(KEY_SEED), StdRng::seed_from_u64(KEY_SEED ^ 0x9E37_79B9_7F4A_7C15))
 }
 
 /// Which prover implementation `Machine::prove_with` runs the batch STARK on. Every variant
@@ -374,18 +392,20 @@ fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
 /// policy is not worth the complexity here.
 const KEY_CACHE_CAPACITY: usize = 64;
 
-/// A bounded, FIFO-evicted cache of `Machine::verifier_key` results, keyed by
-/// `(program_digest(program), tier.0)`.
+/// A bounded, FIFO-evicted cache of `Machine::verifier_key` results, keyed by `tier.0` alone
+/// (M3.4: the preprocessed columns — range, nibble, Poseidon2 round constants — no longer
+/// depend on any specific program, so this collapses from a `(program digest, tier)` cache to
+/// a `tier`-only one; `TIERS.len() == 6`, so it can never actually evict anything in practice).
 #[derive(Default)]
 struct KeyCache {
-    map: HashMap<(u64, usize), Arc<CommonData<Config>>>,
-    order: VecDeque<(u64, usize)>,
+    map: HashMap<usize, Arc<CommonData<Config>>>,
+    order: VecDeque<usize>,
 }
 impl KeyCache {
-    fn get(&self, key: &(u64, usize)) -> Option<Arc<CommonData<Config>>> {
+    fn get(&self, key: &usize) -> Option<Arc<CommonData<Config>>> {
         self.map.get(key).cloned()
     }
-    fn insert(&mut self, key: (u64, usize), value: Arc<CommonData<Config>>) {
+    fn insert(&mut self, key: usize, value: Arc<CommonData<Config>>) {
         if self.map.contains_key(&key) {
             return;
         }
@@ -404,47 +424,43 @@ pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<Ke
 impl Machine {
     pub fn new(profile: FriProfile) -> Self { Self { config: make_config(profile), profile, keys: Mutex::new(KeyCache::default()) } }
 
-    fn log_ext_degrees(&self, program: &Program, tier: Tier) -> Vec<usize> {
+    fn log_ext_degrees(&self, tier: Tier) -> Vec<usize> {
         let zk = self.config.is_zk();
-        let prog_h = ProgramAir { program: program.clone() }.height();
         // Order matches `chips()`: program, cpu, memory, alu, range, nibble, poseidon2.
-        [prog_h, tier.cpu_height(), tier.mem_height(), tier.alu_height(), crate::tables::range::HEIGHT, crate::tables::nibble::HEIGHT, tier.poseidon2_height()]
+        [tier.program_height(), tier.cpu_height(), tier.mem_height(), tier.alu_height(), crate::tables::range::HEIGHT, crate::tables::nibble::HEIGHT, tier.poseidon2_height()]
             .iter().map(|h| h.trailing_zeros() as usize + zk).collect()
     }
 
-    /// The preprocessed commitment (program + range + nibble tables) for `(program, tier)`,
-    /// cached by `program_digest(program)` and `tier.0` — see `KeyCache`. Recomputing it from
-    /// scratch runs the full `ProverData::from_airs_and_degrees` preprocessing pass (in
-    /// particular building the range and nibble tables' Merkle trees every time), which is
-    /// the cost this cache exists to amortize across repeated `verify`/`code_hash` calls for
-    /// the same `(program, tier)`.
-    pub fn verifier_key(&self, program: &Program, tier: Tier) -> Arc<CommonData<Config>> {
-        let key = (program_digest(program), tier.0);
-        if let Some(hit) = self.keys.lock().unwrap().get(&key) {
+    /// The preprocessed commitment (range + nibble tables + Poseidon2 round constants) for
+    /// `tier`, cached by `tier.0` — see `KeyCache`. M3.4: program-independent, so this is the
+    /// *verifier's* key — computable by anyone who knows the tier alone, without the program
+    /// or the proving session. Recomputing it from scratch runs the full
+    /// `ProverData::from_airs_and_degrees` preprocessing pass (in particular building the
+    /// range and nibble tables' Merkle trees every time), which is the cost this cache exists
+    /// to amortize across repeated `verify` calls at the same tier.
+    pub fn verifier_key(&self, tier: Tier) -> Arc<CommonData<Config>> {
+        if let Some(hit) = self.keys.lock().unwrap().get(&tier.0) {
             return hit;
         }
-        let common = Arc::new(
-            ProverData::from_airs_and_degrees(&key_config(self.profile, program), &chips(program, tier), &self.log_ext_degrees(program, tier)).common,
-        );
-        self.keys.lock().unwrap().insert(key, common.clone());
+        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier), &self.log_ext_degrees(tier)).common);
+        self.keys.lock().unwrap().insert(tier.0, common.clone());
         common
     }
 
-    /// Number of `(program, tier)` verifier keys currently cached.
+    /// Number of tiers whose verifier key is currently cached (at most `TIERS.len()`).
     pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().map.len() }
-
-    /// The code hash hc: the Merkle root of the preprocessed columns (program + range + nibble tables).
-    pub fn code_hash(&self, program: &Program, tier: Tier) -> String {
-        let key = self.verifier_key(program, tier);
-        let com = key.preprocessed.as_ref().expect("program table is preprocessed");
-        postcard::to_allocvec(&com.commitment).unwrap().iter().map(|b| format!("{b:02x}")).collect()
-    }
 
     pub fn prove(&self, program: &Program, inputs: &[u32], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
         // Run up to the largest tier's cycle budget; a program that has not halted by then
         // can never be proved, so `OutOfCycles` and `TooManyCycles` agree on the limit.
         let exec = execute(program, inputs, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
-        let tier = match tier { Some(t) => t, None => Tier::for_cycles(exec.cycles()).ok_or(ProveError::NoTier(exec.cycles()))? };
+        let tier = match tier {
+            Some(t) => t,
+            None => {
+                let cycles = exec.cycles() + program.digest_rows();
+                Tier::for_cycles(cycles).ok_or(ProveError::NoTier(cycles))?
+            }
+        };
         let traces = build_traces(program, &exec, tier)?;
         Ok((self.prove_traces(program, &traces, tier), exec))
     }
@@ -455,8 +471,12 @@ impl Machine {
     /// the `key_config`/`self.config` split between the key's prover data and `prove_batch` —
     /// or a backend proof stops matching what the CPU verifier recomputes. Change one, change
     /// the other.
-    pub fn prove_traces(&self, program: &Program, traces: &Traces, tier: Tier) -> Proof {
-        let airs = chips(program, tier);
+    /// `program` is no longer read here (M3.4: `chips`/`key_config` are program-independent,
+    /// and `traces` already carries everything the witness needs, `hc` included via
+    /// `public_values`) — kept in the signature for symmetry with `prove`/`prove_on`, which
+    /// still need the program to execute it and build `traces` in the first place.
+    pub fn prove_traces(&self, _program: &Program, traces: &Traces, tier: Tier) -> Proof {
+        let airs = chips(tier);
         let mats = traces.as_slice();
         let instances: Vec<StarkInstance<'_, Config, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
@@ -478,8 +498,8 @@ impl Machine {
         // `prover_data` only need to be *structurally* compatible (same hash/compress/Dft/FRI
         // parameters, which `key_config` and `make_config` share via `build_config`); their
         // RNG state can differ freely.
-        let key_cfg = key_config(self.profile, program);
-        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees(program, tier));
+        let key_cfg = key_config(self.profile);
+        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees(tier));
         let batch = prove_batch(&self.config, &instances, &prover_data);
         Proof { tier, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }
     }
@@ -495,7 +515,7 @@ impl Machine {
                 // Fresh entropy for the proving config (hiding), deterministic for the key
                 // config — the same split `make_config`/`key_config` make on the CPU.
                 let cfg = reference_cfg::config(self.profile, StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()));
-                let (mmcs_rng, pcs_rng) = key_rngs(program);
+                let (mmcs_rng, pcs_rng) = key_rngs();
                 let key = reference_cfg::config(self.profile, mmcs_rng, pcs_rng);
                 self.prove_on(&cfg, &key, program, inputs, tier)
             }
@@ -503,7 +523,7 @@ impl Machine {
             Backend::Cuda => {
                 let gpu = rand_zkvm_cuda::gpu::GpuProver::probe(PERM_SEED).map_err(|e| ProveError::Backend(e.to_string()))?;
                 let cfg = cuda_cfg::config(self.profile, gpu.clone(), StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()));
-                let (mmcs_rng, pcs_rng) = key_rngs(program);
+                let (mmcs_rng, pcs_rng) = key_rngs();
                 let key = cuda_cfg::config(self.profile, gpu, mmcs_rng, pcs_rng);
                 self.prove_on(&cfg, &key, program, inputs, tier)
             }
@@ -539,9 +559,15 @@ impl Machine {
         // Mirrors `prove`: run up to the largest tier's cycle budget, so `OutOfCycles` and
         // `TooManyCycles` agree on the limit here exactly as they do on the CPU path.
         let exec = execute(program, inputs, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
-        let tier = match tier { Some(t) => t, None => Tier::for_cycles(exec.cycles()).ok_or(ProveError::NoTier(exec.cycles()))? };
+        let tier = match tier {
+            Some(t) => t,
+            None => {
+                let cycles = exec.cycles() + program.digest_rows();
+                Tier::for_cycles(cycles).ok_or(ProveError::NoTier(cycles))?
+            }
+        };
         let traces = build_traces(program, &exec, tier)?;
-        let airs = chips(program, tier);
+        let airs = chips(tier);
         let mats = traces.as_slice();
         let instances: Vec<StarkInstance<'_, SC, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
@@ -550,7 +576,7 @@ impl Machine {
         // That is invariant, not a leak: every backend config (`reference_cfg`, `cuda_cfg`) is
         // built on `HidingFriPcs` just as `make_config` is, so `is_zk()` is `true` for all of
         // them and the degree bits agree with what `verify` recomputes.
-        let prover_data = ProverData::from_airs_and_degrees(key_cfg, &airs, &self.log_ext_degrees(program, tier));
+        let prover_data = ProverData::from_airs_and_degrees(key_cfg, &airs, &self.log_ext_degrees(tier));
         // The engines panic (rather than return) on a device failure — `CudaHashEngine::ok`
         // and friends — so a backend fault must not take the caller's process down with it.
         let batch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_batch(cfg, &instances, &prover_data)))
@@ -560,47 +586,60 @@ impl Machine {
         Ok((Proof { tier, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }, exec))
     }
 
-    pub fn verify(&self, program: &Program, proof: &Proof) -> Result<(), VerifyError> {
-        if proof.public_values.len() != crate::tables::cpu::pv::NUM { return Err(VerifyError::PublicValues); }
+    /// M3.4: takes `hc`, not the program — the verifier no longer holds the program at all
+    /// (`docs/03-privacy.md`). `hc` is checked against `pv::HC0..HC7`, the in-circuit program
+    /// digest `tables::cpu`'s digest rows compute and pin; `pc_entry` is no longer
+    /// independently checkable here (the verifier has no `base_pc` from anywhere except the
+    /// proof itself) — it is read out of the proof, still bound in-circuit to the digest
+    /// group's own `PC` (see `tables::cpu`'s `eval`), and indirectly to `hc` too, since
+    /// `Program::digest` absorbs `base_pc`: a mismatched `pc_entry` claim would need a
+    /// matching-but-different program producing the same `hc`, a genuine hash collision, not
+    /// a free forgery.
+    pub fn verify(&self, hc: &[u32; 8], proof: &Proof) -> Result<(), VerifyError> {
+        use crate::tables::cpu::pv;
+        if proof.public_values.len() != pv::NUM { return Err(VerifyError::PublicValues); }
         // `public_values` is deserialized from untrusted bytes as raw `u64`s, and
         // `Val::from_u64` does not reduce: `out0` and `out0 + p` are the same field element
         // and both verify, but they are different `to_bytes()` and different numbers to
         // anyone reading the proof. Insist on the canonical representative so a proof has
         // exactly one encoding of its outputs.
         if proof.public_values.iter().any(|x| *x >= Val::ORDER_U64) { return Err(VerifyError::PublicValues); }
-        if proof.public_values[crate::tables::cpu::pv::PC_ENTRY] != program.base_pc as u64 { return Err(VerifyError::PublicValues); }
-        if proof.public_values[crate::tables::cpu::pv::TIER] != proof.tier.0 as u64 { return Err(VerifyError::Tier); }
+        for i in 0..8 {
+            if proof.public_values[pv::HC0 + i] != hc[i] as u64 { return Err(VerifyError::PublicValues); }
+        }
+        if proof.public_values[pv::TIER] != proof.tier.0 as u64 { return Err(VerifyError::Tier); }
         // `proof.tier` is deserialized from untrusted bytes: an attacker-supplied out-of-range
         // tier (anything not in TIERS) must be rejected here, before `log_ext_degrees` calls
         // `Tier::cpu_height`/`alu_height`/`mem_height`, which shift by `self.0` and panic in
         // debug builds for a large enough tier (e.g. `1usize << 99`).
         if !TIERS.contains(&proof.tier.0) { return Err(VerifyError::Tier); }
-        if proof.batch.degree_bits != self.log_ext_degrees(program, proof.tier) { return Err(VerifyError::Tier); }
-        let airs = chips(program, proof.tier);
-        let pv: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
-        let pvs: Vec<Vec<Val>> = (0..7).map(|i| if i == 1 { pv.clone() } else { vec![] }).collect();
-        let common = self.verifier_key(program, proof.tier);
+        if proof.batch.degree_bits != self.log_ext_degrees(proof.tier) { return Err(VerifyError::Tier); }
+        let airs = chips(proof.tier);
+        let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
+        let pvs: Vec<Vec<Val>> = (0..airs.len()).map(|i| if i == 1 { pv_vals.clone() } else { vec![] }).collect();
+        let common = self.verifier_key(proof.tier);
         verify_batch(&self.config, &airs, &proof.batch, &pvs, &common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
     }
 }
 
 /// Symbolic max constraint degree of each chip, in `chips()` order — computed the same way
 /// `ProverData::from_airs_and_degrees` (i.e. `verifier_key`) derives each instance's quotient
-/// chunk count: against the real, same-bus-packed lookup contexts for `(program, tier)`, not
-/// a hand-counted estimate. No proving happens here — only the symbolic constraint walk
-/// (`p3_batch_stark::symbolic::get_max_constraint_degree`) plus the one preprocessed-column
-/// commitment `from_airs_and_degrees` always does, so this stays fast.
+/// chunk count: against the real, same-bus-packed lookup contexts for `tier`, not a
+/// hand-counted estimate (M3.4: no longer program-dependent — every chip's shape, `Chip::
+/// Program` included, is now a pure function of the tier). No proving happens here — only the
+/// symbolic constraint walk (`p3_batch_stark::symbolic::get_max_constraint_degree`) plus the
+/// one preprocessed-column commitment `from_airs_and_degrees` always does, so this stays fast.
 ///
 /// Exists to back `tests/tables.rs`'s per-table constraint-degree regression tests: each
 /// table's degree is pinned to a specific number there, with a comment on *why*; a change
 /// here should come with a matching update to those assertions and to
 /// `docs/02-tables-and-buses.md`.
-pub fn max_constraint_degrees(program: &Program, tier: Tier) -> Vec<usize> {
+pub fn max_constraint_degrees(tier: Tier) -> Vec<usize> {
     let machine = Machine::new(FriProfile::Test);
-    let key_cfg = key_config(machine.profile, program);
-    let airs = chips(program, tier);
+    let key_cfg = key_config(machine.profile);
+    let airs = chips(tier);
     let is_zk = machine.config.is_zk();
-    let ext_degrees = machine.log_ext_degrees(program, tier);
+    let ext_degrees = machine.log_ext_degrees(tier);
     let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &ext_degrees);
     let lookup_gadget = p3_lookup::LogUpGadget::new();
     airs.iter()

@@ -203,7 +203,7 @@ impl Ledger {
         if self.nullifiers.contains(&nf) { return Err(LedgerError::Spent(nf)); }
         if self.tree.index.contains_key(&cm_out) { return Err(LedgerError::Duplicate(cm_out)); }
         if time != self.now { return Err(LedgerError::Time { claimed: time, now: self.now }); }
-        machine.verify(&self.program, proof).map_err(LedgerError::Proof)?;
+        machine.verify(&self.program.digest(), proof).map_err(LedgerError::Proof)?;
         self.nullifiers.insert(nf);
         self.tree.append(cm_out);
         self.record_root();

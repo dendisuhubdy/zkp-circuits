@@ -2,7 +2,7 @@
 //! delegates arithmetic to ALU. The only table with public values.
 use super::{bus, limbs, nibble::NibbleCounts, program::MESSAGE_LEN, range::RangeCounts, F};
 use crate::emulator::{CycleEvent, HashRow, Syscall, ECALL_MEM_REG, SLOT_MEM, SLOT_R1, SLOT_R2, SLOT_W, SPACE_RAM};
-use crate::isa::{NUM_OUTPUTS, SYS_HALT as SYS_NUM_HALT, SYS_POSEIDON2, SYS_READ_INPUT, SYS_WRITE_OUTPUT};
+use crate::isa::{Program, NUM_OUTPUTS, SYS_HALT as SYS_NUM_HALT, SYS_POSEIDON2, SYS_READ_INPUT, SYS_WRITE_OUTPUT};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_lookup::{Count, InteractionBuilder};
@@ -113,15 +113,44 @@ pub mod col {
     /// encoding of any lane `< 2^32-1` (see the write-back constraints in `eval`).
     pub const HIMAX0: usize = HP3_HI + 1;                            // 125,126
     pub const INV0: usize = HIMAX0 + 2;                              // 127,128
-    pub const WIDTH: usize = INV0 + 2;                               // 129 = 76 + 53
+    // M3.4: digest rows. `⌈len/4⌉` rows (`IS_DIGEST`) precede the first instruction row,
+    // reusing hash rows' `HS0..7`/`HV0..3`/`ACT0..3`/`HASH_LEFT`/`HASH_IDX`/`LEFT0..1`/
+    // `IDX0..1` machinery (a digest row is an absorb row whose four words come from the
+    // `PROGRAM_WORD` bus instead of a memory read — see `docs/02-tables-and-buses.md`).
+    // `HASH_N` (reused, digest rows only) carries the program's word count; `PC` (reused)
+    // carries `base_pc`, constant across the whole group via the ordinary `NEXT_PC = PC`
+    // chain. Only the final digest word encoding is genuinely new: `DHVL0..31` (the 8 output
+    // words' byte limbs, RANGE8-checked) and `DHIMAX0..3`/`DINV0..3` (the same
+    // canonical-encoding gadget `HIMAX0..1`/`INV0..1` uses for hash write-back rows, one pair
+    // per digest lane) — needed because a digest row publishes all 4 sponge-output lanes (8
+    // words) on a single row, not 2 lanes per row across two write-back rows like a
+    // `POSEIDON2` syscall does.
+    pub const IS_DIGEST: usize = INV0 + 2;                           // 129
+    /// 1 on the transition row out of the digest prefix (the last digest row) only, 0
+    /// everywhere else — a dedicated witness column (not a recomputed expression) so that
+    /// every downstream constraint that needs "is this the last digest row" can gate on a
+    /// plain degree-1 column read instead of the degree-2 `IS_DIGEST*(1-n(IS_DIGEST))`
+    /// expression, keeping this table's already degree-8-pinned packed lookups from
+    /// growing past that ceiling.
+    pub const DIGEST_LAST: usize = IS_DIGEST + 1;                    // 130
+    pub const DHVL0: usize = DIGEST_LAST + 1;                        // 131..162
+    pub const DHIMAX0: usize = DHVL0 + 32;                           // 163..166
+    pub const DINV0: usize = DHIMAX0 + 4;                            // 167..170
+    pub const WIDTH: usize = DINV0 + 4;                              // 174
     /// Columns that must be zero on padding rows.
-    pub const SELECTORS: [usize; 24] = [
+    pub const SELECTORS: [usize; 25] = [
         IS_ALU, IS_IMM, IS_BRANCH, IS_LB, IS_LH, IS_LW, IS_SB, IS_SH, IS_SW, SIGNED,
         IS_JAL, IS_JALR, IS_LUI, IS_AUIPC, IS_ECALL, WRITES_RD, SYS_HALT, SYS_WRITE, SYS_READ, BR_NEG,
-        SYS_HASH, IS_HASH, IS_HASH_OUT, HASH_FIN,
+        SYS_HASH, IS_HASH, IS_HASH_OUT, HASH_FIN, IS_DIGEST,
     ];
 }
-pub mod pv { pub const PC_ENTRY: usize = 0; pub const TIER: usize = 1; pub const OUT0: usize = 2; pub const NUM: usize = 2 + crate::isa::NUM_OUTPUTS; }
+pub mod pv {
+    pub const PC_ENTRY: usize = 0; pub const TIER: usize = 1; pub const OUT0: usize = 2;
+    /// M3.4: the in-circuit program digest, pinned by the last digest row. Replaces the
+    /// verifier-held `Program` — `Machine::verify` now checks `pv[HC0..HC7] == hc` instead.
+    pub const HC0: usize = OUT0 + crate::isa::NUM_OUTPUTS;
+    pub const NUM: usize = HC0 + 8;
+}
 use col::*;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -152,6 +181,13 @@ where
             let mut f = b.when_first_row();
             f.assert_one(v(IS_REAL));
             f.assert_zero(v(CLK));
+            // M3.4: row 0 of the cpu table is now the first *digest* row (there is always at
+            // least one, `Program::digest_rows()` is `max(1, ..)`), not the first
+            // instruction — `pv::PC_ENTRY` is bound to its `PC` (= `base_pc`, by the
+            // constant-across-the-group chain below), which then flows into the first
+            // instruction row's own `PC` via the ordinary `NEXT_PC` transition rule, exactly
+            // as it flowed directly before M3.4.
+            f.assert_one(v(IS_DIGEST));
             f.assert_eq(v(PC), pvs[pv::PC_ENTRY].clone());
         }
         b.when_last_row().assert_zero(v(IS_REAL));
@@ -163,6 +199,9 @@ where
             // the last real row is a HALT, and nothing runs after a HALT
             t.assert_zero(is_real.clone() * (one.clone() - n(IS_REAL)) * (one.clone() - v(SYS_HALT)));
             t.assert_zero(v(SYS_HALT) * n(IS_REAL));
+            // M3.4: `IS_DIGEST` is a contiguous prefix — once it drops to 0 (the first
+            // instruction row) it never returns to 1.
+            t.assert_zero((one.clone() - v(IS_DIGEST)) * n(IS_DIGEST));
         }
 
         // M3.2 hash rows: absorb (`IS_HASH`) and write-back (`IS_HASH_OUT`) rows are
@@ -170,7 +209,12 @@ where
         // fetched — not new fetches — so the PROGRAM lookup is gated off there.
         let is_hash = v(IS_HASH);
         let is_hash_out = v(IS_HASH_OUT);
+        let is_digest = v(IS_DIGEST);
         let is_hash_any = is_hash.clone() + is_hash_out.clone();
+        // M3.4: digest rows share every "this is not an ordinary per-instruction row" gate a
+        // hash row already needed (no PROGRAM fetch, no DEC/register/memory-value columns, no
+        // per-slot MEMORY send) — `off_cpu` is `is_hash_any` generalized to include them.
+        let off_cpu = is_hash_any.clone() + is_digest.clone();
         // MINOR (fix): explicit mutual exclusivity. Nothing else directly forbids a row
         // claiming to be *both* an absorb row and a write-back row at once; every other
         // hash-row constraint happens to be gated by one selector or the other (never by
@@ -184,9 +228,10 @@ where
         // instruction — all its rows — has retired).
         let continues = v(SYS_HASH) + is_hash.clone() + is_hash_out.clone() - v(HASH_FIN);
 
-        // fetch
+        // fetch. M3.4: digest rows are `is_real = 1` (they count as cycles) but are not an
+        // ordinary instruction fetch either — excluded via `off_cpu`, same as hash rows.
         let msg: Vec<AB::Expr> = std::iter::once(v(PC)).chain((0..MESSAGE_LEN - 1).map(|k| v(DEC0 + k))).collect();
-        bus::PROGRAM.lookup_key(b, msg, Count::bounded(is_real.clone() - is_hash_any.clone(), 1));
+        bus::PROGRAM.lookup_key(b, msg, Count::bounded(is_real.clone() - off_cpu.clone(), 1));
 
         // Absorb/write-back rows carry none of the ordinary per-instruction machinery: every
         // decoded field (`DEC0..DEC22`, i.e. `RD..WRITES_RD` — 23 columns), the other two
@@ -197,14 +242,14 @@ where
         // ALU/branch/WRITE_OUTPUT/register-read claim through an absorb or write-back row —
         // the AGENTS.md invariant-1 bug class, generalized to a new row kind. `MEM_ADDR` is
         // included because it is one of the four MEMORY-send address terms generalized below.
-        for k in 0..MESSAGE_LEN - 1 { b.assert_zero(is_hash_any.clone() * v(DEC0 + k)); }
-        b.assert_zero(is_hash_any.clone() * v(SYS_HALT));
-        b.assert_zero(is_hash_any.clone() * v(SYS_WRITE));
-        b.assert_zero(is_hash_any.clone() * v(SYS_READ));
-        b.assert_zero(is_hash_any.clone() * v(A));
-        b.assert_zero(is_hash_any.clone() * v(B));
-        b.assert_zero(is_hash_any.clone() * v(MEM_VAL));
-        b.assert_zero(is_hash_any.clone() * v(MEM_ADDR));
+        for k in 0..MESSAGE_LEN - 1 { b.assert_zero(off_cpu.clone() * v(DEC0 + k)); }
+        b.assert_zero(off_cpu.clone() * v(SYS_HALT));
+        b.assert_zero(off_cpu.clone() * v(SYS_WRITE));
+        b.assert_zero(off_cpu.clone() * v(SYS_READ));
+        b.assert_zero(off_cpu.clone() * v(A));
+        b.assert_zero(off_cpu.clone() * v(B));
+        b.assert_zero(off_cpu.clone() * v(MEM_VAL));
+        b.assert_zero(off_cpu.clone() * v(MEM_ADDR));
 
         // `is_load`/`is_store` are expressions now, not columns (M2.5): one-hot sums over
         // the per-width selectors the program table pre-decodes.
@@ -244,7 +289,13 @@ where
         // A hash row-group's PC stands still until its very last row (`continues = 0` only
         // there); every other row's `NEXT_PC = PC`.
         b.assert_zero(continues.clone() * (v(NEXT_PC) - v(PC)));
-        b.assert_zero(is_real.clone() * (one.clone() - v(IS_BRANCH) - v(IS_JAL) - v(IS_JALR) - continues.clone()) * (v(NEXT_PC) - fallthrough));
+        // M3.4: a digest row's `PC` (= `base_pc`) also stands still across the whole digest
+        // group — unconditionally, including its own last row, so the constant flows through
+        // the ordinary `n(PC) = v(NEXT_PC)` chain into the first instruction row's `PC`.
+        b.assert_zero(is_digest.clone() * (v(NEXT_PC) - v(PC)));
+        b.assert_zero(
+            is_real.clone() * (one.clone() - v(IS_BRANCH) - v(IS_JAL) - v(IS_JALR) - continues.clone() - is_digest.clone()) * (v(NEXT_PC) - fallthrough),
+        );
 
         // memory: address, alignment, and the word actually in memory
         //
@@ -354,16 +405,19 @@ where
         let hash_addr = |k: u32| v(HASH_PTR) + v(HASH_IDX) * four.clone() + AB::Expr::from_u32(k);
         let write_addr = |k: u32| v(HASH_PTR) + AB::Expr::from_u32(k) + v(HASH_FIN) * four.clone();
 
+        // M3.4: `count0`/`count1`'s ordinary-row term excludes digest rows too (`off_cpu`,
+        // not just `is_hash_any`) — a digest row sends nothing at all on any of the four
+        // memory slots, unlike a hash row (which still reads/writes through them).
         let space0 = zero.clone() + space_ram.clone() * is_hash_any.clone();
         let addr0 = v(RS1) + hash_addr(0) * is_hash.clone() + write_addr(0) * is_hash_out.clone();
         let value0 = v(A) + v(HV0) * is_hash_any.clone();
-        let count0 = is_real.clone() * (one.clone() - is_hash_any.clone()) + v(ACT0) * is_hash.clone() + is_hash_out.clone();
+        let count0 = is_real.clone() * (one.clone() - off_cpu.clone()) + v(ACT0) * is_hash.clone() + is_hash_out.clone();
         bus::MEMORY.send(b, [space0, addr0, ts(SLOT_R1), value0, is_hash_out.clone()], Count::bounded(count0, 1));
 
         let space1 = zero.clone() + space_ram.clone() * is_hash_any.clone();
         let addr1 = v(RS2) + hash_addr(1) * is_hash.clone() + write_addr(1) * is_hash_out.clone();
         let value1 = v(B) + v(HV0 + 1) * is_hash_any.clone();
-        let count1 = is_real.clone() * (one.clone() - is_hash_any.clone()) + v(ACT0 + 1) * is_hash.clone() + is_hash_out.clone();
+        let count1 = is_real.clone() * (one.clone() - off_cpu.clone()) + v(ACT0 + 1) * is_hash.clone() + is_hash_out.clone();
         bus::MEMORY.send(b, [space1, addr1, ts(SLOT_R2), value1, is_hash_out.clone()], Count::bounded(count1, 1));
 
         // A load's or a store's own access is always a READ of the word that was there —
@@ -470,11 +524,12 @@ where
         }
 
         // Absorb rows: `ACT0..3` is a boolean, non-increasing (contiguous-prefix) pattern —
-        // lane 0 is always active on a real absorb row — and `active_sum` is how many words
-        // this row actually reads from memory.
+        // lane 0 is always active on a real absorb *or digest* row — and `active_sum` is how
+        // many words this row actually absorbs (from memory on a hash row, from `PROGRAM_WORD`
+        // on a digest row).
         for i in 0..4 { b.assert_bool(v(ACT0 + i)); }
         for i in 1..4 { b.assert_zero(v(ACT0 + i) * (one.clone() - v(ACT0 + i - 1))); }
-        b.assert_zero(is_hash.clone() * (one.clone() - v(ACT0)));
+        b.assert_zero((is_hash.clone() + is_digest.clone()) * (one.clone() - v(ACT0)));
         let active_sum = v(ACT0) + v(ACT0 + 1) + v(ACT0 + 2) + v(ACT0 + 3);
         {
             let mut t = b.when_transition();
@@ -510,31 +565,115 @@ where
             t.assert_zero(is_hash.clone() * n(IS_HASH_OUT) * n(HASH_FIN));
         }
         // Inactive lanes are not overwritten by the sponge: `HV_k` carries the previous
-        // state's own lane `k` forward instead of a memory read.
-        for i in 0..4 { b.assert_zero(is_hash.clone() * (one.clone() - v(ACT0 + i)) * (v(HV0 + i) - v(HS0 + i))); }
+        // state's own lane `k` forward instead of a memory read (hash rows) or a
+        // `PROGRAM_WORD` lookup (digest rows).
+        let is_hash_or_digest = is_hash.clone() + is_digest.clone();
+        for i in 0..4 { b.assert_zero(is_hash_or_digest.clone() * (one.clone() - v(ACT0 + i)) * (v(HV0 + i) - v(HS0 + i))); }
         // `HASH_LEFT`/`HASH_IDX` range checks (byte limbs), the same purpose `MA0..3` serves
         // for `MEM_ADDR`: without this, a wrong `HASH_LEFT`/`HASH_IDX` could only be caught via
         // a field-arithmetic identity, satisfiable by a huge wraparound value a cheating
         // witness could otherwise pick freely. `HASH_LEFT`'s 16-bit bound (`LEFT0..1`, both
-        // `RANGE8`-checked) comfortably covers `POSEIDON2_MAX_WORDS = 4096`. `HASH_IDX`'s
-        // top limb is tightened further, to `< 4` rather than `< 256`: the nibble table has no
-        // entries with `a >= 16`, so requesting `AND4[IDX1, 3, IDX1]` (instead of a plain
-        // `RANGE8[IDX1]`) only finds a match when `IDX1 & 3 == IDX1`, i.e. `IDX1 < 4` — giving
-        // `HASH_IDX = IDX0 + 256·IDX1 < 1024`, exactly `POSEIDON2_MAX_WORDS / 4`, the largest
-        // block index a real call can ever reach.
-        b.assert_zero(is_hash.clone() * (v(LEFT0) + v(LEFT0 + 1) * AB::Expr::from_u32(256) - v(HASH_LEFT)));
-        b.assert_zero(is_hash.clone() * (v(IDX0) + v(IDX0 + 1) * AB::Expr::from_u32(256) - v(HASH_IDX)));
-        for c in [LEFT0, LEFT0 + 1, IDX0] { bus::RANGE8.lookup_key(b, [v(c)], Count::bounded(is_hash.clone(), 1)); }
+        // `RANGE8`-checked) comfortably covers `POSEIDON2_MAX_WORDS = 4096`. On a *hash* row,
+        // `HASH_IDX`'s top limb is tightened further, to `< 4` rather than `< 256`: the nibble
+        // table has no entries with `a >= 16`, so requesting `AND4[IDX1, 3, IDX1]` (instead of
+        // a plain `RANGE8[IDX1]`) only finds a match when `IDX1 & 3 == IDX1`, i.e. `IDX1 < 4`
+        // — giving `HASH_IDX = IDX0 + 256·IDX1 < 1024`, exactly `POSEIDON2_MAX_WORDS / 4`, the
+        // largest block index a `POSEIDON2` syscall can ever reach. M3.4's digest rows have no
+        // such small fixed cap (a program can run to many thousands of words, unlike a single
+        // hash call's 4096-word limit), so they get only the plain `RANGE8[IDX1]` bound
+        // (`HASH_IDX < 65536`, comfortably more than any real program's `digest_rows()`) —
+        // gated by `is_digest` alone, not reusing the hash-only AND4 tightening.
+        b.assert_zero(is_hash_or_digest.clone() * (v(LEFT0) + v(LEFT0 + 1) * AB::Expr::from_u32(256) - v(HASH_LEFT)));
+        b.assert_zero(is_hash_or_digest.clone() * (v(IDX0) + v(IDX0 + 1) * AB::Expr::from_u32(256) - v(HASH_IDX)));
+        for c in [LEFT0, LEFT0 + 1, IDX0] { bus::RANGE8.lookup_key(b, [v(c)], Count::bounded(is_hash_or_digest.clone(), 1)); }
+        bus::RANGE8.lookup_key(b, [v(IDX0 + 1)], Count::bounded(is_digest.clone(), 1));
         bus::AND4.lookup_key(b, [v(IDX0 + 1), AB::Expr::from_u32(3), v(IDX0 + 1)], Count::bounded(is_hash.clone(), 1));
         // The `POSEIDON2` lookup: `state_in` overwrites lanes 0..3 of the row's entering state
         // (`HS`) with this row's `HV`, keeping the capacity lanes 4..7; `state_out` is the
         // *next* row's `HS0..7` — so this single bus interaction is what proves the chain from
         // one absorb row's state to the next is a genuine Poseidon2 permutation, for every
         // absorb row (including the last, whose `state_out` becomes the first write-back row's
-        // `HS`, i.e. the digest).
+        // `HS`, i.e. the digest) *and* every digest row (M3.4; including its own last row,
+        // whose `state_out` becomes `n(HS)` — pinned to `pv::HC0..HC7` below).
         let state_in: Vec<AB::Expr> = (0..8).map(|i| if i < 4 { v(HV0 + i) } else { v(HS0 + i) }).collect();
         let state_out: Vec<AB::Expr> = (0..8).map(|i| n(HS0 + i)).collect();
-        bus::POSEIDON2.lookup_key(b, state_in.into_iter().chain(state_out).collect::<Vec<_>>(), Count::bounded(is_hash.clone(), 1));
+        bus::POSEIDON2.lookup_key(b, state_in.into_iter().chain(state_out).collect::<Vec<_>>(), Count::bounded(is_hash_or_digest.clone(), 1));
+
+        // M3.4 digest rows: `PROGRAM_WORD` lookups in place of a memory read, one per active
+        // lane, keyed by `pc_k = base_pc + 4*(4*block_index + k)` (`Program::pc_of`'s own
+        // indexing, `4*block_index + k` being this word's position in the program).
+        let digest_pc = |k: u32| v(PC) + (v(HASH_IDX) * AB::Expr::from_u32(4) + AB::Expr::from_u32(k)) * AB::Expr::from_u32(4);
+        for k in 0..4u32 {
+            bus::PROGRAM_WORD.lookup_key(b, [digest_pc(k), v(HV0 + k as usize)], Count::bounded(is_digest.clone() * v(ACT0 + k as usize), 1));
+        }
+
+        // M3.4: the digest group's own bookkeeping — `PC` (`base_pc`) and `HASH_N` (`len`,
+        // reused) are seeded once, on the very first cpu-table row (`when_first_row`, since
+        // there is no ecall row preceding a digest group the way `SYS_HASH` precedes a hash
+        // group), then carried forward across the whole group exactly like `HASH_PTR`/
+        // `HASH_N` are for hash rows. `HASH_LEFT` starts at `HASH_N`, drains by `active_sum`
+        // each row, and must hit exactly 0 the moment `IS_DIGEST` drops to 0 — the same
+        // `n`-binding pattern M3.2's absorb rows use, so a digest row cannot be skipped for a
+        // nonzero-length program (`docs/02-tables-and-buses.md`).
+        {
+            let mut f = b.when_first_row();
+            for i in [0usize, 1, 2, 3, 7] { f.assert_zero(v(HS0 + i)); }
+            f.assert_eq(v(HS0 + 4), AB::Expr::from_u32(crate::notes::domain::HC));
+            f.assert_eq(v(HS0 + 5), v(PC));
+            f.assert_eq(v(HS0 + 6), v(HASH_N));
+            f.assert_zero(v(HASH_IDX));
+            f.assert_eq(v(HASH_LEFT), v(HASH_N));
+        }
+        // `DIGEST_LAST` (see its column doc comment): pinned to 0 whenever this isn't a digest
+        // row at all, and — on a digest row — to `1 - n(IS_DIGEST)`, i.e. exactly 1 on the
+        // transition out of the digest prefix. Together these two (each used once) replace
+        // the degree-2 expression `IS_DIGEST*(1-n(IS_DIGEST))` with a degree-1 witness column
+        // for every downstream use below.
+        b.assert_bool(v(DIGEST_LAST));
+        b.assert_zero((one.clone() - is_digest.clone()) * v(DIGEST_LAST));
+        let digest_last = v(DIGEST_LAST);
+        // The final digest: `n(HS0..3)` (read below, inside `when_transition`) is the state
+        // after the last digest row's own `POSEIDON2` permutation — the sponge output.
+        // Encoded canonically into 8 lo/hi machine words (`DHVL0..31`, RANGE8-checked;
+        // `DHIMAX0..3`/`DINV0..3` the same non-canonical-encoding-rejecting gadget M3.2's hash
+        // write-back rows use, `HIMAX0..1`/`INV0..1`, one pair per lane here instead of two
+        // rows of two) and pinned to `pv::HC0..HC7`. The byte-limb/pv-pinning half needs only
+        // the current row, so it runs outside `when_transition` (bus lookups can't be issued
+        // through a `FilteredAirBuilder` alongside a separate live borrow of `b`); only the
+        // "next row's `HS`" half genuinely needs `when_transition`.
+        for k in 0..8 {
+            for j in 0..4 { bus::RANGE8.lookup_key(b, [v(DHVL0 + 4 * k + j)], Count::bounded(digest_last.clone(), 1)); }
+            let byte_sum: AB::Expr = (0..4).map(|j| v(DHVL0 + 4 * k + j) * AB::Expr::from_u32(1 << (8 * j))).sum();
+            b.assert_zero(digest_last.clone() * (pvs[pv::HC0 + k].clone() - byte_sum));
+        }
+        for j in 0..4usize { b.assert_bool(v(DHIMAX0 + j)); }
+        {
+            let mut t = b.when_transition();
+            t.assert_zero(is_digest.clone() * (v(DIGEST_LAST) - (one.clone() - n(IS_DIGEST))));
+            let not_final_digest = is_digest.clone() * n(IS_DIGEST);
+            // `HASH_N` (`len`) only needs to persist digest-row-to-digest-row — unlike `PC`
+            // (whose constant-carry deliberately continues one row further, into the first
+            // instruction row, to become its entry `PC`), nothing reads `HASH_N` past the
+            // digest prefix, and the first instruction row's own `HASH_N` column legitimately
+            // stays at its unrelated `zero_vec` default there. Gating this by `not_final_digest`
+            // (not bare `is_digest`) is what keeps this from wrongly demanding `len` survive
+            // into that row too.
+            t.assert_zero(not_final_digest.clone() * (n(HASH_N) - v(HASH_N)));
+            t.assert_zero(is_digest.clone() * (v(HASH_LEFT) - active_sum.clone() - n(HASH_LEFT)));
+            t.assert_zero(not_final_digest.clone() * (n(HASH_IDX) - v(HASH_IDX) - one.clone()));
+            t.assert_zero(not_final_digest * (one.clone() - v(ACT0 + 3)));
+            t.assert_zero(digest_last.clone() * n(HASH_LEFT));
+
+            let two32 = AB::Expr::from_u64(1u64 << 32);
+            for j in 0..4usize {
+                let lo = v(DHVL0 + 8 * j) + v(DHVL0 + 8 * j + 1) * AB::Expr::from_u32(1 << 8) + v(DHVL0 + 8 * j + 2) * AB::Expr::from_u32(1 << 16) + v(DHVL0 + 8 * j + 3) * AB::Expr::from_u32(1 << 24);
+                let hi = v(DHVL0 + 8 * j + 4) + v(DHVL0 + 8 * j + 5) * AB::Expr::from_u32(1 << 8) + v(DHVL0 + 8 * j + 6) * AB::Expr::from_u32(1 << 16) + v(DHVL0 + 8 * j + 7) * AB::Expr::from_u32(1 << 24);
+                t.assert_zero(digest_last.clone() * (lo.clone() + hi.clone() * two32.clone() - n(HS0 + j)));
+                let d = hi - AB::Expr::from_u32(0xFFFF_FFFF);
+                t.assert_zero(digest_last.clone() * (d * v(DINV0 + j) - (one.clone() - v(DHIMAX0 + j))));
+                t.assert_zero(digest_last.clone() * v(DHIMAX0 + j) * lo);
+            }
+        }
 
         // CRITICAL 2 (fix, continued): the first write-back row's own `HASH_LEFT` must be 0,
         // full stop — regardless of how it got there. This is what actually closes the escape:
@@ -613,22 +752,94 @@ where
     }
 }
 
-pub fn public_values(pc_entry: u32, tier_log2: usize, outputs: &[u32; NUM_OUTPUTS]) -> Vec<F> {
+pub fn public_values(pc_entry: u32, tier_log2: usize, outputs: &[u32; NUM_OUTPUTS], hc: &[u32; 8]) -> Vec<F> {
     let mut v = vec![F::from_u32(pc_entry), F::from_u64(tier_log2 as u64)];
     v.extend(outputs.iter().map(|o| F::from_u32(*o)));
+    v.extend(hc.iter().map(|o| F::from_u32(*o)));
     v
 }
 
+/// M3.4: fills the `⌈len/4⌉`-row digest prefix (`v[0..digest_rows*WIDTH]`) from
+/// `hash::program_digest_rows` — the same per-block state the `IS_DIGEST` AIR rows chain
+/// through, plus the final row's canonical 8-word output encoding (`DHVL0..31`/
+/// `DHIMAX0..3`/`DINV0..3`), mirroring hash write-back rows' own `HIMAX`/`INV` construction.
+fn fill_digest_rows(v: &mut [F], program: &Program, range: &mut RangeCounts) {
+    let blocks = crate::hash::program_digest_rows(program.base_pc, &program.words);
+    let n = blocks.len();
+    for (i, blk) in blocks.iter().enumerate() {
+        let r = &mut v[i * WIDTH..(i + 1) * WIDTH];
+        r[CLK] = F::from_u32(i as u32);
+        r[PC] = F::from_u32(program.base_pc);
+        r[NEXT_PC] = F::from_u32(program.base_pc);
+        r[IS_REAL] = F::ONE;
+        r[IS_DIGEST] = F::ONE;
+        r[HASH_N] = F::from_u32(program.words.len() as u32);
+        r[HASH_LEFT] = F::from_u32(blk.left_before);
+        r[HASH_IDX] = F::from_u32(blk.idx);
+        for k in 0..8 { r[HS0 + k] = blk.state_in[k]; }
+        for k in 0..4 {
+            r[ACT0 + k] = F::from_bool(blk.active[k]);
+            r[HV0 + k] = if blk.active[k] { F::from_u32(blk.words[k]) } else { blk.state_in[k] };
+        }
+        let (l0, l1) = (blk.left_before & 0xff, (blk.left_before >> 8) & 0xff);
+        r[LEFT0] = F::from_u32(l0); r[LEFT0 + 1] = F::from_u32(l1);
+        range.range8(l0); range.range8(l1);
+        let (i0, i1) = (blk.idx & 0xff, (blk.idx >> 8) & 0xff);
+        r[IDX0] = F::from_u32(i0); r[IDX0 + 1] = F::from_u32(i1);
+        range.range8(i0);
+        // Digest rows use the plain 16-bit `RANGE8[IDX1]` bound, not the hash-only `< 4`
+        // AND4 tightening (`Program::digest_rows()` can exceed `POSEIDON2_MAX_WORDS / 4` —
+        // see the AIR's comment on this same check).
+        range.range8(i1);
+        if i + 1 == n {
+            r[DIGEST_LAST] = F::ONE;
+            let digest = crate::hash::split_digest([blk.state_out[0], blk.state_out[1], blk.state_out[2], blk.state_out[3]]);
+            for (k, &w) in digest.iter().enumerate() {
+                let wl = limbs(w);
+                for j in 0..4 { r[DHVL0 + 4 * k + j] = wl[j]; range.range8((w >> (8 * j)) & 0xff); }
+            }
+            for j in 0..4usize {
+                let hi = digest[2 * j + 1];
+                if hi == u32::MAX { r[DHIMAX0 + j] = F::ONE; } else {
+                    let d = F::from_u32(hi) - F::from_u32(u32::MAX);
+                    r[DINV0 + j] = d.inverse();
+                }
+            }
+        }
+    }
+    // The AIR's canonical-encoding pin on the last digest row reads `n(HS0..3)` — the state
+    // *entering* the row right after the digest prefix (the first instruction row, or the
+    // next digest row in the always-≥1-block case). Nothing else populates that row's `HS`
+    // (an ordinary instruction row's own event data has no notion of it), so it must be
+    // seeded here explicitly, exactly as the last digest block's own permutation output —
+    // mirroring how a hash absorb row's `state_out` becomes the *next* row's `HS` via that
+    // row's own event data (`HashRow::Absorb`'s `state_in` chain); here there is no such next
+    // event, so the digest builder writes it directly.
+    if let Some(last) = blocks.last() {
+        let r = &mut v[n * WIDTH..(n + 1) * WIDTH];
+        for k in 0..8 { r[HS0 + k] = last.state_out[k]; }
+    }
+}
+
 /// `range`/`nibble` receive the `RANGE8`/`AND4` lookups the alignment limbs declare, in
-/// lock-step with the interactions the AIR above evaluates.
-pub fn cpu_trace(events: &[CycleEvent], height: usize, range: &mut RangeCounts, nibble: &mut NibbleCounts) -> RowMajorMatrix<F> {
-    assert!(events.len() < height, "cpu table needs a padding row: {} cycles, height {height}", events.len());
+/// lock-step with the interactions the AIR above evaluates. `program` is needed for M3.4's
+/// digest-row prefix (`Program::digest_rows()` rows, `hash::program_digest_rows`) — the
+/// witness's own traversal of the whole program for `hc`, distinct from `events`'ordinary
+/// per-cycle rows, which now start `digest_rows` rows later (`CLK` shifted the same amount).
+pub fn cpu_trace(program: &Program, events: &[CycleEvent], height: usize, range: &mut RangeCounts, nibble: &mut NibbleCounts) -> RowMajorMatrix<F> {
+    let digest_rows = program.digest_rows();
+    assert!(
+        digest_rows + events.len() < height,
+        "cpu table needs a padding row: {digest_rows} digest rows + {} cycles, height {height}",
+        events.len()
+    );
     let mut v = F::zero_vec(height * WIDTH);
+    fill_digest_rows(&mut v, program, range);
     let mut written = [0u32; NUM_OUTPUTS];
     let mut hash_ptr_n: Option<(u32, u32)> = None;
     for (i, e) in events.iter().enumerate() {
-        let r = &mut v[i * WIDTH..(i + 1) * WIDTH];
-        r[CLK] = F::from_u32(e.clk); r[PC] = F::from_u32(e.pc); r[NEXT_PC] = F::from_u32(e.next_pc); r[IS_REAL] = F::ONE;
+        let r = &mut v[(digest_rows + i) * WIDTH..(digest_rows + i + 1) * WIDTH];
+        r[CLK] = F::from_u32(digest_rows as u32 + e.clk); r[PC] = F::from_u32(e.pc); r[NEXT_PC] = F::from_u32(e.next_pc); r[IS_REAL] = F::ONE;
         for (k, f) in e.dec.to_fields().iter().enumerate() { r[DEC0 + k] = F::from_u32(*f); }
         r[A] = F::from_u32(e.a); r[B] = F::from_u32(e.b); r[C] = F::from_u32(e.c);
         r[ALU_OUT] = F::from_u32(e.alu_out); r[TGT] = F::from_u32(e.tgt);
@@ -767,7 +978,7 @@ pub fn cpu_trace(events: &[CycleEvent], height: usize, range: &mut RangeCounts, 
     }
     // The accumulator must carry its final value through the padding: the last row is where
     // `(1 − written_i)·pv[out_i] = 0` reads it.
-    for i in events.len()..height {
+    for i in (digest_rows + events.len())..height {
         let r = &mut v[i * WIDTH..(i + 1) * WIDTH];
         for (k, w) in written.iter().enumerate() { r[WRITTEN0 + k] = F::from_u32(*w); }
     }

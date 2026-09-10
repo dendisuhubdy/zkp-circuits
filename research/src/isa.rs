@@ -109,9 +109,12 @@ pub enum Instr {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeError { Opcode(u32), Funct(u32), Shamt(u32) }
 
-const OP_LUI: u32 = 0x37; const OP_AUIPC: u32 = 0x17; const OP_JAL: u32 = 0x6f; const OP_JALR: u32 = 0x67;
-const OP_BRANCH: u32 = 0x63; const OP_LOAD: u32 = 0x03; const OP_STORE: u32 = 0x23;
-const OP_ALUI: u32 = 0x13; const OP_ALU: u32 = 0x33; const OP_SYSTEM: u32 = 0x73;
+// `pub(crate)`, not private: `tables::program`'s in-circuit decoder (M3.4) mirrors
+// `Instr::decode` opcode-for-opcode and needs these exact same values, rather than a second,
+// independently-typed set of literals that could drift from this one.
+pub(crate) const OP_LUI: u32 = 0x37; pub(crate) const OP_AUIPC: u32 = 0x17; pub(crate) const OP_JAL: u32 = 0x6f; pub(crate) const OP_JALR: u32 = 0x67;
+pub(crate) const OP_BRANCH: u32 = 0x63; pub(crate) const OP_LOAD: u32 = 0x03; pub(crate) const OP_STORE: u32 = 0x23;
+pub(crate) const OP_ALUI: u32 = 0x13; pub(crate) const OP_ALU: u32 = 0x33; pub(crate) const OP_SYSTEM: u32 = 0x73;
 
 /// M-extension `funct3` order (standard RV32M): `MUL=0 MULH=1 MULHSU=2 MULHU=3 DIV=4 DIVU=5
 /// REM=6 REMU=7`, always `funct7 = 1`. Register-register only — there is no RV32M immediate
@@ -283,5 +286,26 @@ impl Program {
     pub fn instr_at(&self, pc: u32) -> Option<Instr> {
         if pc < self.base_pc || pc % 4 != 0 { return None; }
         self.words.get(((pc - self.base_pc) / 4) as usize).and_then(|w| Instr::decode(*w).ok())
+    }
+
+    /// Number of cpu-table digest rows `hc` costs to prove: one Poseidon2 permutation per
+    /// up-to-4-word group of the program, at least 1 (so even the degenerate empty program
+    /// gets one permutation absorbing its domain/base_pc/len header — see `hash::program_digest`'s
+    /// doc comment for why that header never gets its own row). `tables::cpu::cpu_trace`,
+    /// `Machine::build_traces`'s cycle count and `Program::digest` all agree on this number.
+    pub fn digest_rows(&self) -> usize { self.words.len().div_ceil(4).max(1) }
+
+    /// hc: the in-circuit program commitment (M3.4). `tables::cpu`'s digest rows compute
+    /// exactly this, row group by row group, absorbing `words` into `POSEIDON2` and pinning
+    /// the result to `pv::HC0..HC7` — see `hash::program_digest`'s doc comment for the exact
+    /// sponge construction and why it costs exactly `digest_rows()` permutations.
+    pub fn digest(&self) -> [u32; 8] { crate::hash::program_digest(self.base_pc, &self.words) }
+
+    /// hc as hex — the M3.4 replacement for `Machine::code_hash` (which, before M3.4, hashed
+    /// the *preprocessed* program-table commitment; that commitment is program-independent
+    /// now, so it can no longer serve as a program identity). Plain big-endian hex of the 8
+    /// digest words, no `Machine`/tier involved — `hc` doesn't depend on either.
+    pub fn code_hash(&self) -> String {
+        self.digest().iter().map(|w| format!("{w:08x}")).collect()
     }
 }

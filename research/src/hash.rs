@@ -65,3 +65,81 @@ pub fn sponge_hash(msg: &[u32]) -> [u32; 8] {
     let digest: [Val; 4] = sponge.hash_iter(elems);
     split_digest(digest)
 }
+
+/// hc (M3.4): the in-circuit program digest, exactly what `tables::cpu`'s digest rows
+/// compute and `pv::HC0..HC7` publish. `Program::digest` (`isa.rs`) is a thin wrapper over
+/// this.
+///
+/// Deliberately **not** `sponge_hash([HC_DOMAIN, base_pc, len, words...])` (a plain
+/// message-prefixed sponge, `notes::hash`'s own convention): a message-prefixed sponge's
+/// block count is `ceil((3 + len) / 4)`, which depends on `len mod 4` in a way that does not
+/// match the `⌈len/4⌉` permutation-per-block cost the cpu table's digest rows are built
+/// around (each digest row absorbs up to 4 *program words* into the rate lanes — nothing
+/// else — so that its `PROGRAM_WORD` lookups line up one-to-one with `Program::pc_of`).
+/// Instead, the domain tag, `base_pc` and `len` are folded into the **capacity** lanes
+/// (4..7) of the very first permutation's input, before any word is absorbed: `state_in =
+/// [0,0,0,0, HC_DOMAIN, base_pc, len, 0]` rather than the usual all-zero start. That is
+/// still "domain and length absorbed first" in the sense that matters (they are inputs to
+/// the very first permutation, mixed through it before any word content reaches the output)
+/// and still closes the padding-free-sponge trailing-zero concern (two programs with
+/// different `len`, or the same words at a different `base_pc`, feed a different state into
+/// that first permutation, so no trailing-zero padding trick can make one `hc` a prefix
+/// collision of another) — it just does it without spending a rate slot (and hence an extra
+/// row) on the header, which is what lets the cost be exactly `Program::digest_rows()`
+/// permutations, the number `docs/06-viewing-keys.md`'s cost table and `Tier::poseidon2_height`
+/// are measured against.
+///
+/// Inactive lanes (the last, possibly-partial block) carry the *previous* state forward
+/// rather than being zeroed — the same overwrite-mode convention `SYS_POSEIDON2`'s absorb
+/// loop and `tables::cpu`'s `IS_HASH` rows already use (`emulator.rs`'s `HashRow::Absorb`
+/// doc comment) — so this is bit-for-bit what the cpu AIR's `IS_DIGEST` rows compute.
+pub fn program_digest(base_pc: u32, words: &[u32]) -> [u32; 8] {
+    let blocks = program_digest_rows(base_pc, words);
+    let state = blocks.last().expect("program_digest_rows always returns at least one block").state_out;
+    split_digest([state[0], state[1], state[2], state[3]])
+}
+
+/// One `tables::cpu` digest row's worth of absorb data — the M3.4 twin of
+/// `emulator::HashRow::Absorb`, built directly here (rather than by the emulator) since digest
+/// rows are not `CycleEvent`s: `tables::cpu::cpu_trace` uses this to fill `HS0..7`/`HV0..3`/
+/// `ACT0..3`/`HASH_LEFT`/`HASH_IDX` for the digest-row prefix exactly as it fills them for a
+/// `POSEIDON2` syscall's absorb rows, and the last block's `state_out` is what gets encoded
+/// into `pv::HC0..HC7`. Always at least one block (see `program_digest`'s doc comment on why
+/// the header alone still costs one permutation).
+#[derive(Clone, Copy, Debug)]
+pub struct DigestBlock {
+    pub idx: u32,
+    pub left_before: u32,
+    pub words: [u32; 4],
+    pub active: [bool; 4],
+    pub state_in: [Val; 8],
+    pub state_out: [Val; 8],
+}
+
+pub fn program_digest_rows(base_pc: u32, words: &[u32]) -> Vec<DigestBlock> {
+    let mut state = [Val::ZERO; 8];
+    state[4] = Val::from_u32(crate::notes::domain::HC);
+    state[5] = Val::from_u32(base_pc);
+    state[6] = Val::from_u32(words.len() as u32);
+    let n = words.len();
+    let rows = n.div_ceil(4).max(1);
+    let mut out = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let state_in = state;
+        let mut block_words = [0u32; 4];
+        let mut active = [false; 4];
+        let mut merged = state;
+        for k in 0..4 {
+            let idx = i * 4 + k;
+            if idx < n {
+                block_words[k] = words[idx];
+                active[k] = true;
+                merged[k] = Val::from_u32(words[idx]);
+            }
+        }
+        let left_before = (n - i * 4) as u32;
+        state = permute_state(merged);
+        out.push(DigestBlock { idx: i as u32, left_before, words: block_words, active, state_in, state_out: state });
+    }
+    out
+}

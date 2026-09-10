@@ -12,8 +12,12 @@ pub type F = p3_goldilocks::Goldilocks;
 /// Bus catalogue. A bus is a name; the batch verifier checks every bus balances.
 pub mod bus {
     use p3_lookup::{LookupBus, PermutationCheckBus};
-    /// cpu → program: (pc, 18 decoded fields). Program provides.
+    /// cpu → program: (pc, 23 decoded fields). Program provides. Instruction-row fetches only.
     pub const PROGRAM: LookupBus<'static> = LookupBus::new("PROGRAM");
+    /// cpu (digest rows) → program: (pc, word). Program provides — the M3.4 digest bus,
+    /// separate from `PROGRAM` so a digest row's raw-word lookups never interact with an
+    /// ordinary instruction fetch's multiplicity accounting.
+    pub const PROGRAM_WORD: LookupBus<'static> = LookupBus::new("PROGRAM_WORD");
     /// cpu ↔ memory: (space, addr, ts, value, is_write). Multiset equality.
     pub const MEMORY: PermutationCheckBus<'static> = PermutationCheckBus::new("MEMORY");
     /// cpu → alu: (op, a, b, c). Alu provides.

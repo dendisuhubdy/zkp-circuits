@@ -37,7 +37,7 @@ fn main() {
     println!("tier {} → cpu 2^{} rows (actual {} cycles), padding hides the rest", tier.0, tier.0, exec.cycles());
     println!("{:<10}{:>10}{:>8}   {}", "table", "rows", "cols", "role");
     for (name, h, w, role) in [
-        ("program", traces.program.height(), program::col::WIDTH + program::pre::WIDTH, "preprocessed ROM; its commitment is hc"),
+        ("program", traces.program.height(), program::col::WIDTH, "witness ROM + in-circuit decoder; hc is proved, not preprocessed"),
         ("cpu", traces.cpu.height(), cpu::col::WIDTH, "one row per cycle; fetch, decode selectors, pc"),
         ("memory", traces.memory.height(), memory::col::WIDTH, "registers + RAM sorted by (addr, ts)"),
         ("alu", traces.alu.height(), alu::col::WIDTH, "byte-limb arithmetic, shifts, compares"),
@@ -48,24 +48,24 @@ fn main() {
 
     hr("Part 5 · Prove and verify (production FRI: blowup 8, 27 queries, 20 PoW bits, ZK on)");
     let m = Machine::new(FriProfile::Production);
-    let hc = m.code_hash(&program, tier);
+    let hc = program.code_hash();
     println!("hc = {hc}");
     let t = Instant::now();
     let proof = m.prove_traces(&program, &traces, tier);
     let prove_ms = t.elapsed().as_millis();
     println!("proof: {} bytes in {} ms", proof.size(), prove_ms);
     let t = Instant::now();
-    m.verify(&program, &proof).unwrap();
+    m.verify(&program.digest(), &proof).unwrap();
     let verify_ms = t.elapsed().as_micros() as f64 / 1000.0;
     println!("verified in {verify_ms:.1} ms with public values {:?}", proof.public_values);
 
     hr("Part 6 · Cheating provers");
     let mut bad = build_traces(&program, &exec, tier).unwrap();
     bad.public_values[cpu::pv::OUT0] = F::from_u32(0);
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let p = m.prove_traces(&program, &bad, tier); m.verify(&program, &p) }));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let p = m.prove_traces(&program, &bad, tier); m.verify(&program.digest(), &p) }));
     println!("claim output 0 instead of 1        → {}", if matches!(r, Ok(Ok(()))) { "ACCEPTED (bug)" } else { "rejected" });
     let other = guests::balance_check(threshold + 1);
-    println!("verify against a different program → {}", if m.verify(&other, &proof).is_ok() { "ACCEPTED (bug)" } else { "rejected" });
+    println!("verify against a different program → {}", if m.verify(&other.digest(), &proof).is_ok() { "ACCEPTED (bug)" } else { "rejected" });
 
     hr("Part 7 · Zero knowledge and tier padding");
     let (p1, _) = m.prove(&program, &inputs, None).unwrap();
@@ -86,7 +86,7 @@ fn main() {
     println!("\nRead docs/02-tables-and-buses.md for the constraint list, docs/03-privacy.md for what leaks.");
     for (name, p, inp) in guests::all() {
         let (pr, ex) = m.prove(&p, &inp, None).unwrap();
-        m.verify(&p, &pr).unwrap();
+        m.verify(&p.digest(), &pr).unwrap();
         println!("{name:<16} cycles {:>6} tier {:>2} proof {:>7} B", ex.cycles(), pr.tier.0, pr.size());
     }
 
@@ -172,7 +172,7 @@ fn part9_viewing_keys() {
     println!("  ledger → {}", match ledger.apply(&m, &proof, anchor, fake_nf, steal.commitment(), ledger.now, Envelope::seal(&alice, &bob.address(), &steal, &TxKey::random())) { Err(LedgerError::BadDigest) => "rejected: output-commitment digest mismatch", other => panic!("expected BadDigest, got {other:?}") });
     let mut bad = build_traces(&ledger.program, &exec, proof.tier).unwrap();
     bad.public_values[cpu::pv::OUT0] += F::ONE;
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let p = m.prove_traces(&ledger.program, &bad, proof.tier); m.verify(&ledger.program, &p) }));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let p = m.prove_traces(&ledger.program, &bad, proof.tier); m.verify(&ledger.program.digest(), &p) }));
     println!("  flipping one word of the published output-commitment digest → {}", if matches!(r, Ok(Ok(()))) { "ACCEPTED (bug)" } else { "rejected by the constraint system" });
     println!("
 Read docs/06-viewing-keys.md for the construction and what it does not yet cover.");
