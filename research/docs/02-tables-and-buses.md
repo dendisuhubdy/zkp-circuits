@@ -416,6 +416,20 @@ each with its own multiplicity column. Consumed only by `alu` (bitwise
 operands and every isolated nibble extraction) and `cpu` (the memory
 alignment check, and — since M2.5 — `lb`/`lh`'s sign-bit extraction).
 
+## Constraint degree budget
+
+Measured (`p3_batch_stark::symbolic::get_max_constraint_degree`, pinned by
+`tests/tables.rs::alu_max_constraint_degree_is_pinned`) against the real,
+same-bus-packed lookup contexts: `program` 2, `cpu` 8, `memory` 4, `alu` 8,
+`range` 2, `nibble` 2 — `alu`'s comes from the M2.6 `div` sign-fix identity,
+`cpu`'s from its packed lookup fraction-pins rather than its own row logic
+(whose costliest single constraint is only degree 6). This config's ceiling
+is degree 8 (`generic_config`'s `log_blowup = 3` plus this machine's `is_zk =
+1` hiding: `constraint_degree = max_degree + 1 ≤ 9` ⇒ `log2_ceil(8) = 3`
+quotient chunks, `p3-batch-stark`'s cap), so `alu` and `cpu` are both already
+at the edge — any new constraint with a higher degree needs `log_blowup`
+raised (and the FRI soundness/cost tradeoff that comes with it) alongside it.
+
 ## Why the program is preprocessed, and what that means for `hc`
 
 Plonky3 commits a preprocessed trace once, independent of any witness, and

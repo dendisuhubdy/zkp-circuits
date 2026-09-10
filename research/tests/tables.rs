@@ -360,3 +360,66 @@ fn div_family_lookup_counts_per_op() {
         assert_eq!(nibble_total as usize, want_nibble, "{op:?} AND4 count (B == 0)");
     }
 }
+
+/// Pins each table's *symbolic* max constraint degree — the number that determines how many
+/// FRI quotient chunks its instance needs (`log2_ceil(max_degree + 1 - 1)` under this
+/// machine's `is_zk = 1` hiding PCS), against `p3_batch_stark`'s ceiling of `1 << log_blowup =
+/// 8` chunks (`generic_config`'s `log_blowup: 3`, i.e. `log2_ceil(constraint_degree - 1) <=
+/// 3`, i.e. `max_degree <= 8`).
+///
+/// `rand_zkvm::machine::max_constraint_degrees` runs the *exact* computation
+/// `ProverData::from_airs_and_degrees` (hence `Machine::verifier_key`) performs to size each
+/// instance's quotient — `p3_batch_stark::symbolic::get_max_constraint_degree` against the
+/// real, same-bus-packed lookup contexts for that `(program, tier)` — so this test is pinning
+/// what actually ships, not a hand-recount. No proving: `ProverData::from_airs_and_degrees`
+/// only commits the preprocessed columns and walks the symbolic constraint tree: sub-second.
+///
+/// Chip order is `machine::chips()`'s: program, cpu, memory, alu, range, nibble.
+///
+/// If any of these numbers moves, re-measure (this test will fail with the new number) and:
+/// - update the assertion and its comment below,
+/// - update `docs/02-tables-and-buses.md`'s "max constraint degree" line,
+/// - if a degree now exceeds 8, `log_blowup` (or the AIR) must change — 8 is this config's
+///   hard ceiling, not a soft target.
+#[test]
+fn alu_max_constraint_degree_is_pinned() {
+    use rand_zkvm::machine::{max_constraint_degrees, Tier};
+    let p = guests::fib(5);
+    // Tier-invariant: no table here uses periodic columns, so the symbolic degree doesn't
+    // depend on trace height — any tier gives the same numbers. `Tier(10)` (the smallest) is
+    // used only because `max_constraint_degrees` needs one to size the ALU/CPU/memory traces.
+    let degrees = max_constraint_degrees(&p, Tier(10));
+    assert_eq!(degrees.len(), 6, "one degree per chip in machine::chips() order");
+
+    // program: preprocessed-only chip. Its one main-AIR constraint is the padding invariant
+    // `(1 - valid) * mult == 0` (AGENTS.md's invariant 2) — degree 2. The packed PROGRAM-bus
+    // lookup fraction-pin doesn't exceed that either.
+    assert_eq!(degrees[0], 2, "program table max constraint degree");
+
+    // cpu: measured max is 8 — but (checked via get_symbolic_constraints directly) it comes
+    // from the *packed* lookup fraction-pins (the batch-stark same-bus folding that groups
+    // several of CPU's outgoing bus messages together up to the quotient-chunk-preserving
+    // budget), not from CPU's own row logic: CPU's most complex single AIR constraint is only
+    // degree 6. Still exactly at this config's degree-8 ceiling, same as ALU.
+    assert_eq!(degrees[1], 8, "cpu table max constraint degree");
+
+    // memory: measured max is 4, on both the main-AIR side and the packed lookups — comfortably
+    // under the degree-8 ceiling (log_chunks = 2, half the budget ALU/CPU spend).
+    assert_eq!(degrees[2], 4, "memory table max constraint degree");
+
+    // alu: measured max is 8 — the M2.6 `div` sign-fix identity (reconstructing the true
+    // remainder sign from the flipped/unflipped RANGE8-checked byte limbs and the divisor's
+    // sign bit) is this AIR's single degree-8 constraint, one shy of this config's degree-9
+    // ceiling (`log_blowup = 3` => `constraint_degree <= 9` with `is_zk = 1` => `max_degree <=
+    // 8`). See `src/tables/alu.rs`'s div comments for the identity itself.
+    assert_eq!(degrees[3], 8, "alu table max constraint degree");
+
+    // range: single preprocessed-answering chip; its one main-AIR constraint and its packed
+    // RANGE8/POW2 lookup fraction-pins all sit at degree 2.
+    assert_eq!(degrees[4], 2, "range table max constraint degree");
+
+    // nibble: no main-AIR constraints at all (it has no row-level validity marker of its own —
+    // AGENTS.md's cheating-tests note; `LOOKUP_BALANCE_PANIC` is what catches an unpaid
+    // multiplicity here). Its packed AND4/OR4/XOR4 lookup fraction-pins are degree 2.
+    assert_eq!(degrees[5], 2, "nibble table max constraint degree");
+}

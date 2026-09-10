@@ -531,6 +531,41 @@ impl Machine {
     }
 }
 
+/// Symbolic max constraint degree of each chip, in `chips()` order — computed the same way
+/// `ProverData::from_airs_and_degrees` (i.e. `verifier_key`) derives each instance's quotient
+/// chunk count: against the real, same-bus-packed lookup contexts for `(program, tier)`, not
+/// a hand-counted estimate. No proving happens here — only the symbolic constraint walk
+/// (`p3_batch_stark::symbolic::get_max_constraint_degree`) plus the one preprocessed-column
+/// commitment `from_airs_and_degrees` always does, so this stays fast.
+///
+/// Exists to back `tests/tables.rs`'s per-table constraint-degree regression tests: each
+/// table's degree is pinned to a specific number there, with a comment on *why*; a change
+/// here should come with a matching update to those assertions and to
+/// `docs/02-tables-and-buses.md`.
+pub fn max_constraint_degrees(program: &Program, tier: Tier) -> Vec<usize> {
+    let machine = Machine::new(FriProfile::Test);
+    let key_cfg = key_config(machine.profile, program);
+    let airs = chips(program);
+    let is_zk = machine.config.is_zk();
+    let ext_degrees = machine.log_ext_degrees(program, tier);
+    let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &ext_degrees);
+    let lookup_gadget = p3_lookup::LogUpGadget::new();
+    airs.iter()
+        .zip(prover_data.common.lookups.iter())
+        .zip(ext_degrees.iter())
+        .map(|((air, lookups), &ext_db)| {
+            let trace_len = 1usize << (ext_db - is_zk);
+            p3_batch_stark::symbolic::get_max_constraint_degree::<Val, Challenge, Chip, _>(
+                air,
+                p3_air::symbolic::AirLayout::from_air(air),
+                trace_len,
+                lookups,
+                &lookup_gadget,
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod fri_soundness_tests {
     use super::*;
