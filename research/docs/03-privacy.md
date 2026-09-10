@@ -100,9 +100,11 @@ one of the six values in `TIERS` (an attacker-chosen out-of-range tier is
 rejected here, before it can be used to compute a table height and panic);
 the proof's degree bits match the heights that tier implies for all five
 tables; and finally the batch STARK itself, against a verifier key recomputed
-from the program. Both `verify` and `code_hash` recompute that key from
-scratch every time, including the full 2^16-row byte table's preprocessed
-commitment — a known, fixed cost of this milestone, not yet cached.
+from the program. Both `verify` and `code_hash` go through `verifier_key`,
+which includes the full 2^16-row byte table's preprocessed commitment;
+`Machine::verifier_key` caches this per `(program digest, tier)` (64-entry,
+FIFO-evicted) — `tests/e2e.rs::verifier_key_is_cached_after_first_verify`
+measures the cached hit at under 10% of the first, uncached recomputation.
 
 ## Tiers: what padding hides
 

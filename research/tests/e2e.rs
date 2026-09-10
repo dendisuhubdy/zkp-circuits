@@ -37,3 +37,21 @@ fn a_fresh_verifier_accepts_the_proof() {
     assert_eq!(prover.code_hash(&p, proof.tier), verifier.code_hash(&p, proof.tier));
     assert_ne!(prover.code_hash(&p, proof.tier), verifier.code_hash(&guests::fib(11), proof.tier));
 }
+
+#[test]
+fn verifier_key_is_cached_after_first_verify() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (proof, _) = m.prove(&p, &[], None).unwrap();
+    let t0 = std::time::Instant::now();
+    m.verify(&p, &proof).unwrap();
+    let first = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    m.verify(&p, &proof).unwrap();
+    let second = t1.elapsed();
+    assert!(
+        second < first / 10,
+        "cached verify should be under 10% of the first: first={first:?} second={second:?}"
+    );
+    assert_eq!(m.cached_keys(), 1);
+}

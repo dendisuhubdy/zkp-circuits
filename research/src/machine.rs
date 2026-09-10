@@ -161,6 +161,8 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use p3_uni_stark::StarkGenericConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 pub const TIERS: [usize; 6] = [10, 12, 14, 16, 18, 20];
 
@@ -309,10 +311,41 @@ fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
     "backend panicked".to_string()
 }
 
-pub struct Machine { pub config: Config, pub profile: FriProfile }
+/// Bound on the number of `(program digest, tier)` verifier keys `Machine::verifier_key`
+/// keeps in memory at once. Past this, the oldest entry is evicted (FIFO) to make room for the
+/// new one — a preprocessed commitment is cheap enough to recompute that a fancier (e.g. LRU)
+/// policy is not worth the complexity here.
+const KEY_CACHE_CAPACITY: usize = 64;
+
+/// A bounded, FIFO-evicted cache of `Machine::verifier_key` results, keyed by
+/// `(program_digest(program), tier.0)`.
+#[derive(Default)]
+struct KeyCache {
+    map: HashMap<(u64, usize), Arc<CommonData<Config>>>,
+    order: VecDeque<(u64, usize)>,
+}
+impl KeyCache {
+    fn get(&self, key: &(u64, usize)) -> Option<Arc<CommonData<Config>>> {
+        self.map.get(key).cloned()
+    }
+    fn insert(&mut self, key: (u64, usize), value: Arc<CommonData<Config>>) {
+        if self.map.contains_key(&key) {
+            return;
+        }
+        if self.map.len() >= KEY_CACHE_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+        self.order.push_back(key);
+        self.map.insert(key, value);
+    }
+}
+
+pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<KeyCache> }
 
 impl Machine {
-    pub fn new(profile: FriProfile) -> Self { Self { config: make_config(profile), profile } }
+    pub fn new(profile: FriProfile) -> Self { Self { config: make_config(profile), profile, keys: Mutex::new(KeyCache::default()) } }
 
     fn log_ext_degrees(&self, program: &Program, tier: Tier) -> Vec<usize> {
         let zk = self.config.is_zk();
@@ -321,9 +354,26 @@ impl Machine {
             .iter().map(|h| h.trailing_zeros() as usize + zk).collect()
     }
 
-    pub fn verifier_key(&self, program: &Program, tier: Tier) -> CommonData<Config> {
-        ProverData::from_airs_and_degrees(&key_config(self.profile, program), &chips(program), &self.log_ext_degrees(program, tier)).common
+    /// The preprocessed commitment (program + byte table) for `(program, tier)`, cached by
+    /// `program_digest(program)` and `tier.0` — see `KeyCache`. Recomputing it from scratch
+    /// runs the full `ProverData::from_airs_and_degrees` preprocessing pass (in particular
+    /// building the 2^16-row byte table's Merkle tree every time), which is the cost this
+    /// cache exists to amortize across repeated `verify`/`code_hash` calls for the same
+    /// `(program, tier)`.
+    pub fn verifier_key(&self, program: &Program, tier: Tier) -> Arc<CommonData<Config>> {
+        let key = (program_digest(program), tier.0);
+        if let Some(hit) = self.keys.lock().unwrap().get(&key) {
+            return hit;
+        }
+        let common = Arc::new(
+            ProverData::from_airs_and_degrees(&key_config(self.profile, program), &chips(program), &self.log_ext_degrees(program, tier)).common,
+        );
+        self.keys.lock().unwrap().insert(key, common.clone());
+        common
     }
+
+    /// Number of `(program, tier)` verifier keys currently cached.
+    pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().map.len() }
 
     /// The code hash hc: the Merkle root of the preprocessed columns (program + byte table).
     pub fn code_hash(&self, program: &Program, tier: Tier) -> String {

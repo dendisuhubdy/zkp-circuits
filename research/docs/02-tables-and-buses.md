@@ -177,8 +177,9 @@ every program. `Machine::code_hash` recomputes it directly from the program
 via `verifier_key`, so any verifier — not just the original prover — can
 derive `hc` standalone. That recomputation always includes the 2^16-row byte
 table too, since it is also preprocessed and folds into the same
-`CommonData`; this is a known, fixed cost per verification in this
-milestone, to be cached later.
+`CommonData`; `Machine::verifier_key` caches this per `(program digest, tier)`
+(64-entry, FIFO-evicted) — `tests/e2e.rs::verifier_key_is_cached_after_first_verify`
+measures the cached hit at under 10% of the first, uncached recomputation.
 
 Recomputability depends on one deliberate choice in `machine.rs::key_config`:
 the hiding MMCS's per-commit salt (and the PCS's own random codewords) are
