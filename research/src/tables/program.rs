@@ -164,6 +164,42 @@ pub mod flags {
 }
 
 pub const MESSAGE_LEN: usize = 1 + Decoded::NUM_FIELDS;
+
+/// The smallest program-table height ever built, regardless of how short the program is —
+/// matches the pre-M3.4 preprocessed builder's own floor.
+pub const MIN_HEIGHT: usize = 16;
+pub const MIN_LOG_HEIGHT: u8 = 4; // 1 << 4 == MIN_HEIGHT
+/// Ceiling on the *declared* (proof-carried) program-table log-height (`Proof::
+/// program_log_height`) — `2^22` rows is a program of up to ~4M words, comfortably past
+/// anything this crate's guests or any conceivable RV32 program compiled for it need; a
+/// verifier rejects anything larger before it can be used to size a table and panic on an
+/// absurd shift (`machine::Machine::verify`).
+pub const MAX_LOG_HEIGHT: u8 = 22;
+
+/// M3.4 (fix): the program table's height is a **proof-declared** parameter now, not a
+/// function of the tier alone — `Tier::program_height() = cpu_height()` was not a safe bound:
+/// a digest row absorbs up to 4 `PROGRAM_WORD`s per *cycle*, so a program with `len` up to
+/// `4·(cpu_height − 1)` words fits the cycle budget while needing far more than `cpu_height`
+/// program-table rows to hold its own words. `pad_height(len + 1, MIN_HEIGHT)` (the same
+/// "+1 padding row, floor at `MIN_HEIGHT`" rule the old preprocessed builder used) is the
+/// honest prover's minimal choice; `program_log_height` is its base-2 log, what `Proof` and
+/// `Machine::verify` actually carry/check (`log_ext_degrees` wants a log-height directly, and
+/// a log fits in a `u8` where a height might not, at the `MAX_LOG_HEIGHT` ceiling).
+///
+/// **Soundness**, since the verifier no longer bounds this against anything itself: `hc`
+/// (`hash::program_digest`) binds `(base_pc, len, words)` — the capacity-lane header commits
+/// to the exact word count and base address, and every digest row's `PROGRAM_WORD` lookups
+/// draw from real, `VALID = 1` program-table rows whose count (`mult_word = 1` each, M3.4's
+/// own invariant) must add up to exactly `len` for the bus to balance. A prover who declares
+/// a table too small to hold `len` real rows simply cannot build a balancing witness (some
+/// `PROGRAM_WORD` provide `hc` demands has nowhere to live); a prover who declares one larger
+/// than necessary only wastes their own proving time and the verifier's degree-bits check —
+/// the declared height *sizes* the table, it never lets a prover shrink or pad the program
+/// the digest itself is bound to. See `docs/03-privacy.md`.
+pub fn program_log_height(len: usize) -> u8 {
+    super::pad_height(len + 1, MIN_HEIGHT).trailing_zeros() as u8
+}
+
 use col::*;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -409,10 +445,38 @@ where
 /// A main-trace matrix at exactly `height` rows: `PC/WORD/`bits/decoded fields/`VALID` for
 /// `0..program.len()`, `MULT`/`MULT_WORD` fetch-count bookkeeping, all-zero (hence `VALID =
 /// 0`, see the module doc comment) padding for the rest. `height` is the caller's
-/// responsibility (`Tier::program_height`, a function of the tier alone — M3.4 collapses the
-/// verifier key back to one per tier, so this table's shape can no longer depend on the
-/// specific program either).
+/// responsibility — M3.4 (fix): a *proof-declared* value (`program_log_height`'s doc comment),
+/// not a function of the tier, so this table's shape depends on the program's own length again
+/// (unlike M3.4's first cut) while the verifier key it folds into stays keyed by that declared
+/// log-height rather than the program itself (still program-independent — see
+/// `Machine::verifier_key`).
 ///
+/// Fills one row (`row.len() == col::WIDTH`) at `pc`/`word`: the bit decomposition (always),
+/// and — only if `Instr::decode(word)` succeeds — the 23 `Decoded` fields, `VALID = 1`, and the
+/// matching legality flag. An undecodable `word` leaves every field/flag at its `zero_vec`
+/// default (`VALID = 0`), including `RD_IS_ZERO = 1` (the is-zero gadget's own unconditional
+/// invariant — `RD` stays 0 there too, exactly the padding-row case `program_trace` below
+/// handles the same way). Never panics, unlike `program_trace` (which uses this for every real
+/// program row and then enforces its own "every real word decodes" invariant on top) — this is
+/// what lets `tests/tables.rs::program_decoder_equals_instr_decode` compare the decoder's own
+/// output against `Instr::decode` for arbitrary (including undecodable) words directly, without
+/// going through `Program`'s host-side, panic-on-error API.
+pub fn fill_word_row(row: &mut [F], pc: u32, word: u32) {
+    row[PC] = F::from_u32(pc);
+    row[WORD] = F::from_u32(word);
+    for k in 0..32 { row[BIT0 + k] = F::from_bool((word >> k) & 1 == 1); }
+    match Instr::decode(word) {
+        Ok(instr) => {
+            let d = instr.decoded();
+            for (k, field) in d.to_fields().iter().enumerate() { row[RD + k] = F::from_u32(*field); }
+            row[VALID] = F::ONE;
+            if d.rd != 0 { row[RD_INV] = F::from_u32(d.rd).inverse(); } else { row[RD_IS_ZERO] = F::ONE; }
+            set_flags(&mut row[FLAG0..FLAG0 + flags::COUNT], instr);
+        }
+        Err(_) => row[RD_IS_ZERO] = F::ONE,
+    }
+}
+
 /// Panics if `program` contains a word `Instr::decode` rejects: exactly the old preprocessed
 /// builder's own invariant (`ProgramAir::preprocessed_trace`'s `.expect(..)`), preserved here
 /// — this table can only ever commit to a program every one of whose words is something the
@@ -433,20 +497,13 @@ pub fn program_trace(program: &Program, events: &[CycleEvent], height: usize) ->
         let r = &mut v[i * col::WIDTH..(i + 1) * col::WIDTH];
         let pc = program.pc_of(i);
         let word = program.words[i];
-        r[PC] = F::from_u32(pc);
-        r[WORD] = F::from_u32(word);
-        for k in 0..32 { r[BIT0 + k] = F::from_bool((word >> k) & 1 == 1); }
-        let instr = Instr::decode(word).expect("program contains an undecodable word");
-        let d = instr.decoded();
-        for (k, field) in d.to_fields().iter().enumerate() { r[RD + k] = F::from_u32(*field); }
-        r[VALID] = F::ONE;
+        fill_word_row(r, pc, word);
+        assert_eq!(r[VALID], F::ONE, "program contains an undecodable word");
         r[MULT] = F::from_u64(*counts.get(&pc).unwrap_or(&0));
         // Every proof includes exactly one traversal of the whole program for the digest,
         // regardless of how the program actually ran — so every real row's `PROGRAM_WORD`
         // fetch count is unconditionally 1.
         r[MULT_WORD] = F::ONE;
-        if d.rd != 0 { r[RD_INV] = F::from_u32(d.rd).inverse(); } else { r[RD_IS_ZERO] = F::ONE; }
-        set_flags(&mut r[FLAG0..FLAG0 + flags::COUNT], instr);
     }
     // Padding rows: `PC` still increments by 4 (the AIR's transition rule is unconditional),
     // and `RD_IS_ZERO` must still satisfy the is-zero gadget for `RD = 0` (that gadget is

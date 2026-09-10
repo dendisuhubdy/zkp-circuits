@@ -268,6 +268,19 @@ fn bumping_a_program_multiplicity_on_a_padding_row_is_rejected() {
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
+/// The `MULT_WORD` (M3.4 digest-row fetch count) sibling of the test above: a padding row
+/// (`valid = 0`) must never answer a `PROGRAM_WORD` lookup either —
+/// `mult_word·(1 − valid) = 0`, the same invariant generalized to the second bus.
+#[test]
+fn a_bumped_program_word_multiplicity_on_a_padding_row_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = program::col::WIDTH;
+    let pad = t.program.height() - 1;
+    assert!(pad >= p.len(), "last program row is padding");
+    t.program.values[pad * w + program::col::MULT_WORD] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
 #[test]
 fn swapping_two_adjacent_memory_rows_is_rejected() {
     let (m, p, mut t) = setup();

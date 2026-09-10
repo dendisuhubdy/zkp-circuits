@@ -150,19 +150,26 @@ spellings of the same proof); `public_values[HC0..HC7]` equals the
 caller-supplied `hc`, word for word; `public_values[TIER]` equals
 `proof.tier`; `proof.tier` is one of the six values in `TIERS` (an
 attacker-chosen out-of-range tier is rejected here, before it can be used to
-compute a table height and panic); the proof's degree bits match the
-heights that tier implies for all seven tables; and finally the batch STARK
-itself, against a verifier key recomputed from the tier alone —
-`Machine::verifier_key(tier)`, which includes the range and nibble tables'
-preprocessed commitments (256 rows each, since M2.3 split the 2^16-row byte
-table in two) and the Poseidon2 chip's round-constant table. M3.4:
+compute a table height and panic); `proof.program_log_height` is within
+`[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` (review fix — the same defensive pattern,
+`VerifyError::ProgramHeight` rather than a panic on an absurd shift); the
+proof's degree bits match the heights that tier (and the declared program
+height) imply for all seven tables; and finally the batch STARK itself,
+against a verifier key recomputed from the tier and the declared program
+height — `Machine::verifier_key(tier, program_log_height)`, which includes
+the range and nibble tables' preprocessed commitments (256 rows each, since
+M2.3 split the 2^16-row byte table in two) and the Poseidon2 chip's
+round-constant table. M3.4:
 `pc_entry` is no longer independently checked here — the verifier has no
 `base_pc` to check it against — it is read out of the proof and bound only
 in-circuit, to the digest group's own `pc` (and, indirectly, to `hc` itself,
 since `Program::digest` absorbs `base_pc`). `Machine::verifier_key` caches
-this per tier alone now (a 6-entry cache, `TIERS.len()`, that never actually
-evicts) — `tests/e2e.rs::verifier_key_is_cached_after_first_verify` still
-measures the cached hit at under 40% of the first, uncached recomputation.
+this by `(tier, program_log_height)` now — still program-*content*-
+independent (review fix: the program table's height is a value the prover
+declares per proof, not derived from the tier, so the cache key needs both
+— `docs/02-tables-and-buses.md`'s "Height" section) —
+`tests/e2e.rs::verifier_key_is_cached_after_first_verify` still measures
+the cached hit at under 40% of the first, uncached recomputation.
 
 ## Tiers: what padding hides
 
@@ -172,11 +179,13 @@ smallest tier that fits. `cpu` and `alu` pad to `2^ℓ` and `2^(ℓ+1)` rows,
 `2^(ℓ+2)` (M3.4: bumped from `2^(ℓ+1)` to fit the program digest's own
 `⌈len/4⌉` permutations on top of any guest hashing — `docs/02`'s
 `Tier::poseidon2_height` comment has the exact numbers); `program` (M3.4:
-now a main table, no longer sized by the specific program) pads to
-`Tier::program_height()` = `2^ℓ`, the same height as `cpu` — every cycle
-fetches at most one instruction, so no program can outgrow this; `range`
-and `nibble` are each always the fixed 256 rows. Padding rows carry
-`is_real = 0` (or, for `program`, `valid = 0`) and emit nothing on any bus.
+now a main table) pads to `1 << Proof::program_log_height` — a value the
+*prover* declares per proof from the program's own length, not derived
+from the tier at all (review fix: an earlier version of this milestone set
+it to `cpu_height()`, unsafe — see `docs/02-tables-and-buses.md`'s
+"Height" section under the program table); `range` and `nibble` are each
+always the fixed 256 rows. Padding rows carry `is_real = 0` (or, for
+`program`, `valid = 0`) and emit nothing on any bus.
 Digest rows are **not** padding — they are real, `is_real = 1` rows that
 count against the tier's cycle budget just like ordinary instructions do
 (`Program::digest_rows()` added to `Execution::cycles()` before choosing a

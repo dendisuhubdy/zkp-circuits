@@ -1,5 +1,54 @@
+use p3_matrix::Matrix;
+use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::guests;
 use rand_zkvm::machine::{FriProfile, Machine, Tier};
+
+/// M3.4 (fix): the program table's height is proof-declared, not derived from the tier
+/// (`tables::program::program_log_height`'s doc comment) — a program can be far longer than
+/// `Tier::cpu_height()` while still executing briefly, since a digest row absorbs up to 4
+/// `PROGRAM_WORD`s per *cycle* but a program's word count has no such per-cycle cap. Build one:
+/// a trivial computation followed by a large block of never-executed instructions, long enough
+/// that the program table alone would have overflowed a small tier's `cpu_height()`-sized table
+/// under the pre-fix code (`Tier::program_height() = cpu_height()`, since deleted).
+///
+/// The tier this proves at is `Tier(14)`, not `Tier(10)` (whose `cpu_height` the program's
+/// length is checked against): the ~300 digest-row permutations this program's length costs
+/// need a `poseidon2_height` budget only `Tier(14)` (or higher) provides —
+/// `Tier::poseidon2_height`'s own scaling relative to `cpu_height` is a separate, pre-existing
+/// concern this fix does not touch (see the fix report). What this test isolates is exactly
+/// the bug this fix closes: the *program table's own height* — independently confirmed below
+/// via `traces.program.height()` — tracks the program's length, not the tier, so it is not the
+/// thing that would have forced a larger tier here.
+#[test]
+fn a_program_much_longer_than_a_small_tiers_cpu_height_but_briefly_executed_proves() {
+    use rand_zkvm::machine::build_traces;
+    let m = Machine::new(FriProfile::Test);
+    let mut a = Assembler::new(0);
+    a.extend(li(5, 42)); // t0 = 42
+    a.extend(write_output(0, 5));
+    a.extend(halt());
+    // Never executed (the guest already halted above) — padding to push `len` past
+    // `Tier(10).cpu_height()` (1 024) without meaningfully touching the cycle count.
+    for _ in 0..1200 {
+        a.push(addi(0, 0, 0)); // a decodable no-op: x0 = x0 + 0
+    }
+    let p = a.assemble();
+    assert!(p.len() > Tier(10).cpu_height(), "program must exceed a small tier's cpu height to exercise the fix");
+
+    let exec = rand_zkvm::emulator::execute(&p, &[], 1 << 20).unwrap();
+    assert!(exec.cycles() < 20, "only the leading few instructions ever execute");
+    let traces = build_traces(&p, &exec, Tier(14)).unwrap();
+    // The program table's own height is driven by the program's length (`program_log_height`),
+    // not by `Tier(14).cpu_height()` (16 384) — it is far smaller, and in particular still
+    // bigger than `Tier(10).cpu_height()` would have offered, confirming the fix actually sized
+    // the table from `p.len()` rather than coincidentally inheriting a large tier's height.
+    assert!(traces.program.height() > Tier(10).cpu_height());
+    assert!(traces.program.height() < Tier(14).cpu_height());
+
+    let proof = m.prove_traces(&p, &traces, Tier(14));
+    assert_eq!(exec.outputs[0], 42);
+    m.verify(&p.digest(), &proof).unwrap();
+}
 
 #[test]
 fn every_guest_proves_and_verifies() {

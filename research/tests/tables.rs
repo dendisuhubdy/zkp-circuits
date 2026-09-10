@@ -11,7 +11,10 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use rand_zkvm::tables::F;
 use rand_zkvm::isa::Instr;
-use rand_zkvm::tables::program::{self, program_trace};
+use rand_zkvm::tables::program::{self, fill_word_row, program_trace, ProgramAir};
+use rand::distr::{Distribution, StandardUniform};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::tables::memory::{self, memory_trace};
@@ -118,6 +121,90 @@ fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
     assert_eq!(t.values[last * w + program::col::MULT], F::ZERO);
     let total: u64 = (0..t.height()).map(|r| t.values[r * w + program::col::MULT].as_canonical_u64()).sum();
     assert_eq!(total as usize, e.events.len(), "every cycle fetched exactly one row");
+}
+
+/// Every legal encoding `asm::ops` can produce, each over random register/immediate operands —
+/// one instance per mnemonic, covering every `Instr` variant, every `AluOp` (RV32I and the
+/// M2.6 M-extension), every load/store width, and every branch condition.
+fn rand_u32(rng: &mut StdRng) -> u32 { StandardUniform.sample(rng) }
+
+fn every_legal_encoding(rng: &mut StdRng) -> Vec<u32> {
+    use rand_zkvm::asm::ops::*;
+    use rand_zkvm::isa::BranchCond;
+    let r = |rng: &mut StdRng| -> u32 { rand_u32(rng) % 32 };
+    let imm = |rng: &mut StdRng| -> i32 { rand_u32(rng) as i32 };
+    let shamt = |rng: &mut StdRng| -> u32 { rand_u32(rng) % 32 };
+    let mut out = Vec::new();
+    let (rd, rs1, rs2) = (r(rng), r(rng), r(rng));
+    for f in [addi, andi, ori, xori, slti, sltiu] as [fn(u32, u32, i32) -> Instr; 6] { out.push(f(rd, rs1, imm(rng)).encode()); }
+    for f in [slli, srli, srai] as [fn(u32, u32, u32) -> Instr; 3] { out.push(f(rd, rs1, shamt(rng)).encode()); }
+    for f in [add, sub, and, or, xor, sll, srl, sra, slt, sltu, mul, mulh, mulhu, mulhsu, div, divu, rem, remu]
+        as [fn(u32, u32, u32) -> Instr; 18]
+    {
+        out.push(f(rd, rs1, rs2).encode());
+    }
+    for f in [lb, lbu, lh, lhu, lw] as [fn(u32, u32, i32) -> Instr; 5] { out.push(f(rd, rs1, imm(rng)).encode()); }
+    for f in [sb, sh, sw] as [fn(u32, u32, i32) -> Instr; 3] { out.push(f(rs1, rs2, imm(rng)).encode()); }
+    out.push(lui(rd, rand_u32(rng)).encode());
+    out.push(auipc(rd, rand_u32(rng)).encode());
+    out.push(jalr(rd, rs1, imm(rng)).encode());
+    out.push(ecall().encode());
+    for cond in [BranchCond::Eq, BranchCond::Ne, BranchCond::Lt, BranchCond::Ge, BranchCond::Ltu, BranchCond::Geu] {
+        out.push((Instr::Branch { cond, rs1, rs2, imm: imm(rng) as u32 }).encode());
+    }
+    out.push((Instr::Jal { rd, imm: imm(rng) as u32 }).encode());
+    out
+}
+
+/// M3.4 review fix: the in-circuit decoder against `Instr::decode` directly, over 10⁴ random
+/// 32-bit words plus every legal encoding `asm::ops` can produce. For each word: `fill_word_row`
+/// (the same row-filling logic `program_trace` uses for every real program row) must produce
+/// `VALID`/the 23 `Decoded` fields matching `Instr::decode(word)` exactly (`VALID = 1` and
+/// `Decoded::to_fields()` on success, `VALID = 0` — fields unconstrained by this test, since
+/// `Decoded` has no meaning for a word that doesn't decode — on error); and, built into one
+/// trace and run through a real `prove_batch`/`verify_batch` round trip, every row's own AIR
+/// constraints must hold (with `MULT`/`MULT_WORD` left at 0 throughout, so `PROGRAM`/
+/// `PROGRAM_WORD` trivially balance with no consumer table — this test is about the decoder's
+/// own row constraints, not the buses, which the other program-table tests already cover).
+#[test]
+fn program_decoder_equals_instr_decode() {
+    let mut rng = StdRng::seed_from_u64(0x5EC0DE);
+    let mut words: Vec<u32> = (0..10_000).map(|_| rand_u32(&mut rng)).collect();
+    words.extend(every_legal_encoding(&mut rng));
+
+    let w = program::col::WIDTH;
+    let height = rand_zkvm::tables::pad_height(words.len(), 16);
+    let mut v = F::zero_vec(height * w);
+    for (i, &word) in words.iter().enumerate() {
+        let pc = 4 * i as u32;
+        fill_word_row(&mut v[i * w..(i + 1) * w], pc, word);
+        let row = &v[i * w..(i + 1) * w];
+        match Instr::decode(word) {
+            Ok(instr) => {
+                assert_eq!(row[program::col::VALID], F::ONE, "word {word:#010x} should decode");
+                for (k, f) in instr.decoded().to_fields().iter().enumerate() {
+                    assert_eq!(row[program::col::RD + k], F::from_u32(*f), "word {word:#010x} field {k}");
+                }
+            }
+            Err(_) => assert_eq!(row[program::col::VALID], F::ZERO, "word {word:#010x} should not decode"),
+        }
+    }
+    // Padding rows past the sampled words: `PC` still increments by 4 (the AIR's transition
+    // rule is unconditional), and `RD_IS_ZERO` must still satisfy the is-zero gadget for
+    // `RD = 0` (unconditional too, not gated by `VALID` — see `program_trace`'s own padding
+    // handling, which this mirrors).
+    for i in words.len()..height {
+        v[i * w + program::col::PC] = F::from_u32(4 * i as u32);
+        v[i * w + program::col::RD_IS_ZERO] = F::ONE;
+    }
+    let trace = RowMajorMatrix::new(v, w);
+
+    let config = make_config(FriProfile::Test);
+    let airs = vec![ProgramAir];
+    let instances = vec![StarkInstance { air: &airs[0], trace: &trace, public_values: vec![] }];
+    let pd = ProverData::from_instances(&config, &instances);
+    let proof = prove_batch(&config, &instances, &pd);
+    verify_batch(&config, &airs, &proof, &[vec![]], &pd.common).unwrap();
 }
 
 #[test]
@@ -397,11 +484,13 @@ fn div_family_lookup_counts_per_op() {
 #[test]
 fn alu_max_constraint_degree_is_pinned() {
     use rand_zkvm::machine::{max_constraint_degrees, Tier};
-    // Tier-invariant: no table here uses periodic columns, so the symbolic degree doesn't
-    // depend on trace height — any tier gives the same numbers. `Tier(10)` (the smallest) is
-    // used only because `max_constraint_degrees` needs one to size the tables. M3.4: no
-    // longer program-dependent either — every chip's shape is a pure function of the tier.
-    let degrees = max_constraint_degrees(Tier(10));
+    use rand_zkvm::tables::program::MIN_LOG_HEIGHT;
+    // Tier-invariant (and, M3.4 fix, program-log-height-invariant): no table here uses
+    // periodic columns, so the symbolic degree doesn't depend on trace height — any tier and
+    // any declared program height give the same numbers. `Tier(10)`/`MIN_LOG_HEIGHT` (the
+    // smallest of each) are used only because `max_constraint_degrees` needs concrete values
+    // to size the tables.
+    let degrees = max_constraint_degrees(Tier(10), MIN_LOG_HEIGHT);
     assert_eq!(degrees.len(), 7, "one degree per chip in machine::chips() order");
 
     // program: M3.4's main-trace in-circuit decoder. Every one-hot flag pin

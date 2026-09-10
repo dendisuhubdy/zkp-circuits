@@ -95,9 +95,36 @@ agree on, and the ordinary lookup-balance mechanism rejects any mismatch.
 a padding row (all-zero, whose `WORD = 0` decodes as no known opcode) can
 never be fetched *or* digested, and `program_trace` panics if any real word
 is undecodable (the same invariant the old preprocessed builder enforced).
-The table's height is `Tier::program_height()` (= `cpu_height()`, a
-function of the tier alone — see `Machine::verifier_key`'s doc comment on
-why the verifier key must be program-independent now).
+
+**Height (review fix): proof-declared, not tier-derived.** The table's
+height is `1 << Proof::program_log_height` — a value the *prover* declares
+per proof (`tables::program::program_log_height(len) = pad_height(len + 1,
+MIN_HEIGHT).trailing_zeros()`, floored at `MIN_HEIGHT = 16` rows, ceilinged
+at `MAX_LOG_HEIGHT = 22`), not a function of the tier. An early version of
+this milestone set it to `cpu_height()` (the same height as `cpu`) — unsafe:
+a digest row absorbs up to 4 `PROGRAM_WORD`s per *cycle*, so a program with
+`len` up to `4·(cpu_height − 1)` words fits the cycle budget while needing
+far more than `cpu_height` program-table rows to hold its own words, and
+`program_trace`'s `assert!(len <= height)` would panic rather than error.
+`Machine::verify` bounds the proof-carried `program_log_height` itself
+(`[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]`, `VerifyError::ProgramHeight` if it
+isn't) before using it to size anything, exactly as it already bounds
+`proof.tier`. `Machine::verifier_key`'s cache key grows to `(tier,
+program_log_height)` accordingly (still program-*content*-independent —
+computable from the tier and the declared height alone).
+
+Soundness does not depend on the verifier checking the declared height
+against the program in any other way, because `hc` already does: it binds
+`(base_pc, len, words)` via the capacity-lane header
+(`hash::program_digest`), and every digest row's `PROGRAM_WORD` lookups
+draw from real, `valid = 1` program-table rows whose `mult_word = 1` each
+must sum to exactly `len` for the bus to balance. A prover who declares a
+table too small to hold `len` real rows simply cannot build a witness that
+balances (some word `hc` commits to has nowhere to live); one who declares
+a table larger than necessary only spends more of their own proving time
+and a slightly bigger verifier-side degree-bits check. The declared height
+only *sizes* the table — it can never let a prover shrink or pad the
+program the digest is already bound to. See `docs/03-privacy.md`.
 
 `program_trace` (the witness builder) counts an ordinary-fetch `mult` per
 `CycleEvent` whose `pc` matches — except, since M3.2, a `POSEIDON2` call's

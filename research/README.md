@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 111 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
+cargo test              # 114 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -196,7 +196,7 @@ boundary: `docs/03-privacy.md`.
 1. **Closed in M3.4.** `hc` is now an ordinary public value, computed
    in-circuit by the program table's digest rows with the Poseidon2 chip,
    and checked by the universal, program-independent verifier key
-   (`Machine::verifier_key(tier)`). It is still binding but not hiding — a
+   (`Machine::verifier_key(tier, program_log_height)`, still program-*content*-independent). It is still binding but not hiding — a
    verifier who can guess the program can still confirm the guess against
    a published `hc` — see `docs/03-privacy.md`.
 2. The gas tier is public per proof, not only as a batch-level histogram.
