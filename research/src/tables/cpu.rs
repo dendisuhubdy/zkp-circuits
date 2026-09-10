@@ -1,8 +1,8 @@
 //! One row per cycle. Fetches from PROGRAM, reads and writes through MEMORY,
 //! delegates arithmetic to ALU. The only table with public values.
 use super::{bus, limbs, nibble::NibbleCounts, program::MESSAGE_LEN, range::RangeCounts, F};
-use crate::emulator::{CycleEvent, Syscall, ECALL_MEM_REG, SLOT_MEM, SLOT_R1, SLOT_R2, SLOT_W};
-use crate::isa::{NUM_OUTPUTS, SYS_HALT as SYS_NUM_HALT, SYS_READ_INPUT, SYS_WRITE_OUTPUT};
+use crate::emulator::{CycleEvent, HashRow, Syscall, ECALL_MEM_REG, SLOT_MEM, SLOT_R1, SLOT_R2, SLOT_W, SPACE_RAM};
+use crate::isa::{NUM_OUTPUTS, SYS_HALT as SYS_NUM_HALT, SYS_POSEIDON2, SYS_READ_INPUT, SYS_WRITE_OUTPUT};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_lookup::{Count, InteractionBuilder};
@@ -64,11 +64,46 @@ pub mod col {
     /// replaced by the corresponding bytes of `B` (`RB0..3`), everything else left alone —
     /// a read-modify-write over the addressed word, spelled out per byte.
     pub const MERGED0: usize = RB0 + 4;                              // 72
-    pub const WIDTH: usize = MERGED0 + 4;                            // 76
+    // M3.2: hash rows (POSEIDON2). Three row kinds share these columns, over and above an
+    // ordinary row: the ecall row that dispatches the syscall (`SYS_HASH`), an absorb row per
+    // 4-word (or partial) block (`IS_HASH`), and two digest write-back rows (`IS_HASH_OUT`,
+    // the second marked `HASH_FIN`). See `docs/02-tables-and-buses.md` for the full row-kind
+    // argument; `emulator::HashRow` is the reference this trace builder mirrors.
+    pub const SYS_HASH: usize = MERGED0 + 4;                         // 76: ecall row dispatches POSEIDON2
+    pub const IS_HASH: usize = SYS_HASH + 1;                         // 77: absorb row
+    pub const IS_HASH_OUT: usize = IS_HASH + 1;                      // 78: digest write-back row (2 per call)
+    pub const HASH_FIN: usize = IS_HASH_OUT + 1;                     // 79: 1 on the second write-back row only
+    pub const HASH_PTR: usize = HASH_FIN + 1;                        // 80: word address, constant across the group
+    pub const HASH_N: usize = HASH_PTR + 1;                          // 81: word count, constant across the group
+    pub const HASH_LEFT: usize = HASH_N + 1;                         // 82: words not yet absorbed, before this row
+    pub const HASH_IDX: usize = HASH_LEFT + 1;                       // 83: absorbed-block index, before this row
+    /// 8: the sponge state as of the end of the previous block (absorb rows), or the final
+    /// state (both write-back rows, identical on both — copied forward from row 1 to row 2).
+    /// A field element, not a byte-range-bounded quantity: a capacity lane, or any lane after
+    /// a permutation, routinely exceeds `2^32` (see `emulator::HashRow`'s doc comment) — so
+    /// these columns carry no RANGE8 lookup of their own, unlike every other multi-limb value
+    /// in this table.
+    pub const HS0: usize = HASH_IDX + 1;                             // 84..91
+    /// 4: this row's 4 machine words — the words absorbed (or, on an inactive absorb lane,
+    /// copied from `HS`) on an absorb row; the 4 written words on a write-back row.
+    pub const HV0: usize = HS0 + 8;                                  // 92..95
+    /// 4: absorb-row lane-activity booleans (a contiguous prefix of `true`s; lane 0 is always
+    /// active on a real absorb row).
+    pub const ACT0: usize = HV0 + 4;                                 // 96..99
+    /// 2: byte limbs of this row's `HASH_LEFT` (absorb rows only) — bounds it to 16 bits,
+    /// comfortably more than `POSEIDON2_MAX_WORDS = 4096` needs.
+    pub const LEFT0: usize = ACT0 + 4;                               // 100,101
+    /// 2: byte limbs of this row's `HASH_IDX` (absorb rows only).
+    pub const IDX0: usize = LEFT0 + 2;                               // 102,103
+    /// 16: 4 byte limbs each of `HV0..3`, write-back rows only — what lets `HV0..3` be pinned
+    /// as an honest `u32` decomposition of two `HS` lanes (`hs_lane_j = HV_2j + HV_2j+1·2^32`).
+    pub const HVL0_0: usize = IDX0 + 2;                              // 104..119
+    pub const WIDTH: usize = HVL0_0 + 16;                            // 120 = 76 + 44
     /// Columns that must be zero on padding rows.
-    pub const SELECTORS: [usize; 20] = [
+    pub const SELECTORS: [usize; 24] = [
         IS_ALU, IS_IMM, IS_BRANCH, IS_LB, IS_LH, IS_LW, IS_SB, IS_SH, IS_SW, SIGNED,
         IS_JAL, IS_JALR, IS_LUI, IS_AUIPC, IS_ECALL, WRITES_RD, SYS_HALT, SYS_WRITE, SYS_READ, BR_NEG,
+        SYS_HASH, IS_HASH, IS_HASH_OUT, HASH_FIN,
     ];
 }
 pub mod pv { pub const PC_ENTRY: usize = 0; pub const TIER: usize = 1; pub const OUT0: usize = 2; pub const NUM: usize = 2 + crate::isa::NUM_OUTPUTS; }
@@ -115,9 +150,40 @@ where
             t.assert_zero(v(SYS_HALT) * n(IS_REAL));
         }
 
+        // M3.2 hash rows: absorb (`IS_HASH`) and write-back (`IS_HASH_OUT`) rows are
+        // continuations of the ecall instruction the row before them (or before that) already
+        // fetched — not new fetches — so the PROGRAM lookup is gated off there.
+        let is_hash = v(IS_HASH);
+        let is_hash_out = v(IS_HASH_OUT);
+        let is_hash_any = is_hash.clone() + is_hash_out.clone();
+        // 1 on every row of a `POSEIDON2` row-group except its very last (the `HASH_FIN`
+        // write-back row): the ecall row, every absorb row, and the first write-back row. Used
+        // below to (a) carry `HASH_PTR`/`HASH_N` forward across the whole group and (b) pin
+        // `NEXT_PC = PC` on every row but the last (PC only advances once the whole
+        // instruction — all its rows — has retired).
+        let continues = v(SYS_HASH) + is_hash.clone() + is_hash_out.clone() - v(HASH_FIN);
+
         // fetch
         let msg: Vec<AB::Expr> = std::iter::once(v(PC)).chain((0..MESSAGE_LEN - 1).map(|k| v(DEC0 + k))).collect();
-        bus::PROGRAM.lookup_key(b, msg, Count::bounded(is_real.clone(), 1));
+        bus::PROGRAM.lookup_key(b, msg, Count::bounded(is_real.clone() - is_hash_any.clone(), 1));
+
+        // Absorb/write-back rows carry none of the ordinary per-instruction machinery: every
+        // decoded field (`DEC0..DEC22`, i.e. `RD..WRITES_RD` — 23 columns), the other two
+        // syscall selectors, and the register/memory value columns that would otherwise feed
+        // an ordinary row's bus sends are pinned to zero. Without this, those columns are
+        // completely free on a hash row (the PROGRAM lookup that would normally pin `DEC0..22`
+        // is gated off above) and a cheating witness could smuggle an extra, self-consistent
+        // ALU/branch/WRITE_OUTPUT/register-read claim through an absorb or write-back row —
+        // the AGENTS.md invariant-1 bug class, generalized to a new row kind. `MEM_ADDR` is
+        // included because it is one of the four MEMORY-send address terms generalized below.
+        for k in 0..MESSAGE_LEN - 1 { b.assert_zero(is_hash_any.clone() * v(DEC0 + k)); }
+        b.assert_zero(is_hash_any.clone() * v(SYS_HALT));
+        b.assert_zero(is_hash_any.clone() * v(SYS_WRITE));
+        b.assert_zero(is_hash_any.clone() * v(SYS_READ));
+        b.assert_zero(is_hash_any.clone() * v(A));
+        b.assert_zero(is_hash_any.clone() * v(B));
+        b.assert_zero(is_hash_any.clone() * v(MEM_VAL));
+        b.assert_zero(is_hash_any.clone() * v(MEM_ADDR));
 
         // `is_load`/`is_store` are expressions now, not columns (M2.5): one-hot sums over
         // the per-width selectors the program table pre-decodes.
@@ -154,7 +220,10 @@ where
         b.assert_zero(v(IS_BRANCH) * (v(NEXT_PC) - fallthrough.clone() - taken * (v(TGT) - fallthrough.clone())));
         b.assert_zero(v(IS_JAL) * (v(NEXT_PC) - v(TGT)));
         b.assert_zero(v(IS_JALR) * (v(NEXT_PC) - v(ALU_OUT)));
-        b.assert_zero(is_real.clone() * (one.clone() - v(IS_BRANCH) - v(IS_JAL) - v(IS_JALR)) * (v(NEXT_PC) - fallthrough));
+        // A hash row-group's PC stands still until its very last row (`continues = 0` only
+        // there); every other row's `NEXT_PC = PC`.
+        b.assert_zero(continues.clone() * (v(NEXT_PC) - v(PC)));
+        b.assert_zero(is_real.clone() * (one.clone() - v(IS_BRANCH) - v(IS_JAL) - v(IS_JALR) - continues.clone()) * (v(NEXT_PC) - fallthrough));
 
         // memory: address, alignment, and the word actually in memory
         //
@@ -251,30 +320,162 @@ where
 
         let ts = |slot: u32| v(CLK) * four.clone() + AB::Expr::from_u32(slot);
         let zero = AB::Expr::ZERO;
-        bus::MEMORY.send(b, [zero.clone(), v(RS1), ts(SLOT_R1), v(A), zero.clone()], Count::bounded(is_real.clone(), 1));
-        bus::MEMORY.send(b, [zero.clone(), v(RS2), ts(SLOT_R2), v(B), zero.clone()], Count::bounded(is_real.clone(), 1));
+        // M3.2: every one of the four per-cycle slots doubles as a hash-row slot — an absorb
+        // row reads `HASH_PTR + 4·HASH_IDX + k` into `HV_k` (`k` = the slot's own index 0..3,
+        // matching `ACT0..3`/`HV0..3` 1:1: slot `SLOT_R1`→`HV0`, … `SLOT_W`→`HV3`); a
+        // write-back row writes `HASH_PTR + k + 4·HASH_FIN`. Every "ordinary" (non-hash)
+        // formula below already evaluates to exactly 0 whenever `is_hash_any = 1` — either
+        // because its inputs are DEC-derived (forced 0 above) or, for slot 0/1's count and
+        // every slot's `is_write`, via an explicit `(1 - is_hash_any)` gate (`is_real` is the
+        // one input here that is *not* DEC-derived) — so the hash terms below are pure
+        // *additions* to the existing per-slot formulas, not replacements of them.
+        let space_ram = AB::Expr::from_u32(SPACE_RAM);
+        let hash_addr = |k: u32| v(HASH_PTR) + v(HASH_IDX) * four.clone() + AB::Expr::from_u32(k);
+        let write_addr = |k: u32| v(HASH_PTR) + AB::Expr::from_u32(k) + v(HASH_FIN) * four.clone();
+
+        let space0 = zero.clone() + space_ram.clone() * is_hash_any.clone();
+        let addr0 = v(RS1) + hash_addr(0) * is_hash.clone() + write_addr(0) * is_hash_out.clone();
+        let value0 = v(A) + v(HV0) * is_hash_any.clone();
+        let count0 = is_real.clone() * (one.clone() - is_hash_any.clone()) + v(ACT0) * is_hash.clone() + is_hash_out.clone();
+        bus::MEMORY.send(b, [space0, addr0, ts(SLOT_R1), value0, is_hash_out.clone()], Count::bounded(count0, 1));
+
+        let space1 = zero.clone() + space_ram.clone() * is_hash_any.clone();
+        let addr1 = v(RS2) + hash_addr(1) * is_hash.clone() + write_addr(1) * is_hash_out.clone();
+        let value1 = v(B) + v(HV0 + 1) * is_hash_any.clone();
+        let count1 = is_real.clone() * (one.clone() - is_hash_any.clone()) + v(ACT0 + 1) * is_hash.clone() + is_hash_out.clone();
+        bus::MEMORY.send(b, [space1, addr1, ts(SLOT_R2), value1, is_hash_out.clone()], Count::bounded(count1, 1));
+
         // A load's or a store's own access is always a READ of the word that was there —
         // `MEM_VAL`. A store's *write* goes out separately below, on `SLOT_W`.
-        bus::MEMORY.send(b, [is_mem.clone(), v(MEM_ADDR), ts(SLOT_MEM), v(MEM_VAL), zero.clone()], Count::bounded(is_mem + v(IS_ECALL), 1));
-        // `SLOT_W`: either a register writeback (space 0, addr RD, value C — WRITES_RD or
-        // SYS_READ rows) or a store's word write (space 1/RAM, addr MEM_ADDR, value MERGED —
-        // the pin that replaces `2c8a39d`'s "a store's mem_val is the rs2 value": now "the
-        // written value is MERGED, and MERGED = B when IS_SW", proved structurally by the
-        // MERGED formula above). The two never coincide on one row (a store never sets
-        // WRITES_RD or SYS_READ), so the shared slot and its four-timestamps-per-cycle
-        // scheme still carry exactly one message.
-        let slot_w_space = is_store.clone();
-        let slot_w_addr = is_store.clone() * v(MEM_ADDR) + (one.clone() - is_store.clone()) * v(RD);
-        let slot_w_val = is_store.clone() * merged + (one.clone() - is_store.clone()) * v(C);
-        bus::MEMORY.send(b, [slot_w_space, slot_w_addr, ts(SLOT_W), slot_w_val, one.clone()], Count::bounded(v(WRITES_RD) + v(SYS_READ) + is_store, 1));
+        let space2 = is_mem.clone() + space_ram.clone() * is_hash_any.clone();
+        let addr2 = v(MEM_ADDR) + hash_addr(2) * is_hash.clone() + write_addr(2) * is_hash_out.clone();
+        let value2 = v(MEM_VAL) + v(HV0 + 2) * is_hash_any.clone();
+        let count2 = is_mem.clone() + v(IS_ECALL) + v(ACT0 + 2) * is_hash.clone() + is_hash_out.clone();
+        bus::MEMORY.send(b, [space2, addr2, ts(SLOT_MEM), value2, is_hash_out.clone()], Count::bounded(count2, 1));
+
+        // `SLOT_W`: a register writeback (space 0, addr RD, value C — WRITES_RD or SYS_READ
+        // rows), a store's word write (space 1/RAM, addr MEM_ADDR, value MERGED — the pin
+        // that replaces `2c8a39d`'s "a store's mem_val is the rs2 value": now "the written
+        // value is MERGED, and MERGED = B when IS_SW", proved structurally by the MERGED
+        // formula above), or (M3.2) a hash row's 4th lane. No two of the three ever coincide
+        // on one row (a store never sets WRITES_RD/SYS_READ, and both are DEC-derived, forced
+        // 0 on hash rows), so the shared slot still carries exactly one message.
+        let slot_w_space = is_store.clone() + space_ram * is_hash_any.clone();
+        let slot_w_addr = is_store.clone() * v(MEM_ADDR) + (one.clone() - is_store.clone()) * v(RD)
+            + hash_addr(3) * is_hash.clone() + write_addr(3) * is_hash_out.clone();
+        let slot_w_val = is_store.clone() * merged + (one.clone() - is_store.clone()) * v(C) + v(HV0 + 3) * is_hash_any.clone();
+        let slot_w_is_write = (one.clone() - is_hash_any.clone()) + is_hash_out.clone();
+        let count3 = v(WRITES_RD) + v(SYS_READ) + is_store.clone() + v(ACT0 + 3) * is_hash.clone() + is_hash_out.clone();
+        bus::MEMORY.send(b, [slot_w_space, slot_w_addr, ts(SLOT_W), slot_w_val, slot_w_is_write], Count::bounded(count3, 1));
 
         // syscalls: a = number, b = arg0, mem_val = arg1
-        let sys_sum = v(SYS_HALT) + v(SYS_WRITE) + v(SYS_READ);
+        let sys_sum = v(SYS_HALT) + v(SYS_WRITE) + v(SYS_READ) + v(SYS_HASH);
         b.assert_zero(v(IS_ECALL) * (sys_sum.clone() - one.clone()));
         b.assert_zero((one.clone() - v(IS_ECALL)) * sys_sum);
         b.assert_zero(v(SYS_HALT) * (v(A) - AB::Expr::from_u32(SYS_NUM_HALT)));
         b.assert_zero(v(SYS_WRITE) * (v(A) - AB::Expr::from_u32(SYS_WRITE_OUTPUT)));
         b.assert_zero(v(SYS_READ) * (v(A) - AB::Expr::from_u32(SYS_READ_INPUT)));
+
+        // M3.2: the `POSEIDON2` ecall row. `a0` (already read into `B` every ecall row) is the
+        // word pointer; `a1` (read through `MEM_VAL`, the memory slot, exactly like every other
+        // ecall's second argument) is the word count. The group starts with the whole count
+        // still to absorb, at block 0, sponge state all-zero.
+        b.assert_zero(v(SYS_HASH) * (v(A) - AB::Expr::from_u32(SYS_POSEIDON2)));
+        b.assert_zero(v(SYS_HASH) * (v(HASH_PTR) - v(B)));
+        b.assert_zero(v(SYS_HASH) * (v(HASH_N) - v(MEM_VAL)));
+        b.assert_zero(v(SYS_HASH) * (v(HASH_LEFT) - v(HASH_N)));
+        b.assert_zero(v(SYS_HASH) * v(HASH_IDX));
+        for i in 0..8 { b.assert_zero(v(SYS_HASH) * v(HS0 + i)); }
+        {
+            let mut t = b.when_transition();
+            // `HASH_PTR`/`HASH_N` are constant across the whole row-group.
+            t.assert_zero(continues.clone() * (n(HASH_PTR) - v(HASH_PTR)));
+            t.assert_zero(continues.clone() * (n(HASH_N) - v(HASH_N)));
+            // The row right after the ecall row — the first absorb row if `n > 0`, or
+            // directly the first write-back row if `n = 0` — starts the sponge at the
+            // all-zero state and inherits `HASH_LEFT = n`/`HASH_IDX = 0` from the ecall row
+            // (its own `HASH_LEFT`/`HASH_IDX`, which an absorb row's own update formula below
+            // then chains from).
+            for i in 0..8 { t.assert_zero(v(SYS_HASH) * n(HS0 + i)); }
+            t.assert_zero(v(SYS_HASH) * (n(HASH_LEFT) - v(HASH_LEFT)));
+            t.assert_zero(v(SYS_HASH) * (n(HASH_IDX) - v(HASH_IDX)));
+            // The second write-back row needs the same `HS0..7` (specifically lanes 2/3, the
+            // digest's third/fourth field elements) the first row established from the last
+            // absorb's `POSEIDON2` lookup — nothing else propagates it there.
+            let out_continues = is_hash_out.clone() * (one.clone() - v(HASH_FIN));
+            for i in 0..8 { t.assert_zero(out_continues.clone() * (n(HS0 + i) - v(HS0 + i))); }
+        }
+
+        // Absorb rows: `ACT0..3` is a boolean, non-increasing (contiguous-prefix) pattern —
+        // lane 0 is always active on a real absorb row — and `active_sum` is how many words
+        // this row actually reads from memory.
+        for i in 0..4 { b.assert_bool(v(ACT0 + i)); }
+        for i in 1..4 { b.assert_zero(v(ACT0 + i) * (one.clone() - v(ACT0 + i - 1))); }
+        b.assert_zero(is_hash.clone() * (one.clone() - v(ACT0)));
+        let active_sum = v(ACT0) + v(ACT0 + 1) + v(ACT0 + 2) + v(ACT0 + 3);
+        {
+            let mut t = b.when_transition();
+            // `HASH_LEFT` chains to the next row exactly as the emulator's absorb loop does:
+            // `left` drops by this row's `active_sum` — true whether the next row is another
+            // absorb row or (the last block) the first write-back row, whose `HASH_LEFT`
+            // `cpu_trace` leaves at the same zero_vec default the "must fully drain" rule
+            // below requires there anyway.
+            t.assert_zero(is_hash.clone() * (v(HASH_LEFT) - active_sum.clone() - n(HASH_LEFT)));
+            // `HASH_IDX`'s increment-by-one chain, by contrast, is meaningful only between two
+            // absorb rows — a write-back row's `HASH_IDX` column carries no obligation at all
+            // (`cpu_trace` leaves it at 0, not `idx + 1`), so this must be gated by `not_final`,
+            // not bare `is_hash`.
+            let not_final = is_hash.clone() * n(IS_HASH);
+            t.assert_zero(not_final.clone() * (n(HASH_IDX) - v(HASH_IDX) - one.clone()));
+            // Every absorb row but the last one absorbs a *full* block: without this, a
+            // witness could split the same total word count across more, smaller blocks than
+            // the honest `PaddingFreeSponge` schedule — a different, non-standard hash of the
+            // same message (the permutation runs once per block regardless of how full it
+            // is), not merely a differently-shaped but equivalent trace. "Last" means the next
+            // row is not itself an absorb row.
+            t.assert_zero(not_final * (one.clone() - v(ACT0 + 3)));
+            // The *last* absorb row (next row is not `IS_HASH`) must fully drain `HASH_LEFT`
+            // to 0 — it cannot stop early and leave words unabsorbed, nor (combined with the
+            // `HASH_LEFT` chain above, which already forbids `active_sum` exceeding
+            // `HASH_LEFT` without a huge, RANGE8-rejected wraparound) over-absorb.
+            let final_absorb = is_hash.clone() * (one.clone() - n(IS_HASH));
+            t.assert_zero(final_absorb * n(HASH_LEFT));
+        }
+        // Inactive lanes are not overwritten by the sponge: `HV_k` carries the previous
+        // state's own lane `k` forward instead of a memory read.
+        for i in 0..4 { b.assert_zero(is_hash.clone() * (one.clone() - v(ACT0 + i)) * (v(HV0 + i) - v(HS0 + i))); }
+        // `HASH_LEFT`/`HASH_IDX` range checks (2 byte limbs each — 16 bits comfortably bounds
+        // both, since `POSEIDON2_MAX_WORDS = 4096`), the same purpose `MA0..3` serves for
+        // `MEM_ADDR`: without this, a wrong `HASH_LEFT`/`HASH_IDX` could only be caught via a
+        // field-arithmetic identity, satisfiable by a huge wraparound value a cheating witness
+        // could otherwise pick freely.
+        b.assert_zero(is_hash.clone() * (v(LEFT0) + v(LEFT0 + 1) * AB::Expr::from_u32(256) - v(HASH_LEFT)));
+        b.assert_zero(is_hash.clone() * (v(IDX0) + v(IDX0 + 1) * AB::Expr::from_u32(256) - v(HASH_IDX)));
+        for c in [LEFT0, LEFT0 + 1, IDX0, IDX0 + 1] { bus::RANGE8.lookup_key(b, [v(c)], Count::bounded(is_hash.clone(), 1)); }
+        // The `POSEIDON2` lookup: `state_in` overwrites lanes 0..3 of the row's entering state
+        // (`HS`) with this row's `HV`, keeping the capacity lanes 4..7; `state_out` is the
+        // *next* row's `HS0..7` — so this single bus interaction is what proves the chain from
+        // one absorb row's state to the next is a genuine Poseidon2 permutation, for every
+        // absorb row (including the last, whose `state_out` becomes the first write-back row's
+        // `HS`, i.e. the digest).
+        let state_in: Vec<AB::Expr> = (0..8).map(|i| if i < 4 { v(HV0 + i) } else { v(HS0 + i) }).collect();
+        let state_out: Vec<AB::Expr> = (0..8).map(|i| n(HS0 + i)).collect();
+        bus::POSEIDON2.lookup_key(b, state_in.into_iter().chain(state_out).collect::<Vec<_>>(), Count::bounded(is_hash.clone(), 1));
+
+        // Write-back rows: `HV0..3` is this row's 4 written machine words, which must be an
+        // honest `u32` decomposition (`HVL0..15`, RANGE8-checked) of two `HS` lanes — lanes
+        // 0/1 on the first write-back row, 2/3 on the second (`hs_lane_j` below), i.e. exactly
+        // the digest field elements the last absorb's `POSEIDON2` lookup established.
+        for k in 0..4 {
+            for j in 0..4 { bus::RANGE8.lookup_key(b, [v(HVL0_0 + 4 * k + j)], Count::bounded(is_hash_out.clone(), 1)); }
+            let byte_sum: AB::Expr = (0..4).map(|j| v(HVL0_0 + 4 * k + j) * AB::Expr::from_u32(1 << (8 * j))).sum();
+            b.assert_zero(is_hash_out.clone() * (v(HV0 + k) - byte_sum));
+        }
+        let two32 = AB::Expr::from_u64(1u64 << 32);
+        for j in 0..2usize {
+            let hs_lane = (one.clone() - v(HASH_FIN)) * v(HS0 + j) + v(HASH_FIN) * v(HS0 + j + 2);
+            b.assert_zero(is_hash_out.clone() * (v(HV0 + 2 * j) + v(HV0 + 2 * j + 1) * two32.clone() - hs_lane));
+        }
         let mut sel_sum = AB::Expr::ZERO;
         for i in 0..NUM_OUTPUTS {
             let s = v(OUT_SEL0 + i);
@@ -311,6 +512,7 @@ pub fn cpu_trace(events: &[CycleEvent], height: usize, range: &mut RangeCounts, 
     assert!(events.len() < height, "cpu table needs a padding row: {} cycles, height {height}", events.len());
     let mut v = F::zero_vec(height * WIDTH);
     let mut written = [0u32; NUM_OUTPUTS];
+    let mut hash_ptr_n: Option<(u32, u32)> = None;
     for (i, e) in events.iter().enumerate() {
         let r = &mut v[i * WIDTH..(i + 1) * WIDTH];
         r[CLK] = F::from_u32(e.clk); r[PC] = F::from_u32(e.pc); r[NEXT_PC] = F::from_u32(e.next_pc); r[IS_REAL] = F::ONE;
@@ -373,7 +575,55 @@ pub fn cpu_trace(events: &[CycleEvent], height: usize, range: &mut RangeCounts, 
             Some(Syscall::Halt) => r[SYS_HALT] = F::ONE,
             Some(Syscall::WriteOutput { slot, .. }) => { r[SYS_WRITE] = F::ONE; r[OUT_SEL0 + slot as usize] = F::ONE; written[slot as usize] += 1; }
             Some(Syscall::ReadInput { .. }) => r[SYS_READ] = F::ONE,
+            Some(Syscall::Poseidon2 { .. }) => r[SYS_HASH] = F::ONE,
             None => {}
+        }
+        // M3.2 hash rows. `hash_ptr_n` remembers the group's `(ptr, n)` from its ecall row
+        // (`HashRow::Absorb`/`WriteOut` don't carry them again — every row of one group is
+        // adjacent in `events`, in emission order, so the ecall row is always seen first).
+        if let Some(h) = e.hash_row {
+            match h {
+                HashRow::Ecall { ptr, n } => {
+                    hash_ptr_n = Some((ptr, n));
+                    r[HASH_PTR] = F::from_u32(ptr);
+                    r[HASH_N] = F::from_u32(n);
+                    r[HASH_LEFT] = F::from_u32(n);
+                    // HASH_IDX and HS0..7 stay at the `zero_vec` default — the AIR pins both to
+                    // 0 on the ecall row directly.
+                }
+                HashRow::Absorb { idx, left_before, words, active, state_in, .. } => {
+                    r[IS_HASH] = F::ONE;
+                    let (ptr, n) = hash_ptr_n.expect("absorb row without a preceding ecall row");
+                    r[HASH_PTR] = F::from_u32(ptr);
+                    r[HASH_N] = F::from_u32(n);
+                    r[HASH_LEFT] = F::from_u32(left_before);
+                    r[HASH_IDX] = F::from_u32(idx);
+                    for i in 0..8 { r[HS0 + i] = state_in[i]; }
+                    for k in 0..4 {
+                        r[ACT0 + k] = F::from_bool(active[k]);
+                        r[HV0 + k] = if active[k] { F::from_u32(words[k]) } else { state_in[k] };
+                    }
+                    let (l0, l1) = (left_before & 0xff, (left_before >> 8) & 0xff);
+                    r[LEFT0] = F::from_u32(l0); r[LEFT0 + 1] = F::from_u32(l1);
+                    range.range8(l0); range.range8(l1);
+                    let (i0, i1) = (idx & 0xff, (idx >> 8) & 0xff);
+                    r[IDX0] = F::from_u32(i0); r[IDX0 + 1] = F::from_u32(i1);
+                    range.range8(i0); range.range8(i1);
+                }
+                HashRow::WriteOut { fin, words, state } => {
+                    r[IS_HASH_OUT] = F::ONE;
+                    if fin { r[HASH_FIN] = F::ONE; }
+                    let (ptr, n) = hash_ptr_n.expect("write-back row without a preceding ecall row");
+                    r[HASH_PTR] = F::from_u32(ptr);
+                    r[HASH_N] = F::from_u32(n);
+                    for i in 0..8 { r[HS0 + i] = state[i]; }
+                    for k in 0..4 {
+                        r[HV0 + k] = F::from_u32(words[k]);
+                        let bl = limbs(words[k]);
+                        for j in 0..4 { r[HVL0_0 + 4 * k + j] = bl[j]; range.range8((words[k] >> (8 * j)) & 0xff); }
+                    }
+                }
+            }
         }
         for (k, w) in written.iter().enumerate() { r[WRITTEN0 + k] = F::from_u32(*w); }
     }

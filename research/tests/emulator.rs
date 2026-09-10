@@ -5,6 +5,46 @@ use rand_zkvm::isa::*;
 
 fn run(p: &Program, inputs: &[u32]) -> Execution { execute(p, inputs, 1 << 16).unwrap() }
 
+/// M3.2: the `POSEIDON2` syscall (`guests::poseidon2_demo`, which hashes its message in place
+/// and outputs the 8-word digest) must agree with `hash::sponge_hash` — the host-side
+/// `PaddingFreeSponge<_, 8, 4, 4>` reference — for every block-boundary case: empty (no
+/// permutation, all-zero digest), one partial block, one exact full block, one full block plus
+/// a partial one, two full blocks, and a message spanning many blocks. Also checks the row
+/// count the syscall emits: 1 ecall row, `n.div_ceil(4)` absorb rows (0 when `n = 0`), and 2
+/// write-back rows — exactly what `tables::cpu`'s hash-row columns expect per call.
+#[test]
+fn poseidon2_syscall_matches_native_reference_for_various_lengths() {
+    for n in [0usize, 1, 4, 5, 8, 100] {
+        let msg: Vec<u32> = (1..=n as u32).collect();
+        let p = guests::poseidon2_demo(&msg);
+        let e = run(&p, &[]);
+        let want = rand_zkvm::hash::sponge_hash(&msg);
+        assert_eq!(&e.outputs[..8], &want[..], "n={n}: digest");
+        let hash_rows = e.events.iter().filter(|ev| ev.hash_row.is_some()).count();
+        assert_eq!(hash_rows, 1 + n.div_ceil(4) + 2, "n={n}: hash row count");
+    }
+}
+
+/// `n = 0` is the sponge's empty-input case: no permutation runs at all, and the digest is the
+/// all-zero state's own first 4 lanes.
+#[test]
+fn poseidon2_of_the_empty_message_is_the_all_zero_digest() {
+    assert_eq!(rand_zkvm::hash::sponge_hash(&[]), [0u32; 8]);
+    let e = run(&guests::poseidon2_demo(&[]), &[]);
+    assert_eq!(&e.outputs[..8], &[0u32; 8]);
+}
+
+/// `n > POSEIDON2_MAX_WORDS` is rejected before any absorption happens.
+#[test]
+fn poseidon2_over_the_word_limit_is_rejected() {
+    let mut a = Assembler::new(0);
+    a.extend(li(8, 0x1000));
+    a.extend(call_poseidon2(0x1000 / 4, (POSEIDON2_MAX_WORDS + 1) as usize));
+    a.extend(halt());
+    let err = execute(&a.assemble(), &[], 1 << 16).unwrap_err();
+    assert_eq!(err, ExecError::Poseidon2WordCount(POSEIDON2_MAX_WORDS + 1));
+}
+
 #[test]
 fn sub_word_loads_and_stores_match_the_spec() {
     let mut a = Assembler::new(0);

@@ -4,6 +4,7 @@ pub mod guests;
 pub mod emulator;
 pub mod tables;
 pub mod machine;
+pub mod hash;
 pub mod arx;
 pub mod notes;
 pub mod viewing;

@@ -161,7 +161,7 @@ use crate::tables::alu::{alu_trace, AluAir};
 use crate::tables::cpu::{cpu_trace, public_values, CpuAir};
 use crate::tables::memory::{memory_trace, MemoryAir};
 use crate::tables::nibble::{nibble_trace, NibbleAir, NibbleCounts};
-use crate::tables::poseidon2::{poseidon2_trace, Poseidon2Air};
+use crate::tables::poseidon2::{poseidon2_trace, Poseidon2Air, Poseidon2Event};
 use crate::tables::program::{program_trace, ProgramAir};
 use crate::tables::range::{range_trace, RangeAir, RangeCounts};
 use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder};
@@ -268,10 +268,22 @@ pub fn build_traces(program: &Program, exec: &Execution, tier: Tier) -> Result<T
     let range_t = range_trace(&range);
     let nibble_t = nibble_trace(&nibble);
     let program_t = program_trace(program, &exec.events);
-    // M3.2 wires the emulator's own hash events in; until then the table is all padding
-    // (`IS_REAL = 0` throughout) but still a genuine, AIR-satisfying permutation trace — see
-    // `tables::poseidon2`'s module doc comment.
-    let poseidon2_t = poseidon2_trace(&[], tier.poseidon2_height());
+    // M3.2: one `Poseidon2Event` per absorbed block, in emission order — exactly the
+    // permutations the cpu table's absorb rows ask for over the `POSEIDON2` bus (see
+    // `tables::cpu`'s eval). Any block beyond these is padding, still a genuine,
+    // AIR-satisfying permutation trace — see `tables::poseidon2`'s module doc comment.
+    let hash_events: Vec<Poseidon2Event> = exec.events.iter().filter_map(|e| match e.hash_row {
+        // `state_in` is `HS0..7` (the state as of the end of the *previous* block, before this
+        // block's overwrite) — the permutation's real input additionally overwrites lanes 0..3
+        // with this row's active `words`, exactly as the cpu AIR's own `state_in` message does.
+        Some(crate::emulator::HashRow::Absorb { words, active, state_in, state_out, .. }) => {
+            let mut input = state_in;
+            for k in 0..4 { if active[k] { input[k] = Val::from_u32(words[k]); } }
+            Some(Poseidon2Event { input, output: state_out })
+        }
+        _ => None,
+    }).collect();
+    let poseidon2_t = poseidon2_trace(&hash_events, tier.poseidon2_height());
     Ok(Traces { program: program_t, cpu, memory, alu, range: range_t, nibble: nibble_t, poseidon2: poseidon2_t, public_values: public_values(program.base_pc, tier.0, &exec.outputs) })
 }
 

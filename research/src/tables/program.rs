@@ -1,6 +1,6 @@
 //! Preprocessed, pre-decoded program ROM. Its commitment is the code hash hc.
 use super::{bus, pad_height, F};
-use crate::emulator::CycleEvent;
+use crate::emulator::{CycleEvent, HashRow};
 use crate::isa::{Decoded, Instr, Program};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
@@ -62,7 +62,11 @@ pub fn program_trace(program: &Program, events: &[CycleEvent]) -> RowMajorMatrix
     let air = ProgramAir { program: program.clone() };
     let h = air.height();
     let mut counts: HashMap<u32, u64> = HashMap::new();
-    for e in events { *counts.entry(e.pc).or_default() += 1; }
+    // M3.2: a `POSEIDON2` row-group's absorb/write-back rows share their ecall row's `pc`
+    // without being separate fetches (`tables::cpu`'s eval gates the PROGRAM lookup off on
+    // them) — only count a genuine fetch: an ordinary row, or the ecall row itself.
+    let fetches = |e: &CycleEvent| !matches!(e.hash_row, Some(HashRow::Absorb { .. }) | Some(HashRow::WriteOut { .. }));
+    for e in events.iter().filter(|e| fetches(e)) { *counts.entry(e.pc).or_default() += 1; }
     let mut v = F::zero_vec(h * col::WIDTH);
     for i in 0..program.len() {
         v[i * col::WIDTH + col::MULT] = F::from_u64(*counts.get(&program.pc_of(i)).unwrap_or(&0));

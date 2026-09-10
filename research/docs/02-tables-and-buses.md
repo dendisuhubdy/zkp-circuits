@@ -56,8 +56,12 @@ is_auipc is_ecall writes_rd`), then `valid` (1 on real instruction rows, 0
 on padding). One main column, `mult`: how many times this row was fetched.
 Constraint: a row with `valid = 0` must have `mult = 0` — padding can never
 be fetched. Provides `(pc, 23 fields…)` on `PROGRAM` with count `mult`.
+`program_trace` (the witness builder, not the AIR) counts a fetch per
+`CycleEvent` whose `pc` matches — except, since M3.2, a `POSEIDON2` call's
+absorb/write-back rows, which share their ecall row's `pc` without being
+separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 
-## `cpu` — main, `col::WIDTH = 76`
+## `cpu` — main, `col::WIDTH = 120`
 
 Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
 recomputed — `is_load`/`is_store` are *expressions* the AIR computes from
@@ -71,8 +75,14 @@ nibble, unchanged in role since M2.3/M2.4), then the M2.5 sub-word columns:
 limbs of `mem_val` — the word actually in memory), `byte half` (the
 selected byte/halfword), `hi sgn` (the sign-relevant byte's high nibble and
 sign bit), `rb0..3` (byte limbs of `b`, rs2's value, on store rows), and
-`merged0..3` (the word a store writes back). This is the only table with
-public values: `pc_entry`, the tier index, and the eight output words.
+`merged0..3` (the word a store writes back), then the M3.2 hash-row columns
+(their own subsection below): four selectors `sys_hash is_hash is_hash_out
+hash_fin`, `hash_ptr hash_n hash_left hash_idx`, eight state lanes
+`hs0..7`, four per-row words `hv0..3`, four absorb-row lane-activity
+booleans `act0..3`, byte limbs `left0..1`/`idx0..1` of `hash_left`/
+`hash_idx`, and 16 byte limbs `hvl0..15` of `hv0..3` (write-back rows
+only). This is the only table with public values: `pc_entry`, the tier
+index, and the eight output words.
 
 Constraints, in words: `is_real` is boolean and monotone (once 0, stays 0);
 `clk` starts at 0 and increments by 1 on real rows; the first row's `pc`
@@ -166,7 +176,76 @@ value `c`) or a store's word write (space 1/RAM, addr `mem_addr`, value
 for `ma0..3`, 2 `AND4` for the address's top-nibble bound, 4 `RANGE8` for
 `w0..3`; additionally on store rows, 4 `RANGE8` for `rb0..3`; additionally
 on `lb`/`lh` rows, 2 `AND4` for the sign extraction. Receives: 1 `PROGRAM`
-lookup.
+lookup. (M3.2 repurposes all four `MEMORY` slots on hash rows — see below;
+every formula above still applies unchanged on every *non*-hash row.)
+
+### M3.2: the `POSEIDON2` syscall — absorb and write-back hash rows
+
+One `POSEIDON2` call (syscall 3, `docs/01-isa.md`) is a *row-group*: the
+ecall row itself (`sys_hash`), one absorb row per 4-word (or final partial)
+block (`is_hash`), and exactly two digest write-back rows (`is_hash_out`,
+the second also marked `hash_fin`). All four count as ordinary cycles
+(`is_real = 1`, `exec.cycles()`/tier selection see every one of them); `pc`
+does not advance until the group's very last row. `hash_ptr`/`hash_n` are
+read off the ecall row (`a0`/`a1`, the usual ecall argument slots) and held
+constant across the whole group; `hash_left`/`hash_idx` track words not yet
+absorbed and the current block index. Absorb/write-back rows are *not* new
+`PROGRAM` fetches (the lookup is gated by `is_real - is_hash - is_hash_out`)
+and carry none of the ordinary per-instruction columns — every decoded
+field and the other two syscall flags are pinned to zero on them, which is
+also what stops a cheating witness from smuggling an extra ALU/branch/
+`WRITE_OUTPUT` claim through a row that looks, to the `PROGRAM`/`ALU`
+buses, like it isn't fetching anything (the same AGENTS.md invariant-1
+bug class, generalized to a new row kind).
+
+**Slot story.** `hs0..7` is the sponge state as of the end of the
+*previous* block (all-zero for the first); `hv0..3` is this row's four
+machine words. On an absorb row the four `MEMORY` slots (`SLOT_R1 SLOT_R2
+SLOT_MEM SLOT_W`, reused 1:1 with `act0..3`/`hv0..3`) each read one word at
+`hash_ptr + 4·hash_idx + k`, gated by that lane's own `act_k` — a lane past
+the block's real word count sends count 0 and its `hv_k` is pinned to the
+*previous* state's own lane instead of a memory value (the sponge's
+overwrite never touches it). On a write-back row all four slots write
+`hash_ptr + k + 4·hash_fin`, unconditionally (count 1), from `hv0..3`. The
+`POSEIDON2` lookup itself fires once per absorb row, keyed
+`[hv0..3, hs4..7, next-row hs0..7]` — the overwritten rate lanes plus the
+untouched capacity lanes as input, and the *next* row's `hs0..7` (whichever
+row that is) as the claimed output; since the poseidon2 table only ever
+provides genuine permutation pairs, this is what proves the state chain a
+genuine Poseidon2 permutation, one block at a time, all the way to the
+digest. The final absorb row's output becomes the first write-back row's
+`hs0..7` (the digest, in lanes 0..3); the second write-back row copies it
+forward unchanged (nothing else propagates `hs` across a write-back-to-
+write-back transition). Each write-back row's `hv0..3` is pinned as the
+honest lo/hi split (`hv_2j + hv_2j+1·2^32 = hs_lane_j`, byte-decomposed via
+`hvl0..15` and `RANGE8`-checked) of two `hs` lanes — 0/1 on the first row,
+2/3 on the second.
+
+**Per-row-kind invariant argument** (AGENTS.md: every bus message column
+constrained on every row kind that sends it; every count forced to zero
+wherever its message is unconstrained):
+- *ecall row*: `sys_hash·(a - POSEIDON2)`, `hash_ptr = b`, `hash_n = mem_val`,
+  `hash_left = hash_n`, `hash_idx = 0`, `hs0..7 = 0` are all pinned
+  directly; its own `MEMORY`/`ALU`/`PROGRAM` sends are the ordinary-ecall
+  formulas, untouched.
+- *absorb, non-final*: `act3 = 1` is forced (a witness cannot split one
+  block into two smaller ones — a different, non-standard hash of the same
+  message), so the row always absorbs a full 4-word block; `hash_left`/
+  `hash_idx` chain to the next absorb row; the `POSEIDON2` lookup pins the
+  chain to a genuine permutation.
+- *absorb, final (partial)*: `act3` may be 0, but `hash_left` is forced to
+  drain to exactly 0 on the *next* row — no early stop leaving words
+  unabsorbed, no over-absorption (which would otherwise only be caught by
+  a `RANGE8`-rejected field wraparound); inactive lanes' `hv_k = hs_k`.
+- *write-back 1*: `hash_fin = 0`; `hs0..7` is whatever the last absorb's
+  `POSEIDON2` lookup pinned it to (the digest, lanes 0..3); `hv0..3` splits
+  `hs0..1`; all four `MEMORY` slots write unconditionally.
+- *write-back 2*: `hash_fin = 1`, ending the row-group (`next_pc = pc + 4`
+  here, nowhere else in the group); `hs0..7` is copied forward from
+  write-back 1 unchanged; `hv0..3` splits `hs2..3`.
+- *padding*: `sys_hash is_hash is_hash_out hash_fin` are `SELECTORS`
+  entries, so `(1 - is_real)·v = 0` forces all four to 0 — no lookup on
+  either bus fires with a nonzero count there.
 
 ## `memory` — main, `col::WIDTH = 12`
 
@@ -494,10 +573,11 @@ constraints they carry run on literally every block in the trace, real or
 not. A block with no real event still needs a genuine, self-consistent
 permutation trace (of a canonical all-zero input) to satisfy them; the trace
 builder (`poseidon2_trace`) fills every block this way, leaving only
-`is_real`/`mult` at zero to mark a block as padding. This is why
-`build_traces` can already produce a valid all-padding poseidon2 trace
-today, ahead of M3.2 wiring the emulator's own hash events in: every
-existing guest still proves and verifies with this table present but idle.
+`is_real`/`mult` at zero to mark a block as padding. Before M3.2 wired the
+emulator's own hash events in, `build_traces` produced a valid all-padding
+poseidon2 trace for every guest (none of them called `POSEIDON2` yet); a
+guest that still doesn't call it (every guest but `poseidon2_demo`) gets
+exactly that same all-padding trace today.
 
 ## Constraint degree budget
 
@@ -507,7 +587,12 @@ same-bus-packed lookup contexts: `program` 2, `cpu` 8, `memory` 4, `alu` 8,
 `range` 2, `nibble` 2, `poseidon2` 4 — `alu`'s comes from the M2.6 `div`
 sign-fix identity, `cpu`'s from its packed lookup fraction-pins rather than
 its own row logic (whose costliest single constraint is only degree 6),
-`poseidon2`'s from its S-box split (see that table's own section). This
+`poseidon2`'s from its S-box split (see that table's own section). M3.2's
+hash-row columns and constraints (below) keep every individual product at
+or under what the existing worst case already spent — the biggest single
+new terms are the `not_final`/`final_absorb` absorb-chain gates (degree 3)
+and the write-back copy-forward pin (degree 3) — so `cpu`'s measured degree
+is unchanged at 8, not raised past it. This
 config's ceiling is degree 8 (`generic_config`'s `log_blowup = 3` plus this
 machine's `is_zk = 1` hiding: `constraint_degree = max_degree + 1 ≤ 9` ⇒
 `log2_ceil(8) = 3` quotient chunks, `p3-batch-stark`'s cap), so `alu` and

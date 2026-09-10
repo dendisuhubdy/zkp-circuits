@@ -702,8 +702,76 @@ fn bumping_poseidon2_mult_on_an_idle_row_is_rejected() {
     let (m, p, mut t) = setup();
     let w = poseidon2::col::WIDTH;
     // Rows 30/31 of block 0 are idle (ROUND_ROWS = 30); MULT there must stay 0 via
-    // `MULT * (1 - IS_LAST) = 0`, a purely local (`CONSTRAINT_PANIC`) constraint.
-    assert_eq!(t.poseidon2.values[30 * w + poseidon2::col::IS_REAL], F::ZERO, "table isn't fed by the emulator yet (M3.2)");
+    // `MULT * (1 - IS_LAST) = 0`, a purely local (`CONSTRAINT_PANIC`) constraint. `setup()`'s
+    // guest (`fib(10)`) never calls `POSEIDON2`, so this table is still all padding for it.
+    assert_eq!(t.poseidon2.values[30 * w + poseidon2::col::IS_REAL], F::ZERO, "fib(10) never calls POSEIDON2");
     t.poseidon2.values[30 * w + poseidon2::col::MULT] = F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// M3.2: `guests::poseidon2_demo` for `msg`, traced at tier 10.
+fn setup_poseidon2(msg: &[u32]) -> (Machine, rand_zkvm::isa::Program, Traces) {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::poseidon2_demo(msg);
+    let e = execute(&p, &[], 10_000).unwrap();
+    let t = build_traces(&p, &e, Tier(10)).unwrap();
+    (m, p, t)
+}
+
+/// The cpu-table row indices of one `POSEIDON2` call's ecall row, absorb rows (in order), and
+/// write-back rows (in order).
+fn hash_rows(t: &Traces) -> (usize, Vec<usize>, Vec<usize>) {
+    let w = cpu::col::WIDTH;
+    let h = t.cpu.height();
+    let ecall = (0..h).find(|&r| t.cpu.values[r * w + cpu::col::SYS_HASH] == F::ONE).expect("an ecall row");
+    let absorbs: Vec<usize> = (0..h).filter(|&r| t.cpu.values[r * w + cpu::col::IS_HASH] == F::ONE).collect();
+    let writes: Vec<usize> = (0..h).filter(|&r| t.cpu.values[r * w + cpu::col::IS_HASH_OUT] == F::ONE).collect();
+    (ecall, absorbs, writes)
+}
+
+/// Flipping a written digest word breaks the write-back row's own pin, `HV = byte_sum(HVL)`
+/// (the two never leave it), whether or not it also breaks the `HV·2^0 + HV·2^32 = HS_lane`
+/// identity or the `MEMORY` permutation against what the emulator actually put in RAM.
+#[test]
+fn tampering_a_hash_digest_word_is_rejected() {
+    let (m, p, mut t) = setup_poseidon2(&[1, 2, 3, 4]);
+    let w = cpu::col::WIDTH;
+    let (_, _, writes) = hash_rows(&t);
+    assert_eq!(writes.len(), 2, "one POSEIDON2 call always has two write-back rows");
+    t.cpu.values[writes[0] * w + cpu::col::HV0] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// `n = 5` absorbs a full block then a one-word block, so the final absorb row's lane 1 is
+/// inactive: its `HV1` must equal `HS1`, the previous block's own lane 1, carried forward
+/// unread rather than pulled from memory. Flipping `HV1` alone (leaving `ACT`/`HS` untouched)
+/// trips that copy-forward pin directly — the lane-copy invariant a cheating witness could
+/// otherwise use to smuggle an unabsorbed value into the sponge state between two absorb rows.
+#[test]
+fn tampering_a_hash_state_lane_between_absorb_rows_is_rejected() {
+    let (m, p, mut t) = setup_poseidon2(&[1, 2, 3, 4, 5]);
+    let w = cpu::col::WIDTH;
+    let (_, absorbs, _) = hash_rows(&t);
+    assert_eq!(absorbs.len(), 2, "n=5 is one full block plus one partial block");
+    let last = absorbs[1];
+    assert_eq!(t.cpu.values[last * w + cpu::col::ACT0 + 1], F::ZERO, "lane 1 is inactive on the final (partial) block");
+    t.cpu.values[last * w + cpu::col::HV0 + 1] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }));
+}
+
+/// Every new selector (`SYS_HASH`, `IS_HASH`, `IS_HASH_OUT`, `HASH_FIN`) must be zero on a
+/// padding row — `SELECTORS`' `(1 - is_real)·v(s) = 0` gate, the same invariant class as every
+/// other cpu selector. Setting `IS_HASH` in particular also requests a `POSEIDON2` lookup with
+/// count 1 (`Count::bounded(is_hash, 1)`) that nothing else on an all-zero padding row can
+/// answer, so this doubles as "a POSEIDON2 lookup with count 1 on a non-hash row is rejected".
+#[test]
+fn bumping_a_new_hash_selector_on_a_padding_row_is_rejected() {
+    for &sel in &[cpu::col::SYS_HASH, cpu::col::IS_HASH, cpu::col::IS_HASH_OUT, cpu::col::HASH_FIN] {
+        let (m, p, mut t) = setup();
+        let w = cpu::col::WIDTH;
+        let pad = t.cpu.height() - 1;
+        assert_eq!(t.cpu.values[pad * w + cpu::col::IS_REAL], F::ZERO, "last cpu row is padding");
+        t.cpu.values[pad * w + sel] = F::ONE;
+        assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p, &pr) }), "selector column {sel}");
+    }
 }

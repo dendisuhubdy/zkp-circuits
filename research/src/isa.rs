@@ -12,6 +12,14 @@ pub const REG_A7: u32 = 17;
 pub const SYS_HALT: u32 = 0;
 pub const SYS_WRITE_OUTPUT: u32 = 1;
 pub const SYS_READ_INPUT: u32 = 2;
+/// M3.2: `a0 = ptr` (a WORD address, `MEM_ADDR`'s convention), `a1 = n` words (`0 <= n <=
+/// 4096`). Hashes the `n` words at `ptr` with the Poseidon2 sponge (rate 4, overwrite mode, no
+/// padding — see `hash::sponge_hash`) and overwrites `ptr..ptr+8` with the 8 lo/hi digest
+/// words in place.
+pub const SYS_POSEIDON2: u32 = 3;
+/// Hard cap on `POSEIDON2`'s word count: 4096 words is 1024 absorbed blocks, comfortably
+/// within a tier's cycle budget while still bounding the emulator's per-syscall work.
+pub const POSEIDON2_MAX_WORDS: u32 = 4096;
 pub const NUM_OUTPUTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -238,6 +238,19 @@ pub fn muldiv() -> Program {
     a.assemble()
 }
 
+/// M3.2: hashes `msg` with the `POSEIDON2` syscall (in place, at `HEAP`) and outputs the
+/// 8-word digest — the guest-level correctness anchor for the syscall path, mirrored
+/// host-side by `hash::sponge_hash` (`tests/tables.rs::guest_poseidon2_matches_native_poseidon2`).
+pub fn poseidon2_demo(msg: &[u32]) -> Program {
+    let mut a = Assembler::new(0);
+    a.extend(li(S0, HEAP));
+    for (i, w) in msg.iter().enumerate() { a.extend(li(T0, *w as i32)); a.push(sw(S0, T0, 4 * i as i32)); }
+    a.extend(call_poseidon2(HEAP / 4, msg.len()));
+    for i in 0..8 { a.push(lw(T1, S0, 4 * i as i32)); a.extend(write_output(i as u32, T1)); }
+    a.extend(halt());
+    a.assemble()
+}
+
 /// (name, program, private inputs)
 pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
     vec![
@@ -248,6 +261,7 @@ pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
         ("alu_mix", alu_mix(), vec![]),
         ("sub_word_checksum", sub_word_checksum(), vec![]),
         ("muldiv", muldiv(), vec![]),
+        ("poseidon2_demo", poseidon2_demo(&[1, 2, 3, 4, 5]), vec![]),
     ]
 }
 

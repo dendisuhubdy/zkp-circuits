@@ -70,4 +70,14 @@ pub mod ops {
     }
     /// Result lands in a0.
     pub fn read_input(idx: u32) -> Vec<Instr> { let mut v = li(REG_A7, SYS_READ_INPUT as i32); v.extend(li(REG_A0, idx as i32)); v.push(ecall()); v }
+    /// M3.2: hashes `n` words at word address `ptr_words` (`a0`, the `MEM_ADDR` word-address
+    /// convention) with the `POSEIDON2` sponge, overwriting `ptr_words..ptr_words+8` with the
+    /// 8-word digest in place.
+    pub fn call_poseidon2(ptr_words: i32, n: usize) -> Vec<Instr> {
+        let mut v = li(REG_A7, SYS_POSEIDON2 as i32);
+        v.extend(li(REG_A0, ptr_words));
+        v.extend(li(REG_A1, n as i32));
+        v.push(ecall());
+        v
+    }
 }

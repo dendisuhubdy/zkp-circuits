@@ -141,10 +141,20 @@ needs one, is read through the row's memory-access slot as register `a1`
 | 0 | `HALT` | M1 | ends execution; every remaining row in the table is padding |
 | 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, `slot < 8`; constrained directly against the public values, at most once per slot, and any slot never written is pinned to zero |
 | 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — a prover-chosen witness value, and two reads of the same `idx` are not constrained to agree; see `docs/03-privacy.md` |
-| 10 | `POSEIDON2 ptr_in ptr_out` | M3 (not implemented) | hashes 8 words at `ptr_in`, writes 4 at `ptr_out` |
+| 3 | `POSEIDON2 ptr n` | M3.2 | hashes the `n` words at word address `ptr` (`0 <= n <= POSEIDON2_MAX_WORDS = 4096`) with the Poseidon2 sponge (rate 4, overwrite mode, no padding — `hash::sponge_hash`, the exact `PaddingFreeSponge<_, 8, 4, 4>` semantics) and overwrites `ptr..ptr+8` with the 8-word (lo/hi) digest in place |
 | 11 | `NOTE_COMMIT` | M3 (not implemented) | commitment of `(value, ρ, pk)` |
 | 12 | `NULLIFY` | M3 (not implemented) | `nf = H(nk ‖ cm)` — bound to the commitment, not to a sender-chosen nonce |
 | 13 | `MERKLE_VERIFY` | M3 (not implemented) | membership against a public root |
+
+`POSEIDON2` does not follow the "second argument through the memory slot,
+result in `a0`" shape the syscall preamble above describes for a
+*single*-row syscall: it spans several cpu rows (the ecall row, one absorb
+row per 4-word block, and two digest write-back rows — `docs/02-tables-and-
+buses.md`'s `cpu` section has the full row-kind account), and its "return
+value" is written to RAM in place at `ptr` rather than into `a0`. `a0`
+(`ptr`) and `a1` (`n`, read through the memory slot exactly like any other
+ecall's second argument) are still read the ordinary way, on the ecall row
+only.
 
 There is no RISC-V cross toolchain on the development machine, so every guest
 here is written directly against `asm.rs`'s mnemonic helpers (`src/asm.rs::ops`)
