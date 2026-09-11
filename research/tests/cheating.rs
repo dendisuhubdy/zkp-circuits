@@ -1233,22 +1233,181 @@ fn an_extra_real_input_row_at_idx_equal_to_n_in_is_rejected() {
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
-// (h) I2 (review round 1): an appended all-inactive indigest row after a block-aligned n_in
-// (n_in = 4, so the one real block fully drains HASH_LEFT to 0) is rejected —
-// `is_real_indigest * (1 - ACT0) = 0` now forces lane 0 active on *every* real indigest row,
-// closing the gratuitous-extra-permutation gap the old, HASH_LEFT-gated rule left open
-// exactly at a block boundary.
+// (h) I2 (review round 2, N1): the *faithful* regression — a genuinely appended, all-inactive
+// indigest row after a block-aligned n_in (n_in = 4, so HASH_LEFT is already fully drained to
+// 0 on the one real block), built so that *only* the lane-0 rule stands between it and
+// acceptance: everything else the AIR demands (INDIGEST_LAST moved to the new row, the
+// canonical H_IN encoding moved with it, the new row's own genuine POSEIDON2 permutation
+// wired into the poseidon2 table and into the row after it, the whole rest of the cpu table's
+// CLK chain shifted by one, MEMORY and RANGE8 kept exactly balanced) is made fully consistent
+// by hand. Round 1's version repurposed the very next row in place, leaving INDIGEST_LAST = 1
+// on the real row while the new row also claimed IS_INDIGEST = 1 — a shape the untouched
+// chain rule at the real→new transition (`is_indigest * (INDIGEST_LAST - (1 - n(IS_INDIGEST)))
+// = 0`) already rejects on its own, independent of the lane-0 rule, so it never actually
+// exercised I2.
+///
+/// Builds the faithful witness described above from an honest `Traces`, mutating `t.cpu` (row
+/// insertion + CLK shift), `t.memory` (rebuilt at the shifted `CLK` offset — every access after
+/// the insertion point moves by one timestamp unit), `t.range` (RANGE8 is exact-count
+/// accounting: every byte-column value this edit changes — the moved `IHVL0..31`/new row's
+/// `LEFT0/LEFT0+1`/`IDX0/IDX0+1`, and whatever `memory_trace` itself demands at the two
+/// offsets — is tracked and applied as a delta), `t.poseidon2` (append the new row's own
+/// permutation event), and `t.public_values` (`pv::IN0..7` becomes the canonical encoding of
+/// `perm(H_honest)`, the gratuitous extra permutation's actual output).
+fn append_gratuitous_indigest_permutation(p: &rand_zkvm::isa::Program, inputs: &[u32], mut t: Traces) -> Traces {
+    let e = execute(p, inputs, 10_000).unwrap();
+    let w = cpu::col::WIDTH;
+    let height = t.cpu.height();
+    let real_row = p.digest_rows() + 1; // the one real indigest row (right after the salt row)
+    let insert_at = real_row + 1; // == p.digest_rows() + input_digest_row_count(inputs.len())
+
+    // The real row's own permutation output — already seeded (by `fill_input_digest_rows`)
+    // into what is, before this edit, the first ordinary instruction row's HS0..7.
+    let real_state_out: [F; 8] = core::array::from_fn(|k| t.cpu.values[insert_at * w + cpu::col::HS0 + k]);
+    let new_state_out = rand_zkvm::hash::permute_state(real_state_out);
+
+    let mut range_removed: Vec<u32> = Vec::new();
+    let mut range_added: Vec<u32> = Vec::new();
+
+    // The real row is no longer last: clear INDIGEST_LAST and its canonical encoding (moving
+    // to the new row below). RANGE8's demand for the old IHVL bytes disappears with it.
+    t.cpu.values[real_row * w + cpu::col::INDIGEST_LAST] = F::ZERO;
+    for kk in 0..32 {
+        let old_byte = t.cpu.values[real_row * w + cpu::col::IHVL0 + kk].as_canonical_u64() as u32;
+        range_removed.push(old_byte);
+        t.cpu.values[real_row * w + cpu::col::IHVL0 + kk] = F::ZERO;
+    }
+    for c in 0..4 {
+        t.cpu.values[real_row * w + cpu::col::IHIMAX0 + c] = F::ZERO;
+        t.cpu.values[real_row * w + cpu::col::IINV0 + c] = F::ZERO;
+    }
+
+    let real_hash_idx = t.cpu.values[real_row * w + cpu::col::HASH_IDX].as_canonical_u64() as u32;
+    let base_pc = t.cpu.values[real_row * w + cpu::col::PC];
+    let new_clk = t.cpu.values[real_row * w + cpu::col::CLK] + F::ONE;
+
+    let mut new_row = vec![F::ZERO; w];
+    new_row[cpu::col::IS_REAL] = F::ONE;
+    new_row[cpu::col::IS_INDIGEST] = F::ONE;
+    new_row[cpu::col::INDIGEST_LAST] = F::ONE;
+    new_row[cpu::col::HASH_N] = F::from_u32(4);
+    new_row[cpu::col::HASH_LEFT] = F::ZERO; // carried in — the real block already drained it
+    new_row[cpu::col::HASH_IDX] = F::from_u32(real_hash_idx + 1);
+    new_row[cpu::col::CLK] = new_clk;
+    new_row[cpu::col::PC] = base_pc;
+    new_row[cpu::col::NEXT_PC] = base_pc; // is_indigest holds PC still
+    for k in 0..8 { new_row[cpu::col::HS0 + k] = real_state_out[k]; }
+    for k in 0..4 { new_row[cpu::col::HV0 + k] = real_state_out[k]; } // ACT = 0: inactive-lane carry
+    let (l0, l1) = (0u32, 0u32); // byte limbs of HASH_LEFT = 0
+    new_row[cpu::col::LEFT0] = F::from_u32(l0);
+    new_row[cpu::col::LEFT0 + 1] = F::from_u32(l1);
+    range_added.push(l0);
+    range_added.push(l1);
+    let new_idx = real_hash_idx + 1;
+    let (i0, i1) = (new_idx & 0xff, (new_idx >> 8) & 0xff);
+    new_row[cpu::col::IDX0] = F::from_u32(i0);
+    new_row[cpu::col::IDX0 + 1] = F::from_u32(i1);
+    range_added.push(i0);
+    range_added.push(i1);
+
+    // The gratuitous extra permutation's own canonical H_IN encoding, moved here.
+    let words = rand_zkvm::hash::split_digest([new_state_out[0], new_state_out[1], new_state_out[2], new_state_out[3]]);
+    for kk in 0..8 {
+        let bl = limbs(words[kk]);
+        for j in 0..4 {
+            range_added.push(bl[j].as_canonical_u64() as u32);
+            new_row[cpu::col::IHVL0 + 4 * kk + j] = bl[j];
+        }
+    }
+    for j in 0..4usize {
+        let hi = words[2 * j + 1];
+        if hi == u32::MAX {
+            new_row[cpu::col::IHIMAX0 + j] = F::ONE;
+        } else {
+            new_row[cpu::col::IINV0 + j] = (F::from_u32(hi) - F::from_u32(u32::MAX)).inverse();
+        }
+    }
+
+    // Splice the new row in right after the real one, shifting every later row down by one
+    // (CLK bumped for every IS_REAL row, since one more genuine cycle now precedes them) —
+    // drop the table's very last (all-zero-plus-WRITTEN-accumulator padding) row to keep the
+    // height fixed; there are hundreds of identical padding rows to spare.
+    let mut values = Vec::with_capacity(height * w);
+    values.extend_from_slice(&t.cpu.values[..insert_at * w]);
+    values.extend_from_slice(&new_row);
+    for row in insert_at..height - 1 {
+        let mut r: Vec<F> = t.cpu.values[row * w..(row + 1) * w].to_vec();
+        if row == insert_at {
+            // The (now-shifted) first ordinary row is where the extra permutation's own
+            // output belongs: POSEIDON2's n(HS0..7) must equal permute(new_row's state_in).
+            for k in 0..8 { r[cpu::col::HS0 + k] = new_state_out[k]; }
+        }
+        if r[cpu::col::IS_REAL] == F::ONE { r[cpu::col::CLK] += F::ONE; }
+        values.extend_from_slice(&r);
+    }
+    assert_eq!(values.len(), height * w);
+    t.cpu = p3_matrix::dense::RowMajorMatrix::new(values, w);
+
+    // MEMORY: every shifted row's CLK (hence every SLOT timestamp, `ts = CLK*4 + slot`) moved
+    // by one — rebuild the whole table at the new offset (`insert_at + 1`, matching the shift
+    // above exactly) rather than hand-patching timestamps.
+    let mem_height = t.memory.height();
+    let mut old_mem_range = range::RangeCounts::default();
+    let _ = memory::memory_trace(&e.events, insert_at as u32, mem_height, &mut old_mem_range);
+    let mut new_mem_range = range::RangeCounts::default();
+    t.memory = memory::memory_trace(&e.events, (insert_at + 1) as u32, mem_height, &mut new_mem_range);
+
+    // RANGE8 is exact-count accounting: apply the cpu-side byte-demand deltas collected above,
+    // plus whatever delta the memory rebuild itself introduced (a pure CLK-offset shift should
+    // leave every same-address delta unchanged, but this is computed, not assumed).
+    let rw = range::col::WIDTH;
+    for b in range_removed { t.range.values[b as usize * rw + range::col::M_RANGE] -= F::ONE; }
+    for b in range_added { t.range.values[b as usize * rw + range::col::M_RANGE] += F::ONE; }
+    for v in 0..256usize {
+        let old_c = old_mem_range.range.get(v).copied().unwrap_or(0);
+        let new_c = new_mem_range.range.get(v).copied().unwrap_or(0);
+        if new_c > old_c { t.range.values[v * rw + range::col::M_RANGE] += F::from_u32((new_c - old_c) as u32); }
+        if old_c > new_c { t.range.values[v * rw + range::col::M_RANGE] -= F::from_u32((old_c - new_c) as u32); }
+    }
+
+    // POSEIDON2: append the new row's own genuine permutation event.
+    let digest_blocks = rand_zkvm::hash::program_digest_rows(p.base_pc, &p.words);
+    let indigest_blocks = rand_zkvm::hash::input_digest_rows(TEST_SALT, inputs);
+    let extra_block = rand_zkvm::hash::DigestBlock {
+        idx: new_idx,
+        left_before: 0,
+        words: [0; 4],
+        active: [false; 4],
+        state_in: real_state_out,
+        state_out: new_state_out,
+    };
+    let to_events = |blocks: &[rand_zkvm::hash::DigestBlock]| -> Vec<poseidon2::Poseidon2Event> {
+        blocks.iter().map(|blk| {
+            let mut input = blk.state_in;
+            for k in 0..4 { if blk.active[k] { input[k] = F::from_u32(blk.words[k]); } }
+            poseidon2::Poseidon2Event { input, output: blk.state_out }
+        }).collect()
+    };
+    let all: Vec<poseidon2::Poseidon2Event> = to_events(&digest_blocks)
+        .into_iter()
+        .chain(to_events(&indigest_blocks))
+        .chain(to_events(std::slice::from_ref(&extra_block)))
+        .collect();
+    t.poseidon2 = poseidon2::poseidon2_trace(&all, t.poseidon2.height());
+
+    // pv::IN0..7 = the canonical encoding of perm(H_honest) — the gratuitous extra
+    // permutation's actual output, exactly what an otherwise-honest prover computing H_IN off
+    // this witness would publish.
+    for k in 0..8 { t.public_values[cpu::pv::IN0 + k] = F::from_u32(words[k]); }
+
+    t
+}
+
 #[test]
 fn an_appended_all_inactive_indigest_row_after_a_block_aligned_n_in_is_rejected() {
-    let (m, p, mut t) = setup_with_inputs(&[400, 250, 300, 75]); // n_in = 4, one full real block
-    let w = cpu::col::WIDTH;
-    let real_row = p.digest_rows() + 1; // the one real indigest row (right after the salt row)
-    let extra_row = real_row + 1; // currently the first ordinary instruction row
-    // Repurpose it as an extra, all-inactive indigest row: is_indigest turns on, absorbing
-    // nothing (ACT0..3 = 0) — exactly the shape the old rule let through at a block boundary.
-    for c in 0..w { t.cpu.values[extra_row * w + c] = F::ZERO; }
-    t.cpu.values[extra_row * w + cpu::col::IS_REAL] = F::ONE;
-    t.cpu.values[extra_row * w + cpu::col::IS_INDIGEST] = F::ONE;
+    let inputs = [400u32, 250, 300, 75]; // n_in = 4, one full real block
+    let (m, p, t) = setup_with_inputs(&inputs);
+    let t = append_gratuitous_indigest_permutation(&p, &inputs, t);
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 

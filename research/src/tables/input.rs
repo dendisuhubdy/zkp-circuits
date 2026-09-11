@@ -44,7 +44,12 @@ pub mod col {
     /// How many times `SYS_READ` actually consumes this row's `(IDX, WORD)` on `INPUT_READ` —
     /// a free witness value, but pinned to reality by that bus's own balance (independent of
     /// `INPUT_DIGEST`, split precisely so `MULT_READ` cannot affect the digest's own count —
-    /// review round 1, C1).
+    /// review round 1, C1). Needs no range check of its own: `IDX` is already pinned to the
+    /// row's own index (one row per committed index, never revisited), so a too-large
+    /// `MULT_READ` only ever inflates *this one row's* `INPUT_READ` supply — it can't be
+    /// spread across multiple rows to hide an over-count, and an honest excess is caught by
+    /// `INPUT_READ`'s own balance against the true `SYS_READ` demand regardless of how big the
+    /// claimed value is.
     pub const MULT_READ: usize = 3;
     pub const WIDTH: usize = 4;
 }

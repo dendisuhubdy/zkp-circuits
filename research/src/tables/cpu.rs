@@ -658,21 +658,20 @@ where
         // on a digest row).
         for i in 0..4 { b.assert_bool(v(ACT0 + i)); }
         for i in 1..4 { b.assert_zero(v(ACT0 + i) * (one.clone() - v(ACT0 + i - 1))); }
-        // DEVIATION from the brief (found via self-review against every guest in
-        // `guests::all()`, all but `balance_check` passing empty inputs): `is_hash`/`is_digest`
-        // rows are never legitimately empty (a `POSEIDON2` syscall with `n=0` emits *zero*
-        // absorb rows at all — the emulator's absorb loop never runs — and a program always has
-        // at least one word), so "lane 0 always active" is a sound requirement for them. M4.1's
-        // indigest region is different: `hash::input_digest_rows` always emits *at least one*
-        // block even for `n_in = 0` (H_IN's own "the header alone still costs one permutation"
-        // rule), and that one block is legitimately all-inactive. Folding `is_indigest` into
-        // this same blanket rule wrongly forces `ACT0 = 1` even there, rejecting every guest
-        // with an empty input vector. `is_indigest` does not need its own version of this rule
-        // at all — the drain-consistency check below (`is_indigest.clone() * (v(HASH_LEFT) -
-        // active_sum - n(HASH_LEFT))`, unconditional, not split by not-final the way
-        // `is_digest`'s needed to be) already forces `active_sum = 0` whenever `HASH_LEFT = 0`,
-        // which combined with the contiguous-prefix property just above forces every lane
-        // (including `ACT0`) to 0 in exactly the case this blanket rule would otherwise reject.
+        // `is_hash`/`is_digest` rows are never legitimately empty (a `POSEIDON2` syscall with
+        // `n = 0` emits *zero* absorb rows at all — the emulator's absorb loop never runs — and
+        // a program always has at least one word), so "lane 0 always active" is a sound
+        // blanket requirement for them. `is_indigest` is deliberately left out of this same
+        // blanket rule and instead governed by two separate, more precise rules of its own:
+        // the salt row's own `IS_SALT * (1 - ACT3) = 0` (forcing it to absorb a full, genuine
+        // 4-word block — which cascades to `ACT0 = 1` there too, via the contiguous-prefix
+        // property just above), and the real (non-salt) rows'
+        // `is_real_indigest * (1 - ACT0) = 0` (review round 1, I2, right below this comment).
+        // Splitting it this way — rather than folding `is_indigest` whole into the blanket
+        // rule, which would also happen to be correct post-salt — keeps the salt row's "always
+        // a full block" invariant and the real rows' "always non-empty" invariant visibly
+        // distinct, matching how `fill_input_digest_rows` fills them for two structurally
+        // different reasons.
         b.assert_zero((is_hash.clone() + is_digest.clone()) * (one.clone() - v(ACT0)));
         // Review round 1 (I2): the precise version of the same requirement for `is_indigest`
         // is unconditional on *real* indigest rows — `is_real_indigest * (1 - ACT0) = 0`, not
