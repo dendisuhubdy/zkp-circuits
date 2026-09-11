@@ -57,10 +57,15 @@ the crate's zero-knowledge tests forbid). It is computed by the same digest-row 
 program digest uses (a second digest region
 absorbs the `input` memory space in index order). Reads then go through a witness `input` table
 (`IDX, WORD, IS_REAL, MULT_READ`, proof-declared height like the program table) that provides
-`(IDX, WORD)` on an `INPUT_WORD` bus consumed once by the digest rows and once per `READ_INPUT`,
+`(IDX, WORD)` on **two separate buses**, `INPUT_DIGEST` (count `IS_REAL`, consumed once per real
+row by the digest rows) and `INPUT_READ` (count `IS_REAL * MULT_READ`, consumed by `READ_INPUT`),
 so two reads of the same index return the same word and the verifier learns `H_IN` without the
 inputs. (Ruling 2026-09-11: this mirrors the program-digest mechanism exactly; an earlier draft
-said a read-only memory space, which would have needed new memory-table rules.) A guest that
+said a read-only memory space, which would have needed new memory-table rules.) (Ruling
+2026-09-11, implementation review round 1: a single `INPUT_WORD` bus with count `IS_REAL * (1 +
+MULT_READ)` let a prover shrink the digest's absorbed set while a genuine read at the dropped
+index still succeeded, since LogUp balances per `(idx, word)` key only, not per consumer class —
+splitting into `INPUT_DIGEST`/`INPUT_READ` closes it, at the cost of one more bus.) A guest that
 wants its inputs private publishes nothing about them beyond the hiding `H_IN` (opening it needs
 the salt); a guest that wants an input
 public (a bytecode commitment, a calldata hash) is expected to absorb it into an output. Cost: one

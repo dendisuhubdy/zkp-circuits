@@ -1,8 +1,9 @@
 # AGENTS.md — `research` (rand_zkvm)
 
 The Rand reference zkVM: an RV32I subset under a zero-knowledge batch STARK
-(Plonky3 0.7, Goldilocks), proved as seven AIR tables exchanging facts over
-nine LogUp buses, plus the M1.5 viewing-key layer (notes, envelopes, scoped
+(Plonky3 0.7, Goldilocks), proved as eight AIR tables exchanging facts over
+twelve LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
+buses), plus the M1.5 viewing-key layer (notes, envelopes, scoped
 disclosure, simulated ledger). Design docs are `docs/01–06`; the README has
 the reading order.
 

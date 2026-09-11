@@ -145,8 +145,48 @@ needs one, is read through the row's memory-access slot as register `a1`
 |---|---|---|---|
 | 0 | `HALT` | M1 | ends execution; every remaining row in the table is padding |
 | 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, `slot < 8`; constrained directly against the public values, at most once per slot, and any slot never written is pinned to zero |
-| 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — a prover-chosen witness value, and two reads of the same `idx` are not constrained to agree; see `docs/03-privacy.md` |
+| 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — bound to a commitment `H_IN` over the whole private-input vector since milestone 4.1 — two reads of the same `idx` are guaranteed to agree, and `idx >= n_in` cannot be satisfied at all; see `docs/03-privacy.md` |
 | 3 | `POSEIDON2 ptr n` | M3.2 | hashes the `n` words at word address `ptr` (`0 <= n <= POSEIDON2_MAX_WORDS = 4096`) with the Poseidon2 sponge (rate 4, overwrite mode, no padding — `hash::sponge_hash`, the exact `PaddingFreeSponge<_, 8, 4, 4>` semantics) and overwrites `ptr..ptr+8` with the 8-word (lo/hi) digest in place |
+
+## The flat-binary loader (M4.1)
+
+Before M4.1 every guest here was hand-assembled directly against `asm.rs`'s
+mnemonic helpers, since there was no RISC-V cross toolchain on the
+development machine. M4.1 adds `isa::Program::from_flat_binary(base_pc:
+u32, bytes: &[u8]) -> Result<Program, LoadError>`: the little-endian-word
+loader for a real compiled binary. It checks, in order: `bytes` is
+non-empty (`LoadError::Empty`); `bytes.len() % 4 == 0` (`LoadError::Length`,
+every word must be a full 4 bytes); `base_pc % 4 == 0`
+(`LoadError::BasePc`); the decoded word count does not exceed
+`(1 << tables::program::MAX_LOG_HEIGHT) - 1`, the largest program the
+`program` table's height can ever declare for any construction path
+(`LoadError::TooLong`); and, finally, that every word decodes
+(`Instr::decode`, the same check a hand-built `Program` enforces as a panic
+in `program_trace` — this is the `Result`-returning path in front of it),
+reporting the first undecodable word as `LoadError::Decode { index, word,
+err }`. `Program::to_flat_binary` is the exact inverse — little-endian
+bytes of every word, with no header at all; `base_pc` is carried only in
+the `Program` value itself and supplied out of band by the loader's caller
+(`guests::compiled::fib`'s `0x1000` literal, matching `guest-sdk/guest.ld`'s
+`ORIGIN`).
+
+**Guest entry convention.** A loaded program starts at `pc = base_pc`
+(`pv::PC_ENTRY`, unchanged); `sp` is *not* part of the loader's contract —
+it is initialised by the guest's own `_start` code to a linker-provided
+`__stack_top` symbol (`guest-sdk/guest.ld` places `RAM` at `ORIGIN =
+0x1000`, lays `.text`/`.rodata`/`.data`/`.bss` there, and defines
+`__stack_top` after a fixed-size stack region). `_start` (`guest-sdk`'s
+`global_asm!` block) does `la sp, __stack_top; call main`, then falls
+through to its own `li a7,0; ecall` (a `HALT`) as defense in depth if
+`main` ever returns instead of calling `guest_sdk::halt()` itself — this
+machine has no OS to return *to*.
+
+**Unsupported instructions.** `FENCE`, `EBREAK`, CSR instructions, and the
+A/C extensions are never emitted by `Instr::decode`'s recognized encodings,
+so a compiled guest that needs one fails at *load* time
+(`LoadError::Decode`), not silently at runtime — the same guarantee the
+hand-assembled path already had, now enforced against an externally
+compiled binary too.
 
 `NOTE_COMMIT`, `NULLIFY` and `MERKLE_VERIFY` (M3.3) are **not** separate
 syscalls: they are guest-level library routines built entirely on
@@ -166,8 +206,17 @@ value" is written to RAM in place at `ptr` rather than into `a0`. `a0`
 ecall's second argument) are still read the ordinary way, on the ecall row
 only.
 
-There is no RISC-V cross toolchain on the development machine, so every guest
-here is written directly against `asm.rs`'s mnemonic helpers (`src/asm.rs::ops`)
-rather than compiled from C or Rust `no_std`. A later milestone's `loader.rs`
-will load a flat binary (`objcopy -O binary`) built externally at `pc_entry`
-instead.
+Before M4.1 there was no RISC-V cross toolchain on the development machine,
+so every guest was written directly against `asm.rs`'s mnemonic helpers
+(`src/asm.rs::ops`) rather than compiled from C or Rust `no_std`. That
+toolchain now exists: `guest-sdk` (syscall wrappers and the guest entry
+point, `#![no_std]`) and `guests-compiled/` (per-guest crates targeting
+`riscv32im-unknown-none-elf`, built with `-C link-arg=-Tguest.ld` and
+converted to a flat image with `llvm-objcopy -O binary`, committed as
+`.bin` files with their build command in a `Makefile` — see
+`docs/04-guests.md`'s "Compiled guests" section) load through
+`Program::from_flat_binary`, above. The hand-assembled path against
+`asm.rs` remains fully supported and is not being retired — it stays the
+right choice for guests that don't need a `no_std` Rust build (small,
+`AGENTS.md`-style regression fixtures, or guests whose whole point is
+exercising a specific opcode sequence directly).

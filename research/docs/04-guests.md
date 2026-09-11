@@ -21,7 +21,7 @@ slower than the RISC-V native path:
 
 | EVM opcode(s) | Coprocessor needed | Notes |
 |---|---|---|
-| `KECCAK256` | Keccak-f\[1600\] table | `p3-keccak-air` already exists upstream and can be added as a sixth chip |
+| `KECCAK256` | Keccak-f\[1600\] table | the vendored Plonky3 0.7 set has `p3-keccak` (the permutation) but no `p3-keccak-air` — M4.2 hand-writes the chip (`docs/superpowers/specs/2026-09-11-zkvm-m4-design.md` §3) |
 | `ADDMOD`, `MULMOD`, `EXP` | 256-bit modular arithmetic | native words are 32-bit; a 256-bit value is eight limbs, and mulmod/expmod need a dedicated multi-limb multiplier, not four chained 32-bit ALU ops |
 | `ECRECOVER` (and any signature-checking precompile) | secp256k1 recovery | needs field/group arithmetic over a non-Goldilocks curve; this is exactly the CPI/secp256k1 gap noted for `randprotocol-svm` and is shared work |
 | `SLOAD`/`SSTORE` | Merkle-witness syscalls | EVM storage is a sparse Merkle tree keyed by 256-bit slots; each access becomes a `MERKLE_VERIFY`-style syscall against a public state root, which is milestone 3 machinery, not milestone 4's |
@@ -59,22 +59,66 @@ running through the general-purpose ALU.
 
 The EVM interpreter, because it is the more immediately useful target (an
 ERC-20 `transfer` proving under `R_exec` is the milestone's own exit
-criterion) and because `p3-keccak-air` already existing upstream removes the
-single largest unknown. The sBPF interpreter and its coprocessors follow
-once the general "interpreter guest + coprocessor table" pattern is proven
-out once, on the EVM.
+criterion). The vendored Plonky3 0.7 set has no `p3-keccak-air` (only the
+bare `p3-keccak` permutation — corrected above), so M4.2 hand-writes the
+Keccak-f[1600] chip rather than reusing an upstream one; this is now a
+known, scoped cost rather than an unknown. The sBPF interpreter and its
+coprocessors follow once the general "interpreter guest + coprocessor
+table" pattern is proven out once, on the EVM.
 
-## Compiled guests
+## Compiled guests (M4.1)
 
-M4.1 (Task 2, `guest-sdk`, `guests-compiled/`): measured numbers for the first
-guest compiled with the real `riscv32im-unknown-none-elf` toolchain and
-loaded as a flat binary (`Program::from_flat_binary`), rather than
-hand-assembled against `asm.rs`'s mnemonic helpers.
+Before M4.1, every guest in this crate was hand-assembled directly against
+`asm.rs`'s mnemonic helpers — there was no RISC-V cross toolchain on the
+development machine. M4.1 adds one:
 
-| Guest | Tier | Cycles | Proof size |
-|---|---|---|---|
-| `guests::compiled::fib` (`fib(20)`) | `Tier(10)` | 136 | 253208 bytes |
+- **`guest-sdk`** (`no_std`, `#![no_std]`): syscall wrappers as
+  `#[inline(always)]` `asm!` blocks matching `docs/01-isa.md`'s ABI exactly
+  (`read_input`, `write_output`, `poseidon2`), the guest entry point
+  (`_start`, a `global_asm!` block that sets `sp` from the linker-provided
+  `__stack_top` and calls `main`, falling through to a `HALT` ecall as
+  defense in depth if `main` ever returns), a panic handler (halts with
+  output slot 7 set to `0xdead_beef`), and `guest.ld`, the linker script
+  placing RAM at `ORIGIN = 0x1000` with a 64 KiB stack region.
+- **`guests-compiled/<name>/`**: one crate per compiled guest, targeting
+  `riscv32im-unknown-none-elf` (`.cargo/config.toml`: `-C
+  link-arg=-T../../guest-sdk/guest.ld` — a path relative to the crate
+  root, since the linker's cwd during the link step is the guest crate's
+  own directory, one level below where `guest.ld` lives; `-C
+  target-feature=-unaligned-scalar-mem`, explicit even though it is this
+  target's default, since a misaligned load/store is a constraint
+  violation in this machine, not something the compiler may assume the
+  hardware tolerates). Each guest's `Makefile` resolves `llvm-objcopy` out
+  of the toolchain's own sysroot (`rustc --print sysroot`, not a hardcoded
+  host triple — it isn't on `PATH`), builds with `cargo +1.98.1 build
+  --release`, and converts the ELF to a flat image with `llvm-objcopy -O
+  binary`; the Makefile header records the exact `rustc +1.98.1 --version`
+  the committed `.bin` was built with, and a clean rebuild reproduces the
+  identical sha256. The resulting `.bin` is committed (alongside its own
+  `.sha256`) so a reviewer without the target installed can still run
+  every test — `research/src/guests.rs`'s `compiled` module loads it with
+  `include_bytes!` + `Program::from_flat_binary(0x1000, BIN)`.
+
+One deviation worth knowing about: `guest-sdk::halt()` does **not** use
+`asm!`'s `options(noreturn)` (a literal reading of the design spec's own
+snippet would). On this bare-metal target, `rustc` unconditionally
+lowers the IR block LLVM synthesizes after a `noreturn` `asm!` into a
+genuine trap instruction (`0xc0001073`, disassembling as `unimp` — not
+`ECALL`/`EBREAK`, so `Instr::decode` correctly rejects it at load time).
+`halt()` instead ends with a real trailing `loop {}`, giving the compiler
+a genuine backward branch to satisfy `-> !` without needing to synthesize
+`unreachable` at all — the function still never returns, and the trailing
+word is never actually executed (the preceding `ecall` halts first), it
+only needs to be *decodable*, which it now is.
+
+Measured numbers for the first guest built this way:
+
+| Guest | Source | Tier | Cycles | Proof size |
+|---|---|---|---|---|
+| `fib(20)`, compiled (`guests::compiled::fib`) | `guests-compiled/fib` | `Tier(10)` | 136 | 253208 bytes |
 
 Measured by `research/tests/e2e.rs`'s `compiled_fib_proves_and_verifies`
 (`cargo +1.98.1 test -p rand_zkvm --test e2e compiled_fib -- --nocapture`,
-`FriProfile::Test`).
+`FriProfile::Test`), and confirmed against the hand-written
+`guests::fib` guest by `compiled_fib_matches_the_hand_written_guest` (same
+output, same public values, run through the same emulator).

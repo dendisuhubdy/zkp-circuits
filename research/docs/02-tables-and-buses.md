@@ -1,6 +1,6 @@
 # The tables and their buses
 
-The relation is proved as one batch of seven AIR tables under one commitment
+The relation is proved as one batch of eight AIR tables under one commitment
 and one FRI opening (`p3-batch-stark`). Tables never call each other
 directly; they exchange facts through named LogUp buses, and the batch
 verifier checks that every bus balances globally.
@@ -14,14 +14,20 @@ verifier checks that every bus balances globally.
                   MEMORY bus            ┌───────────┐             ALU bus
                             ◄─────      │    CPU    │      ─────►
                  (permutation)          └───────────┘            (lookup)
-                                        │        │
-                    ┌───────────────────┘        └───────────────┐
-                    ▼                                             ▼
-               ┌───────────┐                                 ┌───────────┐
-               │  MEMORY   │                                 │    ALU    │
-               └───────────┘                                 └───────────┘
-                     │ RANGE8                                      │ RANGE8 AND4 OR4 XOR4 POW2
-                     └──────────────────┬──────────────────────────┘
+                                        │   │    │
+                    ┌───────────────────┘   │    └───────────────┐
+                    ▼                       │                    ▼
+               ┌───────────┐                │               ┌───────────┐
+               │  MEMORY   │                │               │    ALU    │
+               └───────────┘                │               └───────────┘
+                     │ RANGE8                │ INPUT_DIGEST /      │ RANGE8 AND4 OR4 XOR4 POW2
+                     │                       │ INPUT_READ (M4.1)   │
+                     │                       ▼                     │
+                     │                 ┌───────────┐               │
+                     │                 │   INPUT   │  main; one row per
+                     │                 └───────────┘  committed input word
+                     │                       │ (no further buses)  │
+                     └──────────────────┬────┴──────────────────────┘
                               ┌──────────┴──────────┐
                               ▼                     ▼
                         ┌───────────┐         ┌───────────┐
@@ -34,10 +40,12 @@ verifier checks that every bus balances globally.
                         │  POSEIDON2  │  main; height = tier.poseidon2_height()
                         └─────────────┘
                     provides POSEIDON2 (lookup); consumed by cpu's hash rows
-                    (a POSEIDON2 syscall) *and* its digest rows (M3.4, hc)
+                    (a POSEIDON2 syscall), its digest rows (M3.4, hc),
+                    *and* its indigest rows (M4.1, H_IN)
 ```
 
-Ten buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `MEMORY`, `ALU`,
+Twelve buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
+`INPUT_READ` (M4.1, carried by the new `input` table), `MEMORY`, `ALU`,
 `RANGE8` and `POW2` (carried by the range table), `AND4`, `OR4`, `XOR4`
 (carried by the nibble table), and `POSEIDON2` (carried by the poseidon2
 table). Every one of these except `MEMORY` is a `LookupBus` (a subset
@@ -45,6 +53,72 @@ check: every value a consumer sends must appear, with enough multiplicity,
 in the provider's table). `MEMORY` is a `PermutationCheckBus` — both sides
 are prover-supplied main-trace rows, and the argument proved is multiset
 equality, not a lookup into a fixed table.
+
+## `input` — main, `col::WIDTH = 4` (M4.1)
+
+One row per committed private-input word: `IDX` (the row's own index, 0 at
+row 0, `+1` every row including through padding — input indices always
+start at 0 by definition, so unlike `program`'s `PC` there is no external
+`base_pc` anchor to worry about), `WORD` (the input value), `IS_REAL`, and
+`MULT_READ` (how many times `READ_INPUT` actually reads this index — a
+free witness value, pinned to reality only by its own bus's balance).
+`IS_REAL` is a boolean, monotone prefix exactly like every other main
+table's real/padding split; `IDX`'s `+1`-per-row chain needs no separate
+"no aliasing" argument the way `program`'s `PC` does, since starting at 0
+already makes every row's index unique.
+
+**Two buses, not one — review round 1 (C1).** An earlier design put both
+consumers of `(IDX, WORD)` — the digest's mandatory absorption and a
+`SYS_READ`'s optional one — on a single `INPUT_WORD` bus with count
+`IS_REAL * (1 + MULT_READ)`. That is unsound: LogUp balances per
+`(idx, word)` key only, not per *consumer class*, so a prover could shrink
+the digest's demand at some index (excluding a word from `H_IN`) while a
+genuine `READ_INPUT` at that same index still succeeded, consuming the
+row's now-sole remaining unit of supply — `H_IN` would then commit to
+*fewer* words than the guest actually read, with every constraint
+satisfied. The table now provides on **two separate buses** instead:
+
+- `INPUT_DIGEST`, count `IS_REAL` — the `cpu` table's `IS_INDIGEST` rows'
+  *only* source of `(idx, word)`, one unit per real row, completely
+  independent of how many times (if any) that index is read.
+- `INPUT_READ`, count `IS_REAL * MULT_READ` — `SYS_READ`'s only source,
+  `MULT_READ` unrelated to `INPUT_DIGEST`'s own count.
+
+With the two separated, `INPUT_DIGEST` alone carries exactly `program`'s
+`MULT_WORD = VALID` argument (the "`hc` binds the whole executable
+program" section, above): the cpu table's real (non-salt) `IS_INDIGEST`
+rows demand exactly the drained absorption chain's index set — `{0, ..,
+n_in-1}` with the words they actually absorbed, fixed independently of
+this table. For `INPUT_DIGEST` to balance, this table's real rows must
+supply *exactly* that set: a real row at `idx >= n_in` is an unclaimed
+supply (rejected — `LOOKUP_BALANCE_PANIC`), and an index the digest
+demands but this table doesn't supply as real is an unclaimed demand
+(also rejected) — either way, `real_count == n_in` is forced, and the
+absorbed words must equal this table's `WORD` values exactly.
+`INPUT_READ` then separately, and independently, ties `MULT_READ` to the
+true `SYS_READ` count per index, with no way for either bus to borrow
+slack from the other. `MULT_READ` needs no range check of its own: `IDX`
+is already pinned one row per committed index, never revisited, so a
+too-large `MULT_READ` only ever inflates *that one row's* `INPUT_READ`
+supply — it can't be spread across rows to hide an over-count, and any
+excess is caught by `INPUT_READ`'s own balance against the true
+`SYS_READ` demand regardless of magnitude.
+
+**Padding.** `WORD` and `MULT_READ` are both pinned to 0 wherever
+`IS_REAL = 0` (AGENTS.md invariant 1/2) — a stray nonzero `MULT_READ` on a
+padding row is exactly the "unconstrained column nothing currently reads"
+class of bug AGENTS.md's ALU lesson warns about, and pinning it is what
+makes `tests/cheating.rs`'s padding-row `MULT_READ` regression a real
+rejection rather than a no-op tamper.
+
+**Height.** `input_log_height(n)` follows `program_log_height`'s own
+"declare `n+1`, floor at `MIN_HEIGHT`" rule (`MIN_HEIGHT = 4`,
+`MIN_LOG_HEIGHT = 2`, `MAX_LOG_HEIGHT = 20` — a million private-input
+words, comfortably past any guest this crate runs, one size smaller than
+`program`'s ceiling since inputs are typically far shorter than programs).
+`Proof` carries the declared height as `input_log_height: u8`, exactly
+mirroring `program_log_height`; `Machine::verify` bounds it to
+`[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` before using it to size anything.
 
 ## `program` — main, `col::WIDTH = 108`
 
@@ -160,7 +234,7 @@ separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 exactly one traversal of the whole program for `hc`, regardless of how the
 program actually ran.
 
-## `cpu` — main, `col::WIDTH = 170`
+## `cpu` — main, `col::WIDTH = 222`
 
 Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
 recomputed — `is_load`/`is_store` are *expressions* the AIR computes from
@@ -185,10 +259,18 @@ five byte limbs `hp0..3`/`hp3_hi` of `hash_ptr` (ecall row only — the
 canonical-digest-encoding gadget's four columns `himax0..1`/`inv0..1`
 (write-back rows only), then the M3.4 digest-row columns (their own
 subsection below): `is_digest`, `digest_last`, 32 byte limbs `dhvl0..31` of
-the 8 output words, and the canonical-encoding gadget's `dhimax0..3`/
-`dinv0..3` (last digest row only). This is the only table with public
-values: `pc_entry`, the tier index, the eight output words, and (M3.4) the
-eight `hc` words, `pv::HC0..HC7`.
+the 8 output words, `dhimax0..3`/`dinv0..3` (the canonical-encoding
+gadget, last digest row only), and (M4.1, freeing the physical `hs0..7`
+cell at the digest-to-indigest transition for `H_IN`'s header seed) eight
+dedicated columns `dpout0..7` holding the last digest row's own real
+permutation output. Then the M4.1 indigest-row columns (their own
+subsection below, mirroring the digest-row prefix): `is_indigest`,
+`indigest_last`, `is_salt`, 32 byte limbs `ihvl0..31` of the 8 `H_IN`
+output words, and the canonical-encoding gadget's `ihimax0..3`/`iinv0..3`
+(last indigest row only). This is the only table with public
+values: `pc_entry`, the tier index, the eight output words, (M3.4) the
+eight `hc` words `pv::HC0..HC7`, and (M4.1) the eight `H_IN` words
+`pv::IN0..IN7` — `pv::NUM` grows from 18 to 26.
 
 Constraints, in words: `is_real` is boolean and monotone (once 0, stays 0);
 `clk` starts at 0 and increments by 1 on real rows; the first row's `pc`
@@ -503,6 +585,65 @@ rejected the same way M3.2's absorb-row `n`-binding is: `hash_left` cannot
 reach exactly 0 early without absorbing a full 4-word block every row but
 the last, and `digest_last`'s own pin desyncs the moment the group ends
 somewhere the witness didn't mark.
+
+### M4.1: the indigest-row region — `H_IN` in-circuit
+
+Right after the program-digest prefix ends comes a second, structurally
+identical digest region: `IS_INDIGEST` rows absorb the guest's committed
+private-input vector into `H_IN` (`pv::IN0..IN7`), reusing the same shared
+absorb machinery `IS_DIGEST`/`IS_HASH` already share (`HS0..7`, `HV0..3`,
+`ACT0..3`, `HASH_LEFT`, `HASH_IDX`, their byte limbs — all three selectors
+are pairwise mutually exclusive, so sharing is safe). This is a *mirror*
+of the digest-row prefix (`IS_DIGEST`/`DIGEST_LAST`/`DHVL0..31`/
+`DHIMAX0..3`/`DINV0..3`), not a generalization of it: `IS_INDIGEST` gets
+its own final-encoding columns (`IHVL0..31`/`IHIMAX0..3`/`IINV0..3`)
+rather than reusing `DHVL0..31`, since folding the two together would mean
+re-deriving every `DHVL`-gated constraint to branch on which selector fired
+and which `pv` slice to write, for a column-count saving this table's
+degree/height budget does not need.
+
+**The one real difference from the digest-row prefix: where the region is
+seeded.** The program digest is row 0 of the table, so it seeds its own
+header (`[HC_DOMAIN, base_pc, len]`) on `when_first_row` — there is no
+"row before it" to transition from. The indigest region has no such luxury
+(it isn't row 0, and — unlike a `POSEIDON2` syscall's absorb rows — there
+is no preceding ecall row to inherit from either), so its header
+(`[IN_DOMAIN, n_in, 0]`, one fewer real word than `hc`'s — no `base_pc`
+analogue for a flat input vector) is instead seeded on the *transition out
+of the program-digest prefix*, gated by `DIGEST_LAST` rather than
+`when_first_row`. This forced a second change: the program digest's last
+row's own real permutation output — needed by the honest trace one row
+later as `n(HS0..7)` before M4.1 — collided with the indigest header now
+wanting that same physical cell, so the last digest row's output moved to
+dedicated `DPOUT0..7` columns instead (see that column's doc comment); the
+`POSEIDON2` bus lookup and the `DHVL` canonical-encoding check both read
+`DPOUT0..7` on that one row instead of `n(HS0..7)`, with zero change
+everywhere else.
+
+**Salted, so `H_IN` is hiding as well as binding.** The **first** absorbed
+block of the indigest region is not a real input word at all — it is a
+128-bit salt (four fresh witness words drawn per proof from OS entropy,
+`Machine::prove`/`prove_on`), marked by a dedicated `IS_SALT` column (1 on
+exactly that one row, the mirror image of `INDIGEST_LAST`'s "exactly one
+row" pattern, at the opposite boundary). The salt row absorbs a full,
+unconditionally-active 4-word block (`IS_SALT * (1 - ACT3) = 0`) and is
+excluded from `INPUT_DIGEST`'s consume (`is_real_indigest = is_indigest -
+IS_SALT` gates it) and from the `HASH_LEFT` drain (the salt isn't one of
+the `n_in` committed words) — an unsalted `H_IN` would let a verifier who
+can enumerate candidate private-input vectors test them directly against
+`pv::IN0..7` (`docs/03-privacy.md`). `n_in == 0` needs no special case
+post-salt: the salt row alone already guarantees at least one permutation,
+so every real indigest row (unlike a digest-row-style "at least one row"
+convention) is legitimately non-empty by construction, and lane 0 must
+always be active there (`is_real_indigest * (1 - ACT0) = 0`) exactly like
+`is_hash`/`is_digest`.
+
+`INDIGEST_LAST`'s own row publishes `H_IN` to `pv::IN0..IN7`, the same
+canonical byte-decomposition-and-non-canonical-rejection gadget
+`DIGEST_LAST` uses for `pv::HC0..HC7`. Unlike `hc`, `H_IN` is **not**
+checked by `Machine::verify` against a caller-supplied value — it is a
+guest-visible commitment the guest itself opens (with the salt) if it
+chooses to, not a verifier-side identity check.
 
 ## `memory` — main, `col::WIDTH = 12`
 
@@ -849,8 +990,9 @@ exactly that same all-padding trace today.
 
 Measured (`p3_batch_stark::symbolic::get_max_constraint_degree`, pinned by
 `tests/tables.rs::alu_max_constraint_degree_is_pinned`) against the real,
-same-bus-packed lookup contexts: `program` 2, `cpu` 8, `memory` 4, `alu` 8,
-`range` 2, `nibble` 2, `poseidon2` 4 — `alu`'s comes from the M2.6 `div`
+same-bus-packed lookup contexts (M4.1, `machine::chips()` order): `program`
+2, `cpu` 8, `memory` 4, `alu` 8, `range` 2, `nibble` 2, `poseidon2` 4,
+`input` 2 — `alu`'s comes from the M2.6 `div`
 sign-fix identity, `cpu`'s from its packed lookup fraction-pins rather than
 its own row logic (whose costliest single constraint is only degree 6),
 `poseidon2`'s from its S-box split (see that table's own section). M3.2's
@@ -879,6 +1021,20 @@ encoding lane checks) reads that column directly instead, so none of them
 inherits an extra degree from redefining "last digest row" inline
 everywhere it's needed. `cpu`'s measured degree stays 8, not raised past it,
 by the same margin argument M3.2's additions already relied on.
+
+**M4.1's additions land the same way, measured, not assumed.** The
+indigest region mirrors the digest-row prefix's degree profile exactly
+(same absorb machinery, same canonical-encoding gadget, one deliberate
+degree-4 exception already covered above); the two-bus split
+(`INPUT_DIGEST`/`INPUT_READ`, review round 1) and the `is_real_indigest *
+(1 - ACT0) = 0` lane rule add nothing past what the existing worst case
+already spends. `cpu`'s measured degree stayed at 8 across both the
+initial M4.1 build and the review-round fixes (`tests/tables.rs::
+alu_max_constraint_degree_is_pinned`, re-run after each). `input`'s own
+degree is 2: `IS_REAL` alone (degree 1) provides `INPUT_DIGEST`, and
+`IS_REAL * MULT_READ` (degree 2) provides `INPUT_READ` — the same ceiling
+the earlier, since-replaced single-bus `IS_REAL * (1 + MULT_READ)` formula
+had.
 
 This config's ceiling is degree 8 (`generic_config`'s `log_blowup = 3` plus this
 machine's `is_zk = 1` hiding: `constraint_degree = max_degree + 1 ≤ 9` ⇒

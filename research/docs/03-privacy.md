@@ -63,31 +63,71 @@ first-verify time by roughly 100-130x, independent of `FriProfile` (see the
 caching paragraph below). Proof size drops a little further too: fewer
 preprocessed columns means smaller opening proofs.
 
-## Private inputs are witness, not yet bound to anything
+## Private inputs are bound to `H_IN` (M4.1)
 
-`READ_INPUT idx` (syscall 2) returns whatever word the prover supplies at
-that index — a value chosen by the prover, checked by nothing. Nothing ties
-two reads of the *same* index together either: the constraint system treats
-each `READ_INPUT` row independently, so `READ_INPUT 0` may return one word on
-one cycle and a different word on the next and the proof still verifies. The
-input array is a per-row witness, not a committed vector; a guest that needs a
-stable value must read it once and keep it in a register. Milestone 1's
-relation is existential: it proves *"there exist inputs such that running
-this program on them produced these outputs,"* full stop for a general
-guest — nothing outside the shielded transfer binds a private input to a
-note commitment, a nullifier, or a Merkle path against a public state root.
-For everything else, "the balance is private" means only that the verifier
-never sees the number, not that the number is tied to any real account.
+Before M4.1, `READ_INPUT idx` (syscall 2) returned whatever word the
+prover supplied at that index — a value chosen by the prover, checked by
+nothing, and nothing tied two reads of the *same* index together: the
+constraint system treated each `READ_INPUT` row independently, so
+`READ_INPUT 0` could return one word on one cycle and a different word on
+the next with the proof still verifying.
 
-The one exception is the shielded transfer guest, which binds its inputs by
+M4.1 closes this. `H_IN` — a Poseidon2 commitment over the guest's whole
+private-input vector, computed by `cpu`'s `IS_INDIGEST` rows the same way
+`hc` is computed by its `IS_DIGEST` rows (`docs/02-tables-and-buses.md`) —
+is bound to a new `input` witness table: every committed word lives on
+exactly one table row, and every `READ_INPUT idx` and every unit of the
+digest's own absorption draw from that same row through the `input`
+table's two buses (`INPUT_DIGEST`, `INPUT_READ`). Two reads of the same
+`idx` are now guaranteed to return the same word (both draw from the one
+row that index has), and `idx >= n_in` (the committed vector's own
+declared length) cannot be satisfied at all — there is no row to draw
+from, and the lookup fails to balance.
+
+**What `H_IN` reveals, and what it does not.** `H_IN` is salted (four
+witness words, drawn fresh per proof from OS entropy, absorbed as the
+first block ahead of the real input words) precisely so it is *hiding* as
+well as binding — unlike `hc` (below), a verifier who can enumerate
+candidate input vectors gets nowhere testing them against a published
+`pv::IN0..7`, since the salt is never published and folds non-invertibly
+into the digest (an earlier, unsalted design failed exactly this way: see
+`tests/zk.rs`'s `different_private_inputs_same_output_are_indistinguishable_
+in_public_values`, which is what caught it). `H_IN` alone does not make
+any input word *public* — it only makes repeated reads of the same index
+consistent and an out-of-range read unsatisfiable. A guest that wants one
+input word to be public (a bytecode commitment, a calldata hash) must
+still explicitly `WRITE_OUTPUT` it; nothing about `H_IN`'s own
+construction publishes anything beyond the 8-word commitment itself, and
+opening that commitment (proving which inputs it commits to) needs the
+salt, which never leaves the prover.
+
+Milestone 1's relation is still existential: it proves *"there exist
+inputs such that running this program on them produced these outputs,"*
+full stop for a general guest — `H_IN` makes the inputs a *fixed, agreed-
+upon* vector across the whole execution, but on its own it still binds
+nothing outside the proof to a note commitment, a nullifier, or a Merkle
+path against a public state root. For everything else, "the balance is
+private" means only that the verifier never sees the number, not that the
+number is tied to any real account.
+
+The shielded transfer guest additionally binds its own inputs by
 recomputing note commitments and a nullifier in-circuit, proving the spent
 commitment's membership in the commitment tree (`POSEIDON2`, `NOTE_COMMIT`,
 `NULLIFY`, `MERKLE_VERIFY` — `docs/06-viewing-keys.md`), and publishing a
 single digest of the result. That is a per-guest choice, not a machine
-property: `READ_INPUT` itself is still unchecked. Since milestone 3.3, the
-spent commitment `cm_in` itself is *not* public — only the tree root
-(`anchor`) it was proved against is — so the link from a note's creation to
-its spend is no longer visible on chain.
+property (`H_IN`, above, is the machine-level binding every guest gets
+for free). Since milestone 3.3, the spent commitment `cm_in` itself is
+*not* public — only the tree root (`anchor`) it was proved against is —
+so the link from a note's creation to its spend is no longer visible on
+chain.
+
+**One remaining gap M4.1 does not close (harmless, not a new leak):** the
+shielded-transfer guest's own inputs (`notes::input`) are now *doubly*
+bound — once by the machine-level `H_IN`, again by the guest's own
+commitment/nullifier logic above. Nothing about the second binding is
+weakened by the first, and nothing about the first leaks anything the
+second didn't already require the guest to prove; it is simply redundant
+coverage of the same private-input vector by two independent mechanisms.
 
 ## Selective disclosure: viewing keys
 
@@ -164,19 +204,27 @@ program-specific left in what it salts.
 ## What `verify` actually checks
 
 `Machine::verify(hc, proof)` — the code a node runs — checks, in order: the
-proof carries exactly `pv::NUM` (18) public values; every one of them is a
+proof carries exactly `pv::NUM` (26, since M4.1 added `pv::IN0..IN7` — was
+18) public values; every one of them is a
 canonical Goldilocks residue (`< p`, so `out0` and `out0 + p` are not two
 spellings of the same proof); `public_values[HC0..HC7]` equals the
-caller-supplied `hc`, word for word; `public_values[TIER]` equals
+caller-supplied `hc`, word for word (`public_values[IN0..IN7]`, `H_IN`, is
+*not* checked here — it has no caller-supplied counterpart to check
+against, unlike `hc`; see "Private inputs are bound to `H_IN`", above);
+`public_values[TIER]` equals
 `proof.tier`; `proof.tier` is one of the six values in `TIERS` (an
 attacker-chosen out-of-range tier is rejected here, before it can be used to
 compute a table height and panic); `proof.program_log_height` is within
 `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` (review fix — the same defensive pattern,
-`VerifyError::ProgramHeight` rather than a panic on an absurd shift); the
+`VerifyError::ProgramHeight` rather than a panic on an absurd shift);
+`proof.input_log_height` is within its own `[MIN_LOG_HEIGHT,
+MAX_LOG_HEIGHT]` (M4.1, the `input` table's exact analogue of the same
+check); the
 proof's degree bits match the heights that tier (and the declared program
-height) imply for all seven tables; and finally the batch STARK itself,
-against a verifier key recomputed from the tier and the declared program
-height — `Machine::verifier_key(tier, program_log_height)`, which includes
+and input heights) imply for all eight tables; and finally the batch
+STARK itself, against a verifier key recomputed from the tier and the two
+declared heights — `Machine::verifier_key(tier, program_log_height,
+input_log_height)`, which includes
 the range and nibble tables' preprocessed commitments (256 rows each, since
 M2.3 split the 2^16-row byte table in two) and the Poseidon2 chip's
 round-constant table. M3.4:
@@ -184,12 +232,19 @@ round-constant table. M3.4:
 `base_pc` to check it against — it is read out of the proof and bound only
 in-circuit, to the digest group's own `pc` (and, indirectly, to `hc` itself,
 since `Program::digest` absorbs `base_pc`). `Machine::verifier_key` caches
-this by `(tier, program_log_height)` now — still program-*content*-
-independent (review fix: the program table's height is a value the prover
-declares per proof, not derived from the tier, so the cache key needs both
+this by `(tier, program_log_height, input_log_height)` now (M4.1 grew the
+2-tuple to a 3-tuple — two independent, unrelated height parameters, so a
+folded single value would obscure rather than simplify) — still
+program-*content*-independent (review fix: the program table's height is a
+value the prover declares per proof, not derived from the tier, so the
+cache key needs it too
 — `docs/02-tables-and-buses.md`'s "Height" section) —
 `tests/e2e.rs::verifier_key_is_cached_after_first_verify` still measures
-the cached hit at under 40% of the first, uncached recomputation.
+the cached hit at under 40% of the first, uncached recomputation. Note for
+`Machine::verify`'s own signature: it is unchanged by any of this — only
+`Proof`'s and `pv`'s shapes grew — so no call site needs a source edit,
+only a recompile against the new shapes (see the fullnode sync note at the
+end of `docs/superpowers/plans/2026-09-11-zkvm-m4-1.md`).
 
 ## Tiers: what padding hides
 
@@ -232,7 +287,7 @@ refused by `build_traces`, not silently truncated.
 | Entry point `pc_entry` | public |
 | Gas tier `ℓ` | public per proof (the proof's own size already reveals its trace height, so hiding the tier index buys nothing at the single-proof level; a batch-level histogram, as the whitepaper describes, is a property of the aggregation layer, not of one proof) |
 | Eight output words | public |
-| Private inputs (`READ_INPUT` values) | hidden — witness only |
+| Private inputs (`READ_INPUT` values) | hidden — witness only; bound (M4.1) to a salted, hiding commitment `H_IN = pv::IN0..IN7` so repeated reads of the same index agree and out-of-range reads are unsatisfiable, but `H_IN` itself opens nothing without the salt (never published) |
 | Every register and memory value | hidden |
 | Every branch taken | hidden |
 | The exact cycle count | hidden — only the padded tier height is visible |
