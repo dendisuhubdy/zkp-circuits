@@ -9,12 +9,12 @@ the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (162 tests: 161 pass, 1 ignored).
-  Everything uses `FriProfile::Test`; measured on the last full run,
-  `tests/viewing.rs` takes ~205 s, `tests/bundle.rs` ~128 s (five
-  proof-backed bundle tests, plus eleven ledger-level ones sharing one
-  proof), `tests/e2e.rs` ~103 s, `tests/cheating.rs` ~26 s and
-  `tests/zk.rs` ~19 s. All green is the bar before any commit.
+- `cargo test` — the whole suite (164 tests: 163 pass, 1 ignored).
+  Everything uses `FriProfile::Test`; measured, `tests/bundle.rs` takes
+  ~231 s (seven proofs: five guest-level, plus one shared by every
+  ledger-level test and one for the 1-real-1-dummy shape),
+  `tests/viewing.rs` ~206 s, `tests/e2e.rs` ~103 s, `tests/cheating.rs`
+  ~26 s and `tests/zk.rs` ~19 s. All green is the bar before any commit.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one
   production-profile proof). The test suite covers everything it shows; don't
   run it casually.

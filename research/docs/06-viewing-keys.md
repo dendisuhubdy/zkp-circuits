@@ -333,6 +333,17 @@ bundle index with different `slot`s; the party it paid sees exactly one
 end, including the per-transaction scope (each of the two `TxKey`s opens
 exactly its own slot) and a stranger's key opening nothing.
 
+**A party's history is collected across both sequences before any nullifier
+is resolved.** `scan` walks every transfer envelope and every bundle envelope
+as receiver first, and only then builds the rows. This is a correctness
+condition, not an optimization: either sequence can spend the other's output
+— a transfer routinely spends a note a bundle paid out, and a bundle spends
+notes transfers paid out — so resolving `spent` while walking, one sequence
+to completion and then the other, would leave every such spend unnamed in
+whichever sequence came first, and `verify_row` would reject a row `scan`
+itself produced. With the two-pass form, walk order cannot affect the result
+at all.
+
 One asymmetry with transfers: a bundle `Sent` row may legitimately carry
 `spent: None`. A transfer row's `None` means a mint (no nullifier at all),
 but a bundle always publishes two nullifiers, and one of them may belong to a
@@ -587,11 +598,24 @@ bundle it would reject anyway:
 | 7 | the proof verifies under `bundle_program`'s `hc` — last, and only then | `Proof(..)` |
 
 Then, and only then: both nullifiers inserted, both commitments appended in
-slot order, the new root recorded, `fees_collected += fee`,
-`burned += burn`, the bundle pushed. `tests/bundle.rs` has one test per row of
-that table, plus the honest path and the replay.
+slot order, the new root recorded, `fee` and `burn` added to their running
+totals (saturating — a `u64` total over unboundedly many bundles can overflow
+where no single bundle's `< 2^63` amount can, and a saturated total is
+visibly wrong to an auditor where a wrapped one reads as almost nothing), the
+bundle pushed. `tests/bundle.rs` has one test per row of that table, plus the
+honest path and the replay.
 
-Three things are worth calling out about this order.
+**This is not `Ledger::apply`'s order, deliberately.** `apply` recomputes its
+digest *second*, right after the shape check; `apply_bundle` recomputes its
+digest *sixth*, after every window/set/tree lookup. A bundle digest is a
+Poseidon2 sponge over 47 words, and a `recent_roots` scan plus two `HashSet`
+probes plus two `HashMap` probes are nowhere near that cost, so §7's
+cheapest-first rule puts them ahead of it. `apply`'s own order is M3.3-era and
+was not changed to match: the property the two share, and the one that
+matters, is that every free structural check runs before the single expensive
+thing — the STARK verification — which is last in both.
+
+Three more things are worth calling out about this order.
 
 **Step 6 is where every in-circuit relation failure lands.** The ledger never
 runs any of the guest's arithmetic. `bundle_digest` fixes the preimage's 47th

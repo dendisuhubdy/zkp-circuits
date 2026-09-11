@@ -294,6 +294,11 @@ fn disclosure_scopes_and_row_verification() {
     assert_eq!(verify_row(l, &alice, &r), Err(RowError::Fields));
     let mut r = honest.clone(); r.tx = 3;
     assert_eq!(verify_row(l, &alice, &r), Err(RowError::Commitment));
+    // A transfer has exactly one commitment/nullifier slot, so any slot but 0 is meaningless
+    // on a `RowSource::Transfer` row — the transfer-side half of the check
+    // `tests/bundle.rs::disclosure_scopes_over_a_bundle` makes for slot 2 on a bundle row.
+    let mut r = honest.clone(); r.slot = 1;
+    assert_eq!(verify_row(l, &alice, &r), Err(RowError::Slot));
     let mut r = honest.clone(); r.spent = Some(s.alice_created);
     assert_eq!(verify_row(l, &alice, &r), Err(RowError::Party));
     let mut r = honest.clone(); r.spent = Some(Note { r: { let mut r = honest.spent.unwrap().r; r[0] ^= 1; r }, ..honest.spent.unwrap() });

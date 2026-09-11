@@ -12,10 +12,11 @@
 //! Shielded pool phase Z: the chain carries a second, independently numbered sequence of
 //! transactions, `bundles`. A [`Bundle`] is the design spec §3 shape — one anchor, two
 //! nullifiers, two commitments, `fee`, `burn`, `asset`, `time`, two envelopes — and
-//! [`Ledger::apply_bundle`] is its consensus check, built as a direct generalization of
-//! `apply` so the two check orders cannot drift (`docs/06-viewing-keys.md`'s "Ledger
-//! admission for bundles"). Both sequences share one tree, one nullifier set and one
-//! recent-roots window.
+//! [`Ledger::apply_bundle`] is its consensus check (`docs/06-viewing-keys.md`'s "Ledger
+//! admission for bundles"). It runs the same *kind* of checks as `apply` — every free
+//! structural one before the single expensive STARK verification — but in the spec's own
+//! cheapest-first order, which is not `apply`'s; see its doc comment. Both sequences share
+//! one tree, one nullifier set and one recent-roots window.
 
 use crate::isa::Program;
 use crate::machine::{Machine, Proof, VerifyError};
@@ -308,7 +309,14 @@ impl Ledger {
     /// legitimately needs the seconds the `ANCHOR_WINDOW` exists to give it. S1 will implement
     /// the rule against a real height.
     ///
-    /// Admission order, cheap before expensive, mirroring `apply`'s so the two cannot drift:
+    /// Admission order, cheapest first. It is **not** `apply`'s order, and the difference is
+    /// deliberate rather than drift: `apply` recomputes its digest second, immediately after
+    /// the shape check, while this recomputes sixth, after every window/set/tree lookup. A
+    /// bundle digest is a Poseidon2 sponge over 47 words; a `recent_roots` scan, two `HashSet`
+    /// probes and two `HashMap` probes together are not close to that. Ordering them
+    /// cheapest-first is what the design spec §7 asks for. What the two *do* share, and what
+    /// actually matters, is that every free structural check runs before the one expensive
+    /// thing, the STARK verification, which is last in both.
     ///
     /// 1. shape — the proof carries `pv::NUM` public values, and its eight digest words are
     ///    canonical field-to-`u32` values (nothing an honest trace can violate; checked so a
@@ -346,8 +354,12 @@ impl Ledger {
         for nf in &b.nullifiers { self.nullifiers.insert(*nf); }
         for cm in &b.commitments { self.tree.append(*cm); }
         self.record_root();
-        self.fees_collected += b.fee;
-        self.burned += b.burn;
+        // Saturating, not `+=`: these are `u64` totals over an unbounded number of bundles,
+        // each contributing a `fee`/`burn` the guest only range-checks `< 2^63`, so the sum
+        // can overflow in a way no single bundle can. A saturated total is visibly wrong to an
+        // auditor; a wrapped one silently reads as almost nothing.
+        self.fees_collected = self.fees_collected.saturating_add(b.fee);
+        self.burned = self.burned.saturating_add(b.burn);
         self.bundles.push(b.clone());
         Ok(self.bundles.len() - 1)
     }

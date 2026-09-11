@@ -178,7 +178,10 @@ pub struct Row {
     /// note whose nullifier (under the party's `nk`) is `nf`. What lets the nullifier be
     /// recomputed.
     ///
-    /// `None` on a transfer row means a mint (created from nothing, no nullifier at all). On a
+    /// `None` on a transfer row means a mint, and only a mint (created from nothing, no
+    /// nullifier at all): a transfer that spends a note the party received is always able to
+    /// name it, whichever sequence paid it — `scan` collects the party's whole history across
+    /// both before resolving any nullifier. On a
     /// bundle row it means the scan could not name the note behind `nullifiers[slot]` — either
     /// that slot held a *dummy* input (design spec §3: a dummy's nullifier is published like
     /// any other and is indistinguishable on chain), or the spent note never appeared in the
@@ -227,19 +230,41 @@ pub fn scan(ledger: &Ledger, d: &Disclosure) -> Vec<Row> {
             }
         }
         Disclosure::Party(vk) => {
-            // The party's own notes, accumulated as the scan goes, so a `Sent` row can name the
-            // note behind a nullifier. The spent note's *commitment* is never public (M3.3:
-            // `MERKLE_VERIFY` proves it in-circuit) — this is the only way to recover it, and
-            // it works only for someone who already holds the party's history.
+            // Pass 1: the party's whole note history, from BOTH sequences, before any `Sent`
+            // row asks which note a nullifier belongs to. The spent note's *commitment* is
+            // never public (M3.3: `MERKLE_VERIFY` proves it in-circuit), so this lookup is the
+            // only way to recover it, and it works only for someone who already holds the
+            // party's history.
+            //
+            // Collecting first is not an optimization, it is the correctness condition. The
+            // two sequences are numbered independently and either can spend the other's
+            // output: a transfer routinely spends a note a bundle paid out, and a bundle
+            // spends notes transfers paid out. Accumulating `owned` while walking — one
+            // sequence to completion and then the other — would leave every such spend with
+            // `spent: None` in whichever sequence happened to be walked first, and
+            // `verify_row` would then reject a transfer row `scan` itself had just produced
+            // (its permissive "nullifier I cannot name" arm is for bundle *dummy inputs*
+            // only). Walk order now cannot affect the result at all.
             let mut owned: Vec<Note> = Vec::new();
-            let spent_for = |owned: &[Note], nf: Word8| owned.iter().copied().find(|n| vk.nullifier(&n.commitment()) == nf);
+            for t in &ledger.txs {
+                if let Some((_, note)) = t.envelope.open_as_receiver(t.cm_out, vk) { owned.push(note); }
+            }
+            for b in &ledger.bundles {
+                for slot in 0..2usize {
+                    if let Some((_, note)) = b.envelopes[slot].open_as_receiver(b.commitments[slot], vk) { owned.push(note); }
+                }
+            }
+            let spent_for = |nf: Word8| owned.iter().copied().find(|n| vk.nullifier(&n.commitment()) == nf);
+            // Pass 2: the rows, transfers in chain order then bundles in chain order. The
+            // receiver openings are repeated here rather than cached from pass 1 — an ML-KEM
+            // decapsulation per envelope, cheap enough at this crate's scale, and it keeps the
+            // two passes independently readable.
             for (i, t) in ledger.txs.iter().enumerate() {
                 if let Some((_, note)) = t.envelope.open_as_receiver(t.cm_out, vk) {
-                    owned.push(note);
                     rows.push(Row::new(i, RowSource::Transfer, 0, t.cm_out, t.nf, Role::Received, note, None));
                 }
                 if let Some((_, note)) = t.envelope.open_as_sender(t.cm_out, vk) {
-                    let spent = t.nf.and_then(|nf| spent_for(&owned, nf));
+                    let spent = t.nf.and_then(spent_for);
                     rows.push(Row::new(i, RowSource::Transfer, 0, t.cm_out, t.nf, Role::Sent, note, spent));
                 }
             }
@@ -248,11 +273,10 @@ pub fn scan(ledger: &Ledger, d: &Disclosure) -> Vec<Row> {
                     let (cm, nf) = (b.commitments[slot], b.nullifiers[slot]);
                     let env = &b.envelopes[slot];
                     if let Some((_, note)) = env.open_as_receiver(cm, vk) {
-                        owned.push(note);
                         rows.push(Row::new(i, RowSource::Bundle, slot as u8, cm, Some(nf), Role::Received, note, None));
                     }
                     if let Some((_, note)) = env.open_as_sender(cm, vk) {
-                        rows.push(Row::new(i, RowSource::Bundle, slot as u8, cm, Some(nf), Role::Sent, note, spent_for(&owned, nf)));
+                        rows.push(Row::new(i, RowSource::Bundle, slot as u8, cm, Some(nf), Role::Sent, note, spent_for(nf)));
                     }
                 }
             }

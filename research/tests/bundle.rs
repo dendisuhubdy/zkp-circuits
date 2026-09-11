@@ -828,3 +828,154 @@ fn disclosure_scopes_over_a_bundle() {
     assert_eq!(verify_row(&l, &bob, &honest), Err(RowError::Party), "a row from one party's scope does not verify under another's");
     assert_eq!(verify_row(&l, &Disclosure::Transaction { tx: 0, key: f.keys[0] }, &honest), Err(RowError::Scope));
 }
+
+// ───────────── Fix round 1: cross-sequence spends, and a dummy input nobody owns ─────────────
+
+/// Review finding #1. A transfer that spends a note a **bundle** paid out. `scan` collects the
+/// party's history across both sequences before resolving any nullifier, so the transfer's
+/// `Sent` row names the bundle output it spent — and, the part that actually bit, every row
+/// `scan` produces passes its own `verify_row`. Before the fix the transfer loop ran to
+/// completion before the bundle loop, so the party's bundle outputs were not yet in `owned`
+/// when the transfer's nullifier was looked up: the row came back with `spent: None`, and
+/// `verify_row`'s permissive arm is deliberately bundle-only (it exists for dummy inputs), so
+/// `scan` handed back a row its own verifier rejected.
+#[test]
+fn a_transfer_that_spends_a_bundle_output_is_named_in_the_scan() {
+    let f = fixture();
+    let m = Machine::new(FriProfile::Test);
+    let mut l = fresh_ledger(f);
+    l.apply_bundle(&m, &shared_proof(f), &honest_bundle(f)).unwrap();
+    // Alice now owns her 500 change note — slot 1 of the bundle. Spend it to Bob by transfer.
+    let change = f.outputs[1];
+    let created = Note::new(f.bob.vk.pk(), f.alice.vk.pk(), change.amount, f.asset, l.now);
+    let env = Envelope::seal(&f.alice.vk, &f.bob.vk.address(), &created, &TxKey::random());
+    let (path, index) = l.path_for(&change.commitment()).expect("apply_bundle appended it");
+    let anchor = l.root();
+    let inputs = notes::transfer_inputs(&f.alice.sk, &change, &created, &path, index);
+    let (proof, _) = m.prove(&l.program, &inputs, None).unwrap();
+    let nf = f.alice.vk.nullifier(&change.commitment());
+    let tx = l.apply(&m, &proof, anchor, nf, created.commitment(), created.time, env).unwrap();
+
+    let alice = Disclosure::Party(f.alice.vk);
+    let rows = scan(&l, &alice);
+    let sent = rows.iter().find(|r| r.source == RowSource::Transfer && r.tx == tx).expect("the transfer's row").clone();
+    assert_eq!(sent.role, Role::Sent);
+    assert_eq!(sent.spent, Some(change), "the spent note was paid out by the bundle, one sequence over");
+    assert_eq!(sent.spent.map(|n| n.commitment()), Some(f.commitments[1]));
+    for r in &rows { verify_row(&l, &alice, r).unwrap(); }
+    let bob = Disclosure::Party(f.bob.vk);
+    for r in &scan(&l, &bob) { verify_row(&l, &bob, r).unwrap(); }
+
+    // And the permissiveness really is bundle-only: the same `spent: None` on a transfer row,
+    // which now can only mean a lie (a transfer either spends a nameable note or is a mint), is
+    // refused.
+    let mut r = sent.clone();
+    r.spent = None;
+    assert_eq!(verify_row(&l, &alice, &r), Err(RowError::Nullifier));
+}
+
+/// Review finding #3's fixture: a 1-real-1-dummy bundle, proved once. Alice spends her single
+/// minted note plus a dummy, pays Bob 900 with a 100 fee, and issues a zero-amount dummy output
+/// owned by a `ghost` party nothing in this test ever scans as. Separate from `Fixture` because
+/// it is a different bundle *shape*, which is the one thing a proof cannot be shared across.
+struct DummyFixture {
+    alice: Party,
+    bob: Party,
+    bridge: Party,
+    in_note: Note,
+    envelopes: [Envelope; 2],
+    anchor: Word8,
+    nullifiers: [Word8; 2],
+    commitments: [Word8; 2],
+    fee: u64,
+    asset: u32,
+    mint_time: u32,
+    time: u32,
+    proof: Proof,
+}
+
+fn dummy_fixture() -> &'static DummyFixture {
+    static FIXTURE: OnceLock<DummyFixture> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let m = Machine::new(FriProfile::Test);
+        let (alice, bob, bridge, ghost) = (Party::new(), Party::new(), Party::new(), Party::new());
+        let (asset, mint_time) = (3u32, 1_700_000_000u32);
+        let mut ledger = Ledger::new(mint_time);
+        let in_note = Note::new(alice.vk.pk(), bridge.vk.pk(), 1_000, asset, mint_time);
+        ledger.mint(&in_note, Envelope::seal(&bridge.vk, &alice.vk.address(), &in_note, &TxKey::random())).unwrap();
+        ledger.advance(60);
+        let (time, anchor) = (ledger.now, ledger.root());
+        let (path, index) = ledger.path_for(&in_note.commitment()).unwrap();
+        let dummy_in = dummy_input(asset, time);
+        let inputs = [(in_note, path, index), dummy_in];
+        let outputs = [
+            Note::new(bob.vk.pk(), alice.vk.pk(), 900, asset, time),
+            Note::new(ghost.vk.pk(), alice.vk.pk(), 0, asset, time), // the dummy output, fresh `r`
+        ];
+        let (fee, burn) = (100u64, 0u64); // 1_000 == 900 + 0 + 100 + 0
+        let envelopes = [
+            Envelope::seal(&alice.vk, &bob.vk.address(), &outputs[0], &TxKey::random()),
+            Envelope::seal(&alice.vk, &ghost.vk.address(), &outputs[1], &TxKey::random()),
+        ];
+        let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
+        let (proof, _) = m.prove(&ledger.bundle_program, &inputs_vec, None).unwrap();
+        // A dummy input's nullifier is computed exactly like a real one (§4 item 3 — `NULLIFY`
+        // runs outside the skip branch), over a `cm_in` whose owner the guest forces to
+        // `pk_self`, so the host reference has to do the same.
+        let dummy_cm_in = Note { pk: alice.vk.pk(), ..dummy_in.0 }.commitment();
+        let nullifiers = [alice.vk.nullifier(&in_note.commitment()), alice.vk.nullifier(&dummy_cm_in)];
+        let commitments = [outputs[0].commitment(), outputs[1].commitment()];
+        DummyFixture { alice, bob, bridge, in_note, envelopes, anchor, nullifiers, commitments, fee, asset, mint_time, time, proof }
+    })
+}
+
+/// Review finding #3. A bundle with a dummy input: nothing in the party's history has the
+/// nullifier published in slot 1, because no note ever had it — it is a dummy's, and the chain
+/// cannot tell the difference (§3). The resulting `Sent` row carries `spent: None` and
+/// `verify_row` accepts it; this test is what pins that permissive branch, which is otherwise
+/// only reachable in a shape no other test builds.
+#[test]
+fn a_bundles_dummy_input_leaves_a_sent_row_with_no_spent_note() {
+    let f = dummy_fixture();
+    let m = Machine::new(FriProfile::Test);
+    let mut l = Ledger::new(f.mint_time);
+    l.mint(&f.in_note, Envelope::seal(&f.bridge.vk, &f.alice.vk.address(), &f.in_note, &TxKey::random())).unwrap();
+    l.advance(f.time - f.mint_time);
+    assert_eq!(l.root(), f.anchor);
+    let b = Bundle {
+        anchor: f.anchor,
+        nullifiers: f.nullifiers,
+        commitments: f.commitments,
+        fee: f.fee,
+        burn: 0,
+        asset: f.asset,
+        time: f.time,
+        envelopes: f.envelopes.clone(),
+    };
+    l.apply_bundle(&m, &f.proof, &b).unwrap();
+    // §3, at the ledger: a dummy's nullifier and commitment take the same path as a real one.
+    // Nothing about the chain state says which slot was the dummy.
+    assert!(l.has_nullifier(&f.nullifiers[1]));
+    assert!(l.has_commitment(&f.commitments[1]));
+    assert_eq!(l.fees_collected, f.fee);
+
+    let alice = Disclosure::Party(f.alice.vk);
+    let rows = scan(&l, &alice);
+    assert_eq!(
+        rows.iter().map(|r| (r.source, r.slot, r.role)).collect::<Vec<_>>(),
+        vec![
+            (RowSource::Transfer, 0, Role::Received), // the mint she was paid
+            (RowSource::Bundle, 0, Role::Sent),       // Bob's output
+            (RowSource::Bundle, 1, Role::Sent),       // the dummy output
+        ]
+    );
+    assert_eq!(rows[1].spent, Some(f.in_note), "slot 0's nullifier is her real input");
+    assert_eq!(rows[2].spent, None, "slot 1's nullifier belongs to a dummy no one owns");
+    assert_eq!(rows[2].nf, Some(f.nullifiers[1]), "unnamed, but still pinned to the chain");
+    for r in &rows { verify_row(&l, &alice, r).unwrap(); }
+
+    let bob = Disclosure::Party(f.bob.vk);
+    let rows_bob = scan(&l, &bob);
+    assert_eq!(rows_bob.iter().map(|r| (r.source, r.slot, r.role, r.amount)).collect::<Vec<_>>(), vec![(RowSource::Bundle, 0, Role::Received, 900)]);
+    for r in &rows_bob { verify_row(&l, &bob, r).unwrap(); }
+}
