@@ -101,7 +101,7 @@ is unaffected.
 **Equality contract.** The chip's output on every test vector must equal `p3_keccak`'s
 `KeccakF` bit for bit; a randomized test compares 1,000 states.
 
-### 3.1 Proposed amendment to §3 (2026-09-12, awaiting the user's ruling before M4.2 is planned)
+### 3.1 Amendment to §3 (proposed 2026-09-12, **approved by the user 2026-09-12**; supersedes §3 where they differ)
 
 A code-level survey of how the Poseidon2 chip is wired (`research/src/tables/{poseidon2,cpu}.rs`,
 `machine.rs`, `emulator.rs`) found four places where §3 as written does not fit the machine.
