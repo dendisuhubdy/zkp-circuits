@@ -11,11 +11,17 @@ use rand_zkvm::notes::{self, domain, output_digest, Note, SpendKey, ViewingKey, 
 use rand_zkvm::tables::{cpu, F};
 use rand_zkvm::viewing::{scan, verify_row, Disclosure, Envelope, Role, RowError, TxKey};
 use p3_field::PrimeCharacteristicRing;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+
+/// `rejects()` — anything other than a constraint failure or a verify error is not a
+/// rejection; `tests/cheating.rs` explains the discipline and owns the test of the helper.
+mod common;
+use common::rejects;
 
 #[test]
 fn domains_and_lengths_separate() {
-    assert_ne!(notes::hash(domain::NK, &[1, 2]), notes::hash(domain::PK, &[1, 2]), "different domains separate");
+    // Both domains take an 8-word message in real use (`sk` for NK, `nk` for PK), so this
+    // pair is at the length the call sites actually fix.
+    assert_ne!(notes::hash(domain::NK, &[1, 2, 3, 4, 5, 6, 7, 8]), notes::hash(domain::PK, &[1, 2, 3, 4, 5, 6, 7, 8]), "different domains separate");
     assert_ne!(notes::hash(domain::CM, &[1, 2]), notes::hash(domain::CM, &[1, 3]), "different messages separate");
     // NOT a collision to guard against: a padding-free sponge starting from an all-zero state
     // cannot distinguish a message from itself with extra zero words appended *within the same
@@ -27,20 +33,20 @@ fn domains_and_lengths_separate() {
     // by the call site (`Note::WORDS`, `nk`/`cm`'s 8 words, ...), never attacker-chosen, so no
     // real message this crate hashes can be reinterpreted as a shorter or longer one.
     assert_eq!(notes::hash(domain::CM, &[1, 2, 0]), notes::hash(domain::CM, &[1, 2]), "documented same-block zero-padding property, not a bug");
-    let sk = SpendKey([1, 2]);
+    let sk = SpendKey([1, 2, 3, 4, 5, 6, 7, 8]);
     let vk = sk.viewing_key();
-    assert_ne!(vk.nk[..2], sk.0, "the viewing key is not the spend key, even in its low words");
+    assert_ne!(vk.nk, sk.0, "the viewing key is not the spend key");
     assert_ne!(vk.pk(), vk.nk);
-    assert_ne!(vk.ovk(), SpendKey([1, 3]).viewing_key().ovk());
+    assert_ne!(vk.ovk(), SpendKey([1, 2, 3, 4, 5, 6, 7, 9]).viewing_key().ovk());
 }
 
-/// M3.3 widths: every key/commitment/nullifier/tree-node hash is `Word8` (8 machine words);
-/// `SpendKey` alone stays two words (nothing hashes it in-circuit except `H_NK`).
+/// M3.3 widths: every key/commitment/nullifier/tree-node hash is `Word8` (8 machine words),
+/// and so is `SpendKey` itself (see `spend_keys_are_256_bits_and_nk_hashes_all_eight_words`).
 #[test]
 fn digest_widths_are_eight_words() {
     let sk = SpendKey::random();
     let vk = sk.viewing_key();
-    assert_eq!(sk.0.len(), 2);
+    assert_eq!(sk.0.len(), 8);
     assert_eq!(vk.nk.len(), 8);
     assert_eq!(vk.pk().len(), 8);
     let note = Note::new(vk.pk(), vk.pk(), 1, 1, 0);
@@ -87,6 +93,22 @@ fn merkle_verify_matches_a_host_side_tree() {
     }
 }
 
+/// The looped `MERKLE_VERIFY`'s index-shifting logic against more than 5 sequential indices:
+/// random leaves, a larger tree, and index bit patterns covering first/second/interior/last.
+#[test]
+fn merkle_verify_loop_matches_a_host_side_tree_for_random_leaves() {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let mut tree = CommitmentTree::new();
+    let leaves: Vec<Word8> = (0..37u32).map(|_| notes::hash(domain::TEST, &[rng.next_u32()])).collect();
+    for cm in &leaves { tree.append(*cm); }
+    for i in [0usize, 1, 17, 36] { // first, second, an interior, and the last-appended leaf
+        let path = tree.path(i);
+        let e = execute(&guests::merkle_probe(leaves[i], &path, i as u32), &[], 1 << 20).unwrap();
+        assert_eq!(e.outputs[..8], tree.root(), "leaf {i}");
+    }
+}
+
 struct Party { sk: SpendKey, vk: ViewingKey }
 impl Party {
     fn new() -> Party { let sk = SpendKey::random(); Party { sk, vk: sk.viewing_key() } }
@@ -106,7 +128,7 @@ fn build_transfer(sender: &Party, spent: &Note, receiver: &ViewingKey, now: u32,
     (created, env, key, inputs, anchor, nf)
 }
 
-fn mint(ledger: &mut Ledger, minter: &Party, to: &ViewingKey, amount: u32, asset: u32) -> Note {
+fn mint(ledger: &mut Ledger, minter: &Party, to: &ViewingKey, amount: u64, asset: u32) -> Note {
     let note = Note::new(to.pk(), minter.vk.pk(), amount, asset, ledger.now);
     let env = Envelope::seal(&minter.vk, &to.address(), &note, &TxKey::random());
     ledger.mint(&note, env).unwrap();
@@ -133,18 +155,23 @@ fn transfer_guest_proves_membership_and_computes_the_reference_outputs() {
     assert_eq!(nf, alice.vk.nullifier(&spent.commitment()));
 }
 
-/// M3.3's measured cost (`docs/06-viewing-keys.md`'s cost table): 190 Poseidon2 permutations
-/// from `execute()` itself (5 non-Merkle hash calls at `Word8` widths plus 32 Merkle levels at
-/// 5 permutations each plus the 7-permutation output-commitment digest) and 3 764 cycles.
+/// Measured cost (`docs/06-viewing-keys.md`'s cost table): 190 Poseidon2 permutations from
+/// `execute()` itself (5 non-Merkle hash calls at `Word8` widths plus 32 Merkle levels at 5
+/// permutations each plus the 7-permutation output-commitment digest) and 3 896 cycles.
 ///
 /// M3.4 adds `Program::digest_rows()` permutations to *every* proof (the program's own `hc`,
-/// unconditional on how the guest ran) and counts them as cycles too: `transfer`'s program is
-/// 4 554 words, i.e. 1 139 digest rows. Total: 3 764 + 1 139 = 4 903 cycles (over tier 12's
-/// 4 095-cycle budget — `transfer` now needs at least tier 14) and 190 + 1 139 = 1 329
-/// permutations (over tier 12's `poseidon2_height() / 32` = 512 slots, and even tier 14's
-/// unmodified `2^(t+1)` would only give 1 024 — this is why `Tier::poseidon2_height` is
-/// `2^(t+2)`, not `2^(t+1)`, as of M3.4: 2 048 slots at tier 14, comfortably enough). Pinned so
-/// a future change to the guest, the hash, or the digest-row cost model is caught here rather
+/// unconditional on how the guest ran) and counts them as cycles too. Task 1 (shielded pool
+/// phase Z) replaced `MERKLE_VERIFY`'s 32-times-unrolled body with a counted loop compiled
+/// once and executed 32 times by ordinary branch/jump control flow: execution cycles rose
+/// slightly (3 764 → 3 896 — the loop's per-iteration `andi`/branch/`srli`/`addi×2`/`jal`
+/// bookkeeping costs a little more than the unrolled version's straight-line code) but the
+/// *compiled program* shrank drastically, since the loop body is emitted once instead of 32
+/// times: `transfer`'s program dropped from 4 554 words (1 139 digest rows) to 1 771 words
+/// (443 digest rows). Total: 3 896 + 443 = 4 339 cycles (still over tier 12's 4 095-cycle
+/// budget, so `transfer` still needs at least tier 14 — M3.3's unrolled figure of 4 903 cycles
+/// needing tier 14 is superseded by this smaller-but-still-tier-14 number) and 190 + 443 = 633
+/// permutations (well under tier 14's `poseidon2_height() / 32` = 2 048 slots). Pinned so a
+/// future change to the guest, the hash, or the digest-row cost model is caught here rather
 /// than surfacing as a mysterious `NoTier`/`TooManyCycles`.
 #[test]
 fn transfer_guest_permutation_and_row_counts_are_measured() {
@@ -161,16 +188,18 @@ fn transfer_guest_permutation_and_row_counts_are_measured() {
     let permutations = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. }))).count();
     let hash_calls = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Ecall { .. }))).count();
     assert_eq!(hash_calls, 5 + DEPTH + 1, "5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest");
-    assert_eq!(permutations, 190);
-    assert_eq!(e.cycles(), 3764);
-    assert_eq!(program.digest_rows(), 1139, "transfer's word count, hence its hc cost, is pinned here");
+    assert_eq!(permutations, 194);
+    assert_eq!(e.cycles(), 3948);
+    assert_eq!(program.digest_rows(), 455, "transfer's word count, hence its hc cost, is pinned here");
     let total_cycles = e.cycles() + program.digest_rows();
     let total_permutations = permutations + program.digest_rows();
-    assert_eq!(total_cycles, 4903);
-    assert_eq!(total_permutations, 1329);
+    assert_eq!(total_cycles, 4403);
+    assert_eq!(total_permutations, 649);
     assert_eq!(Tier::for_cycles(total_cycles), Some(Tier(14)));
     assert!(total_cycles <= Tier(14).max_cycles());
     assert!(total_permutations <= Tier(14).poseidon2_height() / 32, "must fit the tier's permutation slots, not just its cycle budget");
+    eprintln!("transfer: {} program words, {} exec cycles, {} digest rows, {} total cycles, tier {:?}",
+        program.len(), e.cycles(), program.digest_rows(), total_cycles, Tier::for_cycles(total_cycles));
 }
 
 #[test]
@@ -271,6 +300,11 @@ fn disclosure_scopes_and_row_verification() {
     assert_eq!(verify_row(l, &alice, &r), Err(RowError::Fields));
     let mut r = honest.clone(); r.tx = 3;
     assert_eq!(verify_row(l, &alice, &r), Err(RowError::Commitment));
+    // A transfer has exactly one commitment/nullifier slot, so any slot but 0 is meaningless
+    // on a `RowSource::Transfer` row — the transfer-side half of the check
+    // `tests/bundle.rs::disclosure_scopes_over_a_bundle` makes for slot 2 on a bundle row.
+    let mut r = honest.clone(); r.slot = 1;
+    assert_eq!(verify_row(l, &alice, &r), Err(RowError::Slot));
     let mut r = honest.clone(); r.spent = Some(s.alice_created);
     assert_eq!(verify_row(l, &alice, &r), Err(RowError::Party));
     let mut r = honest.clone(); r.spent = Some(Note { r: { let mut r = honest.spent.unwrap().r; r[0] ^= 1; r }, ..honest.spent.unwrap() });
@@ -278,19 +312,6 @@ fn disclosure_scopes_and_row_verification() {
     // A row from one disclosure does not verify under another scope.
     assert_eq!(verify_row(l, &bob, &honest), Err(RowError::Party));
     assert_eq!(verify_row(l, &one, &honest), Err(RowError::Scope));
-}
-
-/// Anything other than a constraint failure or a verify error is not a rejection
-/// (`tests/cheating.rs` explains the discipline).
-fn rejects(f: impl FnOnce() -> Result<(), rand_zkvm::machine::VerifyError>) -> bool {
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(Ok(())) => false,
-        Ok(Err(_)) => true,
-        Err(p) => {
-            let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
-            msg.contains("constraints not satisfied on row")
-        }
-    }
 }
 
 #[test]
@@ -367,6 +388,45 @@ fn a_transfer_with_a_wrong_merkle_path_is_rejected() {
     assert!(matches!(ledger.apply(&m, &proof, bad_anchor, nf, created.commitment(), created.time, env), Err(LedgerError::UnknownAnchor(_))));
 }
 
+/// A note whose real amount needs more than 32 bits (`> u32::MAX`) cannot be spent by a
+/// witness that only supplies the low word and zeroes the high one. `NOTE_COMMIT` hashes both
+/// `amount_lo` and `amount_hi`, so lying about the high word produces a `cm_in` different from
+/// the one actually in the tree; `MERKLE_VERIFY`, honestly run against that wrong leaf with
+/// the *real* path/index, computes a root that is (with overwhelming probability) not
+/// `ledger.root()`. `apply` is handed `ledger.root()` as the claimed anchor — what a submitter
+/// presenting this note as legitimately anchored would claim — but the guest's published
+/// output digest was folded from the wrong root, so it can never match what `apply`
+/// recomputes, and the transfer is rejected with `BadDigest`. This is exactly the closed gap
+/// `u64` amounts fix: at the old `u32` width there was no high word to lie about in the first
+/// place, so a value like this could never even be represented.
+#[test]
+fn spending_a_note_by_truncating_its_amount_to_32_bits_is_rejected() {
+    let m = Machine::new(FriProfile::Test);
+    let (alice, bob, bridge) = (Party::new(), Party::new(), Party::new());
+    let mut ledger = Ledger::new(1_700_000_000);
+    let true_amount: u64 = (1u64 << 32) + 5; // does not fit in 32 bits
+    let note = mint(&mut ledger, &bridge, &alice.vk, true_amount, 1);
+    ledger.advance(1);
+    let (path, index) = ledger.path_for(&note.commitment()).unwrap();
+    // Build a "spent" note as if the real amount were only its low 32 bits (amount_hi lied
+    // to zero), and a matching "created" note of that (wrong, truncated) amount.
+    let lying_spent = Note { amount: 5, ..note };
+    let created = Note::new(bob.vk.pk(), alice.vk.pk(), 5, note.asset, ledger.now);
+    let inputs = notes::transfer_inputs(&alice.sk, &lying_spent, &created, &path, index);
+    let e = execute(&ledger.program, &inputs, 1 << 22).unwrap();
+    assert!(e.halted);
+    let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
+    // The STARK itself verifies fine — the guest faithfully ran with these (dishonest) inputs,
+    // it just proved membership of the wrong leaf.
+    assert!(m.verify(&ledger.program.digest(), &proof).is_ok());
+    let nf = alice.vk.nullifier(&lying_spent.commitment());
+    let env = Envelope::seal(&alice.vk, &bob.vk.address(), &created, &TxKey::random());
+    assert!(matches!(
+        ledger.apply(&m, &proof, ledger.root(), nf, created.commitment(), created.time, env),
+        Err(LedgerError::BadDigest)
+    ), "the guest's real digest was folded from the wrong (truncated-amount) leaf's root, so it cannot match what apply recomputes for the claimed anchor");
+}
+
 /// A proof built against a once-valid root that has since scrolled out of the ledger's
 /// recent-roots window is rejected — even though the proof is perfectly valid math (Merkle
 /// membership against *that* root is true forever), and even though nothing else about the
@@ -382,12 +442,35 @@ fn a_stale_anchor_is_rejected_by_the_ledger() {
     let (created, env, _, inputs, anchor, nf) = build_transfer(&alice, &note, &bob.vk, ledger.now, &ledger);
     let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
     assert!(m.verify(&ledger.program.digest(), &proof).is_ok(), "the proof is valid math regardless of what the ledger does next");
-    // Push the tree far enough that `anchor` falls out of the 16-entry recent-roots window
-    // (one root recorded per mint).
-    for _ in 0..20 {
+    // Push the tree far enough that `anchor` falls out of the `Ledger::ANCHOR_WINDOW`-entry
+    // recent-roots window (one root recorded per mint). `anchor` is the newest entry when the
+    // transfer is built, so it takes a full window's worth of later roots to evict it — 65
+    // mints, one more than the 64-entry window, with no reliance on the exact arithmetic.
+    for _ in 0..Ledger::ANCHOR_WINDOW + 1 {
         let filler = Party::new();
         mint(&mut ledger, &bridge, &filler.vk, 1, 9);
     }
     assert_ne!(ledger.root(), anchor);
     assert!(matches!(ledger.apply(&m, &proof, anchor, nf, created.commitment(), created.time, env), Err(LedgerError::UnknownAnchor(a)) if a == anchor));
+}
+
+/// Shielded pool phase Z follow-up: `pk = H_PK(H_NK(sk))` is known to every counterparty (the
+/// `from` field of a received note), so a 64-bit `sk` would be a brute-force target. The key is
+/// 256 bits like every other key here, and `H_NK` hashes all eight words.
+#[test]
+fn spend_keys_are_256_bits_and_nk_hashes_all_eight_words() {
+    use rand_zkvm::notes::{hash, domain, SpendKey};
+    let sk = SpendKey::random();
+    assert_eq!(sk.0.len(), 8);
+    // Two keys differing only in the last word must derive different viewing keys: the
+    // whole 256-bit key is hashed, not a 64-bit prefix.
+    let mut other = sk;
+    other.0[7] ^= 1;
+    assert_ne!(sk.viewing_key(), other.viewing_key());
+    assert_eq!(sk.viewing_key().nk, hash(domain::NK, &sk.0));
+    // The private-input layouts start with the eight sk words.
+    assert_eq!(rand_zkvm::notes::input::IN_FROM, 8);
+    assert_eq!(rand_zkvm::notes::input::COUNT, 302);
+    assert_eq!(rand_zkvm::notes::bundle_input::IN1_FROM, 8);
+    assert_eq!(rand_zkvm::notes::bundle_input::COUNT, 612);
 }
