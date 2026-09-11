@@ -51,9 +51,12 @@ with `-C target-feature=-unaligned-scalar-mem` (the default for this target).
 repeated reads of the same index (`docs/03-privacy.md`). M4.1 adds an input commitment:
 `pv::IN0..IN7` (8 new public values, `pv::NUM` 18 → 26) carry `H_IN = Poseidon2(domain IN,
 inputs)`, computed by the same digest-row mechanism the program digest uses (a second digest region
-absorbs the `input` memory space in index order). Reads then go through the memory table against
-that space (`space = 2`, read-only, initialised from the witness and digested), so two reads of the
-same index return the same word and the verifier learns `H_IN` without the inputs. A guest that
+absorbs the `input` memory space in index order). Reads then go through a witness `input` table
+(`IDX, WORD, IS_REAL, MULT_READ`, proof-declared height like the program table) that provides
+`(IDX, WORD)` on an `INPUT_WORD` bus consumed once by the digest rows and once per `READ_INPUT`,
+so two reads of the same index return the same word and the verifier learns `H_IN` without the
+inputs. (Ruling 2026-09-11: this mirrors the program-digest mechanism exactly; an earlier draft
+said a read-only memory space, which would have needed new memory-table rules.) A guest that
 wants its inputs private publishes nothing about them beyond `H_IN`; a guest that wants an input
 public (a bytecode commitment, a calldata hash) is expected to absorb it into an output. Cost: one
 digest row per 4 input words, the same rate as the program digest.
