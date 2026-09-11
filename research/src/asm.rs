@@ -114,9 +114,9 @@ pub fn copy_word8_from_reg(a: &mut Assembler, base: u32, tmp: u32, src_reg: u32,
     }
 }
 
-/// The note layer's key derivation, `nk = H(NK, sk)` then `pk = H(PK, nk)`, from a 2-word
+/// The note layer's key derivation, `nk = H(NK, sk)` then `pk = H(PK, nk)`, from an 8-word
 /// spend key at `base + sk_at` to an 8-word `nk` at `base + nk_out` and an 8-word `pk` at
-/// `base + pk_out`. Both hashes stage their own preimage at `base + buf` (3 words, then 9) and
+/// `base + pk_out`. Both hashes stage their own preimage at `base + buf` (9 words each) and
 /// go through the same `POSEIDON2` syscall every other note-layer hash uses; `tmp` is the
 /// single scratch register. `guests::transfer` and `guests::bundle` open with this identical
 /// sequence — every spend in this crate derives its own `pk_self` from the private spend key
@@ -125,9 +125,8 @@ pub fn copy_word8_from_reg(a: &mut Assembler, base: u32, tmp: u32, src_reg: u32,
 pub fn emit_derive_keys(a: &mut Assembler, base: u32, tmp: u32, sk_at: i32, buf: i32, ptr_words: i32, nk_out: i32, pk_out: i32) {
     a.extend(ops::li(tmp, domain::NK as i32));
     a.push(ops::sw(base, tmp, buf));
-    a.push(ops::lw(tmp, base, sk_at)); a.push(ops::sw(base, tmp, buf + 4));
-    a.push(ops::lw(tmp, base, sk_at + 4)); a.push(ops::sw(base, tmp, buf + 8));
-    a.extend(ops::call_poseidon2(ptr_words, 3));
+    copy_word8(a, base, tmp, sk_at, buf + 4);
+    a.extend(ops::call_poseidon2(ptr_words, 9));
     copy_word8(a, base, tmp, buf, nk_out);
     a.extend(ops::li(tmp, domain::PK as i32));
     a.push(ops::sw(base, tmp, buf));

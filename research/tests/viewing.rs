@@ -19,7 +19,9 @@ use common::rejects;
 
 #[test]
 fn domains_and_lengths_separate() {
-    assert_ne!(notes::hash(domain::NK, &[1, 2]), notes::hash(domain::PK, &[1, 2]), "different domains separate");
+    // Both domains take an 8-word message in real use (`sk` for NK, `nk` for PK), so this
+    // pair is at the length the call sites actually fix.
+    assert_ne!(notes::hash(domain::NK, &[1, 2, 3, 4, 5, 6, 7, 8]), notes::hash(domain::PK, &[1, 2, 3, 4, 5, 6, 7, 8]), "different domains separate");
     assert_ne!(notes::hash(domain::CM, &[1, 2]), notes::hash(domain::CM, &[1, 3]), "different messages separate");
     // NOT a collision to guard against: a padding-free sponge starting from an all-zero state
     // cannot distinguish a message from itself with extra zero words appended *within the same
@@ -31,20 +33,20 @@ fn domains_and_lengths_separate() {
     // by the call site (`Note::WORDS`, `nk`/`cm`'s 8 words, ...), never attacker-chosen, so no
     // real message this crate hashes can be reinterpreted as a shorter or longer one.
     assert_eq!(notes::hash(domain::CM, &[1, 2, 0]), notes::hash(domain::CM, &[1, 2]), "documented same-block zero-padding property, not a bug");
-    let sk = SpendKey([1, 2]);
+    let sk = SpendKey([1, 2, 3, 4, 5, 6, 7, 8]);
     let vk = sk.viewing_key();
-    assert_ne!(vk.nk[..2], sk.0, "the viewing key is not the spend key, even in its low words");
+    assert_ne!(vk.nk, sk.0, "the viewing key is not the spend key");
     assert_ne!(vk.pk(), vk.nk);
-    assert_ne!(vk.ovk(), SpendKey([1, 3]).viewing_key().ovk());
+    assert_ne!(vk.ovk(), SpendKey([1, 2, 3, 4, 5, 6, 7, 9]).viewing_key().ovk());
 }
 
-/// M3.3 widths: every key/commitment/nullifier/tree-node hash is `Word8` (8 machine words);
-/// `SpendKey` alone stays two words (nothing hashes it in-circuit except `H_NK`).
+/// M3.3 widths: every key/commitment/nullifier/tree-node hash is `Word8` (8 machine words),
+/// and so is `SpendKey` itself (see `spend_keys_are_256_bits_and_nk_hashes_all_eight_words`).
 #[test]
 fn digest_widths_are_eight_words() {
     let sk = SpendKey::random();
     let vk = sk.viewing_key();
-    assert_eq!(sk.0.len(), 2);
+    assert_eq!(sk.0.len(), 8);
     assert_eq!(vk.nk.len(), 8);
     assert_eq!(vk.pk().len(), 8);
     let note = Note::new(vk.pk(), vk.pk(), 1, 1, 0);
@@ -186,13 +188,13 @@ fn transfer_guest_permutation_and_row_counts_are_measured() {
     let permutations = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. }))).count();
     let hash_calls = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Ecall { .. }))).count();
     assert_eq!(hash_calls, 5 + DEPTH + 1, "5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest");
-    assert_eq!(permutations, 192);
-    assert_eq!(e.cycles(), 3910);
-    assert_eq!(program.digest_rows(), 446, "transfer's word count, hence its hc cost, is pinned here");
+    assert_eq!(permutations, 194);
+    assert_eq!(e.cycles(), 3948);
+    assert_eq!(program.digest_rows(), 455, "transfer's word count, hence its hc cost, is pinned here");
     let total_cycles = e.cycles() + program.digest_rows();
     let total_permutations = permutations + program.digest_rows();
-    assert_eq!(total_cycles, 4356);
-    assert_eq!(total_permutations, 638);
+    assert_eq!(total_cycles, 4403);
+    assert_eq!(total_permutations, 649);
     assert_eq!(Tier::for_cycles(total_cycles), Some(Tier(14)));
     assert!(total_cycles <= Tier(14).max_cycles());
     assert!(total_permutations <= Tier(14).poseidon2_height() / 32, "must fit the tier's permutation slots, not just its cycle budget");
@@ -450,4 +452,25 @@ fn a_stale_anchor_is_rejected_by_the_ledger() {
     }
     assert_ne!(ledger.root(), anchor);
     assert!(matches!(ledger.apply(&m, &proof, anchor, nf, created.commitment(), created.time, env), Err(LedgerError::UnknownAnchor(a)) if a == anchor));
+}
+
+/// Shielded pool phase Z follow-up: `pk = H_PK(H_NK(sk))` is known to every counterparty (the
+/// `from` field of a received note), so a 64-bit `sk` would be a brute-force target. The key is
+/// 256 bits like every other key here, and `H_NK` hashes all eight words.
+#[test]
+fn spend_keys_are_256_bits_and_nk_hashes_all_eight_words() {
+    use rand_zkvm::notes::{hash, domain, SpendKey};
+    let sk = SpendKey::random();
+    assert_eq!(sk.0.len(), 8);
+    // Two keys differing only in the last word must derive different viewing keys: the
+    // whole 256-bit key is hashed, not a 64-bit prefix.
+    let mut other = sk;
+    other.0[7] ^= 1;
+    assert_ne!(sk.viewing_key(), other.viewing_key());
+    assert_eq!(sk.viewing_key().nk, hash(domain::NK, &sk.0));
+    // The private-input layouts start with the eight sk words.
+    assert_eq!(rand_zkvm::notes::input::IN_FROM, 8);
+    assert_eq!(rand_zkvm::notes::input::COUNT, 302);
+    assert_eq!(rand_zkvm::notes::bundle_input::IN1_FROM, 8);
+    assert_eq!(rand_zkvm::notes::bundle_input::COUNT, 612);
 }

@@ -324,7 +324,7 @@ pub fn transfer() -> Program {
         a.extend(read_input(i as u32));
         a.push(sw(BASE, REG_A0, inp(i)));
     }
-    // nk = H_NK(sk), pk = H_PK(nk) — `sk` is 2 words, so these two small hashes are emitted
+    // nk = H_NK(sk), pk = H_PK(nk) — `sk` is 8 words, so both are 9-word hashes, emitted
     // directly rather than through a note/nullifier-shaped wrapper (`asm::emit_derive_keys`,
     // shared with `bundle`).
     emit_derive_keys(&mut a, BASE, T0, inp(input::SK), BUF, ptr_words(BUF), NK, PK);
@@ -431,8 +431,8 @@ pub fn bundle() -> Program {
     // (`Instr::encode`'s `i_type` masks to `imm & 0xfff`, decoded back via `sext(.., 12)`) —
     // any offset outside `[-2048, 2047]` silently wraps. `transfer()` never had to think about
     // this because its whole layout stays under `0x6a0` (1696); `bundle()`'s does not — the
-    // 606-word `bi::COUNT` private-input array's own last word alone reaches byte offset
-    // `4*605 = 2420` past `INP`, and the derived-value scratch (`NK`..`SUM_OUT_HI`) sits at
+    // 612-word `bi::COUNT` private-input array's own last word alone reaches byte offset
+    // `4*611 = 2444` past `INP`, and the derived-value scratch (`NK`..`SUM_OUT_HI`) sits at
     // `0xb00..0xc50` (2816..3152), both past `0x7ff`. Fix: `BASE` is loaded with
     // `HEAP + PIVOT`, not `HEAP`, and every RAM constant below is defined already shifted by
     // `-PIVOT` (so e.g. `ANCHOR`'s nominal `0xc00` becomes `0xc00 - PIVOT`) — every constant
@@ -447,12 +447,12 @@ pub fn bundle() -> Program {
     // final digest (`0x000..0x0c0`); `NOTE_STAGE` starts exactly where `BUF` ends (`0x0c0`,
     // not `0x080` — `0x080` would have overlapped `BUF`'s digest-time window by 16 words) and
     // needs `Note::WORDS` = 28 words = 0x70 bytes (`0x0c0..0x130`); `INP` starts at `0x140`
-    // (comfortably past `0x130`, not `0x100`) and needs `bi::COUNT` = 606 words = 0x978 bytes
-    // (`0x140..0xab8`), still clear of `NK` at `0x0b00`.
+    // (comfortably past `0x130`, not `0x100`) and needs `bi::COUNT` = 612 words = 0x990 bytes
+    // (`0x140..0xad0`), still clear of `NK` at `0x0b00`.
     const PIVOT: i32 = 0x600;
     const BUF: i32 = 0x000 - PIVOT;      // hash scratch: up to 48 words (192 bytes) for the final digest
     const NOTE_STAGE: i32 = 0x0c0 - PIVOT; // Note::WORDS = 28 word staging area, reused per note
-    const INP: i32 = 0x140 - PIVOT;      // bundle_input::COUNT (606) private inputs
+    const INP: i32 = 0x140 - PIVOT;      // bundle_input::COUNT (612) private inputs
     const NK: i32 = 0xb00 - PIVOT;
     const PK: i32 = 0xb20 - PIVOT;
     const CM_IN1: i32 = 0xb40 - PIVOT;

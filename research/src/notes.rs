@@ -18,15 +18,13 @@
 //!
 //! Widths (M3.3): keys, commitments and nullifiers are `Word8` — four canonical Goldilocks
 //! field elements, each split lo/hi into two 32-bit machine words, exactly what
-//! `hash::sponge_hash`/`hash::split_digest` produce. `SpendKey` alone stays two words: it is
-//! never hashed to standalone security-bearing output the way `nk`/`pk`/`nf`/`cm` are, and
-//! nothing recomputes it in-circuit — only `H_NK(sk)` is.
+//! `hash::sponge_hash`/`hash::split_digest` produce. `SpendKey` is eight words too, like every
+//! other key: `pk = H_PK(H_NK(sk))` is known to every counterparty (the `from` field of a
+//! received note), so anything narrower would be a brute-force target for recovering spend
+//! authority from a public address.
 
 use crate::hash::sponge_hash;
 use rand::Rng;
-
-/// A 64-bit value as two machine words — `SpendKey` only; every hash *output* is `Word8`.
-pub type Word2 = [u32; 2];
 
 /// A 256-bit value as eight machine words: four canonical Goldilocks field elements, each
 /// split lo/hi (`hash::split_digest`'s layout). Every key, commitment and nullifier is one.
@@ -39,6 +37,8 @@ pub const DEPTH: usize = 32;
 /// a note commitment can never collide with a nullifier, a key, a tree node or the output
 /// commitment even on identical remaining inputs.
 pub mod domain {
+    /// `nk = H(NK, sk)` — a fixed 9-word message, the tag plus `SpendKey`'s eight words
+    /// (one fixed message length per domain; see `research/AGENTS.md`).
     pub const NK: u32 = 1;
     pub const PK: u32 = 2;
     pub const NF: u32 = 3;
@@ -102,14 +102,16 @@ fn wide_hash(domain: u32, msg: &[u32], out_words: usize) -> Vec<u32> {
 }
 
 /// The spend authority. Never leaves the wallet; the guest reads it through `READ_INPUT`.
-/// Stays two words (see the module doc comment) — only `H_NK(sk)` is ever hashed from it.
+/// Eight words (256 bits), like every other key: `pk = H_PK(H_NK(sk))` is known to every
+/// counterparty (the `from` field of a received note), so a shorter `sk` would be a
+/// brute-force target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SpendKey(pub Word2);
+pub struct SpendKey(pub Word8);
 
 impl SpendKey {
     pub fn random() -> Self {
         let mut rng = rand::rng();
-        SpendKey([rng.next_u32(), rng.next_u32()])
+        SpendKey(std::array::from_fn(|_| rng.next_u32()))
     }
     /// The full viewing key: everything the party can see, nothing it can spend.
     pub fn viewing_key(&self) -> ViewingKey { ViewingKey { nk: hash(domain::NK, &self.0) } }
@@ -238,21 +240,21 @@ pub fn output_digest(anchor: &Word8, nf: &Word8, cm_out: &Word8, time: u32) -> W
 /// constants are the `READ_INPUT` indices the guest uses.
 pub mod input {
     use super::DEPTH;
-    pub const SK: usize = 0;          // 2 words
-    pub const IN_FROM: usize = 2;     // 8 words
-    pub const IN_AMOUNT_LO: usize = 10;
-    pub const IN_AMOUNT_HI: usize = 11;
-    pub const IN_ASSET: usize = 12;
-    pub const IN_TIME: usize = 13;
-    pub const IN_R: usize = 14;       // 8 words
-    pub const OUT_PK: usize = 22;     // 8 words
-    pub const OUT_TIME: usize = 30;
-    pub const OUT_R: usize = 31;      // 8 words
+    pub const SK: usize = 0;          // 8 words
+    pub const IN_FROM: usize = 8;     // 8 words
+    pub const IN_AMOUNT_LO: usize = 16;
+    pub const IN_AMOUNT_HI: usize = 17;
+    pub const IN_ASSET: usize = 18;
+    pub const IN_TIME: usize = 19;
+    pub const IN_R: usize = 20;       // 8 words
+    pub const OUT_PK: usize = 28;     // 8 words
+    pub const OUT_TIME: usize = 36;
+    pub const OUT_R: usize = 37;      // 8 words
     /// `DEPTH` sibling `Word8`s, leaf to root (private: the Merkle witness).
-    pub const PATH: usize = 39;       // DEPTH * 8 words
+    pub const PATH: usize = 45;       // DEPTH * 8 words
     /// The spent note's leaf index; bit `level` selects which side it's on at that level.
-    pub const INDEX: usize = PATH + DEPTH * 8;
-    pub const COUNT: usize = INDEX + 1;
+    pub const INDEX: usize = PATH + DEPTH * 8;   // 301
+    pub const COUNT: usize = INDEX + 1;          // 302
 }
 
 /// Output-slot layout of `guests::transfer`: the public values a ledger reads. `NUM_OUTPUTS`
@@ -267,8 +269,7 @@ pub mod output {
 /// `created` (whose `from` must be `sk`'s address and whose amount and asset must match).
 pub fn transfer_inputs(sk: &SpendKey, spent: &Note, created: &Note, path: &[Word8; DEPTH], index: u32) -> [u32; input::COUNT] {
     let mut v = [0u32; input::COUNT];
-    v[input::SK] = sk.0[0];
-    v[input::SK + 1] = sk.0[1];
+    v[input::SK..input::SK + 8].copy_from_slice(&sk.0);
     v[input::IN_FROM..input::IN_FROM + 8].copy_from_slice(&spent.from);
     v[input::IN_AMOUNT_LO] = spent.amount as u32;
     v[input::IN_AMOUNT_HI] = (spent.amount >> 32) as u32;
@@ -306,26 +307,26 @@ pub fn expected_outputs(sk: &SpendKey, spent: &Note, created: &Note, anchor: Wor
 /// are.
 pub mod bundle_input {
     use super::DEPTH;
-    pub const SK: usize = 0;                               // 2
-    pub const IN1_FROM: usize = 2;                          // 8
-    pub const IN1_AMOUNT_LO: usize = 10;
-    pub const IN1_AMOUNT_HI: usize = 11;
-    pub const IN1_ASSET: usize = 12;
-    pub const IN1_TIME: usize = 13;
-    pub const IN1_R: usize = 14;                            // 8
-    pub const IN1_PATH: usize = 22;                         // DEPTH * 8 = 256
-    pub const IN1_INDEX: usize = IN1_PATH + DEPTH * 8;      // 278
-    pub const IN2_FROM: usize = IN1_INDEX + 1;              // 279
-    pub const IN2_AMOUNT_LO: usize = IN2_FROM + 8;          // 287
+    pub const SK: usize = 0;                                // 8
+    pub const IN1_FROM: usize = 8;                          // 8
+    pub const IN1_AMOUNT_LO: usize = 16;
+    pub const IN1_AMOUNT_HI: usize = 17;
+    pub const IN1_ASSET: usize = 18;
+    pub const IN1_TIME: usize = 19;
+    pub const IN1_R: usize = 20;                            // 8
+    pub const IN1_PATH: usize = 28;                         // DEPTH * 8 = 256
+    pub const IN1_INDEX: usize = IN1_PATH + DEPTH * 8;      // 284
+    pub const IN2_FROM: usize = IN1_INDEX + 1;              // 285
+    pub const IN2_AMOUNT_LO: usize = IN2_FROM + 8;          // 293
     pub const IN2_AMOUNT_HI: usize = IN2_AMOUNT_LO + 1;
     pub const IN2_ASSET: usize = IN2_AMOUNT_HI + 1;
     pub const IN2_TIME: usize = IN2_ASSET + 1;
     pub const IN2_R: usize = IN2_TIME + 1;                  // 8
     pub const IN2_PATH: usize = IN2_R + 8;                  // DEPTH * 8
-    pub const IN2_INDEX: usize = IN2_PATH + DEPTH * 8;      // 555
+    pub const IN2_INDEX: usize = IN2_PATH + DEPTH * 8;      // 561
     /// The tree root every real input's `MERKLE_VERIFY` is checked against (§4 item 2), and
     /// the value the guest publishes as `anchor` (an honest wallet passes `ledger.root()`).
-    pub const ANCHOR: usize = IN2_INDEX + 1;                // 556, 8 words
+    pub const ANCHOR: usize = IN2_INDEX + 1;                // 562, 8 words
     pub const OUT1_PK: usize = ANCHOR + 8;                  // 8
     pub const OUT1_AMOUNT_LO: usize = OUT1_PK + 8;
     pub const OUT1_AMOUNT_HI: usize = OUT1_AMOUNT_LO + 1;
@@ -340,7 +341,7 @@ pub mod bundle_input {
     pub const BURN_HI: usize = BURN_LO + 1;
     pub const ASSET: usize = BURN_HI + 1;
     pub const TIME: usize = ASSET + 1;
-    pub const COUNT: usize = TIME + 1;                      // 606
+    pub const COUNT: usize = TIME + 1;                      // 612
 }
 
 /// `bundle`'s single public output: `H(BUNDLE, anchor, nf1, nf2, cm1, cm2, fee_lo, fee_hi,
@@ -424,7 +425,7 @@ pub fn bundle_inputs(
 ) -> Vec<u32> {
     use bundle_input::*;
     let mut v = vec![0u32; COUNT];
-    v[SK] = sk.0[0]; v[SK + 1] = sk.0[1];
+    v[SK..SK + 8].copy_from_slice(&sk.0);
     #[allow(clippy::too_many_arguments)]
     fn put_in(v: &mut [u32], from_off: usize, amt_lo: usize, amt_hi: usize, asset_off: usize, time_off: usize, r_off: usize, path_off: usize, index_off: usize, note: &Note, path: &[Word8; DEPTH], index: u32) {
         v[from_off..from_off + 8].copy_from_slice(&note.from);

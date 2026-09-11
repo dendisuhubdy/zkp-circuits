@@ -87,8 +87,13 @@ and the 1184-byte ML-KEM-768 encapsulation key envelopes are sealed to.
 **Widths.** Every key, commitment, nullifier and tree node is `Word8` — four
 canonical Goldilocks field elements, each split lo/hi into two 32-bit
 machine words (`hash::split_digest`'s layout, `notes::Word8 = [u32; 8]`).
-`SpendKey` alone stays two words: nothing hashes it in-circuit except
-`H_NK(sk)`, so there is no cost or security reason to widen it.
+`SpendKey` is eight words too, like every other key: `pk = H_PK(H_NK(sk))`
+is known to every counterparty — it is the `from` field of every note the
+party sends — so a narrower spend key would be a brute-force target for
+recovering spend authority from a published address. The cost of the extra
+width is small and measured: `H_NK`'s message grows from 3 words to 9 (one
+permutation to three), and each guest grows by 36 words (six more
+`READ_INPUT` unrollings plus six more `lw`/`sw` pairs staging the preimage).
 
 ## Notes and what the guest proves
 
@@ -111,7 +116,7 @@ of the sender's input note is needed, which matters — disclosing the input
 note's opening to a receiver would hand them the sender's previous
 transaction.
 
-`guests::transfer` reads 296 private words (`notes::input`: the spend key,
+`guests::transfer` reads 302 private words (`notes::input`: the spend key,
 the spent note's fields, the created note's owner/time/randomness, and a
 depth-32 Merkle witness — a sibling path and a leaf index — for the spent
 note's commitment) and computes, with the `NOTE_COMMIT`/`NULLIFY`/
@@ -148,11 +153,11 @@ reinterpreted as a shorter or longer one (`tests/viewing.rs::domains_and_lengths
 documents this precisely).
 
 **Measured cost** (`tests/viewing.rs::transfer_guest_permutation_and_row_counts_are_measured`):
-1 783 instructions, 3 910 cycles, 38 `POSEIDON2` calls (5 note/key/nullifier
-hashes + 32 Merkle levels + 1 output-commitment digest), 192 permutations
+1 819 instructions, 3 948 cycles, 38 `POSEIDON2` calls (5 note/key/nullifier
+hashes + 32 Merkle levels + 1 output-commitment digest), 194 permutations
 from execution itself. M3.4 adds the program's own `hc` digest to every
-proof — 446 more digest rows (`⌈1783/4⌉`), counted as cycles too — for a
-total of 4 356 cycles and 638 permutations. (Shielded pool phase Z Task 1
+proof — 455 more digest rows (`⌈1819/4⌉`), counted as cycles too — for a
+total of 4 403 cycles and 649 permutations. (Shielded pool phase Z Task 1
 replaced `MERKLE_VERIFY`'s 32-times-unrolled body with a counted loop
 compiled once and executed 32 times, which is why the instruction count and
 digest-row cost dropped sharply from M3.3's unrolled figures — 4 554
@@ -165,12 +170,18 @@ coin, too wide for `u32`) — which grows each `NOTE_COMMIT` message (`cm_in`
 and `cm_out`) from 28 to 29 words, one more permutation apiece, and adds 12
 words to the compiled program (one extra `lw`/`sw` pair per note-commit
 block): 1 771 → 1 783 instructions, 190 → 192 execution permutations, 443 →
-446 digest rows, superseded here.) See "Public outputs" and "Cost" below
-for what that meant for the gas tier.
+446 digest rows, superseded here. The phase Z follow-up then widened
+`SpendKey` from two words to eight — `input::COUNT` 296 → 302, `H_NK`'s
+message 3 → 9 words — which adds 36 program words (six more `READ_INPUT`
+unrollings, six more `lw`/`sw` pairs staging the `nk` preimage), 38
+execution cycles and 2 execution permutations: 1 783 → 1 819 instructions,
+3 910 → 3 948 cycles, 192 → 194 execution permutations, 446 → 455 digest
+rows.) See "Public outputs" and "Cost" below for what that meant for the
+gas tier.
 
 ## Public outputs
 
-At `Word2` (64-bit) widths, M1.5 published `cm_in, nf, cm_out, time` as four
+At 64-bit digest widths, M1.5 published `cm_in, nf, cm_out, time` as four
 separate public outputs. At `Word8` (256-bit) widths those four values are
 34 words — `anchor(8) + nf(8) + cm_out(8) + time(1)`, `cm_in` itself having
 moved into the Merkle witness (below) — which does not fit the CPU table's
@@ -410,14 +421,14 @@ commitment.)
 
 | | |
 |---|---|
-| `transfer` program | 1 783 instructions (M3.3's unrolled figure, superseded here: 4 554; Task 1's counted-loop figure, superseded here: 1 771) |
-| cycles (execution only) | 3 910 (M3.3: 3 764; Task 1: 3 896) |
-| digest rows (M3.4, `hc`) | 446 (`⌈1783/4⌉`) — count as cycles too (M3.3's unrolled figure, superseded here: 1 139; Task 1: 443) |
-| total cycles | 4 356 → tier 14 (max 16 383; still doesn't fit tier 12's 4 095) (M3.3's unrolled figure, superseded here: 4 903; Task 1: 4 339) |
+| `transfer` program | 1 819 instructions (M3.3's unrolled figure, superseded here: 4 554; Task 1's counted-loop figure: 1 771; Task 2's `u64`-amount figure: 1 783) |
+| cycles (execution only) | 3 948 (M3.3: 3 764; Task 1: 3 896; Task 2: 3 910) |
+| digest rows (M3.4, `hc`) | 455 (`⌈1819/4⌉`) — count as cycles too (M3.3's unrolled figure, superseded here: 1 139; Task 1: 443; Task 2: 446) |
+| total cycles | 4 403 → tier 14 (max 16 383; still doesn't fit tier 12's 4 095) (M3.3's unrolled figure, superseded here: 4 903; Task 1: 4 339; Task 2: 4 356) |
 | `POSEIDON2` calls (execution only) | 38 (5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest) |
-| permutations (execution only) | 192 total — 1 (`nk`, 3-word message) + 3 (`pk`, 9 words) + 8 (`cm_in`, 29 words) + 5 (`nf`, 17 words) + 8 (`cm_out`, 29 words) + 32 × 5 (Merkle levels, 17 words each) + 7 (output digest, 26 words) |
-| total permutations | 192 + 446 (digest rows) = 638 (M3.3's unrolled figure, superseded here: 1 329; Task 1: 633) |
-| gas tier | 14 — still forced by the cycle count alone (4 356 > tier 12's 4 095-cycle budget), unchanged from M3.3's unrolled version despite the much smaller program; the counted-loop routine's 638 total permutations now comfortably fit even the unmodified `poseidon2_height(t) = 2^(t+1)` (1 024 slots at tier 14) that M3.3's 1 329 permutations had forced past — `machine::Tier::poseidon2_height` still ships M3.4's `2^(t+2)` sizing (2 048 slots), a crate-wide constant other guests (e.g. Task 3's two-Merkle-walk bundle) may still need the margin for, not something Task 1 or Task 2 revisits |
+| permutations (execution only) | 194 total — 3 (`nk`, 9-word message: the domain tag plus the 8-word `sk`) + 3 (`pk`, 9 words) + 8 (`cm_in`, 29 words) + 5 (`nf`, 17 words) + 8 (`cm_out`, 29 words) + 32 × 5 (Merkle levels, 17 words each) + 7 (output digest, 26 words) |
+| total permutations | 194 + 455 (digest rows) = 649 (M3.3's unrolled figure, superseded here: 1 329; Task 1: 633; Task 2: 638) |
+| gas tier | 14 — still forced by the cycle count alone (4 403 > tier 12's 4 095-cycle budget), unchanged from M3.3's unrolled version despite the much smaller program; the counted-loop routine's 649 total permutations now comfortably fit even the unmodified `poseidon2_height(t) = 2^(t+1)` (1 024 slots at tier 14) that M3.3's 1 329 permutations had forced past — `machine::Tier::poseidon2_height` still ships M3.4's `2^(t+2)` sizing (2 048 slots), a crate-wide constant other guests (e.g. Task 3's two-Merkle-walk bundle) may still need the margin for, not something Task 1 or Task 2 revisits |
 | envelope | 1 088 (KEM) + 3 × (12 + 16) + 32 + 32 + 40 bytes ≈ 1.3 KB |
 | test-profile proof | tens of seconds in `cargo test` (opt-level 1, debug constraint checking) at tier 14's larger tables; the proof-backed viewing tests are correspondingly slower than the M1.5/M3.2/M3.3 baseline — expected, not a regression |
 
@@ -444,7 +455,10 @@ which pushes each `NOTE_COMMIT` call's full absorbed message (domain tag +
 (`⌈28/4⌉ = 7` blocks before, `⌈29/4⌉ = 8` now) — one more permutation
 apiece, for `cm_in` and `cm_out` both — and adds 12 words to the compiled
 program (one extra `lw`/`sw` pair per note-commit block), growing the
-program to 1 783 words and its digest cost to 446 permutations. 192 and 638
+program to 1 783 words and its digest cost to 446 permutations. The phase Z
+follow-up's 256-bit `SpendKey` then added 36 more program words and two more
+execution permutations (`H_NK`'s message grows from 3 words to 9, one
+permutation to three), reaching 1 819 words and 455 digest rows. 194 and 649
 are the numbers pinned by
 `tests/viewing.rs::transfer_guest_permutation_and_row_counts_are_measured`.
 
@@ -543,8 +557,8 @@ results, not a separate "skip was fooled" code path (there is none to fool).
 (`Instr::encode`'s `i_type` masks to `imm & 0xfff`, `Instr::decode` sign-extends it back
 via `sext(.., 12)`) — any compile-time offset outside `[-2048, 2047]` from a base register
 silently wraps. `transfer`'s whole RAM layout happens to stay under `0x6a0` (1696), so this
-was never visible before. `bundle`'s naive layout is not so lucky: the 606-word private
-input vector (`bundle_input::COUNT`) alone reaches byte offset 2420 past its own base, and
+was never visible before. `bundle`'s naive layout is not so lucky: the 612-word private
+input vector (`bundle_input::COUNT`) alone reaches byte offset 2444 past its own base, and
 the derived-value scratch (`nk`/`pk`/both commitments/both nullifiers/`anchor`/the running
 Merkle root/the balance accumulators) sits at `0xb00..0xc50` (2816..3152) — both well past
 `0x7ff`. `guests::bundle` fixes this by loading `BASE` with `HEAP + 0x600` instead of
@@ -563,28 +577,30 @@ every scratch region by its widest use, and keep the regions disjoint unconditio
 
 **Measured** (`tests/bundle.rs`, `-- --nocapture`; re-measured after review round 1's
 in-circuit duplicate-input/duplicate-output checks, which added 70 program words and 70
-execution cycles to both shapes. `Tier::poseidon2_height(14) / 32 = 2048` permutation
+execution cycles to both shapes, and again after the phase Z follow-up's 256-bit
+`SpendKey`, which added 36 program words, 38 execution cycles and 2 execution permutations
+to both shapes and one input-digest row. `Tier::poseidon2_height(14) / 32 = 2048` permutation
 slots; `TIERS` is `[10, 12, 14, 16, 18, 20]` — there is no tier 13 or 15 to fall between
 them):
 
 | | 2-in-2-out (`honest_two_in_two_out_proves_and_verifies`) | 1-in-1-out-with-dummies (`honest_one_in_one_out_with_dummies_proves`) |
 |---|---|---|
-| program | 3 775 words |  (same program, both shapes) |
-| cycles (execution only) | 8 018 | 5 779 |
-| digest rows (`hc`) | 944 (`⌈3775/4⌉`) | 944 |
-| input-digest rows (606 private inputs) | 153 (`1 + ⌈606/4⌉`) | 153 |
-| total cycles (what `Tier::for_cycles` sees) | 9 115 | 6 876 |
+| program | 3 811 words |  (same program, both shapes) |
+| cycles (execution only) | 8 056 | 5 817 |
+| digest rows (`hc`) | 953 (`⌈3811/4⌉`) | 953 |
+| input-digest rows (612 private inputs) | 154 (`1 + ⌈612/4⌉`) | 154 |
+| total cycles (what `Tier::for_cycles` sees) | 9 163 | 6 924 |
 | `POSEIDON2` calls (execution only) | 73 — 9 non-Merkle hashes (`nk`, `pk`, `cm_in1`, `cm_in2`, `nf1`, `nf2`, `cm_out1`, `cm_out2`, the final digest) + 32 + 32 Merkle levels (both inputs real) | 41 — the same 9 non-Merkle hashes + 32 (only input 1's `MERKLE_VERIFY` runs; input 2's `NOTE_COMMIT`/`NULLIFY` still run, dummy or not — only membership/anchor/asset are skipped) |
-| permutations (execution only) | 378 | 218 |
-| total permutations (execution + digest rows) | 1 322 | 1 162 |
-| gas tier | `Tier(14)`, **forced by the cycle count alone in both shapes**: `Machine::prove` picks the tier from `exec.cycles() + program.digest_rows() + input_digest_row_count(606)` (9 115 / 6 876 above), and the next tier down, `Tier(12)`, has a 4 095-cycle budget (`cpu_height − 1`) that even the execution cycles alone already blow. `Tier(14)`'s own 16 383-cycle budget and 2 048 permutation slots then both hold with room to spare |
+| permutations (execution only) | 380 | 220 |
+| total permutations (execution + digest rows) | 1 333 | 1 173 |
+| gas tier | `Tier(14)`, **forced by the cycle count alone in both shapes**: `Machine::prove` picks the tier from `exec.cycles() + program.digest_rows() + input_digest_row_count(612)` (9 163 / 6 924 above), and the next tier down, `Tier(12)`, has a 4 095-cycle budget (`cpu_height − 1`) that even the execution cycles alone already blow. `Tier(14)`'s own 16 383-cycle budget and 2 048 permutation slots then both hold with room to spare |
 
 Both shapes prove and verify under `FriProfile::Test`. The 1-in-1-out case costs fewer
 `POSEIDON2` calls/permutations than 2-in-2-out (skipping one 32-level `MERKLE_VERIFY`
 walk, 160 permutations) but the same program (words/digest rows are shape-independent —
 `bundle` has no data-dependent control flow that changes the compiled program itself, only
 which branches execute) and lands at the same tier either way — on cycles, with the
-permutation budget (1 322 / 1 162 against 2 048 slots) never the binding constraint at
+permutation budget (1 333 / 1 173 against 2 048 slots) never the binding constraint at
 this tier.
 
 ## Ledger admission for bundles
