@@ -5,7 +5,7 @@ use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::isa::Instr;
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, TIERS};
-use rand_zkvm::tables::{alu, cpu, memory, nibble, program, range, F};
+use rand_zkvm::tables::{alu, cpu, input, memory, nibble, poseidon2, program, range, F};
 use std::time::Instant;
 
 fn hr(title: &str) { println!("\n══ {title} {}", "═".repeat(70usize.saturating_sub(title.len()))); }
@@ -31,7 +31,7 @@ fn main() {
     let exec = execute(&program, &inputs, 1 << 20).unwrap();
     println!("inputs {:?} → outputs {:?} in {} cycles ({:?})", inputs, &exec.outputs[..2], exec.cycles(), t.elapsed());
 
-    hr("Part 4 · Arithmetize: six tables on eight buses");
+    hr("Part 4 · Arithmetize: eight tables on twelve buses");
     let tier = Tier::for_cycles(exec.cycles()).unwrap();
     let traces = build_traces(&program, &inputs, &exec, tier).unwrap();
     println!("tier {} → cpu 2^{} rows (actual {} cycles), padding hides the rest", tier.0, tier.0, exec.cycles());
@@ -43,8 +43,10 @@ fn main() {
         ("alu", traces.alu.height(), alu::col::WIDTH, "byte-limb arithmetic, shifts, compares"),
         ("range", traces.range.height(), range::col::WIDTH + range::pre::WIDTH, "256 rows: byte range checks, pow2"),
         ("nibble", traces.nibble.height(), nibble::col::WIDTH + nibble::pre::WIDTH, "256 rows: 16×16 and/or/xor"),
+        ("poseidon2", traces.poseidon2.height(), poseidon2::col::WIDTH + poseidon2::pre::WIDTH, "hash permutation: program/input digests, notes"),
+        ("input", traces.input.height(), input::col::WIDTH, "private inputs, committed to the salted H_IN digest"),
     ] { println!("{name:<10}{h:>10}{w:>8}   {role}"); }
-    println!("buses: PROGRAM MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 (LogUp, verified globally)");
+    println!("buses: PROGRAM PROGRAM_WORD MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 POSEIDON2 INPUT_DIGEST INPUT_READ (LogUp, verified globally)");
 
     hr("Part 5 · Prove and verify (production FRI: blowup 8, 27 queries, 20 PoW bits, ZK on)");
     let m = Machine::new(FriProfile::Production);

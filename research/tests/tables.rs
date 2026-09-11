@@ -645,8 +645,10 @@ fn alu_max_constraint_degree_is_pinned() {
     // degree-8 ceiling `alu`/`cpu` already sit at.
     assert_eq!(degrees[6], 4, "poseidon2 table max constraint degree");
 
-    // input: a boolean flag, an arithmetic-sequence pin, and a degree-2 provided count
-    // (IS_REAL*(1+MULT_READ)) — no table here is anywhere close to the degree-8 ceiling.
+    // input: a boolean flag, an arithmetic-sequence pin, and a degree-2 provided count on the
+    // busier of its two split buses — `IS_REAL` alone on `INPUT_DIGEST` (degree 1) and
+    // `IS_REAL * MULT_READ` on `INPUT_READ` (degree 2) — no table here is anywhere close to
+    // the degree-8 ceiling.
     assert_eq!(degrees[7], 2, "input table max constraint degree");
 }
 

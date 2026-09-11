@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 117 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
+cargo test              # 135 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -104,16 +104,17 @@ only ever sees it flow through arithmetic and comparisons on the way to an
 output (Part 2 builds `balance_check`, which sums four private balances and
 outputs a single bit: is the sum over a threshold). Outputs leave through
 `WRITE_OUTPUT slot word`, which is constrained directly against the proof's
-public values — there is no other way for a value to become public. Nothing
-in this milestone binds a `READ_INPUT` value to any commitment or account;
-the relation proved is existential, not "this specific note was spent." See
-`docs/03-privacy.md` for exactly why that matters and what closes the gap.
+public values — there is no other way for a value to become public. Since
+M4.1, `READ_INPUT` is bound to the salted commitment `H_IN`: two reads of
+the same index are constrained to agree, and an index ≥ n_in is
+unsatisfiable. See `docs/03-privacy.md` for exactly why that matters and
+what closes the gap.
 
 Execution happens natively and in the clear on the prover's machine (Part
 3) — the emulator is the reference semantics, and nothing about running it
 is itself confidential; confidentiality is a property of the *proof*, not
 of the execution environment. Arithmetization (Part 4) turns that execution
-into seven tables padded to the smallest gas tier that fits, which is why the
+into eight tables padded to the smallest gas tier that fits, which is why the
 trace height — and hence the tier — is the only thing about "how much work
 happened" that a verifier can see. Proving and verifying (Part 5) run
 against Plonky3's hiding FRI PCS, so the main-trace and quotient commitments

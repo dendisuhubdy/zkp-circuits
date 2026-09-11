@@ -1245,6 +1245,11 @@ fn an_extra_real_input_row_at_idx_equal_to_n_in_is_rejected() {
 // chain rule at the real→new transition (`is_indigest * (INDIGEST_LAST - (1 - n(IS_INDIGEST)))
 // = 0`) already rejects on its own, independent of the lane-0 rule, so it never actually
 // exercised I2.
+//
+// Discrimination check, run by hand against this same witness: restoring the old,
+// `HASH_LEFT`-gated rule (`is_indigest * HASH_LEFT * (1 - ACT0) = 0`) makes the witness
+// VERIFY (it's vacuous here, since the appended row's `HASH_LEFT = 0`); the current rule
+// (`is_real_indigest * (1 - ACT0) = 0`) rejects it, by that single constraint alone.
 ///
 /// Builds the faithful witness described above from an honest `Traces`, mutating `t.cpu` (row
 /// insertion + CLK shift), `t.memory` (rebuilt at the shifted `CLK` offset — every access after

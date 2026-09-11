@@ -175,7 +175,11 @@ the `Program` value itself and supplied out of band by the loader's caller
 it is initialised by the guest's own `_start` code to a linker-provided
 `__stack_top` symbol (`guest-sdk/guest.ld` places `RAM` at `ORIGIN =
 0x1000`, lays `.text`/`.rodata`/`.data`/`.bss` there, and defines
-`__stack_top` after a fixed-size stack region). `_start` (`guest-sdk`'s
+`__stack_top` after a fixed-size stack region). The flat image the loader
+decodes populates the instruction space only — RAM starts zero and nothing
+copies the image's `.rodata`/`.data` bytes into it — so a compiled guest
+must keep those sections empty (loading data into RAM is future work,
+needed before M4.3). `_start` (`guest-sdk`'s
 `global_asm!` block) does `la sp, __stack_top; call main`, then falls
 through to its own `li a7,0; ecall` (a `HALT`) as defense in depth if
 `main` ever returns instead of calling `guest_sdk::halt()` itself — this

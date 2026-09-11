@@ -119,6 +119,10 @@ words, comfortably past any guest this crate runs, one size smaller than
 `Proof` carries the declared height as `input_log_height: u8`, exactly
 mirroring `program_log_height`; `Machine::verify` bounds it to
 `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` before using it to size anything.
+`MAX_LOG_HEIGHT = 20` is only the table-shape ceiling, though: `cpu`'s
+shared absorb machinery range-checks `HASH_LEFT` via two `RANGE8` limbs on
+every indigest row, bounding it to 16 bits — so the effective cap on
+`n_in` is 65535, well below what `MAX_LOG_HEIGHT` alone would allow.
 
 ## `program` — main, `col::WIDTH = 108`
 

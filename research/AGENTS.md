@@ -9,7 +9,7 @@ the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (117 tests). Everything uses
+- `cargo test` — the whole suite (135 tests). Everything uses
   `FriProfile::Test`; the two proof-backed viewing tests take ~70 s and
   `tests/zk.rs` ~50 s. All green is the bar before any commit.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one
@@ -58,8 +58,7 @@ the emulator disagree, the AIR is wrong.
   statistical (not perfect) ZK from Plonky3 0.7's hiding PCS; `hc`
   binding-but-not-hiding (M3.4: still true — `hc` is now an in-circuit
   digest, not a verifier-side commitment, but it still has no hiding salt
-  of its own, see `docs/03-privacy.md`); `READ_INPUT` existential (unbound
-  witness).
+  of its own, see `docs/03-privacy.md`).
 - **One fixed message length per hash domain** (padding-free sponge). Every
   `PaddingFreeSponge` absorb this crate does — `notes::hash`'s
   domain-tagged calls, `hash::sponge_hash`, the M3.4 program digest — must

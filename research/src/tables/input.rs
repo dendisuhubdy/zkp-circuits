@@ -60,7 +60,10 @@ pub const MIN_LOG_HEIGHT: u8 = 2; // 1 << 2 == MIN_HEIGHT
 /// Ceiling on the declared (proof-carried) input-table log-height — 2^20 rows is a million
 /// private-input words, comfortably past any guest this crate runs; mirrors
 /// `tables::program::MAX_LOG_HEIGHT`'s role exactly, one size smaller since private inputs
-/// are typically far shorter than programs.
+/// are typically far shorter than programs. This is only the table-shape ceiling, not the
+/// effective cap on `n_in`: `cpu`'s shared absorb machinery range-checks `HASH_LEFT` (the
+/// words-not-yet-absorbed counter) via two `RANGE8` limbs on every indigest row, bounding it
+/// to 16 bits — so `n_in` is effectively capped at 65535 well before `MAX_LOG_HEIGHT` bites.
 pub const MAX_LOG_HEIGHT: u8 = 20;
 
 /// Same "+1 padding row, floor at MIN_HEIGHT" rule as `tables::program::program_log_height`.

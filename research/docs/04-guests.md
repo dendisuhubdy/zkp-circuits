@@ -99,6 +99,11 @@ development machine. M4.1 adds one:
   every test — `research/src/guests.rs`'s `compiled` module loads it with
   `include_bytes!` + `Program::from_flat_binary(0x1000, BIN)`.
 
+The loader only ever populates the instruction space from the flat image
+— RAM starts zero and nothing copies `.rodata`/`.data` bytes into it — so
+a guest built this way must keep those sections empty (loading data into
+RAM is future work, needed before M4.3).
+
 One deviation worth knowing about: `guest-sdk::halt()` does **not** use
 `asm!`'s `options(noreturn)` (a literal reading of the design spec's own
 snippet would). On this bare-metal target, `rustc` unconditionally
