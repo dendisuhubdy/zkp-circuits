@@ -6,7 +6,7 @@
 use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::ledger::{CommitmentTree, Ledger, LedgerError};
-use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier};
+use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, Tier};
 use rand_zkvm::notes::{self, domain, output_digest, Note, SpendKey, ViewingKey, Word8, DEPTH};
 use rand_zkvm::tables::{cpu, F};
 use rand_zkvm::viewing::{scan, verify_row, Disclosure, Envelope, Role, RowError, TxKey};
@@ -321,7 +321,7 @@ fn a_viewing_key_cannot_spend() {
     // actually computed) is a constraint failure: the write-back rows pin `MEM_VAL` to what
     // the emulator put in RAM, and the public-value columns are pinned to that.
     let real = notes::expected_outputs(&alice.sk, &note, &note, anchor);
-    let mut t = build_traces(&ledger.program, &inputs, [0u32; 4], &e, Tier(14)).unwrap();
+    let mut t = build_traces_salted(&ledger.program, &inputs, [0u32; 4], &e, Tier(14)).unwrap();
     t.public_values[cpu::pv::OUT0] = F::from_u32(real[0]);
     assert!(rejects(|| { let p = m.prove_traces(&ledger.program, &t, Tier(14)); m.verify(&ledger.program.digest(), &p) }));
 }

@@ -1,15 +1,35 @@
 //! M4.1: the `input` witness table — one row per committed private-input word, providing
-//! `(IDX, WORD)` on `INPUT_WORD`. Mirrors `tables::program`'s `(PC, WORD)`/`PROGRAM_WORD`
-//! shape exactly, with one difference `PROGRAM_WORD` never needed: `INPUT_WORD` has *two*
-//! consumers (the cpu table's `IS_INDIGEST` digest rows, and its `SYS_READ` rows), so a row's
-//! provided count is `IS_REAL * (1 + MULT_READ)` — the mandatory 1 the digest always claims,
-//! plus however many times the guest actually reads that index (`MULT_READ`, a free but
-//! LogUp-balance-checked witness value). Any real row the digest does not cover (an honest
-//! table always has real rows exactly `{0, .., n_in-1}`, matching what the digest demands —
-//! see below) supplies an unclaimable extra "1" that can never balance, which is what forces
-//! the real-row count to equal `n_in` exactly, the same set-equality argument
-//! `docs/02-tables-and-buses.md`'s "`hc` binds the whole executable program" section makes
-//! for `program`'s `MULT_WORD = VALID`.
+//! `(IDX, WORD)` on **two separate** buses, `INPUT_DIGEST` and `INPUT_READ`.
+//!
+//! Review round 1 (C1, critical): an earlier design put both consumers on one bus
+//! (`INPUT_WORD`) with count `IS_REAL * (1 + MULT_READ)` — the mandatory "+1" the digest
+//! always claims, plus however many times `SYS_READ` reads that index. That is unsound:
+//! LogUp balances per `(idx, word)` key only, not per *consumer class*, so a prover can shift
+//! budget between the digest's mandatory copy and a `SYS_READ`'s copy — e.g. stop the digest
+//! from absorbing index `k` (dropping its demand by one) while a genuine `READ_INPUT(k)`
+//! still succeeds (using up the row's now-sole remaining unit of supply), so `H_IN` ends up
+//! committing to *fewer* words than the guest actually read, with every constraint still
+//! satisfied. A range check on `MULT_READ` alone cannot close this: the row's *total* provided
+//! count is still whatever the demand happens to be.
+//!
+//! The fix is to split the bus so the two consumer classes cannot trade with each other:
+//! - `INPUT_DIGEST`, count `IS_REAL` — the digest's *only* source of (idx, word), one unit per
+//!   real row, completely independent of how many times (if any) that index is read.
+//! - `INPUT_READ`, count `IS_REAL * MULT_READ` — `SYS_READ`'s only source, `MULT_READ` a free
+//!   but LogUp-balance-checked witness value, unrelated to `INPUT_DIGEST`'s count.
+//!
+//! With the two separated, `INPUT_DIGEST` alone is exactly `program`'s `MULT_WORD = VALID`
+//! argument (`docs/02-tables-and-buses.md`'s "`hc` binds the whole executable program"
+//! section): the cpu table's real (non-salt) `IS_INDIGEST` rows demand exactly the drained
+//! absorption chain's index set — `{0, .., n_in-1}` with the words they actually absorbed,
+//! fixed independently of this table (the drain/`ACT`/`HASH_IDX` chain, unaffected by this
+//! change) — so for `INPUT_DIGEST` to balance, this table's real rows must supply *exactly*
+//! that set: an index the digest doesn't demand (real row at `idx >= n_in`) is an unclaimed
+//! supply, and an index the digest does demand but this table doesn't supply as real (a "hole"
+//! below `n_in`) is an unclaimed demand — either way, `real_count == n_in` is forced, and the
+//! absorbed words must equal this table's `WORD` values exactly. `INPUT_READ` then separately,
+//! and independently, ties `MULT_READ` to the true `SYS_READ` count per index, with no way for
+//! either bus to borrow slack from the other.
 use super::{bus, F};
 use crate::emulator::{CycleEvent, Syscall};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
@@ -21,10 +41,10 @@ pub mod col {
     pub const IDX: usize = 0;
     pub const WORD: usize = 1;
     pub const IS_REAL: usize = 2;
-    /// How many times `SYS_READ` actually consumes this row's `(IDX, WORD)`, beyond the one
-    /// mandatory copy the `IS_INDIGEST` digest rows always claim. A free witness value, but
-    /// pinned to reality by the `INPUT_WORD` bus balance: if it disagrees with the true read
-    /// count, the SYS_READ side's demand and this row's supply stop matching.
+    /// How many times `SYS_READ` actually consumes this row's `(IDX, WORD)` on `INPUT_READ` —
+    /// a free witness value, but pinned to reality by that bus's own balance (independent of
+    /// `INPUT_DIGEST`, split precisely so `MULT_READ` cannot affect the digest's own count —
+    /// review round 1, C1).
     pub const MULT_READ: usize = 3;
     pub const WIDTH: usize = 4;
 }
@@ -81,8 +101,10 @@ where
         // than a no-op tamper.
         b.assert_zero((one.clone() - v(IS_REAL)) * v(MULT_READ));
 
-        let count = v(IS_REAL) * (one + v(MULT_READ));
-        bus::INPUT_WORD.table_entry(b, [v(IDX), v(WORD)], count);
+        // Split per review round 1 (C1): the digest's mandatory copy and a SYS_READ's copy
+        // are now on separate buses, so neither can borrow the other's budget.
+        bus::INPUT_DIGEST.table_entry(b, [v(IDX), v(WORD)], v(IS_REAL));
+        bus::INPUT_READ.table_entry(b, [v(IDX), v(WORD)], v(IS_REAL) * v(MULT_READ));
     }
 }
 

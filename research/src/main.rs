@@ -33,7 +33,7 @@ fn main() {
 
     hr("Part 4 · Arithmetize: six tables on eight buses");
     let tier = Tier::for_cycles(exec.cycles()).unwrap();
-    let traces = build_traces(&program, &inputs, [0u32; 4], &exec, tier).unwrap();
+    let traces = build_traces(&program, &inputs, &exec, tier).unwrap();
     println!("tier {} → cpu 2^{} rows (actual {} cycles), padding hides the rest", tier.0, tier.0, exec.cycles());
     println!("{:<10}{:>10}{:>8}   {}", "table", "rows", "cols", "role");
     for (name, h, w, role) in [
@@ -60,7 +60,7 @@ fn main() {
     println!("verified in {verify_ms:.1} ms with public values {:?}", proof.public_values);
 
     hr("Part 6 · Cheating provers");
-    let mut bad = build_traces(&program, &inputs, [0u32; 4], &exec, tier).unwrap();
+    let mut bad = build_traces(&program, &inputs, &exec, tier).unwrap();
     bad.public_values[cpu::pv::OUT0] = F::from_u32(0);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let p = m.prove_traces(&program, &bad, tier); m.verify(&program.digest(), &p) }));
     println!("claim output 0 instead of 1        → {}", if matches!(r, Ok(Ok(()))) { "ACCEPTED (bug)" } else { "rejected" });
@@ -170,7 +170,7 @@ fn part9_viewing_keys() {
     println!("  the guest derives an address from the key it was given, so its Merkle leaf is not alice's real cm_in");
     let fake_nf = thief.viewing_key().nullifier(&spent.commitment()); // whatever the (wrong) witness happens to imply
     println!("  ledger → {}", match ledger.apply(&m, &proof, anchor, fake_nf, steal.commitment(), ledger.now, Envelope::seal(&alice, &bob.address(), &steal, &TxKey::random())) { Err(LedgerError::BadDigest) => "rejected: output-commitment digest mismatch", other => panic!("expected BadDigest, got {other:?}") });
-    let mut bad = build_traces(&ledger.program, &inputs, [0u32; 4], &exec, proof.tier).unwrap();
+    let mut bad = build_traces(&ledger.program, &inputs, &exec, proof.tier).unwrap();
     bad.public_values[cpu::pv::OUT0] += F::ONE;
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let p = m.prove_traces(&ledger.program, &bad, proof.tier); m.verify(&ledger.program.digest(), &p) }));
     println!("  flipping one word of the published output-commitment digest → {}", if matches!(r, Ok(Ok(()))) { "ACCEPTED (bug)" } else { "rejected by the constraint system" });

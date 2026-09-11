@@ -308,7 +308,18 @@ pub enum VerifyError {
     InputHeight,
 }
 
-pub fn build_traces(program: &Program, inputs: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
+/// Draws a fresh H_IN salt from OS entropy and delegates to [`build_traces_salted`] — the
+/// direct-caller (non-`Machine`) mirror of `Machine::prove`/`Machine::prove_salted`'s own
+/// split (review round 1, M6). Most callers (`main.rs`'s demo sections included) don't need a
+/// *particular* salt, just a fresh one; use `build_traces_salted` where a fixed, reproducible
+/// H_IN is specifically needed (e.g. two traces that must be compared).
+pub fn build_traces(program: &Program, inputs: &[u32], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
+    use rand::RngExt;
+    let salt: [u32; 4] = rand::rng().random();
+    build_traces_salted(program, inputs, salt, exec, tier)
+}
+
+pub fn build_traces_salted(program: &Program, inputs: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
     // M3.4: digest rows count as cycles too — the digest prefix is part of every proof's cpu
     // table, not just `exec.events`. M4.1: so does the input-digest prefix.
     let input_digest_rows = crate::hash::input_digest_row_count(inputs.len());
@@ -459,14 +470,16 @@ fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
 const KEY_CACHE_CAPACITY: usize = 64;
 
 /// A bounded, FIFO-evicted cache of `Machine::verifier_key` results, keyed by `(tier.0,
-/// program_log_height)` (M3.4 fix: the program table's height is proof-declared, not
-/// tier-derived — `tables::program::program_log_height`'s doc comment — so `CommonData`'s
-/// per-instance degree-bit bookkeeping depends on it too, even though the program table has
-/// no preprocessed *columns* of its own any more). Bounded by `TIERS.len() * (MAX_LOG_HEIGHT −
-/// MIN_LOG_HEIGHT + 1)` distinct keys in the worst case — comfortably able to exceed
-/// `KEY_CACHE_CAPACITY` if a caller proves at many different program sizes, unlike the
-/// tier-only cache this replaces, so the FIFO eviction here is a real policy again, not just
-/// defense in depth.
+/// program_log_height, input_log_height)` (M3.4 fix: the program table's height is
+/// proof-declared, not tier-derived — `tables::program::program_log_height`'s doc comment —
+/// so `CommonData`'s per-instance degree-bit bookkeeping depends on it too, even though the
+/// program table has no preprocessed *columns* of its own any more; M4.1 adds the input
+/// table's own height as a third, independent key component for the same reason). Bounded by
+/// `TIERS.len() * (program::MAX_LOG_HEIGHT − program::MIN_LOG_HEIGHT + 1) *
+/// (input::MAX_LOG_HEIGHT − input::MIN_LOG_HEIGHT + 1)` distinct keys in the worst case —
+/// comfortably able to exceed `KEY_CACHE_CAPACITY` if a caller proves at many different
+/// program/input sizes, unlike the tier-only cache this replaces, so the FIFO eviction here is
+/// a real policy again, not just defense in depth.
 #[derive(Default)]
 struct KeyCache {
     map: HashMap<(usize, u8, u8), Arc<CommonData<Config>>>,
@@ -527,7 +540,7 @@ impl Machine {
         common
     }
 
-    /// Number of `(tier, program_log_height)` verifier keys currently cached.
+    /// Number of `(tier, program_log_height, input_log_height)` verifier keys currently cached.
     pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().map.len() }
 
     /// Draws a fresh per-proof salt from OS entropy and delegates to [`Self::prove_salted`] —
@@ -555,7 +568,7 @@ impl Machine {
                 Tier::for_cycles(cycles).ok_or(ProveError::NoTier(cycles))?
             }
         };
-        let traces = build_traces(program, inputs, salt, &exec, tier)?;
+        let traces = build_traces_salted(program, inputs, salt, &exec, tier)?;
         Ok((self.prove_traces(program, &traces, tier), exec))
     }
 
@@ -663,7 +676,7 @@ impl Machine {
                 Tier::for_cycles(cycles).ok_or(ProveError::NoTier(cycles))?
             }
         };
-        let traces = build_traces(program, inputs, salt, &exec, tier)?;
+        let traces = build_traces_salted(program, inputs, salt, &exec, tier)?;
         let airs = chips(tier);
         let mats = traces.as_slice();
         let instances: Vec<StarkInstance<'_, SC, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {

@@ -21,7 +21,7 @@ use rand_zkvm::machine::{FriProfile, Machine, Tier};
 /// thing that would have forced a larger tier here.
 #[test]
 fn a_program_much_longer_than_a_small_tiers_cpu_height_but_briefly_executed_proves() {
-    use rand_zkvm::machine::build_traces;
+    use rand_zkvm::machine::build_traces_salted;
     let m = Machine::new(FriProfile::Test);
     let mut a = Assembler::new(0);
     a.extend(li(5, 42)); // t0 = 42
@@ -37,7 +37,7 @@ fn a_program_much_longer_than_a_small_tiers_cpu_height_but_briefly_executed_prov
 
     let exec = rand_zkvm::emulator::execute(&p, &[], 1 << 20).unwrap();
     assert!(exec.cycles() < 20, "only the leading few instructions ever execute");
-    let traces = build_traces(&p, &[], [0u32; 4], &exec, Tier(14)).unwrap();
+    let traces = build_traces_salted(&p, &[], [0u32; 4], &exec, Tier(14)).unwrap();
     // The program table's own height is driven by the program's length (`program_log_height`),
     // not by `Tier(14).cpu_height()` (16 384) — it is far smaller, and in particular still
     // bigger than `Tier(10).cpu_height()` would have offered, confirming the fix actually sized

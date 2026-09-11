@@ -157,22 +157,31 @@ pub mod col {
     // remaining conflict.
     pub const DPOUT0: usize = DINV0 + 4;                             // 171..178
     // M4.1: a second digest region, IS_INDIGEST, absorbing the committed private-input words
-    // (the `input` table's INPUT_WORD bus) right after the program-digest prefix ends. Mirrors
-    // IS_DIGEST's structure exactly, including reusing the shared absorb machinery (HS0..7,
-    // HV0..3, ACT0..3, HASH_LEFT, HASH_IDX, LEFT0..1, IDX0..1 — IS_DIGEST, IS_HASH and
-    // IS_INDIGEST are pairwise mutually exclusive, so all three safely share those columns) —
-    // but gets its OWN final-encoding columns (IHVL0..31/IHIMAX0..3/IINV0..3) rather than
-    // reusing DHVL0..31: DIGEST_LAST and INDIGEST_LAST are also mutually exclusive in principle,
-    // but sharing their encoding columns would require re-deriving every DHVL-gated constraint
-    // for two selectors at once for a four-column saving — not worth the added risk in a second,
-    // parallel digest region built by mirroring, not by generalizing, the first one.
+    // right after the program-digest prefix ends. Mirrors IS_DIGEST's structure exactly,
+    // including reusing the shared absorb machinery (HS0..7, HV0..3, ACT0..3, HASH_LEFT,
+    // HASH_IDX, LEFT0..1, IDX0..1 — IS_DIGEST, IS_HASH and IS_INDIGEST are pairwise mutually
+    // exclusive, so all three safely share those columns) — but gets its OWN final-encoding
+    // columns (IHVL0..31/IHIMAX0..3/IINV0..3) rather than reusing DHVL0..31: DIGEST_LAST and
+    // INDIGEST_LAST are also mutually exclusive in principle, but sharing their encoding
+    // columns would require re-deriving every DHVL-gated constraint for two selectors at once
+    // for a four-column saving — not worth the added risk in a second, parallel digest region
+    // built by mirroring, not by generalizing, the first one.
+    //
+    // Two things this region needed beyond a plain mirror of IS_DIGEST, both explained where
+    // they're defined: `DPOUT0..7` (above), the last *program*-digest row's own permutation
+    // output, needed because that transition's `n(HS0..7)` is repurposed to seed H_IN's salted
+    // header instead (salted H_IN, controller ruling); and `IS_SALT` (below), marking the one
+    // indigest row whose 4 absorbed words are that fresh per-proof salt rather than committed
+    // input words. The real (non-salt) rows provide/consume on the input table's
+    // `INPUT_DIGEST` bus (review round 1, C1: split from `INPUT_READ`, which `SYS_READ` rows
+    // draw from instead, precisely so a read can never affect the digest's own count).
     pub const IS_INDIGEST: usize = DPOUT0 + 8;
     pub const INDIGEST_LAST: usize = IS_INDIGEST + 1;
     /// M4.1 (salted H_IN, controller ruling): 1 on exactly the *first* indigest row (the one
     /// entered right off `DIGEST_LAST`) — mirrors `INDIGEST_LAST`'s own "dedicated witness
     /// column pinned to a unique structural position" pattern, at the opposite boundary. That
     /// row's 4 absorbed words (`HV0..3`) are the fresh per-proof salt: free witness columns,
-    /// not `INPUT_WORD`-checked, unlike every other indigest row's.
+    /// not `INPUT_DIGEST`-checked, unlike every other (real) indigest row's.
     pub const IS_SALT: usize = INDIGEST_LAST + 1;
     pub const IHVL0: usize = IS_SALT + 1;         // 32: byte limbs of the 8 H_IN output words
     pub const IHIMAX0: usize = IHVL0 + 32;        // 4
@@ -259,6 +268,11 @@ where
         let is_digest = v(IS_DIGEST);
         let is_hash_any = is_hash.clone() + is_hash_out.clone();
         let is_indigest = v(IS_INDIGEST);
+        // 1 on a genuine input-absorbing indigest row, 0 on the salt row — `is_indigest` and
+        // `IS_SALT` are both boolean with `IS_SALT` implying `is_indigest`, so this is itself a
+        // valid 0/1 selector. Hoisted here (rather than defined only where the `INPUT_DIGEST`
+        // lookup needs it, further down) so the lane-0 rule below can also use it.
+        let is_real_indigest = is_indigest.clone() - v(IS_SALT);
         // M3.4: digest rows share every "this is not an ordinary per-instruction row" gate a
         // hash row already needed (no PROGRAM fetch, no DEC/register/memory-value columns, no
         // per-slot MEMORY send) — `off_cpu` is `is_hash_any` generalized to include them.
@@ -562,8 +576,9 @@ where
         // written back to `a0` via the existing WRITES_RD/SYS_READ register-write path) —
         // consumes exactly the (idx, word) pair the `input` table committed. Before this,
         // `C` on a SYS_READ row was free (`docs/03-privacy.md`'s "existential READ_INPUT"
-        // note, now closed).
-        bus::INPUT_WORD.lookup_key(b, [v(B), v(C)], Count::bounded(v(SYS_READ), 1));
+        // note, now closed). Draws from `INPUT_READ`, not `INPUT_DIGEST` (review round 1, C1):
+        // a read can never affect the digest's own count.
+        bus::INPUT_READ.lookup_key(b, [v(B), v(C)], Count::bounded(v(SYS_READ), 1));
 
         // M3.2: the `POSEIDON2` ecall row. `a0` (already read into `B` every ecall row) is the
         // word pointer; `a1` (read through `MEM_VAL`, the memory slot, exactly like every other
@@ -659,19 +674,26 @@ where
         // which combined with the contiguous-prefix property just above forces every lane
         // (including `ACT0`) to 0 in exactly the case this blanket rule would otherwise reject.
         b.assert_zero((is_hash.clone() + is_digest.clone()) * (one.clone() - v(ACT0)));
-        // The precise version of the same requirement for `is_indigest`: lane 0 must be
-        // active whenever this row still has real data left to absorb (`HASH_LEFT != 0`,
-        // itself a range-checked small nonnegative integer, so this is a genuine "nonzero"
-        // test, not merely a field-arithmetic curiosity) — closing an otherwise-open
-        // soundness gap the plain "always active" rule (correct for `is_hash`/`is_digest`,
-        // wrong for `is_indigest`'s legitimate `n_in = 0` block) would leave: without this, a
-        // witness could splice extra all-inactive ("no-op permutation") indigest rows into the
-        // *middle* of an `n_in > 0` absorption, each one changing H_IN's sponge state for free
-        // via a gratuitous permutation while consuming nothing from `INPUT_WORD` — making H_IN
-        // not a well-defined function of the committed input words. `HASH_LEFT = 0` is the
-        // only legitimate exception (the `n_in = 0` block, or the drained state a witness could
-        // never reach mid-region without already having want to consume all real words).
-        b.assert_zero(is_indigest.clone() * v(HASH_LEFT) * (one.clone() - v(ACT0)));
+        // Review round 1 (I2): the precise version of the same requirement for `is_indigest`
+        // is unconditional on *real* indigest rows — `is_real_indigest * (1 - ACT0) = 0`, not
+        // gated by `HASH_LEFT` at all. Post-salt, `hash::input_digest_rows` emits a real block
+        // only when there is at least one real word to put in it (`n.div_ceil(4)`, no `.max(1)`
+        // — the salt row alone covers "at least one permutation"), so every real indigest row
+        // is non-empty by construction and lane 0 must always be active there, exactly like
+        // `is_hash`/`is_digest`. `IS_SALT` rows are excluded (`is_real_indigest = is_indigest -
+        // IS_SALT`) since the salt row's own "always full" requirement is pinned separately.
+        //
+        // A previous, `HASH_LEFT`-gated version of this rule (`is_indigest * HASH_LEFT * (1 -
+        // ACT0) = 0`) was vacuous exactly when the last real block drains `HASH_LEFT` to 0 on
+        // a block boundary (`n_in` a multiple of 4) — a witness could then append one more,
+        // all-inactive indigest row: no rule forced its `ACT0`, its `INPUT_DIGEST` consume
+        // count was 0 either way, and the `POSEIDON2` bus still charged it a genuine extra
+        // permutation, so `H_IN` became `perm(H_honest)` — not a function of `(salt, inputs)`
+        // alone. The unconditional rule closes this: an appended real row always needs
+        // `ACT0 = 1`, so it always demands `INPUT_DIGEST` at an index the real drain chain
+        // never produces, and gets rejected there instead (`tests/cheating.rs`'s regression
+        // (h)).
+        b.assert_zero(is_real_indigest.clone() * (one.clone() - v(ACT0)));
         let active_sum = v(ACT0) + v(ACT0 + 1) + v(ACT0 + 2) + v(ACT0 + 3);
         {
             let mut t = b.when_transition();
@@ -755,23 +777,21 @@ where
             bus::PROGRAM_WORD.lookup_key(b, [digest_pc(k), v(HV0 + k as usize)], Count::bounded(is_digest.clone() * v(ACT0 + k as usize), 1));
         }
 
-        // M4.1: indigest rows draw their 4 words per row from INPUT_WORD (consume), keyed by
+        // M4.1: indigest rows draw their 4 words per row from INPUT_DIGEST (consume), keyed by
         // the plain running index — input indices always start at 0, so unlike
-        // PROGRAM_WORD's digest_pc there is no base offset to add.
+        // PROGRAM_WORD's digest_pc there is no base offset to add. Draws from `INPUT_DIGEST`,
+        // never `INPUT_READ` (review round 1, C1): the digest's own count can never be
+        // affected by how many times (if any) a `SYS_READ` reads the same index.
         //
         // Salted H_IN (controller ruling, deviation from the brief for the same reason):
         // `HASH_IDX` is seeded to 0 on the *salt* row and incremented once per row after, so a
         // real input block's own `HASH_IDX` is one more than its position among real blocks
         // (the salt row occupies index 0) — `indigest_idx` subtracts 1 to undo that offset.
-        // Harmless on the salt row itself: `is_real_indigest` (below) is 0 there regardless of
-        // what `HASH_IDX - 1` evaluates to.
+        // Harmless on the salt row itself: `is_real_indigest` (hoisted near `is_indigest`,
+        // above) is 0 there regardless of what `HASH_IDX - 1` evaluates to.
         let indigest_idx = |k: u32| (v(HASH_IDX) - one.clone()) * four.clone() + AB::Expr::from_u32(k);
-        // 1 on a genuine input-absorbing indigest row, 0 on the salt row — `is_indigest` and
-        // `IS_SALT` are both boolean with `IS_SALT` implying `is_indigest`, so this is itself a
-        // valid 0/1 selector.
-        let is_real_indigest = is_indigest.clone() - v(IS_SALT);
         for k in 0..4u32 {
-            bus::INPUT_WORD.lookup_key(b, [indigest_idx(k), v(HV0 + k as usize)], Count::bounded(is_real_indigest.clone() * v(ACT0 + k as usize), 1));
+            bus::INPUT_DIGEST.lookup_key(b, [indigest_idx(k), v(HV0 + k as usize)], Count::bounded(is_real_indigest.clone() * v(ACT0 + k as usize), 1));
         }
 
         // M3.4: the digest group's own bookkeeping — `PC` (`base_pc`) and `HASH_N` (`len`,
@@ -1066,11 +1086,12 @@ fn fill_digest_rows(v: &mut [F], program: &Program, range: &mut RangeCounts) {
     }
 }
 
-/// M4.1: fills the `⌈n_in/4⌉`-row indigest region starting at cpu-table row `offset`
+/// M4.1: fills the `1 + ⌈n_in/4⌉`-row indigest region (the salt row plus the real input
+/// blocks — `hash::input_digest_row_count`) starting at cpu-table row `offset`
 /// (`program.digest_rows()`), mirroring `fill_digest_rows` exactly with `hash::
 /// input_digest_rows`/`IS_INDIGEST`/`INDIGEST_LAST`/`IHVL0..31`/`IHIMAX0..3`/`IINV0..3` in
 /// place of `hash::program_digest_rows`/`IS_DIGEST`/`DIGEST_LAST`/`DHVL0..31`/`DHIMAX0..3`/
-/// `DINV0..3`. Returns the number of rows it filled (`⌈n_in/4⌉.max(1)`).
+/// `DINV0..3`, plus `IS_SALT` on the first (salt) row. Returns the number of rows it filled.
 fn fill_input_digest_rows(v: &mut [F], offset: usize, base_pc: u32, salt: [u32; 4], inputs: &[u32], range: &mut RangeCounts) -> usize {
     let blocks = crate::hash::input_digest_rows(salt, inputs);
     let n = blocks.len();
@@ -1079,7 +1100,9 @@ fn fill_input_digest_rows(v: &mut [F], offset: usize, base_pc: u32, salt: [u32; 
         r[IS_INDIGEST] = F::ONE;
         // Salted H_IN (controller ruling): block 0 is always the salt block
         // (`hash::input_digest_rows`'s own convention) — mark it so the AIR skips its
-        // `INPUT_WORD` consumption and excludes its `active_sum` from the `HASH_LEFT` drain.
+        // `INPUT_DIGEST` consumption (review round 1, C1: it draws from `INPUT_DIGEST` now,
+        // not the retired single `INPUT_WORD` bus) and excludes its `active_sum` from the
+        // `HASH_LEFT` drain.
         if blk.idx == 0 { r[IS_SALT] = F::ONE; }
         // DEVIATION from the brief (found via self-review against an honest trace, see the
         // three matching AIR-side deviation comments in `eval` — the drain-rule split, the

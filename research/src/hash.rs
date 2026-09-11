@@ -151,7 +151,7 @@ pub fn program_digest_rows(base_pc: u32, words: &[u32]) -> Vec<DigestBlock> {
 /// candidate inputs can test them against `pv::IN0..7` directly). Capacity lanes seeded with
 /// `[IN_DOMAIN, n_in, 0]` (only two real header words, since there is no `base_pc` analogue
 /// for a flat input vector); the **first absorbed rate block is the 4 salt words** (drawn
-/// fresh per proof, `Machine::prove`), never `INPUT_WORD`-checked; then `⌈n_in/4⌉` blocks of
+/// fresh per proof, `Machine::prove`), never `INPUT_DIGEST`-checked; then `⌈n_in/4⌉` blocks of
 /// the real input words. The salt block alone already costs one permutation, so `H_IN(salt,
 /// &[])` is never the all-zero digest and `n_in == 0` needs no separate "at least one block"
 /// special case — see `input_digest_row_count`.
