@@ -304,6 +304,9 @@ pub fn transfer() -> Program {
     use crate::notes::{domain, input, output, DEPTH};
     const BASE: u32 = 25; // s9: RAM base register, holds HEAP
     const BIT: u32 = 26;  // s10: MERKLE_VERIFY's branch scratch
+    const PATH_PTR: u32 = 27;
+    const INDEX_WORK: u32 = 24;
+    const CTR: u32 = 23;
     const BUF: i32 = 0x000;   // hash scratch: up to 28 words (112 bytes)
     const INP: i32 = 0x100;   // the input::COUNT private inputs
     const NK: i32 = 0x600;
@@ -349,7 +352,7 @@ pub fn transfer() -> Program {
     emit_note_commit(&mut a, BASE, T0, NOTE_IN, BUF, ptr_words(BUF), CM_IN);
     // anchor = MERKLE_VERIFY(cm_in, path, index) — proves cm_in is in the commitment tree.
     a.push(lw(T1, BASE, inp(input::INDEX)));
-    emit_merkle_verify(&mut a, BASE, T0, BIT, CM_IN, inp(input::PATH), T1, BUF, ptr_words(BUF), ANCHOR, DEPTH, "transfer_merkle");
+    emit_merkle_verify(&mut a, BASE, T0, BIT, INDEX_WORK, T1, PATH_PTR, CTR, CM_IN, inp(input::PATH), BUF, ptr_words(BUF), ANCHOR, DEPTH, "transfer_merkle");
     // nf = NULLIFY(nk, cm_in) — bound to the commitment, so two notes can never share one.
     emit_nullify(&mut a, BASE, T0, NK, CM_IN, BUF, ptr_words(BUF), NF);
     // cm_out = NOTE_COMMIT(out.pk, pk, in.amount, in.asset, out.time, out.r)
@@ -403,6 +406,9 @@ pub fn merkle_probe(leaf: crate::notes::Word8, path: &[crate::notes::Word8; crat
     use crate::notes::DEPTH;
     const BASE: u32 = 25;
     const BIT: u32 = 26;
+    const PATH_PTR: u32 = 27;
+    const INDEX_WORK: u32 = 24;
+    const CTR: u32 = 23;
     const LEAF: i32 = 0x080;
     const PATH: i32 = 0x0a0; // DEPTH * 8 words = 1024 bytes -> 0x0a0..0x4a0
     const BUF: i32 = 0x000;
@@ -414,7 +420,7 @@ pub fn merkle_probe(leaf: crate::notes::Word8, path: &[crate::notes::Word8; crat
         for (i, w) in sib.iter().enumerate() { a.extend(li(T0, *w as i32)); a.push(sw(BASE, T0, PATH + 32 * level as i32 + 4 * i as i32)); }
     }
     a.extend(li(T1, index as i32));
-    emit_merkle_verify(&mut a, BASE, T0, BIT, LEAF, PATH, T1, BUF, (HEAP + BUF) / 4, ROOT, DEPTH, "merkle_probe");
+    emit_merkle_verify(&mut a, BASE, T0, BIT, INDEX_WORK, T1, PATH_PTR, CTR, LEAF, PATH, BUF, (HEAP + BUF) / 4, ROOT, DEPTH, "merkle_probe");
     for i in 0..8 { a.push(lw(T2, BASE, ROOT + 4 * i)); a.extend(write_output(i as u32, T2)); }
     a.extend(halt());
     a.assemble()

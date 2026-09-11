@@ -143,12 +143,18 @@ reinterpreted as a shorter or longer one (`tests/viewing.rs::domains_and_lengths
 documents this precisely).
 
 **Measured cost** (`tests/viewing.rs::transfer_guest_permutation_and_row_counts_are_measured`):
-4 554 instructions, 3 764 cycles, 38 `POSEIDON2` calls (5 note/key/nullifier
+1 771 instructions, 3 896 cycles, 38 `POSEIDON2` calls (5 note/key/nullifier
 hashes + 32 Merkle levels + 1 output-commitment digest), 190 permutations
 from execution itself. M3.4 adds the program's own `hc` digest to every
-proof — 1 139 more digest rows (`⌈4554/4⌉`), counted as cycles too — for a
-total of 4 903 cycles and 1 329 permutations. See "Public outputs" and
-"Cost" below for what that meant for the gas tier.
+proof — 443 more digest rows (`⌈1771/4⌉`), counted as cycles too — for a
+total of 4 339 cycles and 633 permutations. (Shielded pool phase Z Task 1
+replaced `MERKLE_VERIFY`'s 32-times-unrolled body with a counted loop
+compiled once and executed 32 times, which is why the instruction count and
+digest-row cost dropped sharply from M3.3's unrolled figures — 4 554
+instructions / 1 139 digest rows / 4 903 total cycles, superseded here —
+while execution-only cycles rose slightly, 3 764 → 3 896, from the loop's
+per-iteration branch/counter bookkeeping.) See "Public outputs" and "Cost"
+below for what that meant for the gas tier.
 
 ## Public outputs
 
@@ -242,6 +248,11 @@ own — so tamper coverage at the hash-row level (a row forging its absorb
 state, claiming to be more than one row kind at once, etc.) is inherited
 directly from `tests/cheating.rs`'s M3.2 `POSEIDON2` cheating tests rather
 than needing its own copies for the Merkle-verification call site.
+Shielded pool phase Z Task 1 changed `MERKLE_VERIFY`'s calling convention
+from 32 unrolled copies of its body to a counted loop (`asm::emit_merkle_verify`),
+but its AIR-visible behavior — the same `POSEIDON2` absorb/write-back rows,
+once per level — did not change, which is why no cheating test needed
+updating for the loop.
 
 ## Rows and verification
 
@@ -314,14 +325,14 @@ commitment.)
 
 | | |
 |---|---|
-| `transfer` program | 4 554 instructions |
-| cycles (execution only) | 3 764 |
-| digest rows (M3.4, `hc`) | 1 139 (`⌈4554/4⌉`) — count as cycles too |
-| total cycles | 4 903 → tier 14 (max 16 383; no longer fits tier 12's 4 095) |
+| `transfer` program | 1 771 instructions (M3.3's unrolled figure, superseded here: 4 554) |
+| cycles (execution only) | 3 896 (M3.3: 3 764) |
+| digest rows (M3.4, `hc`) | 443 (`⌈1771/4⌉`) — count as cycles too (M3.3's unrolled figure, superseded here: 1 139) |
+| total cycles | 4 339 → tier 14 (max 16 383; still doesn't fit tier 12's 4 095) (M3.3's unrolled figure, superseded here: 4 903) |
 | `POSEIDON2` calls (execution only) | 38 (5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest) |
 | permutations (execution only) | 190 total — 1 (`nk`, 3-word message) + 3 (`pk`, 9 words) + 7 (`cm_in`, 28 words) + 5 (`nf`, 17 words) + 7 (`cm_out`, 28 words) + 32 × 5 (Merkle levels, 17 words each) + 7 (output digest, 26 words) |
-| total permutations | 190 + 1 139 (digest rows) = 1 329 |
-| gas tier | 14 — forced by the cycle count alone (M3.4: digest rows count as cycles); at tier 14, even the unmodified `poseidon2_height(t) = 2^(t+1)` (1 024 slots) falls short of 1 329, so M3.4 bumps it once more, to `2^(t+2)` (2 048 slots at tier 14) — `machine::Tier::poseidon2_height`'s doc comment has the full trade-off argument (cheaper in proof size than moving to tier 16, whose unmodified `2^(t+1)` would also clear 1 329 but at every other table's much larger tier-16 height too) |
+| total permutations | 190 + 443 (digest rows) = 633 (M3.3's unrolled figure, superseded here: 1 329) |
+| gas tier | 14 — still forced by the cycle count alone (4 339 > tier 12's 4 095-cycle budget), unchanged from M3.3's unrolled version despite the much smaller program; the counted-loop routine's 633 total permutations now comfortably fit even the unmodified `poseidon2_height(t) = 2^(t+1)` (1 024 slots at tier 14) that M3.3's 1 329 permutations had forced past — `machine::Tier::poseidon2_height` still ships M3.4's `2^(t+2)` sizing (2 048 slots), a crate-wide constant other guests (e.g. Task 3's two-Merkle-walk bundle) may still need the margin for, not something Task 1 revisits |
 | envelope | 1 088 (KEM) + 3 × (12 + 16) + 32 + 32 + 40 bytes ≈ 1.3 KB |
 | test-profile proof | tens of seconds in `cargo test` (opt-level 1, debug constraint checking) at tier 14's larger tables; the proof-backed viewing tests are correspondingly slower than the M1.5/M3.2/M3.3 baseline — expected, not a regression |
 
@@ -332,8 +343,15 @@ because at `Word8` widths the note-commitment calls (28-word messages, 7
 permutations each) and the nullifier call (17 words, 5 permutations) cost
 more than one permutation apiece, and the output-commitment digest (`Public
 outputs`, above) adds 7 more. M3.4 then adds the program's own digest cost
-on top — 1 139 more permutations, dwarfing the execution-only count — since
-`transfer`'s compiled program is itself large (4 554 words, dominated by
-the guest-level `NOTE_COMMIT`/`NULLIFY`/`MERKLE_VERIFY` routines' unrolled
-Merkle-level loop). 190 and 1 329 are the numbers pinned by
+on top. Under M3.3's 32-times-unrolled `MERKLE_VERIFY`, that digest cost was
+1 139 permutations, dwarfing the execution-only count, because the compiled
+program was itself large (4 554 words, dominated by the guest-level
+`NOTE_COMMIT`/`NULLIFY`/`MERKLE_VERIFY` routines' unrolled Merkle-level
+loop). Shielded pool phase Z Task 1 replaced that unrolled loop with a
+counted loop — the body compiled once, executed 32 times by ordinary
+branch/jump control flow — which shrank the program to 1 771 words and its
+digest cost to 443 permutations accordingly, without changing what
+`MERKLE_VERIFY` proves or how it compiles at the AIR level (see "The
+commitment tree" section's "Testing note" above). 190 and 633 are the
+numbers pinned by
 `tests/viewing.rs::transfer_guest_permutation_and_row_counts_are_measured`.

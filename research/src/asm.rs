@@ -103,6 +103,17 @@ pub fn copy_word8(a: &mut Assembler, base: u32, tmp: u32, src: i32, dst: i32) {
     }
 }
 
+/// `copy_word8`'s register-indirect twin: copies a `Word8` from `src_reg + {0,4,..,28}`
+/// (a RUNTIME address — `src_reg` holds it, unlike `copy_word8`'s compile-time `src: i32`)
+/// to `base + dst`. What the looped `MERKLE_VERIFY` needs to read the current level's
+/// sibling through a bumped pointer register instead of a per-level compile-time offset.
+pub fn copy_word8_from_reg(a: &mut Assembler, base: u32, tmp: u32, src_reg: u32, dst: i32) {
+    for i in 0..8 {
+        a.push(ops::lw(tmp, src_reg, 4 * i));
+        a.push(ops::sw(base, tmp, dst + 4 * i));
+    }
+}
+
 /// `NOTE_COMMIT`: `note_words` (`Note::WORDS` words, already laid out at `base + note_at`)
 /// hashed as `H(CM_DOMAIN, note_words)`. Stages `[CM_DOMAIN, note_words...]` at `base + buf`
 /// (needs `1 + Note::WORDS` = 28 words of scratch), calls `POSEIDON2`, and copies the 8-word
@@ -132,27 +143,61 @@ pub fn emit_nullify(a: &mut Assembler, base: u32, tmp: u32, nk_at: i32, cm_at: i
     copy_word8(a, base, tmp, buf, nf_out);
 }
 
-/// `MERKLE_VERIFY`, depth `depth` (32 in this crate): proves the `Word8` at `base + leaf` is
-/// a member of a tree whose root is written to `base + root_out`, given a private sibling
-/// path already laid out at `base + path` (`depth` `Word8`s, leaf to root) and `index_word`
-/// — a register holding the leaf's index, whose bit `level` selects which side the running
-/// node is on at that level (`0`: running is left, sibling is right; `1`: the reverse).
+/// `MERKLE_VERIFY`, depth `depth` (32 in this crate), as a counted loop — see the module-level
+/// doc comment above (`docs/superpowers/plans/2026-09-11-shielded-pool-z.md` Task 1) for the
+/// full calling convention. Unlike the M3.3 unrolled version, the compiled body is emitted
+/// once; `ctr` counts `depth` iterations, `path_ptr` walks the sibling array 32 bytes at a
+/// time, and `index` is a destructible copy of `index_word` shifted right by 1 each
+/// iteration — the same "maintain a pointer, bump it, count down" idiom `guests::memcpy`/
+/// `guests::bubble_sort` already use for their own loops, applied here to a `Word8`-at-a-time
+/// stride instead of a word-at-a-time one.
 ///
-/// Unrolled at assembly time (`depth` is fixed, so every level's path offset — `path + 32 *
-/// level` — is a compile-time constant); the only runtime-conditioned step per level is the
-/// branch that picks left/right order. Per level: `[NODE_DOMAIN, left(8), right(8)]` (17
-/// words) staged at `base + buf`, one `POSEIDON2` call (`ceil(17/4) = 5` permutations),
-/// result copied back into the running node. `label_prefix` must be unique per call site (two
-/// `MERKLE_VERIFY`s in one program would otherwise collide on level labels).
+/// Calling convention (documented here because every field is now either a register the
+/// *caller* must dedicate — not shared with anything live across the call — or a compile-time
+/// RAM offset, same as before):
+///   - `base`      (reg, in)  RAM base, unchanged from the unrolled version.
+///   - `tmp`       (reg, scratch) general load/store scratch, unchanged.
+///   - `bit`       (reg, scratch) holds the extracted index low bit each iteration.
+///   - `index`     (reg, scratch, DESTROYED) — the caller's index value is copied in at the
+///                 top of the routine (`mv(index, index_word)`) and shifted right by 1 every
+///                 iteration; the caller's own `index_word` register is left untouched (the
+///                 unrolled version never destroyed it either, since it only ever read one
+///                 fixed bit of it per unrolled level — the loop version must destroy *a copy*
+///                 instead, because it reads a different bit each iteration via repeated
+///                 `srli ..., 1`, not a per-iteration-constant shift amount).
+///   - `index_word`(reg, in, preserved) the caller's original index — read once, not modified.
+///   - `path_ptr`  (reg, scratch) initialized to `base + path` and bumped by 32 bytes (one
+///                 `Word8` sibling) every iteration — the register-indirect address
+///                 `copy_word8_from_reg` reads the current level's sibling from.
+///   - `ctr`       (reg, scratch) counts iterations down from `depth` to 0.
+///   - `leaf`, `path`, `buf`, `ptr_words`, `root_out`, `depth`, `label_prefix`: same meaning
+///     and same compile-time-constant-ness as the unrolled version.
+///
+/// `leaf`/`root_out` may be the same or different RAM offsets (`guests::transfer` uses
+/// different ones, seeding `root_out` from `leaf` once up front, exactly as the unrolled
+/// version did); `path`'s per-level sibling for level `l` is `path + 32*l`, now visited by
+/// `path_ptr` incrementing rather than by a compile-time-computed offset per unrolled copy.
+///
+/// Per iteration: extract the low bit of `index` (`andi(bit, index, 1)`), branch to pick
+/// `[running, sibling]` (bit 0) or `[sibling, running]` (bit 1) order — reading the sibling
+/// through `path_ptr` via `copy_word8_from_reg`, the running node through `root_out` via
+/// `copy_word8` (still a compile-time address: only ONE running-node buffer exists, reused
+/// in place every iteration, exactly as the unrolled version reused it) — hash the 17-word
+/// `[NODE_DOMAIN, left(8), right(8)]` staged at `buf`, copy the digest back into `root_out`,
+/// then advance `index >>= 1`, `path_ptr += 32`, `ctr -= 1`, loop. `label_prefix` must still be
+/// unique per call site (one `_loop`/`_bit0`/`_done`/`_exit` label set is emitted per call).
 #[allow(clippy::too_many_arguments)]
 pub fn emit_merkle_verify(
     a: &mut Assembler,
     base: u32,
     tmp: u32,
     bit: u32,
+    index: u32,
+    index_word: u32,
+    path_ptr: u32,
+    ctr: u32,
     leaf: i32,
     path: i32,
-    index_word: u32,
     buf: i32,
     ptr_words: i32,
     root_out: i32,
@@ -161,25 +206,33 @@ pub fn emit_merkle_verify(
 ) {
     use crate::isa::{BranchCond, REG_ZERO};
     copy_word8(a, base, tmp, leaf, root_out);
-    for level in 0..depth {
-        let sib = path + 32 * level as i32;
-        let bit0 = format!("{label_prefix}_l{level}_bit0");
-        let done = format!("{label_prefix}_l{level}_done");
-        a.push(ops::srli(bit, index_word, level as u32));
-        a.push(ops::andi(bit, bit, 1));
-        a.branch(BranchCond::Eq, bit, REG_ZERO, &bit0);
-        // bit == 1: the running node is on the right — [sibling, running].
-        copy_word8(a, base, tmp, sib, buf + 4);
-        copy_word8(a, base, tmp, root_out, buf + 36);
-        a.jal(REG_ZERO, &done);
-        a.label(&bit0);
-        // bit == 0: the running node is on the left — [running, sibling].
-        copy_word8(a, base, tmp, root_out, buf + 4);
-        copy_word8(a, base, tmp, sib, buf + 36);
-        a.label(&done);
-        a.extend(ops::li(tmp, domain::NODE as i32));
-        a.push(ops::sw(base, tmp, buf));
-        a.extend(ops::call_poseidon2(ptr_words, 17));
-        copy_word8(a, base, tmp, buf, root_out);
-    }
+    a.push(ops::mv(index, index_word));
+    a.push(ops::addi(path_ptr, base, path));
+    a.extend(ops::li(ctr, depth as i32));
+    let loop_lbl = format!("{label_prefix}_loop");
+    let bit0 = format!("{label_prefix}_bit0");
+    let done_lbl = format!("{label_prefix}_done");
+    let exit_lbl = format!("{label_prefix}_exit");
+    a.label(&loop_lbl);
+    a.branch(BranchCond::Eq, ctr, REG_ZERO, &exit_lbl);
+    a.push(ops::andi(bit, index, 1));
+    a.branch(BranchCond::Eq, bit, REG_ZERO, &bit0);
+    // bit == 1: the running node is on the right — [sibling, running].
+    copy_word8_from_reg(a, base, tmp, path_ptr, buf + 4);
+    copy_word8(a, base, tmp, root_out, buf + 36);
+    a.jal(REG_ZERO, &done_lbl);
+    a.label(&bit0);
+    // bit == 0: the running node is on the left — [running, sibling].
+    copy_word8(a, base, tmp, root_out, buf + 4);
+    copy_word8_from_reg(a, base, tmp, path_ptr, buf + 36);
+    a.label(&done_lbl);
+    a.extend(ops::li(tmp, domain::NODE as i32));
+    a.push(ops::sw(base, tmp, buf));
+    a.extend(ops::call_poseidon2(ptr_words, 17));
+    copy_word8(a, base, tmp, buf, root_out);
+    a.push(ops::srli(index, index, 1));
+    a.push(ops::addi(path_ptr, path_ptr, 32));
+    a.push(ops::addi(ctr, ctr, -1));
+    a.jal(REG_ZERO, &loop_lbl);
+    a.label(&exit_lbl);
 }

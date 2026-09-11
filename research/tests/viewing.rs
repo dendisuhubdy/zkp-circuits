@@ -87,6 +87,22 @@ fn merkle_verify_matches_a_host_side_tree() {
     }
 }
 
+/// The looped `MERKLE_VERIFY`'s index-shifting logic against more than 5 sequential indices:
+/// random leaves, a larger tree, and index bit patterns covering first/second/interior/last.
+#[test]
+fn merkle_verify_loop_matches_a_host_side_tree_for_random_leaves() {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let mut tree = CommitmentTree::new();
+    let leaves: Vec<Word8> = (0..37u32).map(|_| notes::hash(domain::TEST, &[rng.next_u32()])).collect();
+    for cm in &leaves { tree.append(*cm); }
+    for i in [0usize, 1, 17, 36] { // first, second, an interior, and the last-appended leaf
+        let path = tree.path(i);
+        let e = execute(&guests::merkle_probe(leaves[i], &path, i as u32), &[], 1 << 20).unwrap();
+        assert_eq!(e.outputs[..8], tree.root(), "leaf {i}");
+    }
+}
+
 struct Party { sk: SpendKey, vk: ViewingKey }
 impl Party {
     fn new() -> Party { let sk = SpendKey::random(); Party { sk, vk: sk.viewing_key() } }
@@ -133,18 +149,23 @@ fn transfer_guest_proves_membership_and_computes_the_reference_outputs() {
     assert_eq!(nf, alice.vk.nullifier(&spent.commitment()));
 }
 
-/// M3.3's measured cost (`docs/06-viewing-keys.md`'s cost table): 190 Poseidon2 permutations
-/// from `execute()` itself (5 non-Merkle hash calls at `Word8` widths plus 32 Merkle levels at
-/// 5 permutations each plus the 7-permutation output-commitment digest) and 3 764 cycles.
+/// Measured cost (`docs/06-viewing-keys.md`'s cost table): 190 Poseidon2 permutations from
+/// `execute()` itself (5 non-Merkle hash calls at `Word8` widths plus 32 Merkle levels at 5
+/// permutations each plus the 7-permutation output-commitment digest) and 3 896 cycles.
 ///
 /// M3.4 adds `Program::digest_rows()` permutations to *every* proof (the program's own `hc`,
-/// unconditional on how the guest ran) and counts them as cycles too: `transfer`'s program is
-/// 4 554 words, i.e. 1 139 digest rows. Total: 3 764 + 1 139 = 4 903 cycles (over tier 12's
-/// 4 095-cycle budget — `transfer` now needs at least tier 14) and 190 + 1 139 = 1 329
-/// permutations (over tier 12's `poseidon2_height() / 32` = 512 slots, and even tier 14's
-/// unmodified `2^(t+1)` would only give 1 024 — this is why `Tier::poseidon2_height` is
-/// `2^(t+2)`, not `2^(t+1)`, as of M3.4: 2 048 slots at tier 14, comfortably enough). Pinned so
-/// a future change to the guest, the hash, or the digest-row cost model is caught here rather
+/// unconditional on how the guest ran) and counts them as cycles too. Task 1 (shielded pool
+/// phase Z) replaced `MERKLE_VERIFY`'s 32-times-unrolled body with a counted loop compiled
+/// once and executed 32 times by ordinary branch/jump control flow: execution cycles rose
+/// slightly (3 764 → 3 896 — the loop's per-iteration `andi`/branch/`srli`/`addi×2`/`jal`
+/// bookkeeping costs a little more than the unrolled version's straight-line code) but the
+/// *compiled program* shrank drastically, since the loop body is emitted once instead of 32
+/// times: `transfer`'s program dropped from 4 554 words (1 139 digest rows) to 1 771 words
+/// (443 digest rows). Total: 3 896 + 443 = 4 339 cycles (still over tier 12's 4 095-cycle
+/// budget, so `transfer` still needs at least tier 14 — M3.3's unrolled figure of 4 903 cycles
+/// needing tier 14 is superseded by this smaller-but-still-tier-14 number) and 190 + 443 = 633
+/// permutations (well under tier 14's `poseidon2_height() / 32` = 2 048 slots). Pinned so a
+/// future change to the guest, the hash, or the digest-row cost model is caught here rather
 /// than surfacing as a mysterious `NoTier`/`TooManyCycles`.
 #[test]
 fn transfer_guest_permutation_and_row_counts_are_measured() {
@@ -162,15 +183,17 @@ fn transfer_guest_permutation_and_row_counts_are_measured() {
     let hash_calls = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Ecall { .. }))).count();
     assert_eq!(hash_calls, 5 + DEPTH + 1, "5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest");
     assert_eq!(permutations, 190);
-    assert_eq!(e.cycles(), 3764);
-    assert_eq!(program.digest_rows(), 1139, "transfer's word count, hence its hc cost, is pinned here");
+    assert_eq!(e.cycles(), 3896);
+    assert_eq!(program.digest_rows(), 443, "transfer's word count, hence its hc cost, is pinned here");
     let total_cycles = e.cycles() + program.digest_rows();
     let total_permutations = permutations + program.digest_rows();
-    assert_eq!(total_cycles, 4903);
-    assert_eq!(total_permutations, 1329);
+    assert_eq!(total_cycles, 4339);
+    assert_eq!(total_permutations, 633);
     assert_eq!(Tier::for_cycles(total_cycles), Some(Tier(14)));
     assert!(total_cycles <= Tier(14).max_cycles());
     assert!(total_permutations <= Tier(14).poseidon2_height() / 32, "must fit the tier's permutation slots, not just its cycle budget");
+    eprintln!("transfer: {} program words, {} exec cycles, {} digest rows, {} total cycles, tier {:?}",
+        program.len(), e.cycles(), program.digest_rows(), total_cycles, Tier::for_cycles(total_cycles));
 }
 
 #[test]
