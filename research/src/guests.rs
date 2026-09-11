@@ -410,7 +410,11 @@ pub fn note_commit_probe(msg: &[u32; crate::notes::Note::WORDS]) -> Program {
 /// mechanism for the genuinely arithmetic checks this ISA has no native assert for (both real
 /// inputs' Merkle roots agreeing with one claimed `anchor`, every amount's `< 2^63` range
 /// check, 64-bit balance conservation, per-input asset agreement with the bundle's public
-/// asset). `bad` is a monotone OR accumulator, folded as an explicit extra word into the
+/// asset, and — nothing else in the relation compares the two inputs/outputs against each
+/// other — the same note never spent as both inputs (`nf1 == nf2`) nor the same note minted
+/// as both outputs (`cm_out1 == cm_out2`); the ledger independently rejects either duplicate
+/// again once applied, so this is defence in depth, not the only place it is caught). `bad`
+/// is a monotone OR accumulator, folded as an explicit extra word into the
 /// published digest's preimage (`notes::bundle_digest`) — never XORed into a plaintext field a
 /// sender publishes, since that would let a cheat simply republish the corrupted plaintext and
 /// have the ledger's independent recomputation agree.
@@ -439,19 +443,28 @@ pub fn bundle() -> Program {
     // (`Instr::encode`'s `i_type` masks to `imm & 0xfff`, decoded back via `sext(.., 12)`) —
     // any offset outside `[-2048, 2047]` silently wraps. `transfer()` never had to think about
     // this because its whole layout stays under `0x6a0` (1696); `bundle()`'s does not — the
-    // 606-word `bi::COUNT` private-input array alone reaches byte offset `606*4 = 2424` past
-    // `INP`, and the derived-value scratch (`NK`..`SUM_OUT_HI`) sits at `0xb00..0xc50`
-    // (2816..3152), both past `0x7ff`. Fix: `BASE` is loaded with `HEAP + PIVOT`, not `HEAP`,
-    // and every RAM constant below is defined already shifted by `-PIVOT` (so e.g. `ANCHOR`'s
-    // nominal `0xc00` becomes `0xc00 - PIVOT`) — every constant actually used as an `lw`/`sw`/
-    // `addi` immediate anywhere in this function then lands in `[-1536, 1612]`, comfortably
-    // inside the 12-bit window. `ptr_words` computes a real absolute word address for the
-    // `POSEIDON2` syscall's pointer argument (built via `li`, which is not immediate-width
-    // limited — see `ops::li`), so it adds `PIVOT` back rather than being shifted itself.
+    // 606-word `bi::COUNT` private-input array's own last word alone reaches byte offset
+    // `4*605 = 2420` past `INP`, and the derived-value scratch (`NK`..`SUM_OUT_HI`) sits at
+    // `0xb00..0xc50` (2816..3152), both past `0x7ff`. Fix: `BASE` is loaded with
+    // `HEAP + PIVOT`, not `HEAP`, and every RAM constant below is defined already shifted by
+    // `-PIVOT` (so e.g. `ANCHOR`'s nominal `0xc00` becomes `0xc00 - PIVOT`) — every constant
+    // actually used as an `lw`/`sw`/`addi` immediate anywhere in this function then lands in
+    // `[-1536, 1612]`, comfortably inside the 12-bit window. `ptr_words` computes a real
+    // absolute word address for the `POSEIDON2` syscall's pointer argument (built via `li`,
+    // which is not immediate-width limited — see `ops::li`), so it adds `PIVOT` back rather
+    // than being shifted itself.
+    //
+    // Every region below is disjoint (checked by nominal byte range, before the `-PIVOT`
+    // shift, which preserves relative order): `BUF` needs up to 48 words = 0xc0 bytes for the
+    // final digest (`0x000..0x0c0`); `NOTE_STAGE` starts exactly where `BUF` ends (`0x0c0`,
+    // not `0x080` — `0x080` would have overlapped `BUF`'s digest-time window by 16 words) and
+    // needs `Note::WORDS` = 28 words = 0x70 bytes (`0x0c0..0x130`); `INP` starts at `0x140`
+    // (comfortably past `0x130`, not `0x100`) and needs `bi::COUNT` = 606 words = 0x978 bytes
+    // (`0x140..0xab8`), still clear of `NK` at `0x0b00`.
     const PIVOT: i32 = 0x600;
     const BUF: i32 = 0x000 - PIVOT;      // hash scratch: up to 48 words (192 bytes) for the final digest
-    const NOTE_STAGE: i32 = 0x080 - PIVOT; // Note::WORDS = 28 word staging area, reused per note
-    const INP: i32 = 0x100 - PIVOT;      // bundle_input::COUNT (606) private inputs
+    const NOTE_STAGE: i32 = 0x0c0 - PIVOT; // Note::WORDS = 28 word staging area, reused per note
+    const INP: i32 = 0x140 - PIVOT;      // bundle_input::COUNT (606) private inputs
     const NK: i32 = 0xb00 - PIVOT;
     const PK: i32 = 0xb20 - PIVOT;
     const CM_IN1: i32 = 0xb40 - PIVOT;
@@ -575,6 +588,22 @@ pub fn bundle() -> Program {
     a.push(lw(T0, BASE, inp(bi::TIME))); a.push(sw(BASE, T0, NOTE_STAGE + 76));
     copy_word8(&mut a, BASE, T0, inp(bi::OUT2_R), NOTE_STAGE + 80);
     emit_note_commit(&mut a, BASE, T0, NOTE_STAGE, BUF, ptr_words(BUF), CM_OUT2);
+
+    // ---- duplicate-input / duplicate-output detection ----
+    // The same note spent as both inputs (nf1 == nf2, since a nullifier is a deterministic
+    // function of cm_in) would otherwise pass every other check with bad == 0 and a
+    // "balanced" 2x-amount output — nothing above compares the two inputs against each
+    // other. Likewise two byte-for-byte identical output notes (cm_out1 == cm_out2) mint the
+    // same commitment twice. `emit_eq8` returns 1 iff equal, so — unlike the anchor-agreement
+    // check above, which wants bad on MISMATCH and so inverts it — this ORs the equality bit
+    // straight into `bad`: bad on MATCH. The ledger (Task 4) independently rejects either
+    // duplicate again once a bundle is applied (a repeated nullifier / a repeated commitment
+    // both already fail there on their own) — this in-circuit check is defence in depth, not
+    // the only place a within-bundle duplicate is caught.
+    emit_eq8(&mut a, BASE, T0, EQFOLD, NF1, NF2, T7);
+    emit_or_into(&mut a, BAD, T7); // T7 := 1 iff nf1 == nf2 (the same note spent twice)
+    emit_eq8(&mut a, BASE, T0, EQFOLD, CM_OUT1, CM_OUT2, T7);
+    emit_or_into(&mut a, BAD, T7); // T7 := 1 iff cm_out1 == cm_out2 (the same note minted twice)
 
     // ---- range checks: every amount (both inputs, both outputs, fee, burn) < 2^63 ----
     for hi_off in [

@@ -406,7 +406,24 @@ can clear a `bad` an earlier one set. Every genuinely arithmetic relation funnel
   both outputs, fee, burn) that is `>= 2^63`.
 - **64-bit conservation.** `asm::emit_add64_carry` chains `in1 + in2` and
   `out1 + out2 + fee + burn` with carry detection at every step, and a final compare ORs
-  `BAD` if the two 65-bit-capable sums disagree.
+  `BAD` if the two 65-bit-capable sums disagree. The carry folds are not redundant with
+  that final compare: a witness can make the *wrapped* sums compare equal
+  (`out1 = out2 = 2^63 − 1`, `fee = 2` wraps `sum_out` to exactly 0, matching two dummy
+  inputs' `sum_in = 0`), and only the carry-out catches it — `a_64_bit_wrap_in_the_balance_is_rejected`
+  is built on exactly that witness so that deleting the carry folds makes it fail.
+- **No duplicate input or output within one bundle** (review round 1). Nothing else in the
+  relation compares the two inputs, or the two outputs, against *each other*: the same note
+  handed in as both inputs passes membership, anchor agreement and asset agreement twice
+  over (it really is the tree's leaf, checked against the same anchor), and the balance sum
+  simply sees `amount + amount` — a free doubling. So after both nullifiers and both output
+  commitments exist, `asm::emit_eq8` compares `nf1` against `nf2` and `cm_out1` against
+  `cm_out2`, and each *equality* (not mismatch — this fold is the inverse polarity of the
+  anchor check) ORs into `BAD`. The ledger (Task 4) independently rejects a repeated
+  nullifier or a repeated commitment when the bundle is applied, so this is defence in
+  depth rather than the only place it is caught. One practical consequence: a dummy
+  *output* still needs a freshly random `r` like any other note, because two zero-`r`
+  dummies commit to the identical `cm_out` and would now taint their own bundle (and, even
+  one at a time, collide with an earlier bundle's dummy leaf on the ledger).
 
 The taint bit is folded into the published digest as **an explicit 47th word**, never
 XORed into `time` or any other plaintext field a sender publishes alongside the proof:
@@ -455,26 +472,36 @@ immediate actually used in `[-1536, 1612]`; `asm::ops::call_poseidon2`'s pointer
 (built via `li`, which is not immediate-width limited) adds the pivot back to recover the
 true absolute address. Any future guest whose RAM footprint is wider than roughly 4 KB
 from one base register needs the same trick (or a second base register anchoring a second
-window).
+window). The same layout table has a second, quieter trap, caught in review round 1: the
+hash scratch `BUF` is sized by its *largest* user, and that is the final 48-word digest
+absorb (`0x000..0x0c0`), not the 29-word `NOTE_COMMIT` staging — so the note staging area
+that is live *simultaneously* with `BUF` must start at `0x0c0`, not at the `0x080` a
+`NOTE_COMMIT`-sized reading of `BUF` suggests. Overlapping them was harmless only by
+accident (the staging area happens to be dead by the time the digest is absorbed); size
+every scratch region by its widest use, and keep the regions disjoint unconditionally.
 
-**Measured** (`tests/bundle.rs`, `-- --nocapture`; `Tier::poseidon2_height(14) / 32 = 2048`
-permutation slots, `Tier(13)`'s 1 024 slots and `Tier(14)`'s own 16 383-cycle budget both
-checked below):
+**Measured** (`tests/bundle.rs`, `-- --nocapture`; re-measured after review round 1's
+in-circuit duplicate-input/duplicate-output checks, which added 70 program words and 70
+execution cycles to both shapes. `Tier::poseidon2_height(14) / 32 = 2048` permutation
+slots; `TIERS` is `[10, 12, 14, 16, 18, 20]` — there is no tier 13 or 15 to fall between
+them):
 
 | | 2-in-2-out (`honest_two_in_two_out_proves_and_verifies`) | 1-in-1-out-with-dummies (`honest_one_in_one_out_with_dummies_proves`) |
 |---|---|---|
-| program | 3 705 words |  (same program, both shapes) |
-| cycles (execution only) | 7 948 | 5 709 |
-| digest rows (`hc`) | 927 (`⌈3705/4⌉`) | 927 |
-| total cycles | 8 875 | 6 636 |
+| program | 3 775 words |  (same program, both shapes) |
+| cycles (execution only) | 8 018 | 5 779 |
+| digest rows (`hc`) | 944 (`⌈3775/4⌉`) | 944 |
+| input-digest rows (606 private inputs) | 153 (`1 + ⌈606/4⌉`) | 153 |
+| total cycles (what `Tier::for_cycles` sees) | 9 115 | 6 876 |
 | `POSEIDON2` calls (execution only) | 73 — 9 non-Merkle hashes (`nk`, `pk`, `cm_in1`, `cm_in2`, `nf1`, `nf2`, `cm_out1`, `cm_out2`, the final digest) + 32 + 32 Merkle levels (both inputs real) | 41 — the same 9 non-Merkle hashes + 32 (only input 1's `MERKLE_VERIFY` runs; input 2's `NOTE_COMMIT`/`NULLIFY` still run, dummy or not — only membership/anchor/asset are skipped) |
 | permutations (execution only) | 378 | 218 |
-| total permutations | 1 305 | 1 145 |
-| gas tier | `Tier(14)` (`8 875`/`6 636` cycles both fit `Tier(13)`'s 8 191-cycle budget, but `Tier(13)`'s 1 024 permutation slots do not fit either shape's total permutations — `Tier(14)`'s 2 048 do, comfortably) |
+| total permutations (execution + digest rows) | 1 322 | 1 162 |
+| gas tier | `Tier(14)`, **forced by the cycle count alone in both shapes**: `Machine::prove` picks the tier from `exec.cycles() + program.digest_rows() + input_digest_row_count(606)` (9 115 / 6 876 above), and the next tier down, `Tier(12)`, has a 4 095-cycle budget (`cpu_height − 1`) that even the execution cycles alone already blow. `Tier(14)`'s own 16 383-cycle budget and 2 048 permutation slots then both hold with room to spare |
 
 Both shapes prove and verify under `FriProfile::Test`. The 1-in-1-out case costs fewer
 `POSEIDON2` calls/permutations than 2-in-2-out (skipping one 32-level `MERKLE_VERIFY`
 walk, 160 permutations) but the same program (words/digest rows are shape-independent —
 `bundle` has no data-dependent control flow that changes the compiled program itself, only
-which branches execute) and lands at the same tier either way, forced by the permutation
-budget rather than the cycle count in both cases.
+which branches execute) and lands at the same tier either way — on cycles, with the
+permutation budget (1 322 / 1 162 against 2 048 slots) never the binding constraint at
+this tier.

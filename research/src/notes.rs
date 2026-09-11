@@ -372,6 +372,13 @@ pub fn bundle_digest(anchor: &Word8, nf1: &Word8, nf2: &Word8, cm1: &Word8, cm2:
 /// the real tree by this function — membership is a guest-side, not host-side, check — so any
 /// value is fine there for a dummy).
 ///
+/// A dummy *output* (`amount == 0`) is not so forgiving: it still needs a freshly random `r`
+/// like any other note (`Note::new`), because its commitment is a plain hash of its words —
+/// an all-zero `r` makes every such dummy commit to the same `cm_out`, which repeats across
+/// bundles (the ledger rejects the duplicate commitment when appending the second one) and,
+/// within one bundle, makes `cm_out1 == cm_out2` if BOTH outputs are zero-`r` dummies, which
+/// `guests::bundle`'s duplicate-output check now taints in-circuit.
+///
 /// Deliberately does **not** re-derive `outputs[i]`'s `from`/`time`/`asset` from
 /// `pk_self`/the bundle's fields the way the guest structurally does — it trusts the caller's
 /// `outputs: &[Note; 2]` already has `from = pk_self`, `time`/`asset` matching the bundle's,

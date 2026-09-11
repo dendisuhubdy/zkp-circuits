@@ -9,9 +9,10 @@ the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (135 tests). Everything uses
-  `FriProfile::Test`; the two proof-backed viewing tests take ~70 s and
-  `tests/zk.rs` ~50 s. All green is the bar before any commit.
+- `cargo test` — the whole suite (151 tests: 150 pass, 1 ignored).
+  Everything uses `FriProfile::Test`; the two proof-backed viewing tests
+  take ~70 s, `tests/zk.rs` ~50 s and `tests/bundle.rs` ~110 s (four
+  proof-backed bundle tests). All green is the bar before any commit.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one
   production-profile proof). The test suite covers everything it shows; don't
   run it casually.

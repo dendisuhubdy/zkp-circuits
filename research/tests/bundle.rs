@@ -270,6 +270,54 @@ fn asset_mismatch_is_rejected() {
     assert_ne!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, claimed_asset, time));
 }
 
+/// Review round 1, finding I1: the same note spent as both inputs doubles its value — nothing
+/// before the new duplicate check compares input 1 against input 2, so two copies of one real
+/// note pass membership, anchor agreement and asset agreement individually (it IS the tree's
+/// one real leaf, checked against the SAME anchor, twice) and the balance sum simply sees
+/// `amount + amount`. `nf1 == nf2` (a nullifier is a deterministic function of `cm_in`, and
+/// both inputs share the identical note/path/index here) is what the new check catches.
+#[test]
+fn the_same_note_spent_as_both_inputs_is_rejected() {
+    let alice = Party::new();
+    let (asset, time) = (0u32, 1_700_000_000u32);
+    let (tree, real) = two_real_inputs(&alice, [1_000, 0 /* unused: input 2 reuses input 1 below */], asset, time);
+    let inputs = [real[0], real[0]]; // the exact same (note, path, index) in both slots
+    let anchor = tree.root();
+    // Balances as if the guest's balance sum (which does not know the two inputs are the
+    // same note) saw 1_000 + 1_000 = 2_000 in.
+    let outputs = [
+        Note::new(alice.vk.pk(), alice.vk.pk(), 1_500, asset, time),
+        Note::new(alice.vk.pk(), alice.vk.pk(), 500, asset, time),
+    ];
+    let program = guests::bundle();
+    let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time);
+    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    assert!(e.halted);
+    assert_ne!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time));
+}
+
+/// Review round 1, finding I1's other half: two byte-for-byte identical output notes mint the
+/// same commitment twice. Built from an otherwise-honest one-real-input-plus-dummy bundle
+/// (`honest_one_in_one_out_with_dummies_proves`'s shape) with output 2 replaced by a literal
+/// copy of output 1 (same `pk`, `r`, everything — `Note` is `Copy`) instead of a genuine
+/// second note; the balance still conserves (`500 + 500 == 1_000`), so only the new
+/// `cm_out1 == cm_out2` check can be what rejects it.
+#[test]
+fn identical_output_notes_are_rejected() {
+    let alice = Party::new();
+    let (asset, time) = (0u32, 1_700_000_000u32);
+    let (tree, real) = two_real_inputs(&alice, [1_000, 0], asset, time);
+    let inputs = [real[0], dummy_input(asset, time)];
+    let anchor = tree.root();
+    let out = Note::new(alice.vk.pk(), alice.vk.pk(), 500, asset, time);
+    let outputs = [out, out]; // the exact same note, twice
+    let program = guests::bundle();
+    let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time);
+    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    assert!(e.halted);
+    assert_ne!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time));
+}
+
 // ───────────────────────── Step 8: fee/digest binding, 64-bit wrap, one true rejects() ─────────────────────────
 
 /// Not a guest-level cheat at all: the digest is a pure function of the plaintext it was built
@@ -295,22 +343,36 @@ fn fee_not_matching_the_digest_is_detectable() {
     assert_ne!(d_honest, d_wrong_fee, "the digest is bound to fee; a caller cannot substitute a different one after the fact");
 }
 
-/// A 64-bit wrap on the output+fee+burn side: three amounts individually under 2^63 whose sum
-/// exceeds 2^64 (their combined true value is far more than the inputs actually hold) — the
-/// final add64 carry-out sets `bad`.
+/// A 64-bit wrap on the output+fee+burn side, isolated from the final equality compare
+/// (controller ruling, review round 1: the original version of this test — `out1 = out2 =
+/// near_2_63`, `fee = near_2_63` — also fails the plain `sum_in != sum_out` equality check
+/// (`0x1 != 0xffff_ffff_ffff_fffe`), so deleting the carry-fold `emit_or_into(&mut a, BAD,
+/// T5)` calls would leave this test green for the wrong reason). This witness makes the
+/// *wrapped* sums compare EQUAL, so only a carry fold (not the equality compare) can catch
+/// it: both inputs are dummies (`amount == 0`, so `sum_in = (0, 0)` trivially and neither
+/// input's membership/anchor/asset checks run at all), and `out1 = out2 = 2^63 - 1`,
+/// `fee = 2`, `burn = 0` — each individually `< 2^63` (passes every range check) — sum to
+/// exactly `2*(2^63-1) + 2 = 2^64`, which wraps to `sum_out = (0, 0)`, bit-for-bit equal to
+/// `sum_in`. The duplicate-input/duplicate-output folds DO run here (they are outside the
+/// dummy skip, and nullifiers are computed for dummies too) and are silent by construction:
+/// `dummy_input` builds each dummy through `Note::new`, whose `r` is fresh OS randomness, so
+/// the two dummies' `cm_in`/`nf` differ, as do the two outputs'. Verified by running (review
+/// round 1) that this test discriminates: with every
+/// carry-fold `emit_or_into(&mut a, BAD, T5)` call in `guests::bundle`'s conservation block
+/// temporarily commented out, this exact witness is accepted (`e.outputs ==
+/// expected_bundle_outputs(..)`) — see the task report for both runs.
 #[test]
 fn a_64_bit_wrap_in_the_balance_is_rejected() {
     let alice = Party::new();
     let (asset, time) = (0u32, 1_700_000_000u32);
-    let (tree, real) = two_real_inputs(&alice, [1, 0], asset, time); // trivial real input value
-    let inputs = [real[0], dummy_input(asset, time)];
-    let anchor = tree.root();
+    let inputs = [dummy_input(asset, time), dummy_input(asset, time)];
+    let anchor = [0u32; 8]; // never read: both inputs are dummies, membership is skipped entirely
     let near_2_63 = (1u64 << 63) - 1;
     let outputs = [
         Note::new(alice.vk.pk(), alice.vk.pk(), near_2_63, asset, time),
         Note::new(alice.vk.pk(), alice.vk.pk(), near_2_63, asset, time),
     ];
-    let (fee, burn) = (near_2_63, 0u64); // out1+out2+fee alone already exceeds 2^64
+    let (fee, burn) = (2u64, 0u64); // out1 + out2 + fee == 2^64 exactly, wraps to 0 == sum_in
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
     let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
