@@ -434,7 +434,7 @@ commitment.)
 
 The M3 design spec's own estimate for the transfer guest was "≈5 + 32·(1+4)
 ≈ 165 permutations" (treating each of the five non-Merkle hash calls as
-roughly one permutation). The measured execution-only count is higher, 192,
+roughly one permutation). The measured execution-only count is higher, 194,
 because at `Word8` widths the note-commitment calls (29-word messages —
 domain tag + `Note::WORDS`, 8 permutations each) and the nullifier call (17
 words, 5 permutations) cost more than one permutation apiece, and the
