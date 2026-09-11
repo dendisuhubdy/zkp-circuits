@@ -444,9 +444,11 @@ fn a_stale_anchor_is_rejected_by_the_ledger() {
     let (created, env, _, inputs, anchor, nf) = build_transfer(&alice, &note, &bob.vk, ledger.now, &ledger);
     let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
     assert!(m.verify(&ledger.program.digest(), &proof).is_ok(), "the proof is valid math regardless of what the ledger does next");
-    // Push the tree far enough that `anchor` falls out of the 16-entry recent-roots window
-    // (one root recorded per mint).
-    for _ in 0..20 {
+    // Push the tree far enough that `anchor` falls out of the `Ledger::ANCHOR_WINDOW`-entry
+    // recent-roots window (one root recorded per mint). `anchor` is the newest entry when the
+    // transfer is built, so it takes a full window's worth of later roots to evict it — 65
+    // mints, one more than the 64-entry window, with no reliance on the exact arithmetic.
+    for _ in 0..Ledger::ANCHOR_WINDOW + 1 {
         let filler = Party::new();
         mint(&mut ledger, &bridge, &filler.vk, 1, 9);
     }
