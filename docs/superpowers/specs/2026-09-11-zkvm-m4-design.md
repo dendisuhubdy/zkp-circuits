@@ -101,6 +101,52 @@ is unaffected.
 **Equality contract.** The chip's output on every test vector must equal `p3_keccak`'s
 `KeccakF` bit for bit; a randomized test compares 1,000 states.
 
+### 3.1 Proposed amendment to §3 (2026-09-12, awaiting the user's ruling before M4.2 is planned)
+
+A code-level survey of how the Poseidon2 chip is wired (`research/src/tables/{poseidon2,cpu}.rs`,
+`machine.rs`, `emulator.rs`) found four places where §3 as written does not fit the machine.
+Each comes with the proposed resolution; none changes M4.2's exit test.
+
+1. **Column count.** §3 targets "under 1,000 columns" by bit-decomposing "only the lanes χ and
+   θ touch per row" — but θ and χ touch every lane in every round, so a degree-≤4 AIR that
+   never stores the state's bits does not exist. The proven layout (Plonky3's own `keccak-air`,
+   degree 3) stores per row: the state as 100 16-bit limbs, the column parities `C` and
+   `C' = C ⊕ D` as 2 × 320 bits, the post-θρπ state `A'` as 1,600 bits, the post-χ state as 100
+   limbs, plus the 64 bits and 4 limbs ι needs on lane (0,0) and 24 step flags: about 2,630
+   columns. A nibble-lookup design (XOR4/AND4 buses, no bit columns) was costed at roughly
+   2,400 lookups per round-row and is worse. **Proposal:** adopt the `keccak-air` layout and
+   round constraints (hand-written into `tables/keccak.rs`, with our LogUp interactions added;
+   `p3-keccak-air` itself is not in the vendored set), state the column count honestly
+   (~2,650), degree 3.
+2. **Height.** With ~2,650 columns, a tier-derived `keccak_height = 2^(t-2)` makes every
+   program pay for a Keccak table it may never use (tier 14: 4,096 rows × 2,650 columns, more
+   cells than the cpu table). **Proposal:** the height is proof-declared like the program and
+   input tables (`Proof.keccak_log_height`, minimum 5 = one 32-row block), so a guest with no
+   `KECCAK` call declares the minimum; the verifier-key cache key gains a fourth component.
+   §6's "only `pv::NUM` grows" stays true; `Proof` gains one `u8`.
+3. **Bus shape.** §3 says the `KECCAK` bus carries `(clk, ptr, is_first_round, is_last_round,
+   state limbs)` "the same shape as the `POSEIDON2` bus" — but `POSEIDON2` carries only
+   `[in0..7, out0..7]`, provided once per permutation on the block's last round row, and the
+   cpu table moves the words to and from memory itself through its four per-cycle memory slots.
+   A 50-word state through the cpu table would cost 13 absorb rows and 13 write-back rows per
+   permutation and 200 new cpu columns. **Proposal:** the Keccak chip talks to the `MEMORY`
+   bus itself. The cpu's ecall row sends `(clk, ptr)` on a two-element `KECCAK` bus (count
+   `SYS_KECCAK`); the chip's block for that permutation provides `(clk, ptr)` once and issues
+   the 50 word reads (`ts = 4·clk + 0`, spread 4 per row over rows 0..12, values packed from the
+   block-constant input limbs) and the 50 word writes (`ts = 4·clk + 1`, spread 7 per row over
+   the block's 8 idle rows, values packed from the output limbs held constant on idle rows).
+   The cpu row group is then a single ecall row with a `SYS_KECCAK` selector, `KECCAK_PTR`
+   bounded below 2^30 exactly as `HASH_PTR` is, and `MEM_VAL` pinned to zero (no second
+   argument). This keeps the cpu table's degree-8 packed-lookup budget untouched.
+4. **Block.** 24 round rows + 8 idle rows = a 32-row block with preprocessed round selectors
+   and round constants, like Poseidon2's 30 + 2; idle rows carry the output state unchanged
+   and do the write-backs. Padding blocks are honest permutations of the zero state with
+   count 0.
+
+Cost, to be measured: the Keccak table at its minimum height adds under 1% to a proof; a
+guest with `n` permutations pays `32n` rows × ~2,650 columns, about 3× the cpu table's cells
+per permutation at tier 14 for 170 permutations.
+
 ## 4. M4.3 — EVM interpreter guest
 
 **Scope.** Enough of the EVM to run OpenZeppelin-style ERC-20 `transfer`, `balanceOf` and
