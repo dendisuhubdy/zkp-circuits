@@ -37,7 +37,7 @@ fn a_program_much_longer_than_a_small_tiers_cpu_height_but_briefly_executed_prov
 
     let exec = rand_zkvm::emulator::execute(&p, &[], 1 << 20).unwrap();
     assert!(exec.cycles() < 20, "only the leading few instructions ever execute");
-    let traces = build_traces(&p, &exec, Tier(14)).unwrap();
+    let traces = build_traces(&p, &[], [0u32; 4], &exec, Tier(14)).unwrap();
     // The program table's own height is driven by the program's length (`program_log_height`),
     // not by `Tier(14).cpu_height()` (16 384) — it is far smaller, and in particular still
     // bigger than `Tier(10).cpu_height()` would have offered, confirming the fix actually sized
@@ -53,12 +53,22 @@ fn a_program_much_longer_than_a_small_tiers_cpu_height_but_briefly_executed_prov
 #[test]
 fn every_guest_proves_and_verifies() {
     let m = Machine::new(FriProfile::Test);
+    // M4.1 salted H_IN (controller ruling): `prove_salted` with a fixed salt, so the expected
+    // H_IN below is reproducible — `prove`'s own OS-entropy salt would make it a different,
+    // unpredictable value on every run.
+    let salt = [11u32, 22, 33, 44];
     for (name, program, inputs) in guests::all() {
-        let (proof, exec) = m.prove(&program, &inputs, None).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let (proof, exec) = m.prove_salted(&program, &inputs, salt, None).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(proof.tier, Tier(10), "{name} should fit the smallest tier");
         assert_eq!(proof.public_values[2], exec.outputs[0] as u64);
         m.verify(&program.digest(), &proof).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert!(proof.size() > 0);
+
+        use rand_zkvm::tables::cpu::pv;
+        let expected_hin = rand_zkvm::hash::input_digest(salt, &inputs);
+        for k in 0..8 {
+            assert_eq!(proof.public_values[pv::IN0 + k], expected_hin[k] as u64, "{name}: H_IN word {k}");
+        }
     }
 }
 

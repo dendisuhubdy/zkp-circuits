@@ -74,7 +74,7 @@ fn setup() -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
     let e = execute(&p, &[], 10_000).unwrap();
-    let t = build_traces(&p, &e, Tier(10)).unwrap();
+    let t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     (m, p, t)
 }
 
@@ -369,7 +369,7 @@ fn storing_a_value_that_was_never_in_a_register_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 5);
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     forge_a_store(&mut t, 0x0500_0000);
     assert_eq!(t.public_values[cpu::pv::OUT0], F::from_u32(0x0500_0000));
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
@@ -391,7 +391,7 @@ fn bumping_range8_on_a_bitwise_rows_now_unconstrained_a_limb_is_rejected() {
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     t.range.values[0x12 * range::col::WIDTH + range::col::M_RANGE] += F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
@@ -409,7 +409,7 @@ fn bumping_range8_on_an_slt_rows_now_unconstrained_c_limb_is_rejected() {
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     t.range.values[range::col::WIDTH + range::col::M_RANGE] += F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
@@ -428,7 +428,7 @@ fn a_store_that_replaces_the_wrong_byte_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0x112233ff);
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     // Find the SB row and corrupt MERGED to replace byte 1 instead of byte 0.
     let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
@@ -451,7 +451,7 @@ fn a_load_byte_with_flipped_sign_extension_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0xffff_ffff);
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     let lb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_LB] == F::ONE).unwrap();
     t.cpu.values[lb_row * w + cpu::col::SGN] = F::ZERO; // flip: claim unsigned-looking zero-extend
@@ -472,7 +472,7 @@ fn a_misaligned_lh_is_rejected_by_the_air() {
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     let lw_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_LW] == F::ONE).unwrap();
     // Retag this LW row as an LH with OFF0=1 (byte offset 1 — misaligned for a half).
@@ -495,7 +495,7 @@ fn a_sb_that_changes_a_byte_outside_its_offset_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0x1122ff44);
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
     // Also corrupt byte 2 (outside off=1), leaving byte 1 correct.
@@ -528,7 +528,7 @@ fn mulhu_cannot_claim_hi_equals_2_32_minus_1_for_a_small_product() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0);
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulhu);
     let forged_carry = 0xffff_ffffu32; // would make HI = T2 + CARRY = 0xffff_ffff
@@ -561,7 +561,7 @@ fn a_small_in_range_forged_carry_on_a_mulhu_row_is_still_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0);
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulhu);
     let forged_carry = 100u32; // < 2^24, so the CARRY-limb check alone does not catch this
@@ -592,7 +592,7 @@ fn a_remainder_not_smaller_than_the_divisor_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 2);
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Remu);
     t.alu.values[row * w + alu::col::Q0] = F::from_u32(2); // quotient core: 3 -> 2
@@ -617,7 +617,7 @@ fn a_wrong_divz_on_a_nonzero_divisor_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 3);
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Divu);
     t.alu.values[row * w + alu::col::DIVZ] = F::ONE; // B = 3 != 0, but claim DIVZ
@@ -656,7 +656,7 @@ fn a_mul_flag_set_on_an_otherwise_all_zero_padding_row_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::muldiv();
     let e = execute(&p, &[], 10_000).unwrap();
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let wa = alu::col::WIDTH;
     let pad = t.alu.height() - 1;
     assert_eq!(t.alu.values[pad * wa + alu::col::IS_REAL], F::ZERO, "last alu row is padding");
@@ -680,7 +680,7 @@ fn a_sign_flipped_mulh_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0);
-    let mut t = build_traces(&p, &e, Tier(10)).unwrap();
+    let mut t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulh);
     assert_eq!(t.alu.values[row * w + alu::col::SA], F::ONE, "A = -2 is negative");
@@ -739,7 +739,7 @@ fn setup_poseidon2(msg: &[u32]) -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::poseidon2_demo(msg);
     let e = execute(&p, &[], 10_000).unwrap();
-    let t = build_traces(&p, &e, Tier(10)).unwrap();
+    let t = build_traces(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
     (m, p, t)
 }
 
@@ -1027,5 +1027,82 @@ fn a_row_claiming_to_be_both_a_digest_and_an_absorb_row_is_rejected() {
     let (_, absorbs, _) = hash_rows(&t);
     assert_eq!(absorbs.len(), 1, "n=4 is exactly one full block");
     t.cpu.values[absorbs[0] * w + cpu::col::IS_DIGEST] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// M4.1: the input commitment — READ_INPUT bound to a committed H_IN via the new `input`
+// table and INPUT_WORD bus.
+
+fn setup_with_inputs(inputs: &[u32]) -> (Machine, rand_zkvm::isa::Program, Traces) {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::balance_check(1000); // reads inputs 0..3 once each
+    let e = execute(&p, inputs, 10_000).unwrap();
+    let t = build_traces(&p, inputs, [0u32; 4], &e, Tier(10)).unwrap();
+    (m, p, t)
+}
+
+// (a) two reads of the same index returning different words rejects.
+#[test]
+fn two_reads_of_the_same_index_returning_different_words_is_rejected() {
+    // A tiny hand-built guest: read input[0] twice into two registers, output their XOR
+    // (0 if honest), so the second read's row is easy to locate and its C column easy to
+    // tamper independently of the first.
+    let mut a = Assembler::new(0);
+    a.extend(read_input(0));
+    a.push(mv(5, REG_A0)); // t0 = first read
+    a.extend(read_input(0));
+    a.push(xor(6, 5, REG_A0)); // t1 = t0 ^ second read (0 if honest)
+    a.extend(write_output(0, 6));
+    a.extend(halt());
+    let p = a.assemble();
+    let inputs = [7u32];
+    let e = execute(&p, &inputs, 10_000).unwrap();
+    assert_eq!(e.outputs[0], 0, "two honest reads of the same index must agree");
+    let m = Machine::new(FriProfile::Test);
+    let mut t = build_traces(&p, &inputs, [0u32; 4], &e, Tier(10)).unwrap();
+    let w = cpu::col::WIDTH;
+    // Locate the second SYS_READ row (there are exactly two) and forge its returned word.
+    let read_rows: Vec<usize> = (0..t.cpu.height()).filter(|&i| t.cpu.values[i * w + cpu::col::SYS_READ] == F::ONE).collect();
+    assert_eq!(read_rows.len(), 2);
+    t.cpu.values[read_rows[1] * w + cpu::col::C] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// (b) a read of a word not in the committed inputs (the input table's own row tampered)
+// rejects — the SYS_READ row's honestly-returned C no longer matches what H_IN absorbed.
+#[test]
+fn a_read_disagreeing_with_the_committed_input_word_is_rejected() {
+    let (m, p, mut t) = setup_with_inputs(&[400, 250, 300, 75]);
+    let iw = rand_zkvm::tables::input::col::WIDTH;
+    t.input.values[0 * iw + rand_zkvm::tables::input::col::WORD] += F::ONE; // tamper index 0's committed word
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// (c) H_IN in pv tampered rejects.
+#[test]
+fn tampering_h_in_in_public_values_is_rejected() {
+    let (m, p, mut t) = setup_with_inputs(&[400, 250, 300, 75]);
+    t.public_values[cpu::pv::IN0] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// (d) declaring n_in smaller than the reads rejects.
+#[test]
+fn declaring_n_in_smaller_than_the_reads_is_rejected() {
+    let (m, p, mut t) = setup_with_inputs(&[400, 250, 300, 75]); // n_in = 4, exactly 1 indigest row
+    let w = cpu::col::WIDTH;
+    let indigest_row = p.digest_rows(); // the single indigest row immediately follows the program digest
+    t.cpu.values[indigest_row * w + cpu::col::HASH_N] = F::from_u32(3);
+    t.cpu.values[indigest_row * w + cpu::col::HASH_LEFT] = F::from_u32(3);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// (e) out-of-window MULT_READ = 1 on a padding row rejects.
+#[test]
+fn a_mult_read_bumped_on_an_input_padding_row_is_rejected() {
+    let (m, p, mut t) = setup_with_inputs(&[400, 250, 300, 75]);
+    let iw = rand_zkvm::tables::input::col::WIDTH;
+    assert!(t.input.height() > 4, "the input table has spare padding rows past the 4 real ones");
+    t.input.values[4 * iw + rand_zkvm::tables::input::col::MULT_READ] = F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
