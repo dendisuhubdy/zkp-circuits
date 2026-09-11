@@ -27,7 +27,7 @@ bin/fib.bin: $(ELF)
 	$(OBJCOPY) -O binary $(ELF) $@
 
 bin/fib.bin.sha256: bin/fib.bin
-	shasum -a 256 $< > $@
+	cd bin && shasum -a 256 fib.bin > fib.bin.sha256
 
 clean:
 	cargo clean
