@@ -49,15 +49,20 @@ with `-C target-feature=-unaligned-scalar-mem` (the default for this target).
 
 **`READ_INPUT` binding.** Today a `READ_INPUT` is a prover-chosen witness word, unconstrained across
 repeated reads of the same index (`docs/03-privacy.md`). M4.1 adds an input commitment:
-`pv::IN0..IN7` (8 new public values, `pv::NUM` 18 → 26) carry `H_IN = Poseidon2(domain IN,
-inputs)`, computed by the same digest-row mechanism the program digest uses (a second digest region
+`pv::IN0..IN7` (8 new public values, `pv::NUM` 18 → 26) carry `H_IN = Poseidon2(domain IN, n_in;
+salt, inputs)`, where `salt` is a 128-bit prover-chosen value drawn per proof (four witness words
+absorbed as the first rate block, never published), so `H_IN` is hiding as well as binding
+(ruling 2026-09-11: an unsalted digest let a verifier test guesses of the private inputs, which
+the crate's zero-knowledge tests forbid). It is computed by the same digest-row mechanism the
+program digest uses (a second digest region
 absorbs the `input` memory space in index order). Reads then go through a witness `input` table
 (`IDX, WORD, IS_REAL, MULT_READ`, proof-declared height like the program table) that provides
 `(IDX, WORD)` on an `INPUT_WORD` bus consumed once by the digest rows and once per `READ_INPUT`,
 so two reads of the same index return the same word and the verifier learns `H_IN` without the
 inputs. (Ruling 2026-09-11: this mirrors the program-digest mechanism exactly; an earlier draft
 said a read-only memory space, which would have needed new memory-table rules.) A guest that
-wants its inputs private publishes nothing about them beyond `H_IN`; a guest that wants an input
+wants its inputs private publishes nothing about them beyond the hiding `H_IN` (opening it needs
+the salt); a guest that wants an input
 public (a bytecode commitment, a calldata hash) is expected to absorb it into an output. Cost: one
 digest row per 4 input words, the same rate as the program digest.
 
