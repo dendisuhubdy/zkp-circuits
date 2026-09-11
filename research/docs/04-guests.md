@@ -127,3 +127,16 @@ Measured by `research/tests/e2e.rs`'s `compiled_fib_proves_and_verifies`
 `FriProfile::Test`), and confirmed against the hand-written
 `guests::fib` guest by `compiled_fib_matches_the_hand_written_guest` (same
 output, same public values, run through the same emulator).
+
+## Hand-written note-layer guests (not this milestone's pipeline)
+
+`guests::transfer` (M3.3) and `guests::bundle` (shielded pool phase Z Task 3)
+are not compiled-guest-toolchain guests — like every other guest in this
+crate before M4.1, they are written directly against `asm.rs`'s mnemonic
+helpers, not built by `guest-sdk`/`guests-compiled` above. `bundle` is this
+crate's second hand-written note-layer guest, proving the shielded pool's
+2-in-2-out transfer relation (fee/burn conservation, dummy notes that skip
+membership) instead of `transfer`'s 1-in-1-out one. See
+`docs/06-viewing-keys.md`'s "Notes and what the guest proves" and "The
+`bundle` relation" sections for what each proves and their measured
+words/cycles/permutations/tier.

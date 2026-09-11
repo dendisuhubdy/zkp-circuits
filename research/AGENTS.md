@@ -31,6 +31,20 @@ first of all:
 2. **A bus count must be forced to zero wherever the message columns are
    unconstrained** — the ALU padding-row forgery; see the INVARIANT comment
    in `src/tables/alu.rs`.
+3. **`lw`/`sw`/`addi` immediates are real 12-bit signed RISC-V I-type
+   fields** (`Instr::encode`'s `i_type` masks to `imm & 0xfff`; `decode`
+   sign-extends it back via `sext(.., 12)`) — any hand-assembled guest's
+   compile-time RAM offset outside `[-2048, 2047]` *from whatever value the
+   base register holds* silently wraps, addressing the wrong cell, with no
+   error at assembly, execution, or proving time (a wrapped write and its
+   matching wrapped read can even round-trip "correctly" in isolation,
+   which is what made this so easy to miss — see shielded pool phase Z Task
+   3's report). `transfer`'s layout happens to stay under `0x6a0`; `bundle`'s
+   606-word private-input vector plus derived-value scratch does not, and is
+   fixed by loading `BASE` from `HEAP + 0x600` and shifting every RAM
+   constant by `-0x600` (`docs/06-viewing-keys.md`'s "The `bundle` relation"
+   section). Any new hand-written guest with a RAM footprint wider than
+   ~4 KB from one base register needs the same trick.
 
 The emulator (`src/emulator.rs`) is the reference semantics: if the AIR and
 the emulator disagree, the AIR is wrong.

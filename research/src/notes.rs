@@ -58,6 +58,16 @@ pub mod domain {
     /// `READ_INPUT` draws from — the capacity-lane header `[IN, n_in, 0]` seeded into the very
     /// first input-digest-row permutation, mirroring `HC`'s `[HC, base_pc, len]` exactly.
     pub const IN: u32 = 10;
+    /// The `bundle` guest's output digest (`docs/superpowers/plans/2026-09-11-shielded-pool-z.md`
+    /// Task 3): `H(BUNDLE, anchor(8) nf1(8) nf2(8) cm1(8) cm2(8) fee(2) burn(2) asset(1) time(1)
+    /// bad(1))` — 47 words. `bad` is an explicit last word, the guest's own taint accumulator
+    /// (0 for an honest run), never folded into `time` or any other plaintext-published field —
+    /// XORing it into a published word would let a cheating sender simply publish the corrupted
+    /// value and have the ledger's independent recomputation agree. The host reference
+    /// (`bundle_digest`/`expected_bundle_outputs`) always computes with `bad = 0`; only the
+    /// guest ever writes a nonzero `bad` word, which is exactly what makes a dishonest witness's
+    /// digest fail to match any plaintext the ledger could reconstruct.
+    pub const BUNDLE: u32 = 11;
     pub const TEST: u32 = 0xff;
 }
 
@@ -283,4 +293,143 @@ pub fn expected_outputs(sk: &SpendKey, spent: &Note, created: &Note, anchor: Wor
     let nf = vk.nullifier(&cm_in);
     let cm_out = created.commitment();
     output_digest(&anchor, &nf, &cm_out, created.time)
+}
+
+/// The private-input vector of `guests::bundle`: spend key, two input notes (each `from`,
+/// `amount_lo`, `amount_hi`, `asset`, `time`, `r`, a depth-32 Merkle witness), the tree root
+/// every real input is checked against, two output notes (`pk`, `amount_lo`, `amount_hi`, `r`
+/// — `from`/`time`/`asset` are not separately supplied, since the guest always sets an
+/// output's `from` to the derived `pk_self` and its `time`/`asset` to the bundle's own public
+/// `time`/`asset`, design spec §4 items 4/6/7), and the four bundle-level values (`fee`,
+/// `burn` as u64 pairs, `asset`, `time`) that get folded into the digest. Flat, like `input` —
+/// no stride abstraction, so a value's offset is a single named constant exactly as `input`'s
+/// are.
+pub mod bundle_input {
+    use super::DEPTH;
+    pub const SK: usize = 0;                               // 2
+    pub const IN1_FROM: usize = 2;                          // 8
+    pub const IN1_AMOUNT_LO: usize = 10;
+    pub const IN1_AMOUNT_HI: usize = 11;
+    pub const IN1_ASSET: usize = 12;
+    pub const IN1_TIME: usize = 13;
+    pub const IN1_R: usize = 14;                            // 8
+    pub const IN1_PATH: usize = 22;                         // DEPTH * 8 = 256
+    pub const IN1_INDEX: usize = IN1_PATH + DEPTH * 8;      // 278
+    pub const IN2_FROM: usize = IN1_INDEX + 1;              // 279
+    pub const IN2_AMOUNT_LO: usize = IN2_FROM + 8;          // 287
+    pub const IN2_AMOUNT_HI: usize = IN2_AMOUNT_LO + 1;
+    pub const IN2_ASSET: usize = IN2_AMOUNT_HI + 1;
+    pub const IN2_TIME: usize = IN2_ASSET + 1;
+    pub const IN2_R: usize = IN2_TIME + 1;                  // 8
+    pub const IN2_PATH: usize = IN2_R + 8;                  // DEPTH * 8
+    pub const IN2_INDEX: usize = IN2_PATH + DEPTH * 8;      // 555
+    /// The tree root every real input's `MERKLE_VERIFY` is checked against (§4 item 2), and
+    /// the value the guest publishes as `anchor` (an honest wallet passes `ledger.root()`).
+    pub const ANCHOR: usize = IN2_INDEX + 1;                // 556, 8 words
+    pub const OUT1_PK: usize = ANCHOR + 8;                  // 8
+    pub const OUT1_AMOUNT_LO: usize = OUT1_PK + 8;
+    pub const OUT1_AMOUNT_HI: usize = OUT1_AMOUNT_LO + 1;
+    pub const OUT1_R: usize = OUT1_AMOUNT_HI + 1;           // 8
+    pub const OUT2_PK: usize = OUT1_R + 8;                  // 8
+    pub const OUT2_AMOUNT_LO: usize = OUT2_PK + 8;
+    pub const OUT2_AMOUNT_HI: usize = OUT2_AMOUNT_LO + 1;
+    pub const OUT2_R: usize = OUT2_AMOUNT_HI + 1;           // 8
+    pub const FEE_LO: usize = OUT2_R + 8;
+    pub const FEE_HI: usize = FEE_LO + 1;
+    pub const BURN_LO: usize = FEE_HI + 1;
+    pub const BURN_HI: usize = BURN_LO + 1;
+    pub const ASSET: usize = BURN_HI + 1;
+    pub const TIME: usize = ASSET + 1;
+    pub const COUNT: usize = TIME + 1;                      // 606
+}
+
+/// `bundle`'s single public output: `H(BUNDLE, anchor, nf1, nf2, cm1, cm2, fee_lo, fee_hi,
+/// burn_lo, burn_hi, asset, time, bad)` — 47 words after the domain tag. `bad` is always `0`
+/// here: this is the host-side reference for an *honest* digest (what the ledger independently
+/// recomputes from the plaintext a bundle publishes); only the guest itself ever writes a
+/// nonzero `bad` word (see `domain::BUNDLE`'s doc comment).
+#[allow(clippy::too_many_arguments)]
+pub fn bundle_digest(anchor: &Word8, nf1: &Word8, nf2: &Word8, cm1: &Word8, cm2: &Word8, fee: u64, burn: u64, asset: u32, time: u32) -> Word8 {
+    let mut msg = [0u32; 47];
+    msg[0..8].copy_from_slice(anchor);
+    msg[8..16].copy_from_slice(nf1);
+    msg[16..24].copy_from_slice(nf2);
+    msg[24..32].copy_from_slice(cm1);
+    msg[32..40].copy_from_slice(cm2);
+    msg[40] = fee as u32; msg[41] = (fee >> 32) as u32;
+    msg[42] = burn as u32; msg[43] = (burn >> 32) as u32;
+    msg[44] = asset;
+    msg[45] = time;
+    msg[46] = 0; // bad: always 0 for the honest host-side reference digest
+    hash(domain::BUNDLE, &msg)
+}
+
+/// The reference `guests::bundle`'s output is checked against for an HONEST witness
+/// (`tests/bundle.rs`), and what a wallet recomputes before submitting a bundle. Computes
+/// nf1/nf2/cm1/cm2 from `sk`/`inputs`/`outputs` the same way the guest does (owner forced to
+/// `pk_self`) and folds them with `anchor`/`fee`/`burn`/`asset`/`time` into `bundle_digest`.
+/// `inputs[i].0` with `.amount == 0` is a dummy (its path/index are never dereferenced against
+/// the real tree by this function — membership is a guest-side, not host-side, check — so any
+/// value is fine there for a dummy).
+///
+/// Deliberately does **not** re-derive `outputs[i]`'s `from`/`time`/`asset` from
+/// `pk_self`/the bundle's fields the way the guest structurally does — it trusts the caller's
+/// `outputs: &[Note; 2]` already has `from = pk_self`, `time`/`asset` matching the bundle's,
+/// because this function is the *host* reference for an *honest* run (a wallet building its
+/// own bundle), and the guest's structural enforcement is exactly what makes a *dishonest*
+/// caller's mismatched `outputs` produce a different, non-matching digest.
+#[allow(clippy::too_many_arguments)]
+pub fn expected_bundle_outputs(
+    sk: &SpendKey,
+    inputs: &[(Note, [Word8; DEPTH], u32); 2],
+    outputs: &[Note; 2],
+    anchor: Word8, fee: u64, burn: u64, asset: u32, time: u32,
+) -> [u32; crate::isa::NUM_OUTPUTS] {
+    let vk = sk.viewing_key();
+    let pk_self = vk.pk();
+    let cm_in = |note: &Note| Note { pk: pk_self, ..*note }.commitment();
+    let cm1 = cm_in(&inputs[0].0);
+    let cm2 = cm_in(&inputs[1].0);
+    let nf1 = vk.nullifier(&cm1);
+    let nf2 = vk.nullifier(&cm2);
+    let cm_out1 = outputs[0].commitment();
+    let cm_out2 = outputs[1].commitment();
+    bundle_digest(&anchor, &nf1, &nf2, &cm_out1, &cm_out2, fee, burn, asset, time)
+}
+
+/// Builds `guests::bundle`'s private-input vector.
+#[allow(clippy::too_many_arguments)]
+pub fn bundle_inputs(
+    sk: &SpendKey,
+    inputs: &[(Note, [Word8; DEPTH], u32); 2],
+    outputs: &[Note; 2],
+    anchor: Word8, fee: u64, burn: u64, asset: u32, time: u32,
+) -> Vec<u32> {
+    use bundle_input::*;
+    let mut v = vec![0u32; COUNT];
+    v[SK] = sk.0[0]; v[SK + 1] = sk.0[1];
+    #[allow(clippy::too_many_arguments)]
+    fn put_in(v: &mut [u32], from_off: usize, amt_lo: usize, amt_hi: usize, asset_off: usize, time_off: usize, r_off: usize, path_off: usize, index_off: usize, note: &Note, path: &[Word8; DEPTH], index: u32) {
+        v[from_off..from_off + 8].copy_from_slice(&note.from);
+        v[amt_lo] = note.amount as u32;
+        v[amt_hi] = (note.amount >> 32) as u32;
+        v[asset_off] = note.asset;
+        v[time_off] = note.time;
+        v[r_off..r_off + 8].copy_from_slice(&note.r);
+        for (level, sib) in path.iter().enumerate() { v[path_off + 8 * level..path_off + 8 * level + 8].copy_from_slice(sib); }
+        v[index_off] = index;
+    }
+    put_in(&mut v, IN1_FROM, IN1_AMOUNT_LO, IN1_AMOUNT_HI, IN1_ASSET, IN1_TIME, IN1_R, IN1_PATH, IN1_INDEX, &inputs[0].0, &inputs[0].1, inputs[0].2);
+    put_in(&mut v, IN2_FROM, IN2_AMOUNT_LO, IN2_AMOUNT_HI, IN2_ASSET, IN2_TIME, IN2_R, IN2_PATH, IN2_INDEX, &inputs[1].0, &inputs[1].1, inputs[1].2);
+    v[ANCHOR..ANCHOR + 8].copy_from_slice(&anchor);
+    v[OUT1_PK..OUT1_PK + 8].copy_from_slice(&outputs[0].pk);
+    v[OUT1_AMOUNT_LO] = outputs[0].amount as u32; v[OUT1_AMOUNT_HI] = (outputs[0].amount >> 32) as u32;
+    v[OUT1_R..OUT1_R + 8].copy_from_slice(&outputs[0].r);
+    v[OUT2_PK..OUT2_PK + 8].copy_from_slice(&outputs[1].pk);
+    v[OUT2_AMOUNT_LO] = outputs[1].amount as u32; v[OUT2_AMOUNT_HI] = (outputs[1].amount >> 32) as u32;
+    v[OUT2_R..OUT2_R + 8].copy_from_slice(&outputs[1].r);
+    v[FEE_LO] = fee as u32; v[FEE_HI] = (fee >> 32) as u32;
+    v[BURN_LO] = burn as u32; v[BURN_HI] = (burn >> 32) as u32;
+    v[ASSET] = asset; v[TIME] = time;
+    v
 }

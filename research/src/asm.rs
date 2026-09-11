@@ -236,3 +236,72 @@ pub fn emit_merkle_verify(
     a.jal(REG_ZERO, &loop_lbl);
     a.label(&exit_lbl);
 }
+
+// ───────────────────────── Task 3: bundle arithmetic routines ─────────────────────────
+//
+// `guests::bundle` proves relations this ISA has no native assert for (two real inputs'
+// Merkle roots agreeing with one claimed anchor, every amount's `< 2^63` range check, 64-bit
+// balance conservation) via a taint-and-corrupt idiom instead: each of these routines computes
+// a free, unconstrained 0/1 "did this check fail" bit that the caller folds into a monotone
+// `bad` accumulator with `emit_or_into`, which is in turn folded into the guest's published
+// digest — see `docs/06-viewing-keys.md`'s "The `bundle` relation" section.
+
+/// `dst_bool := (a == b) as u32` for two `Word8`s already in RAM at `base+a_at`/`base+b_at`:
+/// XOR all 8 word pairs together (OR-folding the results), then `sltiu(dst_bool, folded, 1)` —
+/// `folded == 0` iff every word pair matched. `dst_bool` and `fold` (scratch) must differ from
+/// `tmp`.
+pub fn emit_eq8(a: &mut Assembler, base: u32, tmp: u32, fold: u32, a_at: i32, b_at: i32, dst_bool: u32) {
+    a.push(ops::addi(fold, 0, 0)); // fold := 0
+    for i in 0..8 {
+        a.push(ops::lw(tmp, base, a_at + 4 * i));
+        a.push(ops::lw(dst_bool, base, b_at + 4 * i)); // dst_bool used as scratch here, overwritten below
+        a.push(ops::xor(tmp, tmp, dst_bool));
+        a.push(ops::or(fold, fold, tmp));
+    }
+    // 1 iff fold == 0 iff every word matched. NOTE: this must be the *immediate* form
+    // (`sltiu`, `AluOp::Sltu` with an `imm`) — `ops::sltu(dst_bool, fold, 1)` would instead
+    // compare `fold` against whatever value happens to be sitting in register `x1` (`sltu`'s
+    // third argument is a register index, not an immediate), which is not what "compare
+    // against the literal 1" means.
+    a.push(ops::sltiu(dst_bool, fold, 1));
+}
+
+/// `bad := bad | cond` (`cond` a 0/1 register) — monotone: no later call can clear a `bad` an
+/// earlier one set.
+pub fn emit_or_into(a: &mut Assembler, bad: u32, cond: u32) {
+    a.push(ops::or(bad, bad, cond));
+}
+
+/// Sets `viol := 1` if the 64-bit value with high word `hi` is `>= 2^63` (i.e. `hi`'s top bit
+/// is set — `sltu(viol_inv, hi, 0x8000_0000)` is 1 iff `< 2^63`; `viol := 1 - viol_inv`, via
+/// `xori`), else `0`. Used for the "every amount `< 2^63`" checks. `tmp` is unused (kept for a
+/// uniform call shape alongside the other `emit_*` routines).
+pub fn emit_range_check_u63(a: &mut Assembler, hi: u32, tmp: u32, viol: u32) {
+    let _ = tmp;
+    a.extend(ops::li(viol, i32::MIN)); // 0x8000_0000 as i32 bit pattern
+    a.push(ops::sltu(viol, hi, viol)); // 1 iff hi < 0x8000_0000, i.e. amount < 2^63
+    a.push(ops::xori(viol, viol, 1));  // invert: 1 iff amount >= 2^63
+}
+
+/// 64-bit `(sum_lo, sum_hi) += (lo, hi)`, carry-aware: `sltu` detects the low-word carry, then
+/// the high-word addition is split into two separately-checked steps (`mid = sum_hi + hi`,
+/// `sum_hi := mid + low_carry`) so each step's own `sltu`-detects-carry idiom
+/// (`guests::balance_check`'s 32-bit-sum idiom) catches its own overflow independently;
+/// `carry_out` is their OR. Two checks, not one compare against `hi + low_carry`, because that
+/// single-compare shortcut has an edge case: if `hi == 0xffff_ffff` and `low_carry == 1`,
+/// `hi + low_carry` itself wraps to `0` (mod 2^32), and comparing `sum_hi` (which is `>= 0`
+/// unsigned, always) against that wrapped `0` silently reports no carry when one occurred —
+/// exactly the case `u64::MAX + u64::MAX` hits in `sum_hi`'s low 32 bits once high words are
+/// `0xffff_ffff` and a low carry is pending. `lo`/`hi` are destroyed as scratch (`hi` in
+/// particular, to hold the first step's carry) — callers must reload them per call, exactly as
+/// `guests::bundle` already does.
+pub fn emit_add64_carry(a: &mut Assembler, sum_lo: u32, sum_hi: u32, lo: u32, hi: u32, tmp: u32, carry_out: u32) {
+    a.push(ops::add(tmp, sum_lo, lo));
+    a.push(ops::sltu(carry_out, tmp, sum_lo)); // low-word carry-out
+    a.push(ops::mv(sum_lo, tmp));
+    a.push(ops::add(tmp, sum_hi, hi));         // tmp := mid = sum_hi + hi
+    a.push(ops::sltu(hi, tmp, sum_hi));        // hi (scratch) := carry1 = mid < sum_hi
+    a.push(ops::add(sum_hi, tmp, carry_out));  // sum_hi := mid + low_carry
+    a.push(ops::sltu(carry_out, sum_hi, tmp)); // carry_out := carry2 = sum_hi < mid
+    a.push(ops::or(carry_out, carry_out, hi)); // carry_out := carry1 | carry2
+}

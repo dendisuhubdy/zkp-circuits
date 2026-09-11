@@ -374,3 +374,107 @@ program (one extra `lw`/`sw` pair per note-commit block), growing the
 program to 1 783 words and its digest cost to 446 permutations. 192 and 638
 are the numbers pinned by
 `tests/viewing.rs::transfer_guest_permutation_and_row_counts_are_measured`.
+
+## The `bundle` relation
+
+Shielded pool phase Z Task 3 (`docs/superpowers/specs/2026-09-11-shielded-pool-design.md`
+§4) adds a second hand-written note-layer guest, `guests::bundle`: 2-in-2-out, `u64`
+fee/burn conservation, dummy notes (`amount == 0`) that skip membership. It shares
+`transfer`'s structural idioms (`NOTE_COMMIT`/`NULLIFY`/`MERKLE_VERIFY`, ownership always
+forced through the guest's own derived `pk_self`, asset/time never taken from anywhere but
+one shared field) but also needs to prove relations that are genuinely arithmetic — no
+`assert` primitive exists in this ISA (`BranchCond` only steers control flow, never fails a
+proof) — so it introduces a new idiom for those: **taint-and-corrupt**.
+
+**The `bad` flag.** A single register, `BAD`, starts at 0 and is only ever OR'd with a
+0/1 "did this check fail" bit (`asm::emit_or_into`) — monotone, so no later passing check
+can clear a `bad` an earlier one set. Every genuinely arithmetic relation funnels into it:
+
+- **Anchor agreement.** Each real input's `MERKLE_VERIFY` produces a root; `asm::emit_eq8`
+  compares it against the bundle's single claimed `anchor`, and a mismatch ORs into `BAD`
+  (`transfer` never needed this — with one input, the derived root simply *is* the
+  published anchor; `bundle` has two independent membership checks that must both agree
+  with each other and with one published value, so an equality-then-taint gadget replaces
+  the direct overwrite).
+- **Per-input asset agreement.** A real input's own historical `asset` field free-rides
+  into `cm_in`/`nf` unchecked by anything structural (unlike an output, which always reuses
+  the bundle's shared `asset` field) — so each real input's `asset` word is separately
+  XOR-compared against the bundle's public `asset` and OR'd into `BAD`, gated by that
+  input's own `amount != 0` branch exactly like the anchor check (a dummy's asset is
+  meaningless).
+- **Range checks.** `asm::emit_range_check_u63` flags any of the six amounts (both inputs,
+  both outputs, fee, burn) that is `>= 2^63`.
+- **64-bit conservation.** `asm::emit_add64_carry` chains `in1 + in2` and
+  `out1 + out2 + fee + burn` with carry detection at every step, and a final compare ORs
+  `BAD` if the two 65-bit-capable sums disagree.
+
+The taint bit is folded into the published digest as **an explicit 47th word**, never
+XORed into `time` or any other plaintext field a sender publishes alongside the proof:
+`time` is exactly that — plaintext the ledger is handed independently of the proof — so a
+cheating sender could otherwise just publish `time XOR 1` and have the ledger's own
+recomputation agree. Instead:
+
+```
+digest = H(BUNDLE, anchor(8) nf1(8) nf2(8) cm1(8) cm2(8) fee(2) burn(2) asset(1) time(1) bad(1))
+```
+
+— 47 words after the domain tag (`notes::domain::BUNDLE = 11`, `notes::bundle_digest`).
+The host reference always hashes `bad = 0`; only the guest's own run ever writes a nonzero
+`bad` word there. Poseidon2's padding-free sponge means a preimage differing by even one
+bit in one word produces, with cryptographic-hash-strength probability, a digest that
+matches no real bundle the ledger could reconstruct from plaintext — so
+`Ledger::apply_bundle` (Task 4) catches every one of these cheats with a single equality
+check against its own independently recomputed digest, never running any of the guest's
+arithmetic itself. Every individual check above is a **free, unconstrained** computation —
+Plonky3 does not care whether `bad` ends up 0 or 1, both are valid traces — the check only
+has teeth because it is funnelled into the one thing an external verifier checks
+independently.
+
+**The one relation that is unconstructible, not merely checked.** A dummy input's skip
+condition is `amount_lo | amount_hi == 0`, evaluated by `BranchCond::Eq` on exactly the
+same two registers that also feed the balance sum's addend for that input. A witness
+cannot set `amount != 0` (to claim spending value) and also take the skip branch (whose
+condition reads those same words): either the OR is zero — skip runs, the balance sum sees
+zero, an honest dummy — or it is nonzero — the membership/anchor/asset checks run,
+whatever path was supplied. There is no third case; `a_nonzero_amount_cannot_skip_membership`
+(`tests/bundle.rs`) exercises exactly this and shows the corrupted-digest rejection that
+results, not a separate "skip was fooled" code path (there is none to fool).
+
+**A memory-layout gotcha worth recording** (found the hard way while implementing this):
+`lw`/`sw`/`addi` immediates are genuine 12-bit signed RISC-V I-type fields
+(`Instr::encode`'s `i_type` masks to `imm & 0xfff`, `Instr::decode` sign-extends it back
+via `sext(.., 12)`) — any compile-time offset outside `[-2048, 2047]` from a base register
+silently wraps. `transfer`'s whole RAM layout happens to stay under `0x6a0` (1696), so this
+was never visible before. `bundle`'s naive layout is not so lucky: the 606-word private
+input vector (`bundle_input::COUNT`) alone reaches byte offset 2420 past its own base, and
+the derived-value scratch (`nk`/`pk`/both commitments/both nullifiers/`anchor`/the running
+Merkle root/the balance accumulators) sits at `0xb00..0xc50` (2816..3152) — both well past
+`0x7ff`. `guests::bundle` fixes this by loading `BASE` with `HEAP + 0x600` instead of
+`HEAP` and defining every RAM constant already shifted by `-0x600`, landing every
+immediate actually used in `[-1536, 1612]`; `asm::ops::call_poseidon2`'s pointer argument
+(built via `li`, which is not immediate-width limited) adds the pivot back to recover the
+true absolute address. Any future guest whose RAM footprint is wider than roughly 4 KB
+from one base register needs the same trick (or a second base register anchoring a second
+window).
+
+**Measured** (`tests/bundle.rs`, `-- --nocapture`; `Tier::poseidon2_height(14) / 32 = 2048`
+permutation slots, `Tier(13)`'s 1 024 slots and `Tier(14)`'s own 16 383-cycle budget both
+checked below):
+
+| | 2-in-2-out (`honest_two_in_two_out_proves_and_verifies`) | 1-in-1-out-with-dummies (`honest_one_in_one_out_with_dummies_proves`) |
+|---|---|---|
+| program | 3 705 words |  (same program, both shapes) |
+| cycles (execution only) | 7 948 | 5 709 |
+| digest rows (`hc`) | 927 (`⌈3705/4⌉`) | 927 |
+| total cycles | 8 875 | 6 636 |
+| `POSEIDON2` calls (execution only) | 73 — 9 non-Merkle hashes (`nk`, `pk`, `cm_in1`, `cm_in2`, `nf1`, `nf2`, `cm_out1`, `cm_out2`, the final digest) + 32 + 32 Merkle levels (both inputs real) | 41 — the same 9 non-Merkle hashes + 32 (only input 1's `MERKLE_VERIFY` runs; input 2's `NOTE_COMMIT`/`NULLIFY` still run, dummy or not — only membership/anchor/asset are skipped) |
+| permutations (execution only) | 378 | 218 |
+| total permutations | 1 305 | 1 145 |
+| gas tier | `Tier(14)` (`8 875`/`6 636` cycles both fit `Tier(13)`'s 8 191-cycle budget, but `Tier(13)`'s 1 024 permutation slots do not fit either shape's total permutations — `Tier(14)`'s 2 048 do, comfortably) |
+
+Both shapes prove and verify under `FriProfile::Test`. The 1-in-1-out case costs fewer
+`POSEIDON2` calls/permutations than 2-in-2-out (skipping one 32-level `MERKLE_VERIFY`
+walk, 160 permutations) but the same program (words/digest rows are shape-independent —
+`bundle` has no data-dependent control flow that changes the compiled program itself, only
+which branches execute) and lands at the same tier either way, forced by the permutation
+budget rather than the cycle count in both cases.
