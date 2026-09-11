@@ -18,8 +18,15 @@
 //! data, so an envelope cannot be re-attached to another transaction, and a wrong key fails
 //! authentication instead of yielding garbage — which is what makes a scan with one party's
 //! key silent about everyone else's transactions.
+//!
+//! Phase Z: a `ledger::Bundle` publishes *two* envelopes, one per output slot, each sealed
+//! against its own slot's commitment by exactly the machinery above — nothing about an
+//! envelope changes for a bundle. What changes is the indexing: a [`Row`] now says which
+//! sequence it came from ([`RowSource`]) and which of a bundle's two slots it is about
+//! (`Row::slot`), and [`scan`]/[`verify_row`] read `commitments[slot]`/`nullifiers[slot]`
+//! where they used to read a transfer's single `cm_out`/`nf`.
 
-use crate::ledger::{Ledger, Tx};
+use crate::ledger::Ledger;
 use crate::notes::{words_to_bytes, Note, ViewingKey, Word8};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -131,11 +138,27 @@ pub enum Disclosure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role { Received, Sent, Transaction }
 
+/// Which of the ledger's two independently numbered transaction sequences a [`Row`]'s `tx`
+/// indexes: `ledger.txs` (a transfer or a mint) or `ledger.bundles`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowSource { Transfer, Bundle }
+
 /// One row of disclosed history: the travel-rule fields, and the openings that let anyone
 /// holding the same disclosure check the row against the chain (`verify_row`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
+    /// Index into `ledger.txs` or `ledger.bundles`, per `source`.
     pub tx: usize,
+    pub source: RowSource,
+    /// Which of a bundle's two slots this row is about — 0 or 1. Always 0 for a
+    /// `RowSource::Transfer` row, which only ever had one commitment and one nullifier.
+    ///
+    /// A bundle's slots are paired positionally: slot `s` names `commitments[s]`,
+    /// `envelopes[s]` and `nullifiers[s]`. The pairing is a convention, not a fact about the
+    /// bundle — a 2-in-2-out bundle's two inputs and two outputs have no natural
+    /// correspondence — but it is the *same* convention `scan` and `verify_row` use, so a row
+    /// produced by one is checkable by the other.
+    pub slot: u8,
     pub role: Role,
     pub sender: Word8,
     pub receiver: Word8,
@@ -154,39 +177,83 @@ pub struct Row {
     /// For a `Sent` row: the note that was spent, opened — the party's own earlier `Received`
     /// note whose nullifier (under the party's `nk`) is `nf`. What lets the nullifier be
     /// recomputed.
+    ///
+    /// `None` on a transfer row means a mint (created from nothing, no nullifier at all). On a
+    /// bundle row it means the scan could not name the note behind `nullifiers[slot]` — either
+    /// that slot held a *dummy* input (design spec §3: a dummy's nullifier is published like
+    /// any other and is indistinguishable on chain), or the spent note never appeared in the
+    /// history this disclosure covers. `verify_row` accordingly checks a bundle `Sent` row's
+    /// nullifier only when the row actually claims a spent note.
     pub spent: Option<Note>,
 }
 
 impl Row {
-    fn new(tx: usize, t: &Tx, role: Role, note: Note, spent: Option<Note>) -> Row {
-        Row { tx, role, sender: note.from, receiver: note.pk, amount: note.amount, asset: note.asset, time: note.time, cm_out: t.cm_out, nf: t.nf, note, spent }
+    #[allow(clippy::too_many_arguments)]
+    fn new(tx: usize, source: RowSource, slot: u8, cm_out: Word8, nf: Option<Word8>, role: Role, note: Note, spent: Option<Note>) -> Row {
+        Row { tx, source, slot, role, sender: note.from, receiver: note.pk, amount: note.amount, asset: note.asset, time: note.time, cm_out, nf, note, spent }
     }
 }
 
-/// Everything the disclosure opens, in chain order. A party's key yields one `Received` row
-/// per note it was paid and one `Sent` row per note it spent; a transaction key yields the
-/// one row of that transaction. Nothing else on the chain opens, so nothing else is listed.
+/// Everything the disclosure opens: every transfer/mint row first, in chain order, then every
+/// bundle row, in chain order. A party's key yields one `Received` row per note it was paid and
+/// one `Sent` row per note it created while spending; a transaction key yields the row(s) of
+/// that one transaction. Nothing else on the chain opens, so nothing else is listed.
+///
+/// A bundle has two output slots and therefore up to four rows per party: each slot's envelope
+/// is tried both as receiver and as sender, exactly as the transfer loop tries its single one.
+/// A wallet that consolidates two of its own notes into one bundle and keeps the change gets
+/// two `Sent` rows (one per output slot, carrying that slot's nullifier) and one `Received`
+/// row (its change output) — all three naming the same bundle index with different `slot`s.
 pub fn scan(ledger: &Ledger, d: &Disclosure) -> Vec<Row> {
     let mut rows = Vec::new();
     match d {
         Disclosure::Transaction { tx, key } => {
             if let Some(t) = ledger.txs.get(*tx) {
-                if let Some(note) = t.envelope.open_with_tx_key(t.cm_out, key) { rows.push(Row::new(*tx, t, Role::Transaction, note, None)); }
+                if let Some(note) = t.envelope.open_with_tx_key(t.cm_out, key) {
+                    rows.push(Row::new(*tx, RowSource::Transfer, 0, t.cm_out, t.nf, Role::Transaction, note, None));
+                }
+            }
+            // `Disclosure::Transaction`'s `tx` does not say which sequence it indexes, so both
+            // are tried. This is not ambiguous in practice: a `TxKey` only opens the envelope
+            // it sealed, and every envelope is bound to its own `cm_out` as associated data, so
+            // at most one of these attempts can succeed for a key that is not forged.
+            if let Some(b) = ledger.bundles.get(*tx) {
+                for slot in 0..2usize {
+                    let cm = b.commitments[slot];
+                    if let Some(note) = b.envelopes[slot].open_with_tx_key(cm, key) {
+                        rows.push(Row::new(*tx, RowSource::Bundle, slot as u8, cm, Some(b.nullifiers[slot]), Role::Transaction, note, None));
+                    }
+                }
             }
         }
         Disclosure::Party(vk) => {
+            // The party's own notes, accumulated as the scan goes, so a `Sent` row can name the
+            // note behind a nullifier. The spent note's *commitment* is never public (M3.3:
+            // `MERKLE_VERIFY` proves it in-circuit) — this is the only way to recover it, and
+            // it works only for someone who already holds the party's history.
             let mut owned: Vec<Note> = Vec::new();
+            let spent_for = |owned: &[Note], nf: Word8| owned.iter().copied().find(|n| vk.nullifier(&n.commitment()) == nf);
             for (i, t) in ledger.txs.iter().enumerate() {
                 if let Some((_, note)) = t.envelope.open_as_receiver(t.cm_out, vk) {
                     owned.push(note);
-                    rows.push(Row::new(i, t, Role::Received, note, None));
+                    rows.push(Row::new(i, RowSource::Transfer, 0, t.cm_out, t.nf, Role::Received, note, None));
                 }
                 if let Some((_, note)) = t.envelope.open_as_sender(t.cm_out, vk) {
-                    // The spent note's commitment is not public (M3.3: `MERKLE_VERIFY` proves
-                    // it in-circuit) — find it from the party's own history by nullifier
-                    // instead, the same way an outsider could not.
-                    let spent = t.nf.and_then(|nf| owned.iter().copied().find(|n| vk.nullifier(&n.commitment()) == nf));
-                    rows.push(Row::new(i, t, Role::Sent, note, spent));
+                    let spent = t.nf.and_then(|nf| spent_for(&owned, nf));
+                    rows.push(Row::new(i, RowSource::Transfer, 0, t.cm_out, t.nf, Role::Sent, note, spent));
+                }
+            }
+            for (i, b) in ledger.bundles.iter().enumerate() {
+                for slot in 0..2usize {
+                    let (cm, nf) = (b.commitments[slot], b.nullifiers[slot]);
+                    let env = &b.envelopes[slot];
+                    if let Some((_, note)) = env.open_as_receiver(cm, vk) {
+                        owned.push(note);
+                        rows.push(Row::new(i, RowSource::Bundle, slot as u8, cm, Some(nf), Role::Received, note, None));
+                    }
+                    if let Some((_, note)) = env.open_as_sender(cm, vk) {
+                        rows.push(Row::new(i, RowSource::Bundle, slot as u8, cm, Some(nf), Role::Sent, note, spent_for(&owned, nf)));
+                    }
                 }
             }
         }
@@ -210,35 +277,58 @@ pub enum RowError {
     Nullifier,
     /// The row's role is not one this disclosure can produce.
     Scope,
+    /// The row names a slot the transaction it points at does not have — anything but 0 on a
+    /// transfer/mint, anything but 0 or 1 on a bundle.
+    Slot,
 }
 
 /// Checks `row` against the chain using nothing but `d` — the same key the row was
 /// produced with — so a third party handed the disclosure and the rows can confirm every
 /// row independently of whoever produced them.
 pub fn verify_row(ledger: &Ledger, d: &Disclosure, row: &Row) -> Result<(), RowError> {
-    let t = ledger.txs.get(row.tx).ok_or(RowError::UnknownTx)?;
+    // The three chain-side facts a row is checked against, read from whichever sequence and
+    // slot the row names. Everything below is identical for both sources — a bundle row is the
+    // same check, indexed by `(tx, slot)` instead of `tx` alone.
+    let (cm_out, nf, time, envelope) = match row.source {
+        RowSource::Transfer => {
+            let t = ledger.txs.get(row.tx).ok_or(RowError::UnknownTx)?;
+            if row.slot != 0 { return Err(RowError::Slot); }
+            (t.cm_out, t.nf, t.time, &t.envelope)
+        }
+        RowSource::Bundle => {
+            let b = ledger.bundles.get(row.tx).ok_or(RowError::UnknownTx)?;
+            let s = usize::from(row.slot);
+            if s >= 2 { return Err(RowError::Slot); }
+            (b.commitments[s], Some(b.nullifiers[s]), b.time, &b.envelopes[s])
+        }
+    };
     let n = &row.note;
-    if n.commitment() != t.cm_out || row.cm_out != t.cm_out { return Err(RowError::Commitment); }
+    if n.commitment() != cm_out || row.cm_out != cm_out { return Err(RowError::Commitment); }
     if (row.sender, row.receiver, row.amount, row.asset, row.time) != (n.from, n.pk, n.amount, n.asset, n.time) { return Err(RowError::Fields); }
-    if row.time != t.time { return Err(RowError::Time); }
-    if row.nf != t.nf { return Err(RowError::Nullifier); }
+    if row.time != time { return Err(RowError::Time); }
+    if row.nf != nf { return Err(RowError::Nullifier); }
     match (d, row.role) {
         (Disclosure::Transaction { tx, key }, Role::Transaction) => {
             if *tx != row.tx { return Err(RowError::Scope); }
-            if t.envelope.open_with_tx_key(t.cm_out, key).as_ref() != Some(n) { return Err(RowError::Commitment); }
+            if envelope.open_with_tx_key(cm_out, key).as_ref() != Some(n) { return Err(RowError::Commitment); }
         }
         (Disclosure::Party(vk), Role::Received) => {
             if n.pk != vk.pk() { return Err(RowError::Party); }
         }
         (Disclosure::Party(vk), Role::Sent) => {
             if n.from != vk.pk() { return Err(RowError::Party); }
-            match (t.nf, row.spent) {
+            match (nf, row.spent) {
                 // A mint: created from nothing, so there is no nullifier to check.
                 (None, None) => {}
                 (Some(nf), Some(spent)) => {
                     if spent.pk != vk.pk() { return Err(RowError::Party); }
                     if vk.nullifier(&spent.commitment()) != nf { return Err(RowError::Nullifier); }
                 }
+                // A bundle slot whose spent note the scan could not name — a dummy input, or a
+                // note outside this disclosure's history (see `Row::spent`). The row simply
+                // claims less; there is nothing to check, and nothing it could be lying about,
+                // since `row.nf` was already pinned to the chain's `nullifiers[slot]` above.
+                (Some(_), None) if row.source == RowSource::Bundle => {}
                 _ => return Err(RowError::Nullifier),
             }
         }
