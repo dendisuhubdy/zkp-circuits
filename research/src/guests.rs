@@ -6,6 +6,23 @@ const T0: u32 = 5; const T1: u32 = 6; const T2: u32 = 7; const T3: u32 = 28; con
 const T6: u32 = 31; const S0: u32 = 8; const S1: u32 = 9;
 const HEAP: i32 = 0x1000; // data lives above the code
 
+/// Guests built with the real `riscv32im-unknown-none-elf` toolchain (`guest-sdk`,
+/// `guests-compiled/`) and loaded as flat binaries (`Program::from_flat_binary`), as opposed
+/// to every other guest in this module, which is written directly against `asm.rs`'s
+/// mnemonic helpers.
+pub mod compiled {
+    use crate::isa::Program;
+
+    /// `fib`, compiled for `riscv32im-unknown-none-elf` by `guests-compiled/fib`'s Makefile
+    /// and committed as `guests-compiled/bin/fib.bin` — see that Makefile's header for the
+    /// exact `rustc +1.98.1` build it was produced with. Base `pc = 0x1000`, matching
+    /// `guest-sdk/guest.ld`'s `ORIGIN`.
+    pub fn fib() -> Program {
+        const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/fib.bin");
+        Program::from_flat_binary(0x1000, BIN).expect("fib.bin is a committed, known-good build")
+    }
+}
+
 /// out0 = fib(n) mod 2^32, computed with a counted loop.
 pub fn fib(n: u32) -> Program {
     let mut a = Assembler::new(0);

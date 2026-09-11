@@ -1,0 +1,4 @@
+/target
+# The Makefile's own build output; the copy that matters is committed one level up at
+# guests-compiled/bin/fib.bin (see that directory).
+/bin

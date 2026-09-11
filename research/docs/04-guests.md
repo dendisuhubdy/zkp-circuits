@@ -63,3 +63,18 @@ criterion) and because `p3-keccak-air` already existing upstream removes the
 single largest unknown. The sBPF interpreter and its coprocessors follow
 once the general "interpreter guest + coprocessor table" pattern is proven
 out once, on the EVM.
+
+## Compiled guests
+
+M4.1 (Task 2, `guest-sdk`, `guests-compiled/`): measured numbers for the first
+guest compiled with the real `riscv32im-unknown-none-elf` toolchain and
+loaded as a flat binary (`Program::from_flat_binary`), rather than
+hand-assembled against `asm.rs`'s mnemonic helpers.
+
+| Guest | Tier | Cycles | Proof size |
+|---|---|---|---|
+| `guests::compiled::fib` (`fib(20)`) | `Tier(10)` | 136 | 253208 bytes |
+
+Measured by `research/tests/e2e.rs`'s `compiled_fib_proves_and_verifies`
+(`cargo +1.98.1 test -p rand_zkvm --test e2e compiled_fib -- --nocapture`,
+`FriProfile::Test`).

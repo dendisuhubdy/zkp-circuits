@@ -132,3 +132,22 @@ fn measure_production_profile_at_tier_10_and_12() {
         println!("{label}: proof size = {} bytes, prove = {:?}, verify = {:?}", proof.size(), prove_time, verify_time);
     }
 }
+
+#[test]
+fn compiled_fib_matches_the_hand_written_guest() {
+    use rand_zkvm::emulator::execute;
+    let compiled = guests::compiled::fib();
+    let hand = guests::fib(20);
+    let exec_c = execute(&compiled, &[20], 50_000).unwrap();
+    let exec_h = execute(&hand, &[], 50_000).unwrap();
+    assert_eq!(exec_c.outputs[0], exec_h.outputs[0]);
+}
+
+#[test]
+fn compiled_fib_proves_and_verifies() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::compiled::fib();
+    let (proof, exec) = m.prove(&p, &[20], None).unwrap();
+    eprintln!("compiled fib(20): tier {:?}, {} cycles, proof {} bytes", proof.tier, exec.cycles(), proof.size());
+    m.verify(&p.digest(), &proof).unwrap();
+}

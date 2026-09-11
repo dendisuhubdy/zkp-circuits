@@ -1,0 +1,14 @@
+[build]
+target = "riscv32im-unknown-none-elf"
+
+[target.riscv32im-unknown-none-elf]
+rustflags = [
+  # Path is relative to this crate's root (cargo/rustc's invocation cwd), not to this file —
+  # `-Tguest.ld` alone leaves rust-lld unable to find the script since it only lives in
+  # `guest-sdk/`, one level up from `guests-compiled/`, not in this crate's own directory.
+  "-C", "link-arg=-T../../guest-sdk/guest.ld",
+  # Explicit even though it is this target's default (`docs/superpowers/specs/2026-09-11-
+  # zkvm-m4-design.md` §2): a misaligned load/store is a constraint violation in this
+  # machine (`docs/01-isa.md`), so the compiler must never assume the hardware tolerates one.
+  "-C", "target-feature=-unaligned-scalar-mem",
+]
