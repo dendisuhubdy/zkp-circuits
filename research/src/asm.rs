@@ -116,7 +116,7 @@ pub fn copy_word8_from_reg(a: &mut Assembler, base: u32, tmp: u32, src_reg: u32,
 
 /// `NOTE_COMMIT`: `note_words` (`Note::WORDS` words, already laid out at `base + note_at`)
 /// hashed as `H(CM_DOMAIN, note_words)`. Stages `[CM_DOMAIN, note_words...]` at `base + buf`
-/// (needs `1 + Note::WORDS` = 28 words of scratch), calls `POSEIDON2`, and copies the 8-word
+/// (needs `1 + Note::WORDS` = 29 words of scratch), calls `POSEIDON2`, and copies the 8-word
 /// digest to `base + cm_out`.
 pub fn emit_note_commit(a: &mut Assembler, base: u32, tmp: u32, note_at: i32, buf: i32, ptr_words: i32, cm_out: i32) {
     a.extend(ops::li(tmp, domain::CM as i32));
