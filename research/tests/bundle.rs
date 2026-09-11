@@ -711,10 +711,11 @@ fn a_bundles_time_must_be_inside_the_time_window() {
     assert!(matches!(l.apply_bundle(&m, &proof, &b), Err(LedgerError::Time { .. })), "a bundle cannot claim a future time");
 }
 
-/// The two shape checks that run before anything else: a proof carrying the wrong number of
+/// The two shape checks that run before anything else — a proof carrying the wrong number of
 /// public values is a *proof* error (not a misleading digest mismatch), and a digest word
-/// outside 32 bits — which no honest trace can produce, since an output is a register word —
-/// is `BadDigest` rather than a silent truncation.
+/// outside 32 bits, which no honest trace can produce since an output is a register word, is
+/// `BadDigest` rather than a silent truncation — and the last check of all, which only a proof
+/// that has passed every plaintext check ever reaches.
 #[test]
 fn a_malformed_proof_is_rejected_as_a_proof_error() {
     let f = fixture();
@@ -730,6 +731,16 @@ fn a_malformed_proof_is_rejected_as_a_proof_error() {
     proof.public_values = honest_pvs.clone();
     proof.public_values[cpu::pv::OUT0] = u64::from(u32::MAX) + 1;
     assert!(matches!(l.apply_bundle(&m, &proof, &b), Err(LedgerError::BadDigest)));
+
+    // Step 7, the only check a proof reaches once every plaintext check has passed: the proof
+    // must verify under `bundle_program`'s OWN `hc`. Corrupting `pv::HC0` leaves the published
+    // digest (`OUT0..8`) untouched, so admission gets all the way to `Machine::verify` and is
+    // refused there — which is also why a proof of some *other* program, a `transfer` included,
+    // can never be submitted as a bundle.
+    proof.public_values = honest_pvs.clone();
+    proof.public_values[cpu::pv::HC0] ^= 1;
+    assert!(matches!(l.apply_bundle(&m, &proof, &b), Err(LedgerError::Proof(VerifyError::PublicValues))));
+    assert!(l.bundles.is_empty(), "nothing was applied by any of the three");
 
     proof.public_values = honest_pvs;
     l.apply_bundle(&m, &proof, &b).expect("the restored proof is the honest one again");

@@ -8,6 +8,14 @@
 //! proves it in-circuit against `anchor`, a tree root, so the chain no longer shows which
 //! commitment a transfer spent. `anchor` alone is public (as part of the output-commitment
 //! digest), and only as one of a bounded window of recent roots, not a single fixed point.
+//!
+//! Shielded pool phase Z: the chain carries a second, independently numbered sequence of
+//! transactions, `bundles`. A [`Bundle`] is the design spec §3 shape — one anchor, two
+//! nullifiers, two commitments, `fee`, `burn`, `asset`, `time`, two envelopes — and
+//! [`Ledger::apply_bundle`] is its consensus check, built as a direct generalization of
+//! `apply` so the two check orders cannot drift (`docs/06-viewing-keys.md`'s "Ledger
+//! admission for bundles"). Both sequences share one tree, one nullifier set and one
+//! recent-roots window.
 
 use crate::isa::Program;
 use crate::machine::{Machine, Proof, VerifyError};

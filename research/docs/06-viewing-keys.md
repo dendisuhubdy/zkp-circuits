@@ -236,22 +236,35 @@ H(NODE, empty[d-1], empty[d-1])`, precomputed once — so a depth-32 tree
 never requires materializing `2^32` leaves, and every operation
 (`append`/`root`/`path`) costs `O(leaves)`, not `O(2^32)`.
 
-`Ledger` keeps this tree plus a bounded window of its 16 most recent roots
-(`recent_roots`). `Ledger::mint` appends the minted note's commitment;
-`Ledger::apply` appends `cm_out` after a successful transfer. `path_for(cm)`
-returns the sibling path and index for a commitment already in the tree —
-what `notes::transfer_inputs` needs to spend the note it belongs to.
+`Ledger` keeps this tree plus a bounded window of its most recent roots
+(`recent_roots`, `Ledger::ANCHOR_WINDOW = 64` entries). `Ledger::mint`
+appends the minted note's commitment; `Ledger::apply` appends `cm_out` after
+a successful transfer; `Ledger::apply_bundle` appends *both* of a bundle's
+output commitments. `path_for(cm)` returns the sibling path and index for a
+commitment already in the tree — what `notes::transfer_inputs` and
+`notes::bundle_inputs` need to spend the note it belongs to.
 
 **Why a window, not just the latest root.** A proof takes real wall-clock
 time to build; by the time it is submitted, another transaction may already
-have changed the tree. Accepting any of the last 16 roots as a valid
-`anchor` lets a proof built a little while ago still land, at the cost of
-also accepting an `anchor` that is stale enough to be suspicious — bounded
-by the window, not unbounded. `tests/viewing.rs::a_stale_anchor_is_rejected_by_the_ledger`
-checks the boundary: the proof itself is valid math (Merkle membership
-against a past root is true forever), but once that root has scrolled out
-of the window `apply` rejects it (`LedgerError::UnknownAnchor`) — a ledger
-bookkeeping decision, not a cryptographic one.
+have changed the tree. Accepting any of the last `ANCHOR_WINDOW` roots as a
+valid `anchor` lets a proof built a little while ago still land, at the cost
+of also accepting an `anchor` that is stale enough to be suspicious —
+bounded by the window, not unbounded.
+
+The window was 16 through M3.3 and is 64 from shielded pool phase Z Task 4,
+the design spec §7's own number: at the 1 s block time the spec assumes, 64
+roots is about a minute, which is the order of magnitude a bundle proof
+actually takes to build (a `transfer` is cheaper, but both read the same
+deque, and there is no reason for the cheaper relation to have the tighter
+deadline). `tests/viewing.rs::a_stale_anchor_is_rejected_by_the_ledger` and
+`tests/bundle.rs::a_bundles_anchor_expires_after_the_anchor_window` check the
+boundary from the transfer and bundle sides respectively: the proof itself is
+valid math (Merkle membership against a past root is true forever), but once
+that root has scrolled out of the window the ledger rejects it
+(`LedgerError::UnknownAnchor`) — a ledger bookkeeping decision, not a
+cryptographic one. The bundle-side test pins both halves, admitting the
+bundle with `ANCHOR_WINDOW - 1` later roots in front of its anchor and
+refusing it with `ANCHOR_WINDOW + 1`.
 
 **Testing note.** `MERKLE_VERIFY` compiles down to the same `POSEIDON2`
 syscall (and the same `cpu` absorb/write-back hash rows) any other call to
@@ -294,6 +307,39 @@ rows confirms each row independently of whoever produced it:
 | `Received`: `note.pk == vk.pk()`; `Sent`: `note.from == vk.pk()` | `Party` |
 | `Sent`: `H_NF(nk, H_CM(spent)) == nf` (a mint has neither, and must carry no `spent`) | `Nullifier` |
 | the row's role is one this disclosure can produce | `Scope` |
+| the row names a slot the transaction has | `Slot` |
+
+**Rows over a bundle.** A bundle publishes two envelopes, one per output
+slot, each sealed against its own slot's commitment by exactly the machinery
+above — nothing about an envelope changes. What changes is the indexing: a
+`Row` now says which of the ledger's two independently numbered sequences its
+`tx` indexes (`source: RowSource::{Transfer, Bundle}`) and which of a
+bundle's two slots it is about (`slot: u8`, always 0 for a transfer or mint).
+A bundle's slots are paired positionally — slot `s` means
+`commitments[s]`, `envelopes[s]` and `nullifiers[s]` — and `scan` and
+`verify_row` use the same convention, so a row one produces is checkable by
+the other. Everything in the table above is then the identical check, read at
+`(tx, slot)` instead of `tx` alone.
+
+`scan` tries each of a bundle's two envelopes both as receiver and as sender,
+so up to four rows per bundle per party. The interesting case is the one
+2-in-2-out exists for: a wallet consolidating two of its own notes and
+keeping the change gets **two `Sent` rows** (one per output slot, each
+carrying that slot's nullifier and naming the input note behind it) and
+**one `Received` row** (its change output), all three pointing at the same
+bundle index with different `slot`s; the party it paid sees exactly one
+`Received` row and nothing else.
+`tests/bundle.rs::disclosure_scopes_over_a_bundle` is that scenario end to
+end, including the per-transaction scope (each of the two `TxKey`s opens
+exactly its own slot) and a stranger's key opening nothing.
+
+One asymmetry with transfers: a bundle `Sent` row may legitimately carry
+`spent: None`. A transfer row's `None` means a mint (no nullifier at all),
+but a bundle always publishes two nullifiers, and one of them may belong to a
+*dummy* input — indistinguishable on chain from a real one by design (§3) —
+or to a note outside the history this disclosure covers. Such a row simply
+claims less; `verify_row` has already pinned its `nf` to the chain's
+`nullifiers[slot]`, so there is nothing it could be lying about.
 
 Who can check what follows from who holds `nk`. The sender's viewing key
 verifies the nullifier, because `nf = H_NF(nk_sender, cm_in)`. A receiver, or a
@@ -420,10 +466,14 @@ can clear a `bad` an earlier one set. Every genuinely arithmetic relation funnel
   `cm_out2`, and each *equality* (not mismatch — this fold is the inverse polarity of the
   anchor check) ORs into `BAD`. The ledger (Task 4) independently rejects a repeated
   nullifier or a repeated commitment when the bundle is applied, so this is defence in
-  depth rather than the only place it is caught. One practical consequence: a dummy
-  *output* still needs a freshly random `r` like any other note, because two zero-`r`
-  dummies commit to the identical `cm_out` and would now taint their own bundle (and, even
-  one at a time, collide with an earlier bundle's dummy leaf on the ledger).
+  depth rather than the only place it is caught. One practical consequence, on **both**
+  sides: a dummy *output* still needs a freshly random `r` like any other note, because two
+  zero-`r` dummies commit to the identical `cm_out` and would now taint their own bundle
+  (and, even one at a time, collide with an earlier bundle's dummy leaf on the ledger); and
+  a dummy *input* needs one for the same reason one step removed — two zero-`r` dummy
+  inputs share a `cm_in`, hence a nullifier, so `nf1 == nf2` taints the bundle, and one at
+  a time it is a nullifier an earlier bundle already spent. Build every dummy with
+  `Note::new`, never a hand-written `Note { .., r: [0; 8] }`.
 
 The taint bit is folded into the published digest as **an explicit 47th word**, never
 XORed into `time` or any other plaintext field a sender publishes alongside the proof:
@@ -505,3 +555,70 @@ walk, 160 permutations) but the same program (words/digest rows are shape-indepe
 which branches execute) and lands at the same tier either way — on cycles, with the
 permutation budget (1 322 / 1 162 against 2 048 slots) never the binding constraint at
 this tier.
+
+## Ledger admission for bundles
+
+`Ledger::apply_bundle(machine, proof, bundle)` is the consensus check for a
+bundle, the counterpart of `Ledger::apply` for a transfer, and phase Z Task 4
+implements the design spec §7 admission order as literally as this crate can.
+What it cannot model is named rather than silently dropped: there is no wire
+encoding here, so §7's size checks have nothing to measure; no mempool, so no
+fee floor; no action types; and no block height, so §7's "`time` within 64 of
+the height" is checked against `Ledger::now` instead. Routing the fee to a
+proposer and the burn to its destination needs that same missing actions
+layer and is phase S2/S3's job, not this crate's.
+
+A `Bundle` is all public chain data — `anchor`, two nullifiers, two
+commitments, `fee`, `burn`, `asset`, `time`, two envelopes — submitted
+alongside the proof, exactly the way a transfer submits its
+`(anchor, nf, cm_out, time)` plaintext today.
+
+Cheap before expensive, so a node never pays for a STARK verification of a
+bundle it would reject anyway:
+
+| # | check | fails with |
+|---|---|---|
+| 1 | the proof carries `pv::NUM` public values, and its eight digest words are canonical `u32`s | `Proof(PublicValues)` / `BadDigest` |
+| 2 | `anchor` is one of the last `ANCHOR_WINDOW = 64` recorded roots | `UnknownAnchor` |
+| 3 | `now - TIME_WINDOW <= time <= now` (`TIME_WINDOW = 64`) | `Time` |
+| 4 | `nullifiers[0] != nullifiers[1]`, and neither is already spent | `DuplicateNullifierInBundle` / `Spent` |
+| 5 | `commitments[0] != commitments[1]`, and neither is already a leaf | `DuplicateCommitmentInBundle` / `Duplicate` |
+| 6 | `notes::bundle_digest(anchor, nf1, nf2, cm1, cm2, fee, burn, asset, time)` equals `pv::OUT0..8` | `BadDigest` |
+| 7 | the proof verifies under `bundle_program`'s `hc` — last, and only then | `Proof(..)` |
+
+Then, and only then: both nullifiers inserted, both commitments appended in
+slot order, the new root recorded, `fees_collected += fee`,
+`burned += burn`, the bundle pushed. `tests/bundle.rs` has one test per row of
+that table, plus the honest path and the replay.
+
+Three things are worth calling out about this order.
+
+**Step 6 is where every in-circuit relation failure lands.** The ledger never
+runs any of the guest's arithmetic. `bundle_digest` fixes the preimage's 47th
+word, `bad`, at `0`; a bundle whose guest tainted itself — an over-spend, a
+wrong Merkle path, an input asset that disagrees with the bundle's, a 64-bit
+wrap — published a digest folded from `bad = 1`, which this recomputation can
+never match. So over-spending is not a special case in `apply_bundle`; it is
+a `BadDigest`, like every other broken relation.
+
+**The within-bundle duplicate checks (4, 5) are not redundant with the
+nullifier set and the tree.** Neither slot has been inserted yet when the
+bundle is examined, so the set and the tree cannot see a bundle that repeats
+itself; only an explicit comparison of the two slots can. `guests::bundle`
+also taints such a witness in-circuit, but that is defence in depth in the
+other direction — the guest cannot see the cross-bundle cases at all — and
+neither check substitutes for the other. The two error variants are kept
+distinct from `Spent`/`Duplicate` for exactly that reason.
+
+**Dummies are not detected, deliberately.** A dummy input's nullifier and a
+dummy output's commitment are indistinguishable on chain from real ones by
+design (§3) — that is the entire point of the fixed 2-in-2-out shape — so
+they go through the same `nullifiers.insert` / `tree.append` path as real
+ones and `apply_bundle` never tries to tell them apart. This is also why a
+wallet must build its dummies with a fresh random `r`: see the duplicate-check
+bullet under "The `bundle` relation" above.
+
+`fees_collected` and `burned` are running totals over every admitted bundle,
+nothing more — the ledger-level number an auditor would reconcile against,
+with no destination attached. `apply`/`mint`, the transfer path, are
+unchanged by all of this, including their stricter `time == now`.

@@ -293,7 +293,7 @@ refused by `build_traces`, not silently truncated.
 | The exact cycle count | hidden — only the padded tier height is visible |
 | Which syscalls ran, beyond what the outputs imply | hidden |
 | Shielded transfer (`guests::transfer`): the output-commitment digest `H(anchor, nf, cm_out, time)` | public (the eight output words); the ledger is separately handed the plaintext `anchor`/`nf`/`cm_out`/`time` alongside the proof and checks them against the digest — `docs/06-viewing-keys.md`'s "Public outputs" |
-| Shielded transfer: the spent commitment `cm_in` | hidden — proved in-circuit (`MERKLE_VERIFY`) against `anchor`, a commitment-tree root, never published itself; only `anchor` (one of the ledger's last 16 roots) and `nf` (a one-way function of `cm_in`) are public, so the link from a note's creation to its spend is not visible on chain |
+| Shielded transfer: the spent commitment `cm_in` | hidden — proved in-circuit (`MERKLE_VERIFY`) against `anchor`, a commitment-tree root, never published itself; only `anchor` (one of the ledger's last 64 roots, `Ledger::ANCHOR_WINDOW`) and `nf` (a one-way function of `cm_in`) are public, so the link from a note's creation to its spend is not visible on chain |
 | Shielded transfer: sender, receiver, amount, asset, note randomness | hidden from the chain; opened by the receiver's or sender's viewing key, or by the transaction key (`docs/06-viewing-keys.md`) |
 
 ## The delegated-proving boundary
