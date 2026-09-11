@@ -139,7 +139,7 @@ pub struct Row {
     pub role: Role,
     pub sender: Word8,
     pub receiver: Word8,
-    pub amount: u32,
+    pub amount: u64,
     pub asset: u32,
     pub time: u32,
     /// The created note's on-chain commitment.

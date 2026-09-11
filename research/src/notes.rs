@@ -149,7 +149,10 @@ pub struct Note {
     pub pk: Word8,
     /// Creator.
     pub from: Word8,
-    pub amount: u32,
+    /// SHRUGG units. Two machine words on the wire (lo, hi) — see `words()`. `u64`, not
+    /// `u32`: SHRUGG units are `1e9` per coin, so `u32` cannot hold a single coin
+    /// (`docs/superpowers/specs/2026-09-11-shielded-pool-design.md` §13's ruling).
+    pub amount: u64,
     pub asset: u32,
     /// Creation time, as the transaction that created the note published it.
     pub time: u32,
@@ -158,29 +161,30 @@ pub struct Note {
 }
 
 impl Note {
-    /// `pk(8) from(8) amount(1) asset(1) time(1) r(8)`.
-    pub const WORDS: usize = 8 + 8 + 1 + 1 + 1 + 8;
+    /// `pk(8) from(8) amount_lo amount_hi asset(1) time(1) r(8)`.
+    pub const WORDS: usize = 8 + 8 + 2 + 1 + 1 + 8;
     pub const BYTES: usize = 4 * Self::WORDS;
 
-    /// The word layout the guest hashes: `pk, from, amount, asset, time, r`.
+    /// The word layout the guest hashes: `pk, from, amount_lo, amount_hi, asset, time, r`.
     pub fn words(&self) -> [u32; Self::WORDS] {
         let mut w = [0u32; Self::WORDS];
         w[0..8].copy_from_slice(&self.pk);
         w[8..16].copy_from_slice(&self.from);
-        w[16] = self.amount;
-        w[17] = self.asset;
-        w[18] = self.time;
-        w[19..27].copy_from_slice(&self.r);
+        w[16] = self.amount as u32;
+        w[17] = (self.amount >> 32) as u32;
+        w[18] = self.asset;
+        w[19] = self.time;
+        w[20..28].copy_from_slice(&self.r);
         w
     }
     pub fn from_words(w: [u32; Self::WORDS]) -> Note {
         Note {
             pk: w[0..8].try_into().unwrap(),
             from: w[8..16].try_into().unwrap(),
-            amount: w[16],
-            asset: w[17],
-            time: w[18],
-            r: w[19..27].try_into().unwrap(),
+            amount: (w[16] as u64) | ((w[17] as u64) << 32),
+            asset: w[18],
+            time: w[19],
+            r: w[20..28].try_into().unwrap(),
         }
     }
     pub fn commitment(&self) -> Word8 { hash(domain::CM, &self.words()) }
@@ -192,7 +196,7 @@ impl Note {
         Some(Note::from_words(w))
     }
     /// A fresh note for `owner`, created by `from`, with random `r`.
-    pub fn new(owner: Word8, from: Word8, amount: u32, asset: u32, time: u32) -> Note {
+    pub fn new(owner: Word8, from: Word8, amount: u64, asset: u32, time: u32) -> Note {
         let mut rng = rand::rng();
         let r = std::array::from_fn(|_| rng.next_u32());
         Note { pk: owner, from, amount, asset, time, r }
@@ -226,15 +230,16 @@ pub mod input {
     use super::DEPTH;
     pub const SK: usize = 0;          // 2 words
     pub const IN_FROM: usize = 2;     // 8 words
-    pub const IN_AMOUNT: usize = 10;
-    pub const IN_ASSET: usize = 11;
-    pub const IN_TIME: usize = 12;
-    pub const IN_R: usize = 13;       // 8 words
-    pub const OUT_PK: usize = 21;     // 8 words
-    pub const OUT_TIME: usize = 29;
-    pub const OUT_R: usize = 30;      // 8 words
+    pub const IN_AMOUNT_LO: usize = 10;
+    pub const IN_AMOUNT_HI: usize = 11;
+    pub const IN_ASSET: usize = 12;
+    pub const IN_TIME: usize = 13;
+    pub const IN_R: usize = 14;       // 8 words
+    pub const OUT_PK: usize = 22;     // 8 words
+    pub const OUT_TIME: usize = 30;
+    pub const OUT_R: usize = 31;      // 8 words
     /// `DEPTH` sibling `Word8`s, leaf to root (private: the Merkle witness).
-    pub const PATH: usize = 38;       // DEPTH * 8 words
+    pub const PATH: usize = 39;       // DEPTH * 8 words
     /// The spent note's leaf index; bit `level` selects which side it's on at that level.
     pub const INDEX: usize = PATH + DEPTH * 8;
     pub const COUNT: usize = INDEX + 1;
@@ -255,7 +260,8 @@ pub fn transfer_inputs(sk: &SpendKey, spent: &Note, created: &Note, path: &[Word
     v[input::SK] = sk.0[0];
     v[input::SK + 1] = sk.0[1];
     v[input::IN_FROM..input::IN_FROM + 8].copy_from_slice(&spent.from);
-    v[input::IN_AMOUNT] = spent.amount;
+    v[input::IN_AMOUNT_LO] = spent.amount as u32;
+    v[input::IN_AMOUNT_HI] = (spent.amount >> 32) as u32;
     v[input::IN_ASSET] = spent.asset;
     v[input::IN_TIME] = spent.time;
     v[input::IN_R..input::IN_R + 8].copy_from_slice(&spent.r);

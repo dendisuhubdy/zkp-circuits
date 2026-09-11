@@ -92,11 +92,16 @@ machine words (`hash::split_digest`'s layout, `notes::Word8 = [u32; 8]`).
 
 ## Notes and what the guest proves
 
-A note is 27 machine words:
+A note is 28 machine words:
 
 ```
-pk (8)   from (8)   amount   asset   time   r (8)
+pk (8)   from (8)   amount_lo   amount_hi   asset   time   r (8)
 ```
+
+`amount` is `u64` (SHRUGG units are `1e9` per coin, too wide for `u32`),
+carried as two machine words — low then high — in the commitment preimage;
+everywhere else in this crate it is a single `u64` value
+(`notes::Note::words`/`from_words` do the split/join).
 
 `from` is the address of whoever created the note. It is there so the sender
 is *authenticated*, not merely asserted: the guest sets `cm_out`'s `from` to
@@ -106,7 +111,7 @@ of the sender's input note is needed, which matters — disclosing the input
 note's opening to a receiver would hand them the sender's previous
 transaction.
 
-`guests::transfer` reads 295 private words (`notes::input`: the spend key,
+`guests::transfer` reads 296 private words (`notes::input`: the spend key,
 the spent note's fields, the created note's owner/time/randomness, and a
 depth-32 Merkle witness — a sibling path and a leaf index — for the spent
 note's commitment) and computes, with the `NOTE_COMMIT`/`NULLIFY`/
@@ -115,10 +120,10 @@ note's commitment) and computes, with the `NOTE_COMMIT`/`NULLIFY`/
 ```
 nk      = H_NK(sk)
 pk      = H_PK(nk)
-cm_in   = NOTE_COMMIT(pk,      from_in, amount, asset, time_in,  r_in)
+cm_in   = NOTE_COMMIT(pk,      from_in, amount_lo, amount_hi, asset, time_in,  r_in)
 anchor  = MERKLE_VERIFY(cm_in, path, index)        -- the tree root, not cm_in, is published
 nf      = NULLIFY(nk, cm_in)                        -- H(NF_DOMAIN, nk, cm_in); no separate nonce
-cm_out  = NOTE_COMMIT(pk_out,  pk,      amount, asset, time_out, r_out)
+cm_out  = NOTE_COMMIT(pk_out,  pk,      amount_lo, amount_hi, asset, time_out, r_out)
 ```
 
 Amount and asset conservation is structural — the same input words feed both
@@ -143,18 +148,25 @@ reinterpreted as a shorter or longer one (`tests/viewing.rs::domains_and_lengths
 documents this precisely).
 
 **Measured cost** (`tests/viewing.rs::transfer_guest_permutation_and_row_counts_are_measured`):
-1 771 instructions, 3 896 cycles, 38 `POSEIDON2` calls (5 note/key/nullifier
-hashes + 32 Merkle levels + 1 output-commitment digest), 190 permutations
+1 783 instructions, 3 910 cycles, 38 `POSEIDON2` calls (5 note/key/nullifier
+hashes + 32 Merkle levels + 1 output-commitment digest), 192 permutations
 from execution itself. M3.4 adds the program's own `hc` digest to every
-proof — 443 more digest rows (`⌈1771/4⌉`), counted as cycles too — for a
-total of 4 339 cycles and 633 permutations. (Shielded pool phase Z Task 1
+proof — 446 more digest rows (`⌈1783/4⌉`), counted as cycles too — for a
+total of 4 356 cycles and 638 permutations. (Shielded pool phase Z Task 1
 replaced `MERKLE_VERIFY`'s 32-times-unrolled body with a counted loop
 compiled once and executed 32 times, which is why the instruction count and
 digest-row cost dropped sharply from M3.3's unrolled figures — 4 554
 instructions / 1 139 digest rows / 4 903 total cycles, superseded here —
 while execution-only cycles rose slightly, 3 764 → 3 896, from the loop's
-per-iteration branch/counter bookkeeping.) See "Public outputs" and "Cost"
-below for what that meant for the gas tier.
+per-iteration branch/counter bookkeeping. Shielded pool phase Z Task 2 then
+widened `Note.amount` to `u64` — two words, `amount_lo`/`amount_hi`, in the
+commitment preimage (`Note::WORDS` 27 → 28, SHRUGG units being `1e9` per
+coin, too wide for `u32`) — which grows each `NOTE_COMMIT` message (`cm_in`
+and `cm_out`) from 28 to 29 words, one more permutation apiece, and adds 12
+words to the compiled program (one extra `lw`/`sw` pair per note-commit
+block): 1 771 → 1 783 instructions, 190 → 192 execution permutations, 443 →
+446 digest rows, superseded here.) See "Public outputs" and "Cost" below
+for what that meant for the gas tier.
 
 ## Public outputs
 
@@ -325,33 +337,40 @@ commitment.)
 
 | | |
 |---|---|
-| `transfer` program | 1 771 instructions (M3.3's unrolled figure, superseded here: 4 554) |
-| cycles (execution only) | 3 896 (M3.3: 3 764) |
-| digest rows (M3.4, `hc`) | 443 (`⌈1771/4⌉`) — count as cycles too (M3.3's unrolled figure, superseded here: 1 139) |
-| total cycles | 4 339 → tier 14 (max 16 383; still doesn't fit tier 12's 4 095) (M3.3's unrolled figure, superseded here: 4 903) |
+| `transfer` program | 1 783 instructions (M3.3's unrolled figure, superseded here: 4 554; Task 1's counted-loop figure, superseded here: 1 771) |
+| cycles (execution only) | 3 910 (M3.3: 3 764; Task 1: 3 896) |
+| digest rows (M3.4, `hc`) | 446 (`⌈1783/4⌉`) — count as cycles too (M3.3's unrolled figure, superseded here: 1 139; Task 1: 443) |
+| total cycles | 4 356 → tier 14 (max 16 383; still doesn't fit tier 12's 4 095) (M3.3's unrolled figure, superseded here: 4 903; Task 1: 4 339) |
 | `POSEIDON2` calls (execution only) | 38 (5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest) |
-| permutations (execution only) | 190 total — 1 (`nk`, 3-word message) + 3 (`pk`, 9 words) + 7 (`cm_in`, 28 words) + 5 (`nf`, 17 words) + 7 (`cm_out`, 28 words) + 32 × 5 (Merkle levels, 17 words each) + 7 (output digest, 26 words) |
-| total permutations | 190 + 443 (digest rows) = 633 (M3.3's unrolled figure, superseded here: 1 329) |
-| gas tier | 14 — still forced by the cycle count alone (4 339 > tier 12's 4 095-cycle budget), unchanged from M3.3's unrolled version despite the much smaller program; the counted-loop routine's 633 total permutations now comfortably fit even the unmodified `poseidon2_height(t) = 2^(t+1)` (1 024 slots at tier 14) that M3.3's 1 329 permutations had forced past — `machine::Tier::poseidon2_height` still ships M3.4's `2^(t+2)` sizing (2 048 slots), a crate-wide constant other guests (e.g. Task 3's two-Merkle-walk bundle) may still need the margin for, not something Task 1 revisits |
+| permutations (execution only) | 192 total — 1 (`nk`, 3-word message) + 3 (`pk`, 9 words) + 8 (`cm_in`, 29 words) + 5 (`nf`, 17 words) + 8 (`cm_out`, 29 words) + 32 × 5 (Merkle levels, 17 words each) + 7 (output digest, 26 words) |
+| total permutations | 192 + 446 (digest rows) = 638 (M3.3's unrolled figure, superseded here: 1 329; Task 1: 633) |
+| gas tier | 14 — still forced by the cycle count alone (4 356 > tier 12's 4 095-cycle budget), unchanged from M3.3's unrolled version despite the much smaller program; the counted-loop routine's 638 total permutations now comfortably fit even the unmodified `poseidon2_height(t) = 2^(t+1)` (1 024 slots at tier 14) that M3.3's 1 329 permutations had forced past — `machine::Tier::poseidon2_height` still ships M3.4's `2^(t+2)` sizing (2 048 slots), a crate-wide constant other guests (e.g. Task 3's two-Merkle-walk bundle) may still need the margin for, not something Task 1 or Task 2 revisits |
 | envelope | 1 088 (KEM) + 3 × (12 + 16) + 32 + 32 + 40 bytes ≈ 1.3 KB |
 | test-profile proof | tens of seconds in `cargo test` (opt-level 1, debug constraint checking) at tier 14's larger tables; the proof-backed viewing tests are correspondingly slower than the M1.5/M3.2/M3.3 baseline — expected, not a regression |
 
 The M3 design spec's own estimate for the transfer guest was "≈5 + 32·(1+4)
 ≈ 165 permutations" (treating each of the five non-Merkle hash calls as
-roughly one permutation). The measured execution-only count is higher, 190,
-because at `Word8` widths the note-commitment calls (28-word messages, 7
-permutations each) and the nullifier call (17 words, 5 permutations) cost
-more than one permutation apiece, and the output-commitment digest (`Public
-outputs`, above) adds 7 more. M3.4 then adds the program's own digest cost
-on top. Under M3.3's 32-times-unrolled `MERKLE_VERIFY`, that digest cost was
-1 139 permutations, dwarfing the execution-only count, because the compiled
-program was itself large (4 554 words, dominated by the guest-level
-`NOTE_COMMIT`/`NULLIFY`/`MERKLE_VERIFY` routines' unrolled Merkle-level
-loop). Shielded pool phase Z Task 1 replaced that unrolled loop with a
-counted loop — the body compiled once, executed 32 times by ordinary
-branch/jump control flow — which shrank the program to 1 771 words and its
-digest cost to 443 permutations accordingly, without changing what
-`MERKLE_VERIFY` proves or how it compiles at the AIR level (see "The
-commitment tree" section's "Testing note" above). 190 and 633 are the
-numbers pinned by
+roughly one permutation). The measured execution-only count is higher, 192,
+because at `Word8` widths the note-commitment calls (29-word messages —
+domain tag + `Note::WORDS`, 8 permutations each) and the nullifier call (17
+words, 5 permutations) cost more than one permutation apiece, and the
+output-commitment digest (`Public outputs`, above) adds 7 more. M3.4 then
+adds the program's own digest cost on top. Under M3.3's 32-times-unrolled
+`MERKLE_VERIFY`, that digest cost was 1 139 permutations, dwarfing the
+execution-only count, because the compiled program was itself large (4 554
+words, dominated by the guest-level `NOTE_COMMIT`/`NULLIFY`/`MERKLE_VERIFY`
+routines' unrolled Merkle-level loop). Shielded pool phase Z Task 1 replaced
+that unrolled loop with a counted loop — the body compiled once, executed 32
+times by ordinary branch/jump control flow — which shrank the program to
+1 771 words and its digest cost to 443 permutations accordingly, without
+changing what `MERKLE_VERIFY` proves or how it compiles at the AIR level
+(see "The commitment tree" section's "Testing note" above). Shielded pool
+phase Z Task 2 then widened `Note.amount` to `u64` (`Note::WORDS` 27 → 28),
+which pushes each `NOTE_COMMIT` call's full absorbed message (domain tag +
+`Note::WORDS`) from 28 to 29 words, crossing a rate-4 block boundary
+(`⌈28/4⌉ = 7` blocks before, `⌈29/4⌉ = 8` now) — one more permutation
+apiece, for `cm_in` and `cm_out` both — and adds 12 words to the compiled
+program (one extra `lw`/`sw` pair per note-commit block), growing the
+program to 1 783 words and its digest cost to 446 permutations. 192 and 638
+are the numbers pinned by
 `tests/viewing.rs::transfer_guest_permutation_and_row_counts_are_measured`.

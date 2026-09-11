@@ -307,7 +307,7 @@ pub fn transfer() -> Program {
     const PATH_PTR: u32 = 27;
     const INDEX_WORK: u32 = 24;
     const CTR: u32 = 23;
-    const BUF: i32 = 0x000;   // hash scratch: up to 28 words (112 bytes)
+    const BUF: i32 = 0x000;   // hash scratch: up to 29 words (116 bytes)
     const INP: i32 = 0x100;   // the input::COUNT private inputs
     const NK: i32 = 0x600;
     const PK: i32 = 0x620;
@@ -340,28 +340,31 @@ pub fn transfer() -> Program {
     copy_word8(&mut a, BASE, T0, NK, BUF + 4);
     a.extend(call_poseidon2(ptr_words(BUF), 9));
     copy_word8(&mut a, BASE, T0, BUF, PK);
-    // cm_in = NOTE_COMMIT(pk, in.from, in.amount, in.asset, in.time, in.r) — assembled into a
-    // Note::WORDS-word staging area at BUF + 0x80 (past the hash scratch region).
+    // cm_in = NOTE_COMMIT(pk, in.from, in.amount_lo, in.amount_hi, in.asset, in.time, in.r) —
+    // assembled into a Note::WORDS-word staging area at BUF + 0x80 (past the hash scratch
+    // region).
     const NOTE_IN: i32 = 0x080;
     copy_word8(&mut a, BASE, T0, PK, NOTE_IN);
     copy_word8(&mut a, BASE, T0, inp(input::IN_FROM), NOTE_IN + 32);
-    a.push(lw(T0, BASE, inp(input::IN_AMOUNT))); a.push(sw(BASE, T0, NOTE_IN + 64));
-    a.push(lw(T0, BASE, inp(input::IN_ASSET))); a.push(sw(BASE, T0, NOTE_IN + 68));
-    a.push(lw(T0, BASE, inp(input::IN_TIME))); a.push(sw(BASE, T0, NOTE_IN + 72));
-    copy_word8(&mut a, BASE, T0, inp(input::IN_R), NOTE_IN + 76);
+    a.push(lw(T0, BASE, inp(input::IN_AMOUNT_LO))); a.push(sw(BASE, T0, NOTE_IN + 64));
+    a.push(lw(T0, BASE, inp(input::IN_AMOUNT_HI))); a.push(sw(BASE, T0, NOTE_IN + 68));
+    a.push(lw(T0, BASE, inp(input::IN_ASSET))); a.push(sw(BASE, T0, NOTE_IN + 72));
+    a.push(lw(T0, BASE, inp(input::IN_TIME))); a.push(sw(BASE, T0, NOTE_IN + 76));
+    copy_word8(&mut a, BASE, T0, inp(input::IN_R), NOTE_IN + 80);
     emit_note_commit(&mut a, BASE, T0, NOTE_IN, BUF, ptr_words(BUF), CM_IN);
     // anchor = MERKLE_VERIFY(cm_in, path, index) — proves cm_in is in the commitment tree.
     a.push(lw(T1, BASE, inp(input::INDEX)));
     emit_merkle_verify(&mut a, BASE, T0, BIT, INDEX_WORK, T1, PATH_PTR, CTR, CM_IN, inp(input::PATH), BUF, ptr_words(BUF), ANCHOR, DEPTH, "transfer_merkle");
     // nf = NULLIFY(nk, cm_in) — bound to the commitment, so two notes can never share one.
     emit_nullify(&mut a, BASE, T0, NK, CM_IN, BUF, ptr_words(BUF), NF);
-    // cm_out = NOTE_COMMIT(out.pk, pk, in.amount, in.asset, out.time, out.r)
+    // cm_out = NOTE_COMMIT(out.pk, pk, in.amount_lo, in.amount_hi, in.asset, out.time, out.r)
     copy_word8(&mut a, BASE, T0, inp(input::OUT_PK), NOTE_IN);
     copy_word8(&mut a, BASE, T0, PK, NOTE_IN + 32);
-    a.push(lw(T0, BASE, inp(input::IN_AMOUNT))); a.push(sw(BASE, T0, NOTE_IN + 64));
-    a.push(lw(T0, BASE, inp(input::IN_ASSET))); a.push(sw(BASE, T0, NOTE_IN + 68));
-    a.push(lw(T0, BASE, inp(input::OUT_TIME))); a.push(sw(BASE, T0, NOTE_IN + 72));
-    copy_word8(&mut a, BASE, T0, inp(input::OUT_R), NOTE_IN + 76);
+    a.push(lw(T0, BASE, inp(input::IN_AMOUNT_LO))); a.push(sw(BASE, T0, NOTE_IN + 64));
+    a.push(lw(T0, BASE, inp(input::IN_AMOUNT_HI))); a.push(sw(BASE, T0, NOTE_IN + 68));
+    a.push(lw(T0, BASE, inp(input::IN_ASSET))); a.push(sw(BASE, T0, NOTE_IN + 72));
+    a.push(lw(T0, BASE, inp(input::OUT_TIME))); a.push(sw(BASE, T0, NOTE_IN + 76));
+    copy_word8(&mut a, BASE, T0, inp(input::OUT_R), NOTE_IN + 80);
     emit_note_commit(&mut a, BASE, T0, NOTE_IN, BUF, ptr_words(BUF), CM_OUT);
     // digest = H(OUT_DOMAIN, anchor, nf, cm_out, time_out) — the single published output.
     a.extend(li(T0, domain::OUT as i32));

@@ -122,7 +122,7 @@ fn build_transfer(sender: &Party, spent: &Note, receiver: &ViewingKey, now: u32,
     (created, env, key, inputs, anchor, nf)
 }
 
-fn mint(ledger: &mut Ledger, minter: &Party, to: &ViewingKey, amount: u32, asset: u32) -> Note {
+fn mint(ledger: &mut Ledger, minter: &Party, to: &ViewingKey, amount: u64, asset: u32) -> Note {
     let note = Note::new(to.pk(), minter.vk.pk(), amount, asset, ledger.now);
     let env = Envelope::seal(&minter.vk, &to.address(), &note, &TxKey::random());
     ledger.mint(&note, env).unwrap();
@@ -182,13 +182,13 @@ fn transfer_guest_permutation_and_row_counts_are_measured() {
     let permutations = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. }))).count();
     let hash_calls = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Ecall { .. }))).count();
     assert_eq!(hash_calls, 5 + DEPTH + 1, "5 note/key/nullifier hashes + 32 Merkle levels + 1 output digest");
-    assert_eq!(permutations, 190);
-    assert_eq!(e.cycles(), 3896);
-    assert_eq!(program.digest_rows(), 443, "transfer's word count, hence its hc cost, is pinned here");
+    assert_eq!(permutations, 192);
+    assert_eq!(e.cycles(), 3910);
+    assert_eq!(program.digest_rows(), 446, "transfer's word count, hence its hc cost, is pinned here");
     let total_cycles = e.cycles() + program.digest_rows();
     let total_permutations = permutations + program.digest_rows();
-    assert_eq!(total_cycles, 4339);
-    assert_eq!(total_permutations, 633);
+    assert_eq!(total_cycles, 4356);
+    assert_eq!(total_permutations, 638);
     assert_eq!(Tier::for_cycles(total_cycles), Some(Tier(14)));
     assert!(total_cycles <= Tier(14).max_cycles());
     assert!(total_permutations <= Tier(14).poseidon2_height() / 32, "must fit the tier's permutation slots, not just its cycle budget");
@@ -388,6 +388,45 @@ fn a_transfer_with_a_wrong_merkle_path_is_rejected() {
     assert_ne!(bad_anchor, ledger.root());
     let nf = alice.vk.nullifier(&note.commitment());
     assert!(matches!(ledger.apply(&m, &proof, bad_anchor, nf, created.commitment(), created.time, env), Err(LedgerError::UnknownAnchor(_))));
+}
+
+/// A note whose real amount needs more than 32 bits (`> u32::MAX`) cannot be spent by a
+/// witness that only supplies the low word and zeroes the high one. `NOTE_COMMIT` hashes both
+/// `amount_lo` and `amount_hi`, so lying about the high word produces a `cm_in` different from
+/// the one actually in the tree; `MERKLE_VERIFY`, honestly run against that wrong leaf with
+/// the *real* path/index, computes a root that is (with overwhelming probability) not
+/// `ledger.root()`. `apply` is handed `ledger.root()` as the claimed anchor — what a submitter
+/// presenting this note as legitimately anchored would claim — but the guest's published
+/// output digest was folded from the wrong root, so it can never match what `apply`
+/// recomputes, and the transfer is rejected with `BadDigest`. This is exactly the closed gap
+/// `u64` amounts fix: at the old `u32` width there was no high word to lie about in the first
+/// place, so a value like this could never even be represented.
+#[test]
+fn spending_a_note_by_truncating_its_amount_to_32_bits_is_rejected() {
+    let m = Machine::new(FriProfile::Test);
+    let (alice, bob, bridge) = (Party::new(), Party::new(), Party::new());
+    let mut ledger = Ledger::new(1_700_000_000);
+    let true_amount: u64 = (1u64 << 32) + 5; // does not fit in 32 bits
+    let note = mint(&mut ledger, &bridge, &alice.vk, true_amount, 1);
+    ledger.advance(1);
+    let (path, index) = ledger.path_for(&note.commitment()).unwrap();
+    // Build a "spent" note as if the real amount were only its low 32 bits (amount_hi lied
+    // to zero), and a matching "created" note of that (wrong, truncated) amount.
+    let lying_spent = Note { amount: 5, ..note };
+    let created = Note::new(bob.vk.pk(), alice.vk.pk(), 5, note.asset, ledger.now);
+    let inputs = notes::transfer_inputs(&alice.sk, &lying_spent, &created, &path, index);
+    let e = execute(&ledger.program, &inputs, 1 << 22).unwrap();
+    assert!(e.halted);
+    let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
+    // The STARK itself verifies fine — the guest faithfully ran with these (dishonest) inputs,
+    // it just proved membership of the wrong leaf.
+    assert!(m.verify(&ledger.program.digest(), &proof).is_ok());
+    let nf = alice.vk.nullifier(&lying_spent.commitment());
+    let env = Envelope::seal(&alice.vk, &bob.vk.address(), &created, &TxKey::random());
+    assert!(matches!(
+        ledger.apply(&m, &proof, ledger.root(), nf, created.commitment(), created.time, env),
+        Err(LedgerError::BadDigest)
+    ), "the guest's real digest was folded from the wrong (truncated-amount) leaf's root, so it cannot match what apply recomputes for the claimed anchor");
 }
 
 /// A proof built against a once-valid root that has since scrolled out of the ledger's
