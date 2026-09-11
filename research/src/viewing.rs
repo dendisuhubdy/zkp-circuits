@@ -52,6 +52,17 @@ impl ViewingKey {
 }
 
 /// The per-transaction disclosure key. Handing it over discloses exactly one transaction.
+///
+/// **Wallet obligation: one fresh key per sealed envelope, never reused.** A
+/// [`Disclosure::Transaction`] carries a bare index `tx` that does not say which of the
+/// ledger's two independently numbered sequences it means, so [`scan`] tries both. That is
+/// unambiguous exactly as long as a key opens one envelope: each envelope binds its own
+/// `cm_out` as AEAD associated data, so a key cannot open an envelope it did not seal — but
+/// two envelopes sealed under the *same* key, one in `ledger.txs[i]` and one in
+/// `ledger.bundles[i]`, would both open under `Disclosure::Transaction { tx: i, .. }`, and
+/// both rows would pass `verify_row`. The disclosure would then be wider than the "exactly one
+/// transaction" this type promises. Nothing in this module can prevent that — the key is the
+/// caller's to generate and hand out — so it is the wallet's rule; `random` is how it is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxKey(pub [u8; 32]);
 impl TxKey {
@@ -219,7 +230,11 @@ pub fn scan(ledger: &Ledger, d: &Disclosure) -> Vec<Row> {
             // `Disclosure::Transaction`'s `tx` does not say which sequence it indexes, so both
             // are tried. This is not ambiguous in practice: a `TxKey` only opens the envelope
             // it sealed, and every envelope is bound to its own `cm_out` as associated data, so
-            // at most one of these attempts can succeed for a key that is not forged.
+            // at most one of these attempts can succeed for a key that is not forged — PROVIDED
+            // the wallet never seals two envelopes under one `TxKey`. A key reused across a
+            // transfer and a bundle that happen to share an index would open both, and both
+            // rows would verify; see `TxKey`'s doc comment for why that obligation lives with
+            // the wallet and cannot be enforced here.
             if let Some(b) = ledger.bundles.get(*tx) {
                 for slot in 0..2usize {
                     let cm = b.commitments[slot];

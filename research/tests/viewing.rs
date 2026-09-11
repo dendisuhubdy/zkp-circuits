@@ -11,7 +11,11 @@ use rand_zkvm::notes::{self, domain, output_digest, Note, SpendKey, ViewingKey, 
 use rand_zkvm::tables::{cpu, F};
 use rand_zkvm::viewing::{scan, verify_row, Disclosure, Envelope, Role, RowError, TxKey};
 use p3_field::PrimeCharacteristicRing;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+
+/// `rejects()` — anything other than a constraint failure or a verify error is not a
+/// rejection; `tests/cheating.rs` explains the discipline and owns the test of the helper.
+mod common;
+use common::rejects;
 
 #[test]
 fn domains_and_lengths_separate() {
@@ -306,19 +310,6 @@ fn disclosure_scopes_and_row_verification() {
     // A row from one disclosure does not verify under another scope.
     assert_eq!(verify_row(l, &bob, &honest), Err(RowError::Party));
     assert_eq!(verify_row(l, &one, &honest), Err(RowError::Scope));
-}
-
-/// Anything other than a constraint failure or a verify error is not a rejection
-/// (`tests/cheating.rs` explains the discipline).
-fn rejects(f: impl FnOnce() -> Result<(), rand_zkvm::machine::VerifyError>) -> bool {
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(Ok(())) => false,
-        Ok(Err(_)) => true,
-        Err(p) => {
-            let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
-            msg.contains("constraints not satisfied on row")
-        }
-    }
 }
 
 #[test]

@@ -19,6 +19,11 @@ use rand_zkvm::tables::cpu;
 use rand_zkvm::viewing::{scan, verify_row, Disclosure, Envelope, Role, RowError, RowSource, TxKey};
 use std::sync::{Mutex, OnceLock};
 
+/// `rejects()` — a constraint failure or a verify error, and nothing else, counts as a
+/// rejection; `tests/cheating.rs` explains the discipline and owns the test of the helper.
+mod common;
+use common::rejects;
+
 struct Party { sk: SpendKey, vk: ViewingKey }
 impl Party { fn new() -> Party { let sk = SpendKey::random(); Party { sk, vk: sk.viewing_key() } } }
 
@@ -202,9 +207,16 @@ fn a_real_input_with_a_wrong_path_is_rejected() {
 /// A dummy input (amount == 0) with a wrong path is FINE — membership is skipped, the path is
 /// never read. This is the mirror image of the previous test and documents the boundary: it is
 /// amount, not path validity, that gates the skip.
+///
+/// No `prove`/`verify` tail (final review, minor #6): the claim is "the garbage path is never
+/// read", and the emulator run plus the `expected_bundle_outputs` equality establish it in
+/// full — an honest, untainted digest for this witness IS the guest saying it never looked at
+/// the path. That this shape proves and verifies is already
+/// `honest_one_in_one_out_with_dummies_proves`'s job, and a second ~30 s proof of the same
+/// shape buys nothing. (`over_spend_is_rejected` keeps its proof, by contrast, because there
+/// the point is that a *tainted* witness still verifies — that is the whole idiom.)
 #[test]
-fn a_dummy_input_with_a_garbage_path_still_proves() {
-    let m = Machine::new(FriProfile::Test);
+fn a_dummy_input_with_a_garbage_path_is_never_read() {
     let alice = Party::new();
     let (asset, time) = (0u32, 1_700_000_000u32);
     let (tree, real) = two_real_inputs(&alice, [1_000, 0], asset, time);
@@ -221,8 +233,6 @@ fn a_dummy_input_with_a_garbage_path_still_proves() {
     let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
     assert!(e.halted);
     assert_eq!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time), "a dummy's path is never read, garbage or not");
-    let (proof, _) = m.prove(&program, &inputs_vec, None).unwrap();
-    m.verify(&program.digest(), &proof).unwrap();
 }
 
 /// The exact scenario the design task calls out by name: try to claim amount > 0 on an input
@@ -402,15 +412,6 @@ fn tampering_the_published_digest_directly_is_a_constraint_violation() {
     use p3_field::PrimeCharacteristicRing;
     use rand_zkvm::machine::build_traces_salted;
     use rand_zkvm::tables::{cpu, F};
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-    fn rejects(f: impl FnOnce() -> Result<(), rand_zkvm::machine::VerifyError>) -> bool {
-        match catch_unwind(AssertUnwindSafe(f)) {
-            Ok(Ok(())) => false,
-            Ok(Err(_)) => true,
-            Err(p) => p.downcast_ref::<&str>().map(|s| s.contains("constraints not satisfied on row")).unwrap_or(false)
-                || p.downcast_ref::<String>().map(|s| s.contains("constraints not satisfied on row")).unwrap_or(false),
-        }
-    }
     let m = Machine::new(FriProfile::Test);
     let alice = Party::new();
     let (asset, time) = (0u32, 1_700_000_000u32);
@@ -424,8 +425,9 @@ fn tampering_the_published_digest_directly_is_a_constraint_violation() {
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time);
     let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
-    // Use the honest 2-in-2-out proof's measured tier (Step 6's eprintln!) so the salted trace
-    // is built at the same height `prove_traces` expects.
+    // The measured tier for this 1-real-1-dummy witness (Step 6's eprintln! reports tier 14 for
+    // both bundle shapes) so the salted trace is built at the same height `prove_traces`
+    // expects.
     let tier = Tier(14);
     let mut t = build_traces_salted(&program, &inputs_vec, [0u32; 4], &e, tier).unwrap();
     t.public_values[cpu::pv::OUT0] += F::ONE;
@@ -444,6 +446,11 @@ fn tampering_the_published_digest_directly_is_a_constraint_violation() {
 /// The one honest bundle every test below starts from: Alice spends her 1 000 and 2 000 notes,
 /// pays Bob 2 400, keeps 500 as change, pays a 100 fee and burns nothing
 /// (`2_400 + 500 + 100 + 0 == 1_000 + 2_000`).
+///
+/// In asset 0, SHRUGG, because it charges a fee: design spec §4 item 6 charges every fee in
+/// asset 0, so a bundle with `asset != 0` must have `fee = 0`, and `apply_bundle` enforces it
+/// (`LedgerError::FeeInForeignAsset`). The foreign-asset side of that rule — a legitimate
+/// `asset = 3`, `fee = 0` bundle — is `DummyFixture` at the end of this file.
 struct Fixture {
     alice: Party,
     bob: Party,
@@ -473,7 +480,7 @@ fn fixture() -> &'static Fixture {
     FIXTURE.get_or_init(|| {
         let m = Machine::new(FriProfile::Test);
         let (alice, bob, bridge) = (Party::new(), Party::new(), Party::new());
-        let (asset, mint_time) = (1u32, 1_700_000_000u32);
+        let (asset, mint_time) = (0u32, 1_700_000_000u32);
         let mut ledger = Ledger::new(mint_time);
         let in_notes: [Note; 2] = [1_000u64, 2_000].map(|amount| {
             let n = Note::new(alice.vk.pk(), bridge.vk.pk(), amount, asset, mint_time);
@@ -638,15 +645,68 @@ fn a_bundle_whose_plaintext_does_not_match_the_published_digest_is_rejected() {
     let mut b = honest_bundle(f);
     b.fee += 1;
     assert!(matches!(l.apply_bundle(&m, &proof, &b), Err(LedgerError::BadDigest)));
-    // The same for `burn` and `asset`, the two other bundle-level fields no other check reads.
+    // The same for `burn`, the other bundle-level field no other check reads. (`asset` is
+    // bound by the digest too, but the fixture pays a fee, so any non-zero asset is refused
+    // one step earlier by the §4 item 6 fee rule; that field's digest binding is pinned by
+    // `a_fee_in_a_foreign_asset_is_rejected`'s zero-fee half instead.)
     let mut b = honest_bundle(f);
     b.burn += 1;
     assert!(matches!(l.apply_bundle(&m, &proof, &b), Err(LedgerError::BadDigest)));
-    let mut b = honest_bundle(f);
-    b.asset += 1;
-    assert!(matches!(l.apply_bundle(&m, &proof, &b), Err(LedgerError::BadDigest)));
     assert_eq!((l.fees_collected, l.burned), (0, 0), "a rejected bundle accumulates nothing");
     assert!(l.bundles.is_empty());
+}
+
+/// Design spec §4 item 6: `fee` is charged in asset 0 (SHRUGG), so a bundle that declares any
+/// other asset must carry `fee = 0`. `apply_bundle` enforces it as step 4, a pair of integer
+/// compares over two public words, well before the digest is recomputed and the proof is
+/// verified — so the rejection here happens with the fixture's honest, untouched proof in hand
+/// and nothing expensive run. See `LedgerError::FeeInForeignAsset` for why this is the
+/// ledger's job and not the circuit's, and `DummyFixture` for the case the rule allows:
+/// `asset = 3` with `fee = 0`, admitted.
+///
+/// What it protects is `fees_collected`, which the docs call the proposer's SHRUGG fee
+/// accounting: without the check, this bundle's 100 units of asset 1 would be added to the
+/// same `u64` as every SHRUGG fee. (No value would be created — the fee is still subtracted
+/// from the bundle's own inputs — which is why this is a spec deviation and misaccounting
+/// rather than a soundness hole.)
+#[test]
+fn a_fee_in_a_foreign_asset_is_rejected() {
+    let f = fixture();
+    let m = Machine::new(FriProfile::Test);
+    let mut l = fresh_ledger(f);
+    let proof = shared_proof(f);
+    let mut b = honest_bundle(f);
+    b.asset = 1; // the fixture's `fee` of 100 stays exactly as it is
+    assert_eq!(b.fee, 100);
+    assert!(matches!(l.apply_bundle(&m, &proof, &b), Err(LedgerError::FeeInForeignAsset { asset: 1, fee: 100 })));
+    assert_eq!((l.fees_collected, l.burned), (0, 0), "nothing in a foreign asset ever reaches the fee total");
+    assert!(l.bundles.is_empty());
+
+    // And it really is the fee rule that rejected it, not the digest: the same foreign-asset
+    // bundle with `fee = 0` gets past step 4 and is refused three steps later, at the digest
+    // recomputation — which is also what pins `asset`'s binding into the digest.
+    b.fee = 0;
+    assert!(matches!(l.apply_bundle(&m, &proof, &b), Err(LedgerError::BadDigest)));
+}
+
+/// Minor #3 of the final review: the pool's `< 2^63` amount invariant, enforced at the only
+/// place value enters it. `guests::bundle` range-checks all six amounts it sees, so a leaf
+/// minted at or above `2^63` would be a real, spendable-looking note that no bundle could ever
+/// spend — the range check would taint the proof and `apply_bundle` would refuse it as
+/// `BadDigest`. That is permanently stuck value, so `mint` refuses it up front.
+#[test]
+fn a_mint_above_the_u63_range_is_rejected() {
+    let f = fixture();
+    let mut l = Ledger::new(f.mint_time);
+    let bad = Note::new(f.alice.vk.pk(), f.bridge.vk.pk(), 1u64 << 63, 0, f.mint_time);
+    let env = |n: &Note| Envelope::seal(&f.bridge.vk, &f.alice.vk.address(), n, &TxKey::random());
+    assert!(matches!(l.mint(&bad, env(&bad)), Err(LedgerError::AmountOutOfRange(a)) if a == 1u64 << 63));
+    assert!(!l.has_commitment(&bad.commitment()), "nothing was appended to the tree");
+    assert!(l.txs.is_empty());
+    // The largest amount the guest's range check accepts is admitted, so the bound is `>=`,
+    // not `>`.
+    let ok = Note::new(f.alice.vk.pk(), f.bridge.vk.pk(), (1u64 << 63) - 1, 0, f.mint_time);
+    l.mint(&ok, env(&ok)).expect("2^63 - 1 is inside the range every amount check allows");
 }
 
 /// An anchor that is not a recorded root at all (one bit flipped). The anchor check runs before
@@ -663,10 +723,14 @@ fn a_bundle_with_an_unknown_anchor_is_rejected() {
     assert!(matches!(l.apply_bundle(&m, &shared_proof(f), &b), Err(LedgerError::UnknownAnchor(u)) if u == a));
 }
 
-/// The `ANCHOR_WINDOW` itself, from the bundle side: a genuine, once-current root stays valid
-/// for 64 further roots and no longer. Each filler mint records exactly one root, and the
-/// bundle's anchor is the newest entry when the window starts scrolling, so 63 fillers leave it
-/// inside the window and 65 push it out.
+/// The `ANCHOR_WINDOW` itself, from the bundle side, at the exact boundary. `record_root`
+/// keeps the `ANCHOR_WINDOW` most recent roots *including* the one just recorded, so a root
+/// that is the newest entry when the window starts scrolling survives exactly
+/// `ANCHOR_WINDOW - 1` = 63 further roots and is evicted by the 64th — which is "one of the
+/// last 64 roots" read literally. Each filler mint records exactly one root, so this admits
+/// the bundle after 63 fillers and refuses it after `ANCHOR_WINDOW` = 64, the first count the
+/// code rejects (final review, deferred #7: the second half used to use `ANCHOR_WINDOW + 1`,
+/// which is comfortably outside the window and so left the boundary itself unpinned).
 #[test]
 fn a_bundles_anchor_expires_after_the_anchor_window() {
     let f = fixture();
@@ -681,11 +745,11 @@ fn a_bundles_anchor_expires_after_the_anchor_window() {
     let mut l = fresh_ledger(f);
     for i in 0..(Ledger::ANCHOR_WINDOW as u32 - 1) { filler(&mut l, i); }
     assert_ne!(l.root(), f.anchor);
-    l.apply_bundle(&m, &proof, &honest_bundle(f)).expect("still inside the window");
+    l.apply_bundle(&m, &proof, &honest_bundle(f)).expect("63 further roots still leave it inside the window");
 
     let mut l = fresh_ledger(f);
-    for i in 0..(Ledger::ANCHOR_WINDOW as u32 + 1) { filler(&mut l, i); }
-    assert!(matches!(l.apply_bundle(&m, &proof, &honest_bundle(f)), Err(LedgerError::UnknownAnchor(a)) if a == f.anchor));
+    for i in 0..(Ledger::ANCHOR_WINDOW as u32) { filler(&mut l, i); }
+    assert!(matches!(l.apply_bundle(&m, &proof, &honest_bundle(f)), Err(LedgerError::UnknownAnchor(a)) if a == f.anchor), "the ANCHOR_WINDOW-th further root is the one that evicts it");
 }
 
 /// §7's "`time` within 64 of the height", checked here against `now` (this crate has no block
@@ -875,9 +939,14 @@ fn a_transfer_that_spends_a_bundle_output_is_named_in_the_scan() {
 }
 
 /// Review finding #3's fixture: a 1-real-1-dummy bundle, proved once. Alice spends her single
-/// minted note plus a dummy, pays Bob 900 with a 100 fee, and issues a zero-amount dummy output
+/// minted note plus a dummy, pays Bob the whole 1 000, and issues a zero-amount dummy output
 /// owned by a `ghost` party nothing in this test ever scans as. Separate from `Fixture` because
 /// it is a different bundle *shape*, which is the one thing a proof cannot be shared across.
+///
+/// This is also the legitimate foreign-asset bundle: `asset = 3` with `fee = 0`, which design
+/// spec §4 item 6 allows and `apply_bundle` must therefore admit (only `asset != 0` *with* a
+/// non-zero fee is refused — `a_fee_in_a_foreign_asset_is_rejected`). Consequently
+/// `fees_collected` stays 0 here: the ledger's fee total is SHRUGG-only by construction.
 struct DummyFixture {
     alice: Party,
     bob: Party,
@@ -909,10 +978,11 @@ fn dummy_fixture() -> &'static DummyFixture {
         let dummy_in = dummy_input(asset, time);
         let inputs = [(in_note, path, index), dummy_in];
         let outputs = [
-            Note::new(bob.vk.pk(), alice.vk.pk(), 900, asset, time),
+            Note::new(bob.vk.pk(), alice.vk.pk(), 1_000, asset, time),
             Note::new(ghost.vk.pk(), alice.vk.pk(), 0, asset, time), // the dummy output, fresh `r`
         ];
-        let (fee, burn) = (100u64, 0u64); // 1_000 == 900 + 0 + 100 + 0
+        // No fee: this bundle is in asset 3, and §4 item 6 charges fees in asset 0 only.
+        let (fee, burn) = (0u64, 0u64); // 1_000 == 1_000 + 0 + 0 + 0
         let envelopes = [
             Envelope::seal(&alice.vk, &bob.vk.address(), &outputs[0], &TxKey::random()),
             Envelope::seal(&alice.vk, &ghost.vk.address(), &outputs[1], &TxKey::random()),
@@ -957,7 +1027,7 @@ fn a_bundles_dummy_input_leaves_a_sent_row_with_no_spent_note() {
     // Nothing about the chain state says which slot was the dummy.
     assert!(l.has_nullifier(&f.nullifiers[1]));
     assert!(l.has_commitment(&f.commitments[1]));
-    assert_eq!(l.fees_collected, f.fee);
+    assert_eq!((l.fees_collected, f.fee), (0, 0), "a foreign-asset bundle is admitted, and carries no fee to total (§4 item 6)");
 
     let alice = Disclosure::Party(f.alice.vk);
     let rows = scan(&l, &alice);
@@ -976,6 +1046,6 @@ fn a_bundles_dummy_input_leaves_a_sent_row_with_no_spent_note() {
 
     let bob = Disclosure::Party(f.bob.vk);
     let rows_bob = scan(&l, &bob);
-    assert_eq!(rows_bob.iter().map(|r| (r.source, r.slot, r.role, r.amount)).collect::<Vec<_>>(), vec![(RowSource::Bundle, 0, Role::Received, 900)]);
+    assert_eq!(rows_bob.iter().map(|r| (r.source, r.slot, r.role, r.amount)).collect::<Vec<_>>(), vec![(RowSource::Bundle, 0, Role::Received, 1_000)]);
     for r in &rows_bob { verify_row(&l, &bob, r).unwrap(); }
 }

@@ -114,6 +114,49 @@ pub fn copy_word8_from_reg(a: &mut Assembler, base: u32, tmp: u32, src_reg: u32,
     }
 }
 
+/// The note layer's key derivation, `nk = H(NK, sk)` then `pk = H(PK, nk)`, from a 2-word
+/// spend key at `base + sk_at` to an 8-word `nk` at `base + nk_out` and an 8-word `pk` at
+/// `base + pk_out`. Both hashes stage their own preimage at `base + buf` (3 words, then 9) and
+/// go through the same `POSEIDON2` syscall every other note-layer hash uses; `tmp` is the
+/// single scratch register. `guests::transfer` and `guests::bundle` open with this identical
+/// sequence — every spend in this crate derives its own `pk_self` from the private spend key
+/// rather than taking an owner from the witness, which is what makes "you can only spend notes
+/// committed to your own key" structural — so it is emitted from one place.
+pub fn emit_derive_keys(a: &mut Assembler, base: u32, tmp: u32, sk_at: i32, buf: i32, ptr_words: i32, nk_out: i32, pk_out: i32) {
+    a.extend(ops::li(tmp, domain::NK as i32));
+    a.push(ops::sw(base, tmp, buf));
+    a.push(ops::lw(tmp, base, sk_at)); a.push(ops::sw(base, tmp, buf + 4));
+    a.push(ops::lw(tmp, base, sk_at + 4)); a.push(ops::sw(base, tmp, buf + 8));
+    a.extend(ops::call_poseidon2(ptr_words, 3));
+    copy_word8(a, base, tmp, buf, nk_out);
+    a.extend(ops::li(tmp, domain::PK as i32));
+    a.push(ops::sw(base, tmp, buf));
+    copy_word8(a, base, tmp, nk_out, buf + 4);
+    a.extend(ops::call_poseidon2(ptr_words, 9));
+    copy_word8(a, base, tmp, buf, pk_out);
+}
+
+/// Lays a `Note` out at `base + stage` in the exact field order `emit_note_commit` hashes
+/// (`pk(8), from(8), amount_lo, amount_hi, asset, time, r(8)` — `Note::WORDS` words), copying
+/// each field from the RAM offset named for it. Every source is a compile-time `base`-relative
+/// offset, so a caller stages a note by *naming* where each field comes from, which is what
+/// makes a guest's structural claims about a note readable at the call site rather than in a
+/// comment over a block of `lw`/`sw` pairs: `guests::bundle` passes its derived `PK` offset as
+/// `pk_at` for both inputs ("the owner is always `pk_self`") and as `from_at` for both outputs
+/// ("the sender is always `pk_self`"), and passes the bundle's own public `ASSET`/`TIME` input
+/// words as `asset_at`/`time_at` for both outputs ("an output has no asset or time of its own
+/// to claim"). `tmp` is the single scratch register, clobbered throughout.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_stage_note(a: &mut Assembler, base: u32, tmp: u32, stage: i32, pk_at: i32, from_at: i32, amount_lo_at: i32, amount_hi_at: i32, asset_at: i32, time_at: i32, r_at: i32) {
+    copy_word8(a, base, tmp, pk_at, stage);
+    copy_word8(a, base, tmp, from_at, stage + 32);
+    a.push(ops::lw(tmp, base, amount_lo_at)); a.push(ops::sw(base, tmp, stage + 64));
+    a.push(ops::lw(tmp, base, amount_hi_at)); a.push(ops::sw(base, tmp, stage + 68));
+    a.push(ops::lw(tmp, base, asset_at)); a.push(ops::sw(base, tmp, stage + 72));
+    a.push(ops::lw(tmp, base, time_at)); a.push(ops::sw(base, tmp, stage + 76));
+    copy_word8(a, base, tmp, r_at, stage + 80);
+}
+
 /// `NOTE_COMMIT`: `note_words` (`Note::WORDS` words, already laid out at `base + note_at`)
 /// hashed as `H(CM_DOMAIN, note_words)`. Stages `[CM_DOMAIN, note_words...]` at `base + buf`
 /// (needs `1 + Note::WORDS` = 29 words of scratch), calls `POSEIDON2`, and copies the 8-word
@@ -274,10 +317,11 @@ pub fn emit_or_into(a: &mut Assembler, bad: u32, cond: u32) {
 
 /// Sets `viol := 1` if the 64-bit value with high word `hi` is `>= 2^63` (i.e. `hi`'s top bit
 /// is set — `sltu(viol_inv, hi, 0x8000_0000)` is 1 iff `< 2^63`; `viol := 1 - viol_inv`, via
-/// `xori`), else `0`. Used for the "every amount `< 2^63`" checks. `tmp` is unused (kept for a
-/// uniform call shape alongside the other `emit_*` routines).
-pub fn emit_range_check_u63(a: &mut Assembler, hi: u32, tmp: u32, viol: u32) {
-    let _ = tmp;
+/// `xori`), else `0`. Used for the "every amount `< 2^63`" checks. `viol` is the only register
+/// written: it holds the `0x8000_0000` constant for one instruction before the comparison
+/// overwrites it with the comparison's own result, so no scratch register is needed (this
+/// routine deliberately takes no `tmp`, unlike the other `emit_*` ones).
+pub fn emit_range_check_u63(a: &mut Assembler, hi: u32, viol: u32) {
     a.extend(ops::li(viol, i32::MIN)); // 0x8000_0000 as i32 bit pattern
     a.push(ops::sltu(viol, hi, viol)); // 1 iff hi < 0x8000_0000, i.e. amount < 2^63
     a.push(ops::xori(viol, viol, 1));  // invert: 1 iff amount >= 2^63
@@ -292,9 +336,10 @@ pub fn emit_range_check_u63(a: &mut Assembler, hi: u32, tmp: u32, viol: u32) {
 /// `hi + low_carry` itself wraps to `0` (mod 2^32), and comparing `sum_hi` (which is `>= 0`
 /// unsigned, always) against that wrapped `0` silently reports no carry when one occurred —
 /// exactly the case `u64::MAX + u64::MAX` hits in `sum_hi`'s low 32 bits once high words are
-/// `0xffff_ffff` and a low carry is pending. `lo`/`hi` are destroyed as scratch (`hi` in
-/// particular, to hold the first step's carry) — callers must reload them per call, exactly as
-/// `guests::bundle` already does.
+/// `0xffff_ffff` and a low carry is pending. `hi` is destroyed as scratch (it holds the first
+/// step's carry once its value has been consumed); `lo` is read once and left alone, but since
+/// a caller chaining several addends has to reload `hi` per call anyway it reloads both,
+/// exactly as `guests::bundle` already does.
 pub fn emit_add64_carry(a: &mut Assembler, sum_lo: u32, sum_hi: u32, lo: u32, hi: u32, tmp: u32, carry_out: u32) {
     a.push(ops::add(tmp, sum_lo, lo));
     a.push(ops::sltu(carry_out, tmp, sum_lo)); // low-word carry-out

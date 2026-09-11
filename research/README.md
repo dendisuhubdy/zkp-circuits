@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 164 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys, shielded-pool bundles
+cargo test              # 166 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys, shielded-pool bundles
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -160,7 +160,8 @@ the address itself, so a witness built from the viewing key names a
 commitment the chain has never seen, and claiming the real one is a
 constraint failure. The spent commitment itself is never public — only the
 commitment-tree root (`anchor`) the proof was built against is, one of the
-ledger's last 16 recorded roots: `docs/06-viewing-keys.md`.
+ledger's last 64 recorded roots (`Ledger::ANCHOR_WINDOW`):
+`docs/06-viewing-keys.md`.
 
 ## The three targets
 

@@ -60,6 +60,28 @@ pub enum LedgerError {
     /// `DuplicateNullifierInBundle` on the output side, and likewise both tainted in-circuit
     /// and checked here. Distinct from `Duplicate`, the cross-bundle case.
     DuplicateCommitmentInBundle,
+    /// A `Bundle` declares a non-zero `asset` but charges a non-zero `fee` (design spec §4
+    /// item 6: "`fee` is charged in asset 0, so a bundle with `asset != 0` must have
+    /// `fee = 0`").
+    ///
+    /// Enforced by the ledger and *not* by `guests::bundle`, deliberately: `fee` and `asset`
+    /// are both public chain data, and the ledger recomputes the bundle digest over both of
+    /// them (step 7 of `apply_bundle`'s order), so it already knows the exact values the proof
+    /// is bound to. An in-circuit comparison of two public words would add nothing that this
+    /// free integer compare does not already give, and would cost a witness the guest would
+    /// have to carry. Nor is this a soundness rule: the fee is subtracted from the bundle's
+    /// inputs in whatever asset they are denominated in, so a fee in a foreign asset creates
+    /// no value. What it would corrupt is `Ledger::fees_collected`, which is SHRUGG (asset 0)
+    /// accounting; this check is what keeps that total denominated in one asset.
+    FeeInForeignAsset { asset: u32, fee: u64 },
+    /// A minted note's `amount` is `>= 2^63`, outside the range the design spec makes a global
+    /// invariant and `guests::bundle` enforces with six `emit_range_check_u63` checks. Such a
+    /// note would be a real, spendable-looking leaf that no bundle could ever spend — the
+    /// range check would taint the proof and the ledger would refuse it as `BadDigest` — i.e.
+    /// permanently stuck value, so the one entry point that creates notes from nothing refuses
+    /// it up front. (`apply`'s transfer path preserves amounts rather than creating them, so
+    /// it needs no check of its own.)
+    AmountOutOfRange(u64),
 }
 
 /// An append-only, depth-`DEPTH` commitment Merkle tree, using exactly the hash the guest's
@@ -182,9 +204,20 @@ pub struct Ledger {
     /// accounting (§3, §8's "every bundle fee in a block is credited to the proposer's rewards
     /// field"). Phase Z only *totals* it: routing a fee to a particular validator needs an
     /// actions layer this crate does not have, and is phase S2's job.
+    ///
+    /// It is a single-asset total, and legitimately so: §4 item 6 charges every fee in asset 0
+    /// (SHRUGG), and `apply_bundle` refuses a bundle that declares another asset with a
+    /// non-zero fee (`LedgerError::FeeInForeignAsset`), so nothing but SHRUGG can ever reach
+    /// this accumulator.
     pub fees_collected: u64,
     /// Total value that has left the pool through `burn` (the Bond/BridgeBurn mechanism, §3,
     /// §6) — again only totaled here, never routed to a destination (S2/S3).
+    ///
+    /// Unlike `fees_collected`, this one *is* cross-asset: `burn` is denominated in the
+    /// bundle's own `asset`, whatever it is, and no rule confines it to asset 0. So this is a
+    /// count of units burned across all assets, useful as a ledger-level "something left the
+    /// pool" signal and nothing more. S2/S3, which give the burn a destination, are where it
+    /// has to become per-asset; do not read it as SHRUGG until then.
     pub burned: u64,
 }
 
@@ -262,6 +295,10 @@ impl Ledger {
     /// commitment appended to the tree directly. Its envelope is sealed like any other so the
     /// receiver's viewing key finds it.
     pub fn mint(&mut self, note: &Note, envelope: Envelope) -> Result<usize, LedgerError> {
+        // The pool's global amount invariant, enforced at the only place value enters it:
+        // `guests::bundle` range-checks every amount it sees `< 2^63`, so a leaf minted above
+        // that bound could never be spent by a bundle (see `AmountOutOfRange`).
+        if note.amount >= 1u64 << 63 { return Err(LedgerError::AmountOutOfRange(note.amount)); }
         if note.time != self.now { return Err(LedgerError::Time { claimed: note.time, now: self.now }); }
         let cm = note.commitment();
         if self.tree.index.contains_key(&cm) { return Err(LedgerError::Duplicate(cm)); }
@@ -311,7 +348,7 @@ impl Ledger {
     ///
     /// Admission order, cheapest first. It is **not** `apply`'s order, and the difference is
     /// deliberate rather than drift: `apply` recomputes its digest second, immediately after
-    /// the shape check, while this recomputes sixth, after every window/set/tree lookup. A
+    /// the shape check, while this recomputes seventh, after every window/set/tree lookup. A
     /// bundle digest is a Poseidon2 sponge over 47 words; a `recent_roots` scan, two `HashSet`
     /// probes and two `HashMap` probes together are not close to that. Ordering them
     /// cheapest-first is what the design spec §7 asks for. What the two *do* share, and what
@@ -323,15 +360,18 @@ impl Ledger {
     ///    malformed proof is a proof error, not a misleading digest mismatch);
     /// 2. `anchor` is one of the last `ANCHOR_WINDOW` recorded roots;
     /// 3. `time` is within `TIME_WINDOW` seconds before `now`, and not in the future;
-    /// 4. the two nullifiers differ, and neither is already spent;
-    /// 5. the two commitments differ, and neither is already a leaf;
-    /// 6. the digest recomputed from the published plaintext equals `pv::OUT0..8`;
-    /// 7. the proof verifies under `bundle_program`'s `hc` — last, and only then.
+    /// 4. a bundle in a foreign asset (`asset != 0`) charges no `fee` (spec §4 item 6 — two
+    ///    integer compares over public words, see `LedgerError::FeeInForeignAsset` for why
+    ///    the ledger and not the circuit enforces it);
+    /// 5. the two nullifiers differ, and neither is already spent;
+    /// 6. the two commitments differ, and neither is already a leaf;
+    /// 7. the digest recomputed from the published plaintext equals `pv::OUT0..8`;
+    /// 8. the proof verifies under `bundle_program`'s `hc` — last, and only then.
     ///
     /// The digest is recomputed with `notes::bundle_digest`, which fixes the preimage's 47th
     /// word (`bad`) at `0`: `bad` is a guest-internal taint flag with no plaintext channel, so
     /// a bundle whose guest set it publishes a digest this recomputation can never match, and
-    /// is rejected at step 6 as `BadDigest` (that is how every in-circuit relation failure —
+    /// is rejected at step 7 as `BadDigest` (that is how every in-circuit relation failure —
     /// over-spend, a wrong Merkle path, an asset mismatch, a 64-bit wrap — reaches the ledger).
     ///
     /// Effects on success: both nullifiers inserted, both commitments appended in slot order,
@@ -343,6 +383,7 @@ impl Ledger {
         if proof.public_values[pv::OUT0..pv::OUT0 + 8].iter().any(|v| *v > u32::MAX as u64) { return Err(LedgerError::BadDigest); }
         if !self.recent_roots.contains(&b.anchor) { return Err(LedgerError::UnknownAnchor(b.anchor)); }
         if b.time > self.now || self.now - b.time > Self::TIME_WINDOW { return Err(LedgerError::Time { claimed: b.time, now: self.now }); }
+        if b.asset != 0 && b.fee != 0 { return Err(LedgerError::FeeInForeignAsset { asset: b.asset, fee: b.fee }); }
         if b.nullifiers[0] == b.nullifiers[1] { return Err(LedgerError::DuplicateNullifierInBundle); }
         for nf in &b.nullifiers { if self.nullifiers.contains(nf) { return Err(LedgerError::Spent(*nf)); } }
         if b.commitments[0] == b.commitments[1] { return Err(LedgerError::DuplicateCommitmentInBundle); }

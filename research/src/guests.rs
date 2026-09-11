@@ -300,7 +300,7 @@ pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
 /// witness): only `anchor` is, so the chain no longer shows which commitment a transfer
 /// spent.
 pub fn transfer() -> Program {
-    use crate::asm::{copy_word8, emit_merkle_verify, emit_note_commit, emit_nullify};
+    use crate::asm::{copy_word8, emit_derive_keys, emit_merkle_verify, emit_note_commit, emit_nullify};
     use crate::notes::{domain, input, output, DEPTH};
     const BASE: u32 = 25; // s9: RAM base register, holds HEAP
     const BIT: u32 = 26;  // s10: MERKLE_VERIFY's branch scratch
@@ -324,22 +324,10 @@ pub fn transfer() -> Program {
         a.extend(read_input(i as u32));
         a.push(sw(BASE, REG_A0, inp(i)));
     }
-    // nk = H_NK(sk) — sk is 2 words; NOTE_COMMIT/NULLIFY expect Word8 neighbours, so this one
-    // small hash is emitted directly rather than through a note/nullifier-shaped wrapper.
-    a.extend(li(T0, domain::NK as i32));
-    a.push(sw(BASE, T0, BUF));
-    a.push(lw(T0, BASE, inp(input::SK)));
-    a.push(sw(BASE, T0, BUF + 4));
-    a.push(lw(T0, BASE, inp(input::SK + 1)));
-    a.push(sw(BASE, T0, BUF + 8));
-    a.extend(call_poseidon2(ptr_words(BUF), 3));
-    copy_word8(&mut a, BASE, T0, BUF, NK);
-    // pk = H_PK(nk)
-    a.extend(li(T0, domain::PK as i32));
-    a.push(sw(BASE, T0, BUF));
-    copy_word8(&mut a, BASE, T0, NK, BUF + 4);
-    a.extend(call_poseidon2(ptr_words(BUF), 9));
-    copy_word8(&mut a, BASE, T0, BUF, PK);
+    // nk = H_NK(sk), pk = H_PK(nk) — `sk` is 2 words, so these two small hashes are emitted
+    // directly rather than through a note/nullifier-shaped wrapper (`asm::emit_derive_keys`,
+    // shared with `bundle`).
+    emit_derive_keys(&mut a, BASE, T0, inp(input::SK), BUF, ptr_words(BUF), NK, PK);
     // cm_in = NOTE_COMMIT(pk, in.from, in.amount_lo, in.amount_hi, in.asset, in.time, in.r) —
     // assembled into a Note::WORDS-word staging area at BUF + 0x80 (past the hash scratch
     // region).
@@ -428,7 +416,7 @@ pub fn note_commit_probe(msg: &[u32; crate::notes::Note::WORDS]) -> Program {
 /// uses (`transfer` and `bundle` are two different `hc`-pinned programs, never both live in one
 /// ledger — S1 decides which).
 pub fn bundle() -> Program {
-    use crate::asm::{copy_word8, emit_add64_carry, emit_eq8, emit_merkle_verify, emit_note_commit, emit_nullify, emit_or_into, emit_range_check_u63};
+    use crate::asm::{copy_word8, emit_add64_carry, emit_derive_keys, emit_eq8, emit_merkle_verify, emit_note_commit, emit_nullify, emit_or_into, emit_range_check_u63, emit_stage_note};
     use crate::notes::{bundle_input as bi, domain, output, DEPTH};
     const BASE: u32 = 25;   // RAM base (holds HEAP), same convention as transfer()
     const BIT: u32 = 26;    // MERKLE_VERIFY scratch
@@ -490,18 +478,10 @@ pub fn bundle() -> Program {
         a.push(sw(BASE, REG_A0, inp(i)));
     }
 
-    // nk = H_NK(sk); pk_self = H_PK(nk) — identical to transfer().
-    a.extend(li(T0, domain::NK as i32));
-    a.push(sw(BASE, T0, BUF));
-    a.push(lw(T0, BASE, inp(bi::SK))); a.push(sw(BASE, T0, BUF + 4));
-    a.push(lw(T0, BASE, inp(bi::SK + 1))); a.push(sw(BASE, T0, BUF + 8));
-    a.extend(call_poseidon2(ptr_words(BUF), 3));
-    copy_word8(&mut a, BASE, T0, BUF, NK);
-    a.extend(li(T0, domain::PK as i32));
-    a.push(sw(BASE, T0, BUF));
-    copy_word8(&mut a, BASE, T0, NK, BUF + 4);
-    a.extend(call_poseidon2(ptr_words(BUF), 9));
-    copy_word8(&mut a, BASE, T0, BUF, PK);
+    // nk = H_NK(sk); pk_self = H_PK(nk) — the same `asm::emit_derive_keys` sequence transfer()
+    // opens with. `PK` is the owner slot of both inputs and the `from` of both outputs below,
+    // so every note this relation touches is tied to the private spend key read at `bi::SK`.
+    emit_derive_keys(&mut a, BASE, T0, inp(bi::SK), BUF, ptr_words(BUF), NK, PK);
 
     // anchor := the private ANCHOR field (the wallet's claimed current tree root); every real
     // input's MERKLE_VERIFY is checked against it via emit_eq8 + emit_or_into(BAD, ..), never
@@ -512,13 +492,10 @@ pub fn bundle() -> Program {
     copy_word8(&mut a, BASE, T0, inp(bi::ANCHOR), ANCHOR);
 
     // ---- input 1 ----
-    copy_word8(&mut a, BASE, T0, PK, NOTE_STAGE);
-    copy_word8(&mut a, BASE, T0, inp(bi::IN1_FROM), NOTE_STAGE + 32);
-    a.push(lw(T0, BASE, inp(bi::IN1_AMOUNT_LO))); a.push(sw(BASE, T0, NOTE_STAGE + 64));
-    a.push(lw(T0, BASE, inp(bi::IN1_AMOUNT_HI))); a.push(sw(BASE, T0, NOTE_STAGE + 68));
-    a.push(lw(T0, BASE, inp(bi::IN1_ASSET))); a.push(sw(BASE, T0, NOTE_STAGE + 72));
-    a.push(lw(T0, BASE, inp(bi::IN1_TIME))); a.push(sw(BASE, T0, NOTE_STAGE + 76));
-    copy_word8(&mut a, BASE, T0, inp(bi::IN1_R), NOTE_STAGE + 80);
+    // §4 item 1, structurally: the spent note's OWNER is `PK` (= pk_self, derived above from
+    // the private spend key), never a witness word — a prover can only ever spend a note
+    // committed to its own public key. Everything else about the note comes from the witness.
+    emit_stage_note(&mut a, BASE, T0, NOTE_STAGE, PK, inp(bi::IN1_FROM), inp(bi::IN1_AMOUNT_LO), inp(bi::IN1_AMOUNT_HI), inp(bi::IN1_ASSET), inp(bi::IN1_TIME), inp(bi::IN1_R));
     emit_note_commit(&mut a, BASE, T0, NOTE_STAGE, BUF, ptr_words(BUF), CM_IN1);
     // amount1 != 0? — the ONLY branch condition, shared with the balance sum's own addend.
     a.push(lw(T1, BASE, inp(bi::IN1_AMOUNT_LO)));
@@ -542,14 +519,8 @@ pub fn bundle() -> Program {
     a.label("bundle_in1_skip");
     emit_nullify(&mut a, BASE, T0, NK, CM_IN1, BUF, ptr_words(BUF), NF1);
 
-    // ---- input 2 (identical shape) ----
-    copy_word8(&mut a, BASE, T0, PK, NOTE_STAGE);
-    copy_word8(&mut a, BASE, T0, inp(bi::IN2_FROM), NOTE_STAGE + 32);
-    a.push(lw(T0, BASE, inp(bi::IN2_AMOUNT_LO))); a.push(sw(BASE, T0, NOTE_STAGE + 64));
-    a.push(lw(T0, BASE, inp(bi::IN2_AMOUNT_HI))); a.push(sw(BASE, T0, NOTE_STAGE + 68));
-    a.push(lw(T0, BASE, inp(bi::IN2_ASSET))); a.push(sw(BASE, T0, NOTE_STAGE + 72));
-    a.push(lw(T0, BASE, inp(bi::IN2_TIME))); a.push(sw(BASE, T0, NOTE_STAGE + 76));
-    copy_word8(&mut a, BASE, T0, inp(bi::IN2_R), NOTE_STAGE + 80);
+    // ---- input 2 (identical shape, same `PK` owner slot) ----
+    emit_stage_note(&mut a, BASE, T0, NOTE_STAGE, PK, inp(bi::IN2_FROM), inp(bi::IN2_AMOUNT_LO), inp(bi::IN2_AMOUNT_HI), inp(bi::IN2_ASSET), inp(bi::IN2_TIME), inp(bi::IN2_R));
     emit_note_commit(&mut a, BASE, T0, NOTE_STAGE, BUF, ptr_words(BUF), CM_IN2);
     a.push(lw(T1, BASE, inp(bi::IN2_AMOUNT_LO)));
     a.push(lw(T2, BASE, inp(bi::IN2_AMOUNT_HI)));
@@ -571,22 +542,10 @@ pub fn bundle() -> Program {
     // ---- outputs: from = pk_self, asset/time = the bundle's own public fields (structural
     // enforcement of §4 items 4/6/7 — there is no other asset/time an output's commitment
     // could use) ----
-    copy_word8(&mut a, BASE, T0, inp(bi::OUT1_PK), NOTE_STAGE);
-    copy_word8(&mut a, BASE, T0, PK, NOTE_STAGE + 32);
-    a.push(lw(T0, BASE, inp(bi::OUT1_AMOUNT_LO))); a.push(sw(BASE, T0, NOTE_STAGE + 64));
-    a.push(lw(T0, BASE, inp(bi::OUT1_AMOUNT_HI))); a.push(sw(BASE, T0, NOTE_STAGE + 68));
-    a.push(lw(T0, BASE, inp(bi::ASSET))); a.push(sw(BASE, T0, NOTE_STAGE + 72));
-    a.push(lw(T0, BASE, inp(bi::TIME))); a.push(sw(BASE, T0, NOTE_STAGE + 76));
-    copy_word8(&mut a, BASE, T0, inp(bi::OUT1_R), NOTE_STAGE + 80);
+    emit_stage_note(&mut a, BASE, T0, NOTE_STAGE, inp(bi::OUT1_PK), PK, inp(bi::OUT1_AMOUNT_LO), inp(bi::OUT1_AMOUNT_HI), inp(bi::ASSET), inp(bi::TIME), inp(bi::OUT1_R));
     emit_note_commit(&mut a, BASE, T0, NOTE_STAGE, BUF, ptr_words(BUF), CM_OUT1);
 
-    copy_word8(&mut a, BASE, T0, inp(bi::OUT2_PK), NOTE_STAGE);
-    copy_word8(&mut a, BASE, T0, PK, NOTE_STAGE + 32);
-    a.push(lw(T0, BASE, inp(bi::OUT2_AMOUNT_LO))); a.push(sw(BASE, T0, NOTE_STAGE + 64));
-    a.push(lw(T0, BASE, inp(bi::OUT2_AMOUNT_HI))); a.push(sw(BASE, T0, NOTE_STAGE + 68));
-    a.push(lw(T0, BASE, inp(bi::ASSET))); a.push(sw(BASE, T0, NOTE_STAGE + 72));
-    a.push(lw(T0, BASE, inp(bi::TIME))); a.push(sw(BASE, T0, NOTE_STAGE + 76));
-    copy_word8(&mut a, BASE, T0, inp(bi::OUT2_R), NOTE_STAGE + 80);
+    emit_stage_note(&mut a, BASE, T0, NOTE_STAGE, inp(bi::OUT2_PK), PK, inp(bi::OUT2_AMOUNT_LO), inp(bi::OUT2_AMOUNT_HI), inp(bi::ASSET), inp(bi::TIME), inp(bi::OUT2_R));
     emit_note_commit(&mut a, BASE, T0, NOTE_STAGE, BUF, ptr_words(BUF), CM_OUT2);
 
     // ---- duplicate-input / duplicate-output detection ----
@@ -612,7 +571,7 @@ pub fn bundle() -> Program {
         bi::FEE_HI, bi::BURN_HI,
     ] {
         a.push(lw(T1, BASE, inp(hi_off)));
-        emit_range_check_u63(&mut a, T1, T0, T2);
+        emit_range_check_u63(&mut a, T1, T2);
         emit_or_into(&mut a, BAD, T2);
     }
 

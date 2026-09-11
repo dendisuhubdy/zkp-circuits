@@ -225,6 +225,19 @@ commitment into the associated data means an envelope cannot be re-attached
 to a different transaction and a decrypted note is checked against the
 commitment it was published under (`open_with_tx_key` rejects a mismatch).
 
+**One `K_tx` per envelope — a wallet obligation, not an enforced one.** A
+`Disclosure::Transaction` carries a bare index `tx`, and since phase Z the
+ledger has two independently numbered sequences (`txs` and `bundles`), so
+`scan` tries the index in both. That is unambiguous exactly as long as a key
+opens one envelope: the commitment in the associated data already stops a key
+from opening an envelope it did not seal. But a wallet that reused one
+`K_tx` for a transfer and for a bundle output that happened to land at the
+same index would have both open under a single `Disclosure::Transaction`, and
+both rows would pass `verify_row` — a disclosure wider than the one
+transaction this scope promises. Nothing in `viewing.rs` can prevent it (the
+key is the caller's to make and to hand out), so it is stated at
+`TxKey::random`, which is how the rule is kept.
+
 ## The commitment tree
 
 `ledger::CommitmentTree` is an append-only, depth-32, host-side Merkle tree
@@ -262,9 +275,12 @@ boundary from the transfer and bundle sides respectively: the proof itself is
 valid math (Merkle membership against a past root is true forever), but once
 that root has scrolled out of the window the ledger rejects it
 (`LedgerError::UnknownAnchor`) — a ledger bookkeeping decision, not a
-cryptographic one. The bundle-side test pins both halves, admitting the
-bundle with `ANCHOR_WINDOW - 1` later roots in front of its anchor and
-refusing it with `ANCHOR_WINDOW + 1`.
+cryptographic one. The bundle-side test pins the exact boundary: `record_root` keeps the
+`ANCHOR_WINDOW` most recent roots *including* the one just recorded, so an
+anchor that is the newest entry when the window starts scrolling survives
+`ANCHOR_WINDOW - 1` = 63 further roots and is evicted by the 64th — the test
+admits the bundle with 63 later roots in front of its anchor and refuses it
+with `ANCHOR_WINDOW`.
 
 **Testing note.** `MERKLE_VERIFY` compiles down to the same `POSEIDON2`
 syscall (and the same `cpu` absorb/write-back hash rows) any other call to
@@ -460,7 +476,11 @@ can clear a `bad` an earlier one set. Every genuinely arithmetic relation funnel
   input's own `amount != 0` branch exactly like the anchor check (a dummy's asset is
   meaningless).
 - **Range checks.** `asm::emit_range_check_u63` flags any of the six amounts (both inputs,
-  both outputs, fee, burn) that is `>= 2^63`.
+  both outputs, fee, burn) that is `>= 2^63`. (`Ledger::mint` refuses an out-of-range
+  amount at deposit time for the same bound, so the pool never holds a leaf no bundle could
+  spend.) The *other* half of §4 item 6 — a fee is charged in asset 0, so `asset != 0`
+  implies `fee = 0` — is not in the circuit at all: both words are public, so the ledger
+  enforces it for free at admission (step 4 of "Ledger admission for bundles" below).
 - **64-bit conservation.** `asm::emit_add64_carry` chains `in1 + in2` and
   `out1 + out2 + fee + burn` with carry detection at every step, and a final compare ORs
   `BAD` if the two 65-bit-capable sums disagree. The carry folds are not redundant with
@@ -592,10 +612,11 @@ bundle it would reject anyway:
 | 1 | the proof carries `pv::NUM` public values, and its eight digest words are canonical `u32`s | `Proof(PublicValues)` / `BadDigest` |
 | 2 | `anchor` is one of the last `ANCHOR_WINDOW = 64` recorded roots | `UnknownAnchor` |
 | 3 | `now - TIME_WINDOW <= time <= now` (`TIME_WINDOW = 64`) | `Time` |
-| 4 | `nullifiers[0] != nullifiers[1]`, and neither is already spent | `DuplicateNullifierInBundle` / `Spent` |
-| 5 | `commitments[0] != commitments[1]`, and neither is already a leaf | `DuplicateCommitmentInBundle` / `Duplicate` |
-| 6 | `notes::bundle_digest(anchor, nf1, nf2, cm1, cm2, fee, burn, asset, time)` equals `pv::OUT0..8` | `BadDigest` |
-| 7 | the proof verifies under `bundle_program`'s `hc` — last, and only then | `Proof(..)` |
+| 4 | `asset == 0 || fee == 0` — §4 item 6 charges every fee in asset 0 | `FeeInForeignAsset` |
+| 5 | `nullifiers[0] != nullifiers[1]`, and neither is already spent | `DuplicateNullifierInBundle` / `Spent` |
+| 6 | `commitments[0] != commitments[1]`, and neither is already a leaf | `DuplicateCommitmentInBundle` / `Duplicate` |
+| 7 | `notes::bundle_digest(anchor, nf1, nf2, cm1, cm2, fee, burn, asset, time)` equals `pv::OUT0..8` | `BadDigest` |
+| 8 | the proof verifies under `bundle_program`'s `hc` — last, and only then | `Proof(..)` |
 
 Then, and only then: both nullifiers inserted, both commitments appended in
 slot order, the new root recorded, `fee` and `burn` added to their running
@@ -607,7 +628,7 @@ honest path and the replay.
 
 **This is not `Ledger::apply`'s order, deliberately.** `apply` recomputes its
 digest *second*, right after the shape check; `apply_bundle` recomputes its
-digest *sixth*, after every window/set/tree lookup. A bundle digest is a
+digest *seventh*, after every window/set/tree lookup. A bundle digest is a
 Poseidon2 sponge over 47 words, and a `recent_roots` scan plus two `HashSet`
 probes plus two `HashMap` probes are nowhere near that cost, so §7's
 cheapest-first rule puts them ahead of it. `apply`'s own order is M3.3-era and
@@ -617,7 +638,7 @@ thing — the STARK verification — which is last in both.
 
 Three more things are worth calling out about this order.
 
-**Step 6 is where every in-circuit relation failure lands.** The ledger never
+**Step 7 is where every in-circuit relation failure lands.** The ledger never
 runs any of the guest's arithmetic. `bundle_digest` fixes the preimage's 47th
 word, `bad`, at `0`; a bundle whose guest tainted itself — an over-spend, a
 wrong Merkle path, an input asset that disagrees with the bundle's, a 64-bit
@@ -625,7 +646,7 @@ wrap — published a digest folded from `bad = 1`, which this recomputation can
 never match. So over-spending is not a special case in `apply_bundle`; it is
 a `BadDigest`, like every other broken relation.
 
-**The within-bundle duplicate checks (4, 5) are not redundant with the
+**The within-bundle duplicate checks (5, 6) are not redundant with the
 nullifier set and the tree.** Neither slot has been inserted yet when the
 bundle is examined, so the set and the tree cannot see a bundle that repeats
 itself; only an explicit comparison of the two slots can. `guests::bundle`
@@ -642,7 +663,26 @@ ones and `apply_bundle` never tries to tell them apart. This is also why a
 wallet must build its dummies with a fresh random `r`: see the duplicate-check
 bullet under "The `bundle` relation" above.
 
+**Step 4, the fee-asset rule, is the ledger's job and not the circuit's.**
+§4 item 6 charges `fee` in asset 0 (SHRUGG), so a bundle declaring any other
+asset must carry `fee = 0`. Both fields are public: the ledger recomputes the
+digest over `fee` and `asset` at step 7 and so knows exactly what the proof
+is bound to, which leaves an in-circuit comparison of two public words with
+nothing to add that two free integer compares here do not already give. Nor
+is it a soundness rule — the fee is subtracted from the bundle's own inputs
+in whatever asset they are denominated in, so a foreign-asset fee creates no
+value. What it protects is `fees_collected`.
+
 `fees_collected` and `burned` are running totals over every admitted bundle,
 nothing more — the ledger-level number an auditor would reconcile against,
-with no destination attached. `apply`/`mint`, the transfer path, are
-unchanged by all of this, including their stricter `time == now`.
+with no destination attached. They differ in one way worth stating, because
+S2/S3 will have to: `fees_collected` is SHRUGG-only, guaranteed by step 4,
+while `burned` is a **cross-asset** total, since `burn` is denominated in
+whatever the bundle's own `asset` is and no rule confines it to asset 0. Read
+it as "units burned, all assets", not as SHRUGG, until the phase that gives
+the burn a destination makes it per-asset. `apply`/`mint`, the transfer path,
+are unchanged by all of this, including their stricter `time == now` — with
+one addition: `mint` now refuses an `amount >= 2^63`
+(`LedgerError::AmountOutOfRange`), mirroring the six range checks
+`guests::bundle` applies, since a leaf minted above that bound is value no
+bundle could ever spend.
