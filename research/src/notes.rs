@@ -54,6 +54,10 @@ pub mod domain {
     /// The `transfer` guest's output commitment: `H(OUT, anchor(8), nf(8), cm_out(8), time)`
     /// — see `output_digest` and `docs/06-viewing-keys.md`'s "Public outputs" section.
     pub const OUT: u32 = 9;
+    /// M4.1: the input commitment (`hash::input_digest`), sealing the private-input vector
+    /// `READ_INPUT` draws from — the capacity-lane header `[IN, n_in, 0]` seeded into the very
+    /// first input-digest-row permutation, mirroring `HC`'s `[HC, base_pc, len]` exactly.
+    pub const IN: u32 = 10;
     pub const TEST: u32 = 0xff;
 }
 
