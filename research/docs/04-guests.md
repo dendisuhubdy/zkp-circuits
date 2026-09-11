@@ -120,7 +120,7 @@ Measured numbers for the first guest built this way:
 
 | Guest | Source | Tier | Cycles | Proof size |
 |---|---|---|---|---|
-| `fib(20)`, compiled (`guests::compiled::fib`) | `guests-compiled/fib` | `Tier(10)` | 136 | 253208 bytes |
+| `fib(20)`, compiled (`guests::compiled::fib`) | `guests-compiled/fib` | `Tier(10)` | 136 | 271,600–275,889 bytes over three proofs (varies per proof with the hiding salt; measured after the input table landed — the 253,208 figure recorded before it is not comparable) |
 
 Measured by `research/tests/e2e.rs`'s `compiled_fib_proves_and_verifies`
 (`cargo +1.98.1 test -p rand_zkvm --test e2e compiled_fib -- --nocapture`,
