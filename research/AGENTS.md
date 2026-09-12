@@ -22,8 +22,10 @@ are `docs/01–06`; the README has the reading order.
   harness proves a 128-row table, so it is cheap despite 2 612 columns).
   All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a
   keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with
-  a batch's column count, so carrying it costs ~705 KB at the production
-  profile (`docs/03-privacy.md`'s M4.2 measurement). That is a known cost of
+  a batch's column count, so carrying it costs ~1.91 MB at the production
+  profile — 80 queries since the 2026-09-12 audit revert; it was ~705 KB at
+  the 27 queries M4.2 measured (`docs/03-privacy.md`'s profile table and M4.2
+  measurement). That is a known cost of
   using the syscall, not a regression to chase; a guest that makes no `KECCAK`
   call does not pay it, because the table is left out of the batch entirely.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one

@@ -1288,7 +1288,8 @@ measure_production_profile_at_tier_10_and_12`, the same command
 about 705 KB either way, for a guest that never calls `KECCAK`. Prove time
 barely moves (5.996 s → 6.154 s at tier 10; 23.40 s → 23.91 s at tier 12),
 which locates the cost: not in committing a 32-row trace, but in *opening* a
-2 612-wide main-trace leaf at each of the profile's 27 FRI queries. The
+2 612-wide main-trace leaf at each of the profile's 80 FRI queries (27 when
+that measurement was taken — see `docs/03-privacy.md`'s profile table). The
 table's width, not its height, is what a proof pays for — the one M4.2 number
 worth carrying into M4.3's own chip design. That number is why Task 6 made the
 instance optional rather than merely small: at 705 KB per proof a shielded

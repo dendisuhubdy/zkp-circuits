@@ -310,6 +310,18 @@ fn measure_production_profile_at_tier_10_and_12() {
         let verify_time = t1.elapsed();
         println!("{label}: proof size = {} bytes, prove = {:?}, verify = {:?}", proof.size(), prove_time, verify_time);
     }
+    // Audit ZM1 (2026-09-12): what a proof that *does* carry the keccak table costs at the
+    // restored 80-query profile — the same comparison `docs/03-privacy.md`'s M4.2 table makes,
+    // re-measured because FRI leaf openings scale with the query count.
+    let msg: Vec<u8> = (0..64u8).collect();
+    let p = guests::keccak_demo(&msg);
+    let t0 = std::time::Instant::now();
+    let (proof, _) = m.prove(&p, &[], Some(Tier(10))).unwrap();
+    let prove_time = t0.elapsed();
+    assert_eq!(proof.keccak_log_height, 5);
+    let t1 = std::time::Instant::now();
+    m.verify(&p.digest(), &proof).unwrap();
+    println!("tier 10 with a keccak table: proof size = {} bytes, prove = {:?}, verify = {:?}", proof.size(), prove_time, t1.elapsed());
 }
 
 #[test]

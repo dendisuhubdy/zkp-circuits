@@ -42,8 +42,15 @@ pub enum FriProfile {
     /// 16 queries, 4 PoW bits — for `cargo test`. 3·16+4 = 52 conjectured bits; not a
     /// production target, only fast enough for the suite.
     Test,
-    /// 27 queries, 20 PoW bits, blowup 8. Chosen so the ethSTARK conjectured bound
-    /// `log_blowup·num_queries + query_pow_bits ≥ 100`: 3·27+20 = 101.
+    /// 80 queries, 20 PoW bits, blowup 8 — the whitepaper's parameter table (Draft 3, Part
+    /// III: FRI 80/8/20). The M2.2 retune to 27 queries (`3·27+20 = 101`) hit the ethSTARK
+    /// *conjectured* 100-bit target but quietly abandoned the *proven* floor the 80-query
+    /// choice exists to keep: the proven proximity-gaps bound is ~86 bits at q=80, g=20 and
+    /// scales ~linearly in the query count, so 27 queries leaves only ~42 proven bits (a
+    /// provable 100 would need q=97 or g=34). The paper's Part III reconciliation weighed
+    /// exactly this trade and kept q=80/g=20; this profile is consensus-facing (genesis-bound
+    /// through the node's chain config, never proof-supplied), so it follows the paper.
+    /// Reverted 2026-09-12 on the zk audit's finding ZM1.
     Production,
 }
 
@@ -51,7 +58,7 @@ impl FriProfile {
     pub fn num_queries(self) -> usize {
         match self {
             Self::Test => 16,
-            Self::Production => 27,
+            Self::Production => 80,
         }
     }
     pub fn pow_bits(self) -> usize {
@@ -1194,7 +1201,11 @@ mod fri_soundness_tests {
             query_proof_of_work_bits: FriProfile::Production.pow_bits(),
             mmcs: (),
         };
-        assert_eq!(FriProfile::Production.num_queries(), 27);
+        // The whitepaper table (Draft 3, Part III): 80 queries / blowup 8 / 20 grinding bits —
+        // conjectured `3·80+20 = 260` here, and ~86 bits on the *proven* proximity-gaps bound at
+        // these parameters (the reason the paper keeps q=80 rather than dropping to the
+        // conjectured-only minimum; see `FriProfile`'s doc comment). Audit ZM1, 2026-09-12.
+        assert_eq!(FriProfile::Production.num_queries(), 80);
         assert_eq!(FriProfile::Production.pow_bits(), 20);
         assert!(fri.conjectured_soundness_bits() >= 100, "got {}", fri.conjectured_soundness_bits());
     }

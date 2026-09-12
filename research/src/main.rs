@@ -69,7 +69,7 @@ fn main() {
         if traces.keccak_log_height == 0 { "absent".to_string() } else { format!("2^{}", traces.keccak_log_height) },
         traces.mem_log_height);
 
-    hr("Part 5 · Prove and verify (production FRI: blowup 8, 27 queries, 20 PoW bits, ZK on)");
+    hr("Part 5 · Prove and verify (production FRI: blowup 8, 80 queries, 20 PoW bits, ZK on)");
     let m = Machine::new(FriProfile::Production);
     let hc = program.code_hash();
     println!("hc = {hc}");

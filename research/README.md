@@ -31,10 +31,11 @@ cargo test              # 223 tests (222 pass, 1 ignored): emulator, per-table c
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
 it up automatically. `cargo test` uses `FriProfile::Test` throughout (16
 queries, 4 proof-of-work bits) so the suite runs in well under a minute per
-proving test; the demo runs one full `FriProfile::Production` proof (27
-queries, 20 PoW bits, folding arity 8 — tuned in M2.2 to a 100-bit
-conjectured soundness target, roughly a third the proof size of the earlier
-80-query profile at the same target margin: see `docs/03-privacy.md`) to
+proving test; the demo runs one full `FriProfile::Production` proof (80
+queries, 20 PoW bits, folding arity 8 — the whitepaper's own parameters,
+restored on 2026-09-12 after the zk audit found M2.2's 27-query retune met
+the *conjectured* 100-bit target only by giving up the *proven*
+proximity-gaps floor: see `docs/03-privacy.md`) to
 show the real numbers, and one `FriProfile::Test` proof of the same trace so
 you can see the parameter effect directly.
 

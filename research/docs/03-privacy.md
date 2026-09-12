@@ -21,27 +21,76 @@ round constants are likewise derived from a fixed development seed
 — a placeholder for the same reason: correct math, wrong constants for
 production.
 
-`Machine::new` takes a `FriProfile`: `Production` (27 FRI queries, 20
+`Machine::new` takes a `FriProfile`: `Production` (80 FRI queries, 20
 proof-of-work bits, `max_log_arity: 3` — folding arity 8) or `Test` (16
 queries, 4 PoW bits, for a fast `cargo test`). Both use blowup 8 and the same
 hiding PCS; only the query count, grinding difficulty, and folding arity
-differ. `Production`'s numbers (M2.2) are tuned to the ethSTARK conjectured-
-soundness bound `log_blowup·num_queries + query_pow_bits ≥ 100`:
-`3·27+20 = 101`; `Test`'s (`3·16+4 = 52`) is not a production target, only
-fast enough for the suite. Neither profile is any less zero-knowledge than
-the other — only proof size and conjectured soundness change with the query
-count.
+differ.
 
-Before M2.2, `Production` ran 80 queries / 20 PoW bits with `max_log_arity:
-1` — conjectured soundness `3·80+20 = 260` bits, far past the 100-bit
-target, at a proportional cost in proof size. Measured on `guests::fib` at
-tier 10 and tier 12 (`cargo test --release --test e2e
-measure_production_profile_at_tier_10_and_12 -- --ignored --nocapture`,
-`tests/e2e.rs`). The verify times below are each program's *first* verify on
-a fresh `Machine` — an uncached `verifier_key` recomputation, which
-dominates them (see "What `verify` actually checks" below); a cached verify
-of the same proof runs under 40% of that, per
-`tests/e2e.rs::verifier_key_is_cached_after_first_verify`:
+| | queries | PoW bits | blowup | conjectured | proven (proximity gaps) |
+| --- | --- | --- | --- | --- | --- |
+| `Production` | 80 | 20 | 8 | `3·80+20 = 260` | ~86 bits |
+| `Test` | 16 | 4 | 8 | `3·16+4 = 52` | ~17 bits |
+
+`Production` is the whitepaper's own parameter table (Draft 3, Part III: FRI
+80/8/20), **restored on 2026-09-12** after the zk audit (finding ZM1). M2.2
+had retuned it to 27 queries, which met the ethSTARK *conjectured* bound
+`log_blowup·num_queries + query_pow_bits ≥ 100` (`3·27+20 = 101`) but
+silently abandoned the *proven* floor the 80-query choice exists to keep: the
+proven proximity-gaps bound is ~86 bits at q=80/g=20 and scales roughly
+linearly in the query count, so 27 queries leaves only ~42 proven bits (a
+provable 100 would need q=97 or g=34). The paper's Part III reconciliation
+weighed exactly that trade and kept q=80/g=20, and this profile is
+consensus-facing — genesis-bound through the node's chain config, never
+proof-supplied — so it follows the paper. `Test`'s numbers are not a
+production target, only fast enough for the suite. Neither profile is any
+less zero-knowledge than the other — only proof size and soundness change
+with the query count.
+
+**A 27-query proof and an 80-query verifier are mutually incompatible**, in
+both directions, so this is a hard fork for proofs: every node in a fleet
+must run the same build, and a chain carrying 27-query proofs needs a new
+chain id to move.
+
+Measured on `guests::fib` at tier 10 and tier 12 (`cargo test --release
+--test e2e measure_production_profile_at_tier_10_and_12 -- --ignored
+--nocapture`, `tests/e2e.rs`), immediately before and after the revert on the
+same machine:
+
+| | tier 10 | tier 12 |
+| --- | --- | --- |
+| proof size, 27 queries | 435 529 bytes | 460 441 bytes |
+| proof size, 80 queries | **1 202 416 / 1 195 120 bytes** | **1 252 338 / 1 263 921 bytes** |
+| prove time (27 → 80) | 5.96 s → 6.05 s, 5.81 s | 22.91 s → 22.78 s, 22.74 s |
+| verify time, first and uncached (27 → 80) | 213.2 ms → 232.7 ms, 232.3 ms | 809.2 ms → 837.5 ms, 842.0 ms |
+
+Two consecutive runs are given for the 80-query row for the same reason the
+M4.2 table gives two: the hiding PCS draws fresh entropy per proof, so the
+postcard encoding moves by about a percent run to run. Proof size grows by
+~2.75x, a little under the 80/27 = 2.96 the query count alone suggests
+(the parts of a proof that do not scale with queries dilute it). Prove and
+first-verify time barely move, for the same reason they barely moved when
+M2.2 cut the queries: both are dominated by trace commitment and, for the
+first verify, the uncached `verifier_key` recomputation — costs the query
+count does not touch.
+
+**Consequence for the node's 1 MiB proof cap.** At 80 queries a *keccak-free*
+tier-10 proof is already ~1.20 MB, past the 1 MiB cap the full node applies
+to a submitted proof, and a proof carrying the keccak table measures
+3 106 757 bytes at tier 10 (a +1.91 MB delta over keccak-free, the 80-query
+restatement of the +705 KB M4.2 measured at 27 queries). The cap is the
+node's constant, not this crate's, but it has to be raised in the same change
+that ships this profile or no production proof will be accepted.
+
+The verify times above are each program's *first* verify on a fresh
+`Machine` — an uncached `verifier_key` recomputation, which dominates them
+(see "What `verify` actually checks" below); a cached verify of the same
+proof runs under 40% of that, per
+`tests/e2e.rs::verifier_key_is_cached_after_first_verify`.
+
+**M2.1 → M2.3 history**, kept for the shape of that improvement rather than
+as a current baseline (these are 27-query-era or older numbers, on the
+pre-M3.4 machine):
 
 | | tier 10 (M2.1 → M2.2 → M2.3) | tier 12 (M2.1 → M2.2 → M2.3) |
 | --- | --- | --- |
@@ -57,7 +106,13 @@ and M4.1 (the input table, the `INPUT_DIGEST`/`INPUT_READ` buses, the salted
 H_IN) each grew every proof in between. `b1d01d9`, this branch's base, is where
 that growth had landed when M4.2 began.
 
-**M4.2's own measurement, same command, same guest.** A 2 612-column table is
+**M4.2's own measurement, same command, same guest — at 27 queries.** Every
+number in this subsection was taken before the 2026-09-12 profile revert; at
+80 queries each of them is roughly 2.75x larger (the keccak delta re-measured
+directly: 3 106 757 bytes for a keccak-carrying tier-10 proof against
+1 195 120 keccak-free, i.e. +1.91 MB rather than +705 KB). The *shape* of the
+comparison — what the optional table buys — is unchanged, which is why the
+27-query numbers are kept rather than restated. A 2 612-column table is
 expensive in *proof size* regardless of how few rows it holds, because every
 FRI query opens a main-trace leaf of the batch's full width. The first cut of
 M4.2 put the keccak table in every proof (its height floored at one 32-row
@@ -72,7 +127,7 @@ pre-M4.2 size. Measured on `guests::fib`:
 | before the keccak table (branch base `b1d01d9`, i.e. M4.1 as shipped) | 437 599 bytes | 460 242 bytes |
 | with the padding block every proof carried (Task 5) | 1 142 262 bytes | 1 161 162 bytes |
 | keccak-free, the table now optional (Task 6) | **439 816 / 440 456 bytes** | **464 891 / 460 924 bytes** |
-| what a guest that *does* call `KECCAK` still pays | +~705 KB | +~701 KB |
+| what a guest that *does* call `KECCAK` still pays | +~705 KB (+1.91 MB at 80 queries) | +~701 KB |
 | prove time (before / Task 5 / Task 6) | 5.996 s / 6.154 s / 6.48 s, 6.36 s | 23.40 s / 23.91 s / 23.61 s, 25.15 s |
 | verify time, first and uncached (before / Task 5 / Task 6) | 218.1 ms / 250.6 ms / 224.3 ms, 219.8 ms | 812.2 ms / 860.7 ms / 827.8 ms, 824.3 ms |
 
@@ -86,7 +141,9 @@ That prove time barely moved when the table was added is what locates the
 cost: committing a 32-row
 trace is nothing, but every FRI query has to *open* a 2 612-wide main-trace
 leaf. Order-of-magnitude, that accounts for most of it — 27 queries x 2 612
-columns x 8 bytes is ~565 KB of leaf data, and the zeta/zeta-next opened
+columns x 8 bytes is ~565 KB of leaf data (and 80 queries, the profile
+restored on 2026-09-12, ~1.67 MB — the M4.2 numbers in this section are all
+27-query numbers, taken before the revert), and the zeta/zeta-next opened
 values (2 612 columns, two points, a degree-2 extension) another ~84 KB, with
 the chip's permutation columns and quotient chunks making up the rest. The
 keccak chip's **width**, not its height, is what a proof carrying it pays for
@@ -109,7 +166,8 @@ proof-declared instead recovers 14 767 bytes and 1.79 s of prove time at tier
 10 (1 157 029 → 1 142 262 bytes, 7.94 s → 6.15 s) and 22 316 bytes and 4.65 s
 at tier 12 (1 183 478 → 1 161 162 bytes, 28.56 s → 23.91 s).
 
-M2.2 (80 → 27 queries, retuned to the 100-bit conjectured target) cut proof
+M2.2 (80 → 27 queries, retuned to the 100-bit conjectured target — since
+reverted, see the profile table above) cut proof
 size to roughly a third at the same conjectured soundness margin; prove and
 first-verify times moved by noise, not by the query-count change, because
 both were dominated by costs the query count and fold width don't touch:
