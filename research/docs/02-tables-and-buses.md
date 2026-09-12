@@ -1,9 +1,10 @@
 # The tables and their buses
 
-The relation is proved as one batch of nine AIR tables under one commitment
-and one FRI opening (`p3-batch-stark`). Tables never call each other
-directly; they exchange facts through named LogUp buses, and the batch
-verifier checks that every bus balances globally.
+The relation is proved as one batch of **eight AIR tables, nine when a proof
+declares a keccak table** (M4.2), under one commitment and one FRI opening
+(`p3-batch-stark`). Tables never call each other directly; they exchange facts
+through named LogUp buses, and the batch verifier checks that every bus
+balances globally.
 
 ```
                                   ┌───────────┐
@@ -44,20 +45,25 @@ verifier checks that every bus balances globally.
                     *and* its indigest rows (M4.1, H_IN)
 
                         ┌─────────────┐
-                        │   KECCAK    │  main; height = 1 << Proof::keccak_log_height
-                        └─────────────┘
+                        │   KECCAK    │  main; OPTIONAL — present only when
+                        └─────────────┘  Proof::keccak_log_height != 0, and
+                                         then of height 1 << that
                     provides KECCAK (clk, ptr) (lookup); consumed by cpu's
                     SYS_KECCAK rows. Unlike every other chip it also *sends*
                     on MEMORY — its own 50 reads and 50 writes per block, so
                     the cpu row that asks for a permutation never carries the
-                    permuted words at all (M4.2)
+                    permuted words at all (M4.2). A guest that makes no KECCAK
+                    call declares keccak_log_height = 0 and the instance is
+                    absent from the batch entirely
 ```
 
 Thirteen buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
 `INPUT_READ` (M4.1, carried by the new `input` table), `MEMORY`, `ALU`,
 `RANGE8` and `POW2` (carried by the range table), `AND4`, `OR4`, `XOR4`
 (carried by the nibble table), `POSEIDON2` (carried by the poseidon2
-table), and `KECCAK` (M4.2, carried by the keccak table). Every one of these
+table), and `KECCAK` (M4.2, carried by the keccak table — and so declared but
+**unprovided** in a proof that has no keccak table, which is exactly what
+makes a `SYS_KECCAK` cpu row unprovable there). Every one of these
 except `MEMORY` is a `LookupBus` (a subset
 check: every value a consumer sends must appear, with enough multiplicity,
 in the provider's table). `MEMORY` is a `PermutationCheckBus` — both sides
@@ -731,9 +737,11 @@ Through M4.1 this table's height was flatly `2^(ℓ+2)` — four accesses per
 cycle times `2^ℓ` cycles. A `KECCAK` row breaks that assumption by two orders
 of magnitude, so M4.2's first cut sized the table
 `log2_ceil(2^(ℓ+2) + 100·2^(klh−5))`, a function of the tier and the declared
-keccak height. That is verifier-computable but wrong in practice: `klh` floors
-at 5 (every proof carries one keccak block, real or padding), so the `+100`
-term is never zero and *every* proof — a guest that never calls `KECCAK`
+keccak height. That is verifier-computable but wrong in practice: `klh` floored
+at 5 at the time (every proof carried one keccak block, real or padding — Task
+6 has since made the table optional, so a keccak-free proof declares `klh = 0`),
+so the `+100`
+term was never zero and *every* proof — a guest that never calls `KECCAK`
 included — paid for a doubled memory table (at tier 10, `4 096 + 100 → 2^13`).
 
 The height is a **proof-declared** parameter instead, `Proof::mem_log_height`,
@@ -1092,13 +1100,32 @@ Plonky3's own `keccak-air` *column layout* (the vendored 0.7 set ships
 `p3-keccak`, the scalar permutation, but no `p3-keccak-air`, so the AIR
 itself is written here; `docs/04-guests.md` has that correction). Height is
 `1 << Proof::keccak_log_height`, proof-declared like `program`'s and
-`input`'s: one block per permutation, floored at a single (padding) block so
-the table exists in every proof, and ceilinged by the *tier* —
-`klh ≤ ℓ + 5`, since a permutation costs a cpu row and therefore a cycle
-(`machine::Tier::max_keccak_log_height`). That tier relation is the table's
-only upper bound; an earlier flat `MAX_LOG_HEIGHT = 20` was removed because
-it disagreed with it in both directions (at tier 10 it would have admitted
-32 768 permutation slots for at most 1 023 possible calls).
+`input`'s: one block per permutation, floored at a single block, and
+ceilinged by the *tier* — `klh ≤ ℓ + 5`, since a permutation costs a cpu row
+and therefore a cycle (`machine::Tier::max_keccak_log_height`). That tier
+relation is the table's only upper bound; an earlier flat `MAX_LOG_HEIGHT =
+20` was removed because it disagreed with it in both directions (at tier 10
+it would have admitted 32 768 permutation slots for at most 1 023 possible
+calls).
+
+**The table is optional per proof** (M4.2, Task 6). `keccak_log_height = 0`
+is not a height: it is the declaration "this proof has no keccak table", and
+`machine::chips` then returns eight chips instead of nine. Through the first
+cut of M4.2 a keccak-free guest still carried one 32-row padding block, and
+because FRI openings scale with a batch's *column* count rather than its row
+count, that block cost ~705 KB of every production proof — more than a
+shielded bundle proof's entire budget (`docs/03-privacy.md`). Dropping the
+instance is safe without touching the cpu table or the keccak AIR: with no
+keccak table in the batch the `KECCAK` bus has **no provider**, so any cpu row
+with `SYS_KECCAK = 1` leaves it unbalanced and the proof cannot be built
+(`tests/cheating.rs::a_keccak_syscall_without_a_keccak_table_is_rejected`).
+The keccak chip is appended last in `chips()` exactly so that removing it
+disturbs no other instance's index — `i == 1` (cpu) is still the
+public-values slot, `i == 2` still memory. `Machine::verify` range-checks
+`keccak_log_height` only when it is non-zero (`0` is exempt; any *other*
+value below one block is still `VerifyError::KeccakHeight`), and the
+`degree_bits` equality check pins the instance count in both shapes, since
+`log_ext_degrees` emits the keccak entry only when the table is present.
 
 The design spec estimated ~2,650 main columns; the built table is exactly
 **2,612**, pinned by `tests/tables.rs`'s shape test.
@@ -1195,17 +1222,21 @@ entry). `tests/keccak.rs` checks the filler's arithmetic against `p3_keccak`
 on 1,000 random states, and runs the chip alone under the real batch STARK
 with throwaway consumers on both of its buses.
 
-**What the padding block costs.** It is not free. Measured at
+**What the table costs, and why it is optional.** It is not free. Measured at
 `FriProfile::Production` on `guests::fib` (`tests/e2e.rs::
 measure_production_profile_at_tier_10_and_12`, the same command
-`docs/03-privacy.md` records): adding this table took a tier-10 proof from
+`docs/03-privacy.md` records): carrying this table took a tier-10 proof from
 437 599 to 1 142 262 bytes and a tier-12 proof from 460 242 to 1 161 162 —
 about 705 KB either way, for a guest that never calls `KECCAK`. Prove time
 barely moves (5.996 s → 6.154 s at tier 10; 23.40 s → 23.91 s at tier 12),
 which locates the cost: not in committing a 32-row trace, but in *opening* a
 2 612-wide main-trace leaf at each of the profile's 27 FRI queries. The
 table's width, not its height, is what a proof pays for — the one M4.2 number
-worth carrying into M4.3's own chip design.
+worth carrying into M4.3's own chip design. That number is why Task 6 made the
+instance optional rather than merely small: at 705 KB per proof a shielded
+bundle proof (~300 KB) would no longer fit the node's 1 MiB cap, and no amount
+of shrinking a 32-row padding block could have changed that. Keccak-free
+proofs are back to their pre-M4.2 sizes; only guests that call `KECCAK` pay.
 
 ## Constraint degree budget
 
@@ -1213,7 +1244,9 @@ Measured (`p3_batch_stark::symbolic::get_max_constraint_degree`, pinned by
 `tests/tables.rs::alu_max_constraint_degree_is_pinned`) against the real,
 same-bus-packed lookup contexts (M4.1, `machine::chips()` order): `program`
 2, `cpu` 8, `memory` 4, `alu` 8, `range` 2, `nibble` 2, `poseidon2` 4,
-`input` 2, `keccak` 3 (M4.2) — `alu`'s comes from the M2.6 `div`
+`input` 2, `keccak` 3 (M4.2; that last entry exists only in the nine-chip
+shape — the pin test asserts both, and that the other eight degrees are
+identical between them) — `alu`'s comes from the M2.6 `div`
 sign-fix identity, `cpu`'s from its packed lookup fraction-pins rather than
 its own row logic (whose costliest single constraint is only degree 6),
 `poseidon2`'s from its S-box split (see that table's own section). M3.2's

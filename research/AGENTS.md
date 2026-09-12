@@ -1,26 +1,31 @@
 # AGENTS.md — `research` (rand_zkvm)
 
 The Rand reference zkVM: an RV32I subset under a zero-knowledge batch STARK
-(Plonky3 0.7, Goldilocks), proved as nine AIR tables exchanging facts over
+(Plonky3 0.7, Goldilocks), proved as eight AIR tables — nine when a proof
+declares a keccak table — exchanging facts over
 thirteen LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
-buses; M4.2 added `keccak` and the `KECCAK` bus), plus the M1.5 viewing-key
+buses; M4.2 added `keccak` and the `KECCAK` bus, and made that one table
+optional per proof: `Proof::keccak_log_height = 0` means the batch has no
+keccak instance at all), plus the M1.5 viewing-key
 layer (notes, envelopes, scoped disclosure, simulated ledger). Design docs
 are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (200 tests: 199 pass, 1 ignored).
+- `cargo test` — the whole suite (202 tests: 201 pass, 1 ignored).
   Everything uses `FriProfile::Test`; measured on the M4.2 branch,
-  `tests/bundle.rs` takes ~222 s (six proofs: four guest-level, plus one
+  `tests/bundle.rs` takes ~236 s (six proofs: four guest-level, plus one
   shared by every ledger-level test and one for the 1-real-1-dummy shape),
-  `tests/viewing.rs` ~194 s, `tests/e2e.rs` ~99 s, `tests/cheating.rs`
-  ~39 s, `tests/zk.rs` ~18 s, `tests/tables.rs` ~10 s and
+  `tests/viewing.rs` ~202 s, `tests/e2e.rs` ~98 s, `tests/cheating.rs`
+  ~43 s, `tests/zk.rs` ~18 s, `tests/tables.rs` ~10 s and
   `tests/keccak.rs` ~1 s (its chip-alone harness proves a 128-row table, so
   it is cheap despite 2 612 columns). All green is the bar before any
-  commit. Every table's proof got markedly larger in M4.2 — the keccak chip
-  is in every proof, including proofs that never call `KECCAK`
-  (`docs/03-privacy.md`'s M4.2 measurement); that is a known cost, not a
-  regression to chase.
+  commit. A proof that *does* call `KECCAK` is markedly larger than a
+  keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with
+  a batch's column count, so carrying it costs ~705 KB at the production
+  profile (`docs/03-privacy.md`'s M4.2 measurement). That is a known cost of
+  using the syscall, not a regression to chase; a guest that makes no `KECCAK`
+  call does not pay it, because the table is left out of the batch entirely.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one
   production-profile proof). The test suite covers everything it shows; don't
   run it casually.

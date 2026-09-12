@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 200 tests (199 pass, 1 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, viewing keys, shielded-pool bundles
+cargo test              # 202 tests (201 pass, 1 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, viewing keys, shielded-pool bundles
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -40,7 +40,8 @@ you can see the parameter effect directly.
 
 ## The machine in one picture
 
-The relation is proved as one batch of nine AIR tables under a single
+The relation is proved as one batch of eight AIR tables — nine when a proof
+declares a keccak table (M4.2) — under a single
 commitment and a single FRI opening. Tables never call each other directly;
 they exchange facts through thirteen named LogUp buses, and the batch verifier
 checks that every bus balances globally.
@@ -88,7 +89,9 @@ table); `program`, `cpu`, `memory`, `alu`, `poseidon2`, `input` and `keccak`
 are main traces, rebuilt per execution (`poseidon2`'s and `keccak`'s own
 round-constant/row-kind columns are preprocessed too, but their state columns
 are not; `program`'s decoder columns are all main now — M3.4 retired its
-preprocessed half entirely).
+preprocessed half entirely). `keccak` is the one **optional** table: a proof
+whose guest never calls `KECCAK` declares `keccak_log_height = 0` and leaves
+the instance out of the batch altogether.
 Full column lists and constraints: `docs/02-tables-and-buses.md`.
 
 ## How confidential arbitrary computation works
@@ -123,7 +126,7 @@ Execution happens natively and in the clear on the prover's machine (Part
 3) — the emulator is the reference semantics, and nothing about running it
 is itself confidential; confidentiality is a property of the *proof*, not
 of the execution environment. Arithmetization (Part 4) turns that execution
-into nine tables padded to the smallest gas tier that fits, which is why the
+into eight or nine tables padded to the smallest gas tier that fits, which is why the
 trace height — and hence the tier — is the only thing about "how much work
 happened" that a verifier can see. Proving and verifying (Part 5) run
 against Plonky3's hiding FRI PCS, so the main-trace and quotient commitments
@@ -195,11 +198,13 @@ milestone 4 builds first: `docs/04-guests.md`.
 | The program itself (M3.4 — `verify` takes only `hc`), private inputs, every register/memory value, every branch, the exact cycle count, which syscalls ran | hidden |
 
 `hc` is binding but not hiding: a verifier who can guess the program can
-confirm the guess against a published `hc`. The four declared heights are
-coarse power-of-two bounds, each with a floor that makes the common case
-uninformative — a keccak-free guest and a one-permutation guest declare the
-same `keccak_log_height`, and every guest whose memory traffic fits the tier's
-own budget declares the same `mem_log_height` (`docs/03-privacy.md`).
+confirm the guess against a published `hc`. The declared heights are coarse
+power-of-two bounds: every guest whose memory traffic fits the tier's own
+budget declares the same `mem_log_height`, and `keccak_log_height` reveals the
+permutation count only to within a factor of two. Its one exact disclosure is
+`0` — "this program made no `KECCAK` call at all", which is also what lets the
+proof drop the 2 612-column keccak table and stay the size it was before M4.2
+(`docs/03-privacy.md`).
 
 Full detail, including the tier-to-row-count table and the delegated-proving
 boundary: `docs/03-privacy.md`.
