@@ -687,6 +687,87 @@ fn alu_max_constraint_degree_is_pinned() {
     // chip's own packed `MEMORY`/`KECCAK` lookups — selector-weighted message columns times a
     // degree-2 `IS_REAL · sel_sum` count — don't raise it either.
     assert_eq!(degrees[8], 3, "keccak table max constraint degree");
+
+    // sha256 (M4.4 Task 3): measured max is 4 — the tenth entry of this pin — of which the AIR's
+    // own rules account for 3 and the packed lookups for the fourth. 4 costs nothing over 3 here:
+    // the quotient is chunked by `log2_ceil(degree + is_zk - 1)`, which is 2 for both. The three
+    // cubic rules are the ones that must be cubic: `xor3` inside Σ0/Σ1 and σ0/σ1, and `Maj`'s
+    // `ab + bc + ca − 2abc`. Everything else is written to stay at or below that — the σ values
+    // get their own two columns (`S1`, `S0`) precisely so the *gated* schedule equation stays
+    // degree 2 instead of carrying a cubic σ under a preprocessed selector, and every carry is
+    // spelled as bits so no rule needs a range lookup.
+    //
+    // It is measured here directly off `Sha256Air` rather than read out of `degrees[9]`: the
+    // chip joins `machine::chips()` in Task 4, and until it does `max_constraint_degrees` has
+    // nine entries. The call is the same one `max_constraint_degrees` makes per chip — the
+    // AIR's symbolic constraints plus the packed lookups a batch gives it.
+    {
+        use p3_air::symbolic::AirLayout;
+        use p3_air::PermutationAirBuilder;
+        use p3_batch_stark::symbolic::get_max_constraint_degree;
+        use p3_field::Field;
+        use rand_zkvm::machine::Challenge;
+        use rand_zkvm::tables::sha256::{self, sha256_trace, Sha256Air};
+
+        /// `Sha256Air`'s own `BaseAir::preprocessed_trace` deliberately panics (the height is a
+        /// property of the proof, not of the AIR), so it needs the same height-carrying wrapper
+        /// `machine::Chip::Sha256` will be in Task 4.
+        #[derive(Clone)]
+        struct WithPre(Sha256Air, usize);
+        impl<Fld: Field> BaseAir<Fld> for WithPre {
+            fn width(&self) -> usize { BaseAir::<Fld>::width(&self.0) }
+            fn preprocessed_width(&self) -> usize { BaseAir::<Fld>::preprocessed_width(&self.0) }
+            fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Fld>> {
+                Some(Sha256Air::preprocessed_trace_at(self.1))
+            }
+        }
+        impl<AB: AirBuilder + PermutationAirBuilder + InteractionBuilder> Air<AB> for WithPre
+        where AB::F: Field {
+            fn eval(&self, b: &mut AB) { self.0.eval(b) }
+        }
+
+        let trace = sha256_trace(&[], sha256::MIN_LOG_HEIGHT);
+        let air = WithPre(Sha256Air, trace.height());
+        let instances = vec![StarkInstance { air: &air, trace: &trace, public_values: vec![] }];
+        let config = make_config(FriProfile::Test);
+        let pd = ProverData::from_instances(&config, &instances);
+        let degree = get_max_constraint_degree::<F, Challenge, WithPre, _>(
+            &air,
+            AirLayout::from_air::<F>(&air),
+            trace.height(),
+            &pd.common.lookups[0],
+            &p3_lookup::LogUpGadget::new(),
+        );
+        // Split out so the pin says *where* the degree comes from, as the cpu comment above does:
+        // the AIR's own rules are all degree ≤ 3 (the module doc's claim), and the packed
+        // `MEMORY`/`SHA256` fraction-pins — 18 interactions folded into 7 groups, each with a
+        // degree-2 `IS_REAL · selector` count — are what adds the fourth.
+        let air_only = get_max_constraint_degree::<F, Challenge, WithPre, _>(
+            &air,
+            AirLayout::from_air::<F>(&air),
+            trace.height(),
+            &[],
+            &p3_lookup::LogUpGadget::new(),
+        );
+        assert_eq!(air_only, 3, "sha256 table max constraint degree, AIR rules alone");
+        assert_eq!(degree, 4, "sha256 table max constraint degree");
+    }
+}
+
+/// M4.4 Task 3: the sha256 table's documented shape. 466 main columns and 10 preprocessed ones —
+/// the numbers `src/tables/sha256.rs`'s module doc breaks down column by column (and that
+/// `docs/02-tables-and-buses.md` will quote once the chip is wired). A change here is a
+/// constraint-set change, so it has to be deliberate.
+#[test]
+fn sha256_table_has_the_documented_width() {
+    use rand_zkvm::tables::sha256::{col, pre};
+    assert_eq!(col::WIDTH, 466, "sha256 main width");
+    assert_eq!(pre::WIDTH, 10, "sha256 preprocessed width");
+    // The six bit banks of the working variables, then the two post-round banks: 8 x 32 bits is
+    // most of the table.
+    assert_eq!(col::B_BITS - col::A_BITS, 32);
+    assert_eq!(col::ENEW_BITS - col::ANEW_BITS, 32);
+    assert_eq!(col::HOUT - col::HIN, 8);
 }
 
 mod poseidon2_tests {

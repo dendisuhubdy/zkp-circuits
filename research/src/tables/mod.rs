@@ -8,6 +8,7 @@ pub mod cpu;
 pub mod poseidon2;
 pub mod input;
 pub mod keccak;
+pub mod sha256;
 
 pub type F = p3_goldilocks::Goldilocks;
 
@@ -54,6 +55,15 @@ pub mod bus {
     /// what actually ties the permutation to the guest's RAM. `(clk, ptr)` is only the handle
     /// that makes the cpu's syscall row and the chip's block the same event.
     pub const KECCAK: LookupBus<'static> = LookupBus::new("KECCAK");
+    /// M4.4 — cpu (`SYS_SHA256` rows) → sha256: (clk, ptr). The sha256 table provides one entry
+    /// per real 64-row block, on the block's first row, with count `IS_REAL * IS_FIRST` — there is
+    /// no `MULT` witness on this chip, so a real block is claimed by construction. As on
+    /// `KECCAK`, the message is deliberately *just* the clk/ptr pair: the 24 words the
+    /// compression reads and the 8 it writes back never travel on this bus, they travel on
+    /// `MEMORY`, sent by the sha256 chip itself (reads at `ts = 4*clk`, writes at `ts = 4*clk + 1`).
+    /// `(clk, ptr)` is only the handle that makes the cpu's syscall row and the chip's block the
+    /// same event.
+    pub const SHA256: LookupBus<'static> = LookupBus::new("SHA256");
 }
 
 /// Split a u32 into four little-endian bytes as field elements.
