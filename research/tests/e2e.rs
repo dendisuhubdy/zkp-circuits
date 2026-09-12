@@ -236,6 +236,144 @@ fn enough_keccak_permutations_raise_the_declared_memory_height_past_the_floor() 
     m.verify(&p.digest(), &proof).unwrap();
 }
 
+/// M4.4: the end-to-end anchor for the whole `SHA256` path — the guest's own padding, the
+/// `SYS_SHA256` cpu row, the sha256 chip's 64 rounds and its own 32 `MEMORY` accesses, the
+/// proof-declared sha256 height — checked against the host `sha256::sha256` for the same
+/// message. One 55-byte message is one padded 512-bit block, i.e. exactly one compression, so
+/// `sha256_log_height` sits at its floor of 6 (one 64-row block).
+#[test]
+fn sha256_demo_proves_and_verifies_with_one_sha256_block() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::sha256_demo();
+    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    // 55 bytes: the largest message whose `0x80 ‖ zeros ‖ be64(bitlen)` padding still fits one
+    // 64-byte block. `guests::SHA256_DEMO_MSG` is the same literal the guest hashes; the length
+    // assertion is what keeps the two from drifting into a two-block message, which
+    // `sha256_demo` (a single `SHA256` call, no Merkle–Damgård loop) could not hash.
+    let msg = b"The quick brown fox jumps over the lazy dog............";
+    assert_eq!(msg.len(), 55, "one padded block");
+    assert_eq!(msg, guests::SHA256_DEMO_MSG, "the test and the guest hash the same message");
+    let want = rand_zkvm::sha256::sha256(msg);
+    for k in 0..8 {
+        assert_eq!(
+            exec.outputs[k],
+            u32::from_be_bytes(want[4 * k..4 * k + 4].try_into().unwrap()),
+            "digest word {k}",
+        );
+    }
+    assert_eq!(exec.events.iter().filter(|e| e.sha256_row.is_some()).count(), 1, "one compression");
+    let t0 = std::time::Instant::now();
+    let (proof, _) = m.prove_salted(&p, &[], [1, 2, 3, 4], None).unwrap();
+    let prove_time = t0.elapsed();
+    assert_eq!(proof.tier, Tier(10));
+    assert_eq!(proof.sha256_log_height, 6, "one compression fills the minimum block exactly");
+    assert_eq!(proof.keccak_log_height, 0, "and it calls no KECCAK, so that table is absent");
+    // Nine instances: the eight every proof carries plus the sha256 chip. The keccak chip is
+    // the one that is absent here — the sha256 entry is the *tenth* slot in `chips()` order, so
+    // a batch can carry either, both or neither.
+    assert_eq!(proof.batch.degree_bits.len(), 9, "eight tables plus sha256");
+    let t1 = std::time::Instant::now();
+    m.verify(&p.digest(), &proof).unwrap();
+    eprintln!(
+        "sha256_demo(55 bytes): tier {:?}, {} cycles, proof {} bytes, prove {:?}, verify {:?}",
+        proof.tier, exec.cycles(), proof.size(), prove_time, t1.elapsed()
+    );
+}
+
+/// The sha256 table is optional per proof exactly as the keccak table is (M4.2 Task 6's
+/// pattern, applied to a 466-column chip): a guest that never executes `SHA256` declares
+/// `sha256_log_height = 0` and the batch has no sha256 instance at all, which is what makes a
+/// cpu row claiming `SYS_SHA256` unprovable there (`tests/cheating.rs::
+/// sha256_row_without_a_sha256_table_is_rejected`).
+#[test]
+fn a_sha256_free_proof_carries_no_sha256_table() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (proof, _) = m.prove_salted(&p, &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
+    assert_eq!(proof.sha256_log_height, 0, "no SHA256 call, no sha256 table");
+    assert_eq!(proof.keccak_log_height, 0, "and no KECCAK call either");
+    assert_eq!(proof.batch.degree_bits.len(), 8, "the eight tables every proof carries");
+    m.verify(&p.digest(), &proof).unwrap();
+}
+
+/// What one declared sha256 table costs a proof, measured the way M4.2 measured keccak's: the
+/// **same guest**, the same tier, the same declared heights, differing only in whether the batch
+/// carries the sha256 instance. `fib(10)` makes no `SHA256` call, so its honest sha256 table is a
+/// single all-padding block — which is a perfectly provable witness (AGENTS.md invariant 2: with
+/// `IS_REAL = 0` every bus count on every row is zero, so the block sends no memory traffic and
+/// provides no `SHA256` entry), and that is exactly the shape a non-optional chip would have
+/// forced on every proof in existence. Both proofs verify; the delta between them is the number
+/// `docs/03-privacy.md` carries.
+///
+/// The assertions are deliberately loose (the hiding PCS moves each encoding ~1% run to run);
+/// what they pin is the order of magnitude, i.e. that the instance is neither free nor
+/// keccak-sized.
+#[test]
+fn a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile() {
+    use rand_zkvm::machine::build_traces_salted;
+    use rand_zkvm::tables::sha256;
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let mut t = build_traces_salted(&p, &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
+    assert_eq!(t.sha256_log_height, 0, "fib makes no SHA256 call");
+    let free = m.prove_traces(&p, &t, Tier(10));
+    m.verify(&p.digest(), &free).unwrap();
+
+    t.sha256 = Some(sha256::sha256_trace(&[], sha256::MIN_LOG_HEIGHT));
+    t.sha256_log_height = sha256::MIN_LOG_HEIGHT;
+    let carried = m.prove_traces(&p, &t, Tier(10));
+    m.verify(&p.digest(), &carried).unwrap();
+
+    let (a, b) = (free.size(), carried.size());
+    eprintln!(
+        "Test profile, tier 10, fib(10): sha256 table absent {a} bytes, one padding block {b} bytes, delta {} bytes",
+        b as i64 - a as i64,
+    );
+    assert!(b > a + 50_000, "a 466 + 10-column instance is not free: {a} -> {b}");
+    assert!(b < a + 200_000, "nor is it keccak-sized: {a} -> {b}");
+}
+
+/// The same comparison at the profile that actually ships (80 queries, blowup 8, 20 PoW bits) —
+/// the number `docs/03-privacy.md`'s profile table needs, and the one that says whether a guest
+/// calling `SHA256` still fits the node's proof cap. Ignored for the same reason
+/// `measure_production_profile_at_tier_10_and_12` is: two production-profile proofs are ~13 s.
+#[test]
+#[ignore]
+fn measure_the_sha256_table_cost_at_the_production_profile() {
+    use rand_zkvm::machine::build_traces_salted;
+    use rand_zkvm::tables::sha256;
+    let m = Machine::new(FriProfile::Production);
+    let p = guests::fib(10);
+    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let mut t = build_traces_salted(&p, &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
+    let t0 = std::time::Instant::now();
+    let free = m.prove_traces(&p, &t, Tier(10));
+    let free_prove = t0.elapsed();
+    m.verify(&p.digest(), &free).unwrap();
+    t.sha256 = Some(sha256::sha256_trace(&[], sha256::MIN_LOG_HEIGHT));
+    t.sha256_log_height = sha256::MIN_LOG_HEIGHT;
+    let t1 = std::time::Instant::now();
+    let carried = m.prove_traces(&p, &t, Tier(10));
+    let carried_prove = t1.elapsed();
+    m.verify(&p.digest(), &carried).unwrap();
+    println!(
+        "Production profile, tier 10, fib(10): sha256 absent {} bytes ({:?} to prove), one block {} bytes ({:?}), delta {} bytes",
+        free.size(), free_prove, carried.size(), carried_prove,
+        carried.size() as i64 - free.size() as i64,
+    );
+    // And a guest that genuinely hashes, for the whole-proof number.
+    let d = guests::sha256_demo();
+    let t2 = std::time::Instant::now();
+    let (proof, dexec) = m.prove_salted(&d, &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
+    let demo_prove = t2.elapsed();
+    m.verify(&d.digest(), &proof).unwrap();
+    println!(
+        "Production profile, tier 10, sha256_demo: {} words, {} cycles, slh {}, mem 2^{}, {} bytes ({:?} to prove)",
+        d.words.len(), dexec.cycles(), proof.sha256_log_height, proof.mem_log_height, proof.size(), demo_prove,
+    );
+}
+
 #[test]
 fn tier_padding_hides_cycle_count() {
     let m = Machine::new(FriProfile::Test);
@@ -293,14 +431,25 @@ fn verifier_key_is_cached_after_first_verify() {
     // (same tier, same declared program/input heights), asking for both must miss the
     // cache separately and hand back two different keys.
     assert_eq!(proof.keccak_log_height, 0, "fib is keccak-free");
+    assert_eq!(proof.sha256_log_height, 0, "and sha256-free");
     let (t, plh, ilh) = (proof.tier, proof.program_log_height, proof.input_log_height);
-    let keccak_free = m.verifier_key(t, plh, ilh, 0);
-    assert_eq!(m.cached_keys(), 1, "the keccak-free key is the one `verify` already cached");
-    let with_keccak = m.verifier_key(t, plh, ilh, 5);
+    let bare = m.verifier_key(t, plh, ilh, 0, 0);
+    assert_eq!(m.cached_keys(), 1, "the hash-table-free key is the one `verify` already cached");
+    let with_keccak = m.verifier_key(t, plh, ilh, 5, 0);
     assert_eq!(m.cached_keys(), 2, "`keccak_log_height = 5` is a different cache key from `0`");
-    assert!(!std::sync::Arc::ptr_eq(&keccak_free, &with_keccak));
-    assert_eq!(keccak_free.lookups.len(), 8, "eight instances");
+    assert!(!std::sync::Arc::ptr_eq(&bare, &with_keccak));
+    // M4.4: `sha256_log_height` is the key's fifth component, and independent of the fourth —
+    // the four combinations of "declares a keccak table" x "declares a sha256 table" are four
+    // different chip sets and therefore four different `CommonData`s.
+    let with_sha256 = m.verifier_key(t, plh, ilh, 0, 6);
+    assert_eq!(m.cached_keys(), 3, "`sha256_log_height = 6` is a different cache key again");
+    let with_both = m.verifier_key(t, plh, ilh, 5, 6);
+    assert_eq!(m.cached_keys(), 4, "and both together is a fourth");
+    assert!(!std::sync::Arc::ptr_eq(&with_keccak, &with_sha256));
+    assert_eq!(bare.lookups.len(), 8, "eight instances");
     assert_eq!(with_keccak.lookups.len(), 9, "nine instances");
+    assert_eq!(with_sha256.lookups.len(), 9, "nine instances — sha256 in keccak's place");
+    assert_eq!(with_both.lookups.len(), 10, "ten instances");
 }
 
 #[test]

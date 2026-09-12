@@ -611,29 +611,32 @@ fn alu_max_constraint_degree_is_pinned() {
     // any declared program height give the same numbers. `Tier(10)`/`MIN_LOG_HEIGHT` (the
     // smallest of each) are used only because `max_constraint_degrees` needs concrete values
     // to size the tables.
-    // M4.2 (Task 6): the keccak table is optional per proof, so `chips()` — and therefore this
-    // list — has two shapes. Pin both. `klh = 0` is the eight-chip batch a keccak-free proof
-    // uses; `klh = keccak::MIN_LOG_HEIGHT` is the nine-chip one. Every shared table's degree
-    // must be identical between them: dropping an instance changes the batch's instance count,
-    // not any other AIR's constraints or its own packed lookups.
-    let keccak_free = max_constraint_degrees(
+    // M4.2 (Task 6) and M4.4: the keccak *and* sha256 tables are optional per proof, so
+    // `chips()` — and therefore this list — has four shapes. Pin the two extremes: `klh = slh =
+    // 0` is the eight-chip batch a hash-syscall-free proof uses, and both at their minima is the
+    // ten-chip one. Every shared table's degree must be identical between them: dropping an
+    // instance changes the batch's instance count, not any other AIR's constraints or its own
+    // packed lookups.
+    let bare = max_constraint_degrees(
         Tier(10),
         MIN_LOG_HEIGHT,
         rand_zkvm::tables::input::MIN_LOG_HEIGHT,
         0,
+        0,
         Tier(10).min_mem_log_height(),
     );
-    assert_eq!(keccak_free.len(), 8, "eight chips when the proof declares no keccak table");
+    assert_eq!(bare.len(), 8, "eight chips when the proof declares neither hash table");
 
     let degrees = max_constraint_degrees(
         Tier(10),
         MIN_LOG_HEIGHT,
         rand_zkvm::tables::input::MIN_LOG_HEIGHT,
         rand_zkvm::tables::keccak::MIN_LOG_HEIGHT,
+        rand_zkvm::tables::sha256::MIN_LOG_HEIGHT,
         Tier(10).min_mem_log_height(),
     );
-    assert_eq!(degrees.len(), 9, "one degree per chip in machine::chips() order");
-    assert_eq!(keccak_free[..], degrees[..8], "the other eight tables are unaffected");
+    assert_eq!(degrees.len(), 10, "one degree per chip in machine::chips() order");
+    assert_eq!(bare[..], degrees[..8], "the other eight tables are unaffected");
 
     // program: M3.4's main-trace in-circuit decoder. Every one-hot flag pin
     // (`flag*(op-code)=0`) and field-consistency equation is at most degree 2 in the
@@ -688,72 +691,52 @@ fn alu_max_constraint_degree_is_pinned() {
     // degree-2 `IS_REAL · sel_sum` count — don't raise it either.
     assert_eq!(degrees[8], 3, "keccak table max constraint degree");
 
-    // sha256 (M4.4 Task 3): measured max is 4 — the tenth entry of this pin — of which the AIR's
-    // own rules account for 3 and the packed lookups for the fourth. 4 costs nothing over 3 here:
-    // the quotient is chunked by `log2_ceil(degree + is_zk - 1)`, which is 2 for both. The three
-    // cubic rules are the ones that must be cubic: `xor3` inside Σ0/Σ1 and σ0/σ1, and `Maj`'s
-    // `ab + bc + ca − 2abc`. Everything else is written to stay at or below that — the σ values
-    // get their own two columns (`S1`, `S0`) precisely so the *gated* schedule equation stays
-    // degree 2 instead of carrying a cubic σ under a preprocessed selector, and every carry is
-    // spelled as bits so no rule needs a range lookup.
-    //
-    // It is measured here directly off `Sha256Air` rather than read out of `degrees[9]`: the
-    // chip joins `machine::chips()` in Task 4, and until it does `max_constraint_degrees` has
-    // nine entries. The call is the same one `max_constraint_degrees` makes per chip — the
-    // AIR's symbolic constraints plus the packed lookups a batch gives it.
+    // sha256 (M4.4): measured max is 4, of which the AIR's own rules account for 3 and the packed
+    // lookups for the fourth. 4 costs nothing over 3 here: the quotient is chunked by
+    // `log2_ceil(degree + is_zk - 1)`, which is 2 for both. The three cubic rules are the ones
+    // that must be cubic: `xor3` inside Σ0/Σ1 and σ0/σ1, and `Maj`'s `ab + bc + ca − 2abc`.
+    // Everything else is written to stay at or below that — the σ values get their own two
+    // columns (`S1`, `S0`) precisely so the *gated* schedule equation stays degree 2 instead of
+    // carrying a cubic σ under a preprocessed selector, and every carry is spelled as bits so no
+    // rule needs a range lookup.
+    assert_eq!(degrees[9], 4, "sha256 table max constraint degree");
+
+    // Task 3 measured this off `Sha256Air` through a local height-carrying wrapper, because
+    // `Chip::Sha256` did not exist yet; the wrapper is gone and the two halves below are measured
+    // off the real chip instance, so the pin says *where* the degree comes from (as the cpu
+    // comment above does): the AIR's own rules are all degree ≤ 3 (the module doc's claim), and
+    // the packed `MEMORY`/`SHA256` fraction-pins — 18 interactions folded into 7 groups, each with
+    // a degree-2 `IS_REAL · selector` count — are what adds the fourth. (Folding each state word's
+    // read and write-back into one degree-2 send gives 10 interactions but *9* groups;
+    // `tables/sha256.rs`'s rule 12 records that measurement.)
     {
         use p3_air::symbolic::AirLayout;
-        use p3_air::PermutationAirBuilder;
         use p3_batch_stark::symbolic::get_max_constraint_degree;
-        use p3_field::Field;
-        use rand_zkvm::machine::Challenge;
-        use rand_zkvm::tables::sha256::{self, sha256_trace, Sha256Air};
+        use rand_zkvm::machine::{Challenge, Chip, Machine};
+        use rand_zkvm::tables::sha256::{self, Sha256Air};
 
-        /// `Sha256Air`'s own `BaseAir::preprocessed_trace` deliberately panics (the height is a
-        /// property of the proof, not of the AIR), so it needs the same height-carrying wrapper
-        /// `machine::Chip::Sha256` will be in Task 4.
-        #[derive(Clone)]
-        struct WithPre(Sha256Air, usize);
-        impl<Fld: Field> BaseAir<Fld> for WithPre {
-            fn width(&self) -> usize { BaseAir::<Fld>::width(&self.0) }
-            fn preprocessed_width(&self) -> usize { BaseAir::<Fld>::preprocessed_width(&self.0) }
-            fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Fld>> {
-                Some(Sha256Air::preprocessed_trace_at(self.1))
-            }
-        }
-        impl<AB: AirBuilder + PermutationAirBuilder + InteractionBuilder> Air<AB> for WithPre
-        where AB::F: Field {
-            fn eval(&self, b: &mut AB) { self.0.eval(b) }
-        }
-
-        let trace = sha256_trace(&[], sha256::MIN_LOG_HEIGHT);
-        let air = WithPre(Sha256Air, trace.height());
-        let instances = vec![StarkInstance { air: &air, trace: &trace, public_values: vec![] }];
-        let config = make_config(FriProfile::Test);
-        let pd = ProverData::from_instances(&config, &instances);
-        let degree = get_max_constraint_degree::<F, Challenge, WithPre, _>(
-            &air,
-            AirLayout::from_air::<F>(&air),
-            trace.height(),
-            &pd.common.lookups[0],
-            &p3_lookup::LogUpGadget::new(),
-        );
-        // Split out so the pin says *where* the degree comes from, as the cpu comment above does:
-        // the AIR's own rules are all degree ≤ 3 (the module doc's claim), and the packed
-        // `MEMORY`/`SHA256` fraction-pins — 18 interactions folded into 7 groups, each with a
-        // degree-2 `IS_REAL · selector` count — are what adds the fourth. (Folding each state
-        // word's read and write-back into one degree-2 send gives 10 interactions but *9* groups;
-        // `tables/sha256.rs`'s rule 12 records that measurement.)
-        let air_only = get_max_constraint_degree::<F, Challenge, WithPre, _>(
-            &air,
-            AirLayout::from_air::<F>(&air),
-            trace.height(),
+        let height = 1usize << sha256::MIN_LOG_HEIGHT;
+        let chip = Chip::Sha256(Sha256Air, height);
+        let air_only = get_max_constraint_degree::<F, Challenge, Chip, _>(
+            &chip,
+            AirLayout::from_air::<F>(&chip),
+            height,
             &[],
             &p3_lookup::LogUpGadget::new(),
         );
-        assert_eq!(pd.common.lookups[0].len(), 7, "sha256 packed lookup groups");
         assert_eq!(air_only, 3, "sha256 table max constraint degree, AIR rules alone");
-        assert_eq!(degree, 4, "sha256 table max constraint degree");
+        // The packed groups, read off the same `CommonData` `verifier_key` hands a verifier — the
+        // sha256 instance is last in `chips()` order, hence index 9 in the ten-chip shape.
+        let m = Machine::new(FriProfile::Test);
+        let common = m.verifier_key(
+            Tier(10),
+            MIN_LOG_HEIGHT,
+            rand_zkvm::tables::input::MIN_LOG_HEIGHT,
+            rand_zkvm::tables::keccak::MIN_LOG_HEIGHT,
+            sha256::MIN_LOG_HEIGHT,
+        );
+        assert_eq!(common.lookups.len(), 10);
+        assert_eq!(common.lookups[9].len(), 7, "sha256 packed lookup groups");
     }
 }
 
