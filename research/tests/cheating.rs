@@ -7,10 +7,10 @@
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::Matrix;
 use rand_zkvm::asm::{ops::*, Assembler};
-use rand_zkvm::emulator::{execute, SLOT_W};
+use rand_zkvm::emulator::{execute, CycleEvent, HashRow, MemAccess, Syscall, SLOT_W, SPACE_RAM};
 use rand_zkvm::guests;
-use rand_zkvm::isa::{AluOp, Instr, REG_A0, REG_A1};
-use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, Tier, Traces};
+use rand_zkvm::isa::{AluOp, Decoded, Instr, Program, REG_A0, REG_A1, REG_A2, REG_A7, SYS_POSEIDON2};
+use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, Tier, Traces, Val};
 use rand_zkvm::tables::{alu, cpu, keccak, limbs, memory, nibble, poseidon2, program, range, F};
 
 /// `rejects()`, and the two constraint-panic prefixes it matches (`CONSTRAINT_PANIC` and
@@ -865,6 +865,262 @@ fn skipping_the_first_write_back_row_is_rejected() {
     assert_eq!(writes[0], ecall + 1, "the first write-back row follows the ecall row directly");
     assert_eq!(t.cpu.values[writes[0] * w + cpu::col::HASH_FIN], F::ZERO);
     t.cpu.values[writes[0] * w + cpu::col::HASH_FIN] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// ---------------------------------------------------------------------------
+// Audit (2026-09-12) regressions, ZC1/ZC2: free-standing hash rows. Until the entry gates and
+// the `HASH_FIN` pin landed, every hash row-group routing rule was gated on the *current* row
+// already being inside a group — so a cheating witness could splice `IS_HASH_OUT`/`IS_HASH`
+// rows in anywhere, with a free, unbounded `HASH_PTR` (the `SYS_HASH`-gated `HP0..3`
+// decomposition never fires on such rows) and no ecall, no fetch, and (on write-back rows) not
+// even a permutation consumed: arbitrary RAM writes at arbitrary addresses at an
+// attacker-chosen cycle, from which any "execution" can be fabricated. Each test below builds
+// the *complete* attack witness — not just a flipped cell — by feeding a crafted event stream
+// through the honest trace builders, so before the fix it verified outright (RED-verified by
+// re-running these four tests with the new gates commented out; the report records the
+// output); afterwards the named gate is what rejects it.
+
+/// A small guest with one genuine `POSEIDON2` call (`n = 4` words at `0x40`) and `noops`
+/// `addi x0, x0, 0` slots between the hash group and the output write — sacrificial
+/// instructions a spliced row-group can replace without disturbing any register value (a
+/// no-op writes nothing and reads only `x0`'s always-fresh zero), bus count, or public value.
+/// Returns the program and its honest outputs (out0 = 42).
+fn audit_guest(noops: usize) -> (Program, [u32; 8]) {
+    let mut a = Assembler::new(0);
+    a.extend(li(REG_A2, 42));
+    a.extend(li(REG_A7, SYS_POSEIDON2 as i32));
+    a.extend(li(REG_A0, 0x40));
+    a.extend(li(REG_A1, 4));
+    a.push(ecall());
+    for _ in 0..noops { a.push(addi(0, 0, 0)); }
+    a.extend(write_output(0, REG_A2));
+    a.extend(halt());
+    let p = a.assemble();
+    let outputs = execute(&p, &[], 10_000).unwrap().outputs;
+    (p, outputs)
+}
+
+/// Indices of the guest's no-op events in an execution (its only `addi x0, x0, 0`s).
+fn noop_rows(events: &[CycleEvent]) -> Vec<usize> {
+    events.iter().enumerate()
+        .filter(|(_, e)| e.instr == Instr::AluImm { op: AluOp::Add, rd: 0, rs1: 0, imm: 0 })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// A synthetic write-back row event: `IS_HASH_OUT` with the given `fin`, writing `words` at
+/// `ptr + 4·fin .. + 3` with sponge state `state`. `cpu_trace` turns this into a complete
+/// write-back row (`HVL` limbs and the `HIMAX/INV` gadget included) as long as some ecall row
+/// preceded it (its `hash_ptr_n` state) — the row a cheating prover writes by hand.
+fn rogue_write_out(fin: bool, pc: u32, next_pc: u32, ptr: u32, words: [u32; 4], state: [Val; 8]) -> CycleEvent {
+    let base = ptr + if fin { 4 } else { 0 };
+    CycleEvent {
+        clk: 0, // renumbered once the stream is assembled
+        pc, next_pc,
+        instr: Instr::Ecall, // unread on hash rows (`dec` below is what the builder consumes)
+        dec: Decoded::default(),
+        a: 0, b: 0, c: 0, alu_out: 0, tgt: 0, mem_addr: 0, mem_val: 0,
+        sys: None,
+        accesses: (0..4).map(|k| MemAccess { space: SPACE_RAM, addr: base + k as u32, slot: k as u32, value: words[k as usize], is_write: true }).collect(),
+        alu: Vec::new(),
+        hash_row: Some(HashRow::WriteOut { fin, words, state }),
+        keccak_row: None,
+        keccak_accesses: Vec::new(),
+    }
+}
+
+/// Build the full witness for a crafted event stream through the *honest* builders — the same
+/// `build_traces_salted` `Machine::prove` uses (empty inputs, zero salt, tier 10) —
+/// renumbering `clk` contiguously first so `CLK` and the memory timestamps agree.
+fn rogue_traces(p: &rand_zkvm::isa::Program, mut events: Vec<CycleEvent>, outputs: [u32; 8]) -> Traces {
+    for (i, e) in events.iter_mut().enumerate() { e.clk = i as u32; }
+    let exec = rand_zkvm::emulator::Execution { events, outputs, halted: true };
+    build_traces_salted(p, &[], [0u32; 4], &exec, Tier(10)).unwrap()
+}
+
+/// ZC1, the entry gate `(1 − SYS_HASH − is_hash − is_hash_out)·n(IS_HASH_OUT) = 0`: a
+/// free-standing write-back pair spliced in after an *ordinary* row — the canonical attack.
+/// The pair takes the second no-op's slot, so its predecessor is the first no-op. Eight
+/// zero-word writes land at the stale group pointer `0x40..0x47` (the builder's `hash_ptr_n`
+/// carry), no permutation is consumed, and outputs/`hc` are untouched — pre-fix this verified.
+#[test]
+fn a_free_standing_write_back_pair_after_an_ordinary_row_is_rejected() {
+    let (p, outputs) = audit_guest(2);
+    let honest = execute(&p, &[], 10_000).unwrap();
+    let noops = noop_rows(&honest.events);
+    assert_eq!(noops.len(), 2);
+    let pc = honest.events[noops[1]].pc;
+    let mut events: Vec<CycleEvent> = Vec::new();
+    for (i, e) in honest.events.iter().enumerate() {
+        if i == noops[1] {
+            events.push(rogue_write_out(false, pc, pc, 0x40, [0; 4], [Val::ZERO; 8]));
+            events.push(rogue_write_out(true, pc, pc + 4, 0x40, [0; 4], [Val::ZERO; 8]));
+        } else {
+            events.push(e.clone());
+        }
+    }
+    let m = Machine::new(FriProfile::Test);
+    let t = rogue_traces(&p, events, outputs);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// ZC1, the exit gate `HASH_FIN·n(IS_HASH_OUT) = 0`: the same pair, but spliced directly after
+/// the genuine group's own final write-back row — dressed up as the group's tail. The honest
+/// `HASH_FIN = 1` row must end the group.
+#[test]
+fn a_free_standing_write_back_pair_after_a_hash_group_is_rejected() {
+    let (p, outputs) = audit_guest(1);
+    let honest = execute(&p, &[], 10_000).unwrap();
+    let noops = noop_rows(&honest.events);
+    assert_eq!(noops.len(), 1);
+    let pc = honest.events[noops[0]].pc;
+    let mut events: Vec<CycleEvent> = Vec::new();
+    for (i, e) in honest.events.iter().enumerate() {
+        if i == noops[0] {
+            events.push(rogue_write_out(false, pc, pc, 0x40, [0; 4], [Val::ZERO; 8]));
+            events.push(rogue_write_out(true, pc, pc + 4, 0x40, [0; 4], [Val::ZERO; 8]));
+        } else {
+            events.push(e.clone());
+        }
+    }
+    let m = Machine::new(FriProfile::Test);
+    let t = rogue_traces(&p, events, outputs);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// ZC1, the entry gate `(1 − SYS_HASH − is_hash)·n(IS_HASH) = 0`: a whole rogue "group" —
+/// absorb + two write-backs, no ecall — spliced in place of the first no-op (its predecessor
+/// is the genuine group's `HASH_FIN = 1` row, which is neither `SYS_HASH` nor `IS_HASH`). The
+/// absorb honestly re-reads the four digest words the genuine group just wrote at `0x40..0x43`
+/// (memory stays consistent) and hashes them through one *genuine* permutation — which the
+/// witness really does supply to the POSEIDON2 table; that is not the hole. The hole is the
+/// rogue absorb's free sponge state and pointer, pinned by nothing an ecall would have
+/// provided.
+#[test]
+fn a_free_standing_absorb_group_with_a_forged_state_is_rejected() {
+    let (p, outputs) = audit_guest(2);
+    let honest = execute(&p, &[], 10_000).unwrap();
+    let noops = noop_rows(&honest.events);
+    assert_eq!(noops.len(), 2);
+    // The genuine digest at `0x40..0x47`: the message was four zero words (that region is
+    // never written before the group reads it).
+    let digest = rand_zkvm::hash::sponge_hash(&[0, 0, 0, 0]);
+    let mut merged = [Val::ZERO; 8];
+    for k in 0..4 { merged[k] = Val::from_u32(digest[k]); }
+    let state_out = rand_zkvm::hash::permute_state(merged);
+    let rehashed = rand_zkvm::hash::split_digest([state_out[0], state_out[1], state_out[2], state_out[3]]);
+    let pc = honest.events[noops[0]].pc;
+    let mut events: Vec<CycleEvent> = Vec::new();
+    for (i, e) in honest.events.iter().enumerate() {
+        if i == noops[0] {
+            events.push(CycleEvent {
+                clk: 0, pc, next_pc: pc,
+                instr: Instr::Ecall, dec: Decoded::default(),
+                a: 0, b: 0, c: 0, alu_out: 0, tgt: 0, mem_addr: 0, mem_val: 0,
+                sys: None,
+                accesses: (0..4).map(|k| MemAccess { space: SPACE_RAM, addr: 0x40 + k as u32, slot: k as u32, value: digest[k as usize], is_write: false }).collect(),
+                alu: Vec::new(),
+                hash_row: Some(HashRow::Absorb { idx: 0, left_before: 4, words: [digest[0], digest[1], digest[2], digest[3]], active: [true; 4], state_in: [Val::ZERO; 8], state_out }),
+                keccak_row: None,
+                keccak_accesses: Vec::new(),
+            });
+            events.push(rogue_write_out(false, pc, pc, 0x40, [rehashed[0], rehashed[1], rehashed[2], rehashed[3]], state_out));
+            events.push(rogue_write_out(true, pc, pc + 4, 0x40, [rehashed[4], rehashed[5], rehashed[6], rehashed[7]], state_out));
+        } else {
+            events.push(e.clone());
+        }
+    }
+    let m = Machine::new(FriProfile::Test);
+    let t = rogue_traces(&p, events, outputs);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// ZC2, the pin `HASH_FIN·(1 − IS_HASH_OUT) = 0`: setting `HASH_FIN` on the ecall row drives
+/// `continues` to 0 there, so the rest of the row-group's `HASH_PTR` is no longer a copy of the
+/// ecall row's range-checked one — it becomes a free, unbounded field element on the `MEMORY`
+/// bus (the mod-`p` key-aliasing hole CRITICAL 1 closed, one row later), while the ecall row's
+/// own `NEXT_PC` snaps to `PC + 4` and silently swallows one instruction. The witness below
+/// does the whole thing: the group shifts up by one instruction slot (the no-op vanishes) and
+/// every absorb/write-back row points at `ROGUE_PTR = 2^31`, past the `2^30` bound the ecall's
+/// `HP0..3` decomposition enforces — pre-fix this verified, with the digest written to
+/// `2^31..` instead of `0x40..`.
+#[test]
+fn hash_fin_on_the_ecall_row_detaching_hash_ptr_is_rejected() {
+    const ROGUE_PTR: u32 = 0x8000_0000;
+    let (p, outputs) = audit_guest(1);
+    let honest = execute(&p, &[], 10_000).unwrap();
+    let h = honest.events.iter().position(|e| matches!(e.sys, Some(Syscall::Poseidon2 { .. }))).expect("the poseidon2 ecall");
+    let noops = noop_rows(&honest.events);
+    assert_eq!(noops.len(), 1);
+    assert_eq!(noops[0], h + 4, "the no-op follows the group directly");
+    let mut events: Vec<CycleEvent> = Vec::new();
+    for (i, e) in honest.events.iter().enumerate() {
+        if i == noops[0] { continue; } // the instruction the shifted group lands on: gone
+        let mut e = e.clone();
+        if i == h {
+            e.next_pc = e.pc + 4; // `continues = 0` here once HASH_FIN is set below
+        } else if i == h + 1 || i == h + 2 {
+            e.pc += 4;
+            e.next_pc += 4;
+            for a in &mut e.accesses { a.addr = a.addr - 0x40 + ROGUE_PTR; }
+        } else if i == h + 3 {
+            e.pc += 4;
+            e.next_pc = e.pc + 4;
+            for a in &mut e.accesses { a.addr = a.addr - 0x40 + ROGUE_PTR; }
+        }
+        events.push(e);
+    }
+    let m = Machine::new(FriProfile::Test);
+    let mut t = rogue_traces(&p, events, outputs);
+    // The builders never produce this cell combination — that is exactly the point of the pin:
+    // `HASH_FIN` on the ecall row, and the rest of the group carrying the rogue pointer the
+    // ecall's own bounded one no longer reaches.
+    let w = cpu::col::WIDTH;
+    let (ecall_row, absorbs, writes) = hash_rows(&t);
+    t.cpu.values[ecall_row * w + cpu::col::HASH_FIN] = F::ONE;
+    for r in absorbs.iter().chain(writes.iter()) {
+        t.cpu.values[*r * w + cpu::col::HASH_PTR] = F::from_u32(ROGUE_PTR);
+    }
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// ZC1, the `SYS_KECCAK` classification (controller ruling 2): a `KECCAK` row is an ecall row
+/// of the ordinary shape — one row, `continues` keys off `SYS_HASH` alone — so nothing
+/// hash-shaped may follow it, exactly as for `SYS_WRITE`. Splicing a write-back pair in right
+/// after the genuine `KECCAK` row is therefore the entry gate's business, not a special case:
+/// `SYS_KECCAK` is not in either gate's whitelist, so `n(IS_HASH_OUT)` is forced to zero there.
+#[test]
+fn a_free_standing_write_back_pair_after_a_keccak_row_is_rejected() {
+    // A genuine `POSEIDON2` group first (at `0x40`), then the `KECCAK` call (at `0x100`, clear
+    // of the digest): the rogue pair rides the pointer that group left behind, exactly as in
+    // the ordinary-row test — what differs is only the row it is spliced after.
+    let mut a = Assembler::new(0);
+    a.extend(li(REG_A2, 42));
+    a.extend(call_poseidon2(0x40, 4));
+    a.extend(call_keccak(0x100));
+    a.push(addi(0, 0, 0));
+    a.push(addi(0, 0, 0));
+    a.extend(write_output(0, REG_A2));
+    a.extend(halt());
+    let p = a.assemble();
+    let honest = execute(&p, &[], 100_000).unwrap();
+    let k = honest.events.iter().position(|e| matches!(e.sys, Some(Syscall::Keccak { .. }))).expect("the keccak ecall");
+    let noops = noop_rows(&honest.events);
+    assert_eq!(noops.len(), 2);
+    assert_eq!(noops[0], k + 1, "the first no-op follows the keccak row directly");
+    let pc = honest.events[noops[0]].pc;
+    let mut events: Vec<CycleEvent> = Vec::new();
+    for (i, e) in honest.events.iter().enumerate() {
+        if i == noops[0] {
+            events.push(rogue_write_out(false, pc, pc, 0x40, [0; 4], [Val::ZERO; 8]));
+            events.push(rogue_write_out(true, pc, pc + 4, 0x40, [0; 4], [Val::ZERO; 8]));
+        } else {
+            events.push(e.clone());
+        }
+    }
+    let m = Machine::new(FriProfile::Test);
+    let t = rogue_traces(&p, events, honest.outputs);
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 

@@ -483,6 +483,54 @@ still under the degree-8 ceiling). Together the three cover every
 transition that could land on `hash_fin = 1`, so a `POSEIDON2` call now
 always writes both digest rows.
 
+**Entry gates (audit ZC1/ZC2, 2026-09-12).** Every rule above is gated on
+the *current* row already being inside a group. Nothing constrained what
+may **precede** an `is_hash` or `is_hash_out` row — unlike the digest and
+indigest prefixes, which have proper entry control (first-row pin,
+contiguous prefix, forced `digest_last -> is_indigest`/`is_salt`
+transitions). A witness could therefore splice a free-standing write-back
+*pair* in after any ordinary row: four `MEMORY` writes per row at a
+`hash_ptr` that is a free, unbounded field element (the `sys_hash`-gated
+`hp0..3` decomposition never fires on such a row, and the `continues`
+carry-forward only ever propagates *into* a group from its own ecall row),
+no permutation consumed (`is_hash_or_digest` excludes `is_hash_out`), and
+`hv0..3` pinned only to a free `hs`. Eight arbitrary RAM words at an
+attacker-chosen cycle is a total break of execution integrity: plant
+values later honest loads read, then fabricate a fully consistent
+execution ending in any output. Three transition gates close it —
+
+- `(1 - sys_hash - is_hash)·n(is_hash) = 0` — an absorb row may only
+  follow the ecall row or another absorb row;
+- `(1 - sys_hash - is_hash - is_hash_out)·n(is_hash_out) = 0` — a
+  write-back row may only follow the ecall row (the `n = 0` case), an
+  absorb row, or the first write-back row;
+- `hash_fin·n(is_hash_out) = 0` — nothing hash-shaped follows the second
+  write-back row; the group ends there.
+
+All three are products of two degree-1 selectors (degree 2; cpu's pinned
+degree 8 is unmoved). Every other row kind is excluded by having neither
+`sys_hash` nor `is_hash`/`is_hash_out` set: an ordinary instruction row, a
+digest or indigest row, a padding row — and a `sys_keccak` row, which is
+an *ordinary-shaped* ecall row (one row, `continues` keys off `sys_hash`
+alone), so like `sys_write` it may not be followed by a hash row. Only
+`sys_hash` opens a row-group.
+
+Alongside them, `hash_fin` itself is pinned to write-back rows:
+`hash_fin·(1 - is_hash_out) = 0`. It was previously free on every other
+row, and setting it on the ecall row drives `continues` to 0 there — so
+the rest of the group's `hash_ptr`/`hash_n` stop being carried from the
+ecall row's range-checked values and become free field elements on the
+`MEMORY` bus (the mod-`p` key-aliasing hole the address bound above
+closes, one row later), while the ecall row's own `next_pc` snaps to
+`pc + 4` under the generic fallthrough rule and silently swallows one
+instruction. Four attack-witness regression tests in `tests/cheating.rs`
+build the complete forged witnesses through the honest trace builders
+(`a_free_standing_write_back_pair_after_an_ordinary_row_is_rejected` and
+its `_after_a_hash_group_`/`_after_a_keccak_row_` siblings,
+`a_free_standing_absorb_group_with_a_forged_state_is_rejected`,
+`hash_fin_on_the_ecall_row_detaching_hash_ptr_is_rejected`); each verifies
+with the gates removed and is rejected with them in.
+
 **Canonical digest encoding.** `hv_lo + hv_hi·2^32 = hs_lane` is only a
 *field* identity — for any lane value `v < 2^32 - 1` the non-canonical
 pair `(v + 1, 2^32 - 1)` satisfies it too (`(v+1) + (2^32-1)·2^32 = v + p
@@ -534,6 +582,11 @@ wherever its message is unconstrained):
 - *padding*: `sys_hash is_hash is_hash_out hash_fin` are `SELECTORS`
   entries, so `(1 - is_real)·v = 0` forces all four to 0 — no lookup on
   either bus fires with a nonzero count there.
+- *every row that is none of the above* (ordinary instruction, digest,
+  indigest, `sys_keccak`, padding): the entry gates above force
+  `n(is_hash) = n(is_hash_out) = 0`, so no hash-shaped row can begin
+  anywhere but inside a group its own ecall row opened, and `hash_fin` is
+  zero on it (`hash_fin·(1 - is_hash_out) = 0`).
 
 ### M3.4: the digest-row prefix — `hc` in-circuit
 
