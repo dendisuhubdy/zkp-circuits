@@ -65,9 +65,9 @@
 //! equation multiplies a preprocessed selector into a degree-2 expression rather than a cubic
 //! one.
 //!
-//! The *instance's* measured maximum is 4: the 18 bus interactions below pack into 7 LogUp
-//! groups whose fraction-pins carry a degree-2 `IS_REAL · selector` count, and that is where the
-//! fourth degree comes from — not from any rule. It is free: the quotient is chunked by
+//! The *instance's* measured maximum is 4: the 10 bus interactions below pack into 9 LogUp groups
+//! whose fraction-pins carry a degree-2 `IS_REAL · selector` count, and that is where the fourth
+//! degree comes from — not from any rule. It is free: the quotient is chunked by
 //! `log2_ceil(degree + is_zk − 1)`, which is 2 at either 3 or 4, and the config's ceiling is 8.
 //! `tests/tables.rs::alu_max_constraint_degree_is_pinned` pins both numbers.
 //!
@@ -100,10 +100,13 @@
 //!   block-constant, so row 0 is where they are pinned to the working variables.
 //! * the eight write-backs on row 63, at `PTR + 16 + i`, gated by `IS_LAST`.
 //!
-//! Counted as the AIR writes them (which is what the packed-lookup budget sees) that is 17
-//! `MEMORY` interactions on *every* row — 1 read slot + 8 read slots + 8 write slots, each a
-//! separate send whose count is zero on the rows that carry no such access — plus the single
-//! `SHA256` entry.
+//! The state word `i` is read on row 0 and written back on row 63 at the same address, and those
+//! two rows are disjoint, so each pair is *one* selector-weighted send (`value = IS_FIRST · HIN[i]
+//! + IS_LAST · HOUT[i]`, `ts = 4·CLK + IS_LAST`, `is_write = IS_LAST`) — `keccak`'s technique for
+//! the same job. Counted as the AIR writes them (which is what the packed-lookup budget and the
+//! permutation trace see) that is 9 `MEMORY` interactions on *every* row — the message-word read
+//! plus the eight state slots, each a send whose count is zero on the rows that carry no such
+//! access — plus the single `SHA256` entry, so 10 per row, exactly `keccak`'s count.
 //!
 //! ## The final add
 //!
@@ -567,9 +570,18 @@ where
         // Every message column is pinned on every row that sends one: `CLK`/`PTR` by rule 1 (and
         // the `SHA256` bus, which is what ties them to the cpu's own row), `WNEW` by rules 4/7,
         // `HIN` by rules 1/3, `HOUT` by rule 10.
+        //
+        // The state word `i` is read on row 0 and written back on row 63 at the *same address*,
+        // and those two rows are disjoint, so the two accesses are **one** selector-weighted send
+        // — the technique `keccak`'s rules 12/13 use to spread 100 accesses over 32 rows: on any
+        // row at most one of `IS_FIRST`/`IS_LAST` is 1, so the message is a single well-defined
+        // access, and on every other row its count is zero. 9 `MEMORY` interactions per row (one
+        // message-word read plus these eight) instead of 17, which is what the packed-lookup
+        // budget and the permutation trace see. Invariant 1 still holds branch by branch: the read
+        // branch's value is `HIN[i]`, pinned on row 0 by rule 3, and the write branch's is
+        // `HOUT[i]`, pinned on row 63 by rule 10.
         let space = AB::Expr::from_u32(SPACE_RAM);
         let ts_read = v(col::CLK) * AB::Expr::from_u8(4);
-        let ts_write = v(col::CLK) * AB::Expr::from_u8(4) + one.clone();
         bus::MEMORY.send(
             b,
             [
@@ -582,16 +594,16 @@ where
             Count::bounded(is_real.clone() * t_lt_16, 1),
         );
         for i in 0..STATE_WORDS {
-            let addr = || v(col::PTR) + AB::Expr::from_u32((BLOCK_WORDS + i) as u32);
             bus::MEMORY.send(
                 b,
-                [space.clone(), addr(), ts_read.clone(), v(col::HIN + i), AB::Expr::ZERO],
-                Count::bounded(is_real.clone() * is_first.clone(), 1),
-            );
-            bus::MEMORY.send(
-                b,
-                [space.clone(), addr(), ts_write.clone(), v(col::HOUT + i), one.clone()],
-                Count::bounded(is_real.clone() * is_last.clone(), 1),
+                [
+                    space.clone(),
+                    v(col::PTR) + AB::Expr::from_u32((BLOCK_WORDS + i) as u32),
+                    ts_read.clone() + is_last.clone(),
+                    is_first.clone() * v(col::HIN + i) + is_last.clone() * v(col::HOUT + i),
+                    is_last.clone(),
+                ],
+                Count::bounded(is_real.clone() * (is_first.clone() + is_last.clone()), 1),
             );
         }
     }

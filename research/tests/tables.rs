@@ -740,7 +740,7 @@ fn alu_max_constraint_degree_is_pinned() {
         );
         // Split out so the pin says *where* the degree comes from, as the cpu comment above does:
         // the AIR's own rules are all degree ≤ 3 (the module doc's claim), and the packed
-        // `MEMORY`/`SHA256` fraction-pins — 18 interactions folded into 7 groups, each with a
+        // `MEMORY`/`SHA256` fraction-pins — 10 interactions folded into 9 groups, each with a
         // degree-2 `IS_REAL · selector` count — are what adds the fourth.
         let air_only = get_max_constraint_degree::<F, Challenge, WithPre, _>(
             &air,

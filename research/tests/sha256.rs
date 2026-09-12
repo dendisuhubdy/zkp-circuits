@@ -252,7 +252,7 @@ mod harness {
     /// The 32 `(space, addr, ts, value, is_write)` accesses one real compression makes: the 24
     /// words of the buffer read at `ts = 4·clk`, the eight new state words written back at
     /// `ts = 4·clk + 1` — the same tuples `emulator::CycleEvent::sha256_accesses` records.
-    fn twin_trace(ev: &Sha256Event) -> RowMajorMatrix<F> {
+    fn twin_values(ev: &Sha256Event) -> Vec<F> {
         let mut h_out = ev.h_in;
         rand_zkvm::sha256::compress(&mut h_out, &ev.block);
         let mut v = F::zero_vec(32 * 6);
@@ -272,22 +272,36 @@ mod harness {
             put(16 + i, ev.ptr + 16 + i as u32, 4 * ev.clk, ev.h_in[i], false);
             put(24 + i, ev.ptr + 16 + i as u32, 4 * ev.clk + 1, h_out[i], true);
         }
-        RowMajorMatrix::new(v, 6)
+        v
+    }
+
+    /// The `value` cell of the twin row that carries the read of state word `i` — the one a
+    /// dishonest memory would have to lie in.
+    const fn twin_state_read_value(i: usize) -> usize {
+        (16 + i) * 6 + 4
     }
 
     pub fn run(trace: &RowMajorMatrix<F>, ev: &Sha256Event, height: usize) -> Result<(), VerifyError> {
+        run_with_twin(trace, ev, &RowMajorMatrix::new(twin_values(ev), 6), height)
+    }
+
+    pub fn run_with_twin(
+        trace: &RowMajorMatrix<F>,
+        ev: &Sha256Event,
+        twin: &RowMajorMatrix<F>,
+        height: usize,
+    ) -> Result<(), VerifyError> {
         let mut asker = F::zero_vec(4 * 3);
         asker[0] = F::ONE;
         asker[1] = F::from_u32(ev.clk);
         asker[2] = F::from_u32(ev.ptr);
         let asker_trace = RowMajorMatrix::new(asker, 3);
-        let twin = twin_trace(ev);
 
         let airs = vec![T::S(Sha256Air, height), T::A(Sha256Asker), T::M(MemoryTwin)];
         let instances = vec![
             StarkInstance { air: &airs[0], trace, public_values: vec![] },
             StarkInstance { air: &airs[1], trace: &asker_trace, public_values: vec![] },
-            StarkInstance { air: &airs[2], trace: &twin, public_values: vec![] },
+            StarkInstance { air: &airs[2], trace: twin, public_values: vec![] },
         ];
         let config = make_config(FriProfile::Test);
         let pd = ProverData::from_instances(&config, &instances);
@@ -349,6 +363,78 @@ mod harness {
         let mut trace = sha256_trace(&[ev], LOG_HEIGHT);
         trace.values[(BLOCK - 1) * col::WIDTH + col::HOUT + 5] += F::ONE;
         assert!(rejects(|| run(&trace, &ev, 1 << LOG_HEIGHT)));
+    }
+
+    /// Rule 3's two *borrowed*-bank pins (`compose(WM15_BITS) = HIN[7]` and
+    /// `compose(WM2_BITS) = HIN[3]`) are the only thing bounding `h` and `d` below 2^32 on row 0 —
+    /// every other state word is bounded by the bit bank it composes into. Without them a
+    /// dishonest memory could hand the chip a *field element* whose canonical value is `2^32` where
+    /// the state word should be, and the round's carries would quietly absorb the extra `2^32`: the
+    /// chip would prove an honest compression of `h = 0` while the memory bus says the word at
+    /// `PTR + 23` is `2^32`. That is the machine-wide "every memory word is 32 bits" induction this
+    /// chip declines to depend on (module doc, "Why there are no RANGE8 lookups").
+    ///
+    /// The forgery is built to satisfy *every other rule*, which is what makes these tests pin the
+    /// borrow specifically rather than something else: `HIN[i]` is patched on all 64 rows (rule 1
+    /// is block-constant), row 0's `D`/`H` follow it (rule 3), the round carries it feeds grow by
+    /// one (rule 8) and the final add's carry bit for that word flips (rule 10) — and the twin
+    /// serves the same value back on the `MEMORY` bus, so the bus balances too.
+    fn non_word_state_forgery(slot: usize) -> (Sha256Event, RowMajorMatrix<F>, RowMajorMatrix<F>) {
+        assert!(slot == 3 || slot == 7, "only D and H lack a bit bank of their own");
+        let mut ev = event();
+        // Zero in the slot under test, so its honest final-add carry is 0 and the patch below is a
+        // clean 0 -> 1 flip.
+        ev.h_in[3] = 0;
+        ev.h_in[7] = 0;
+        let mut trace = sha256_trace(&[ev], LOG_HEIGHT);
+        let big = F::from_u64(1u64 << 32);
+
+        for r in 0..BLOCK {
+            trace.values[r * col::WIDTH + col::HIN + slot] = big;
+        }
+        // Row 0 is the trace's first row, so its cells are at `col::*` directly.
+        let bump_carry = |trace: &mut RowMajorMatrix<F>, base: usize| {
+            let mut c = 0u64;
+            for i in 0..3 {
+                if trace.values[base + i] == F::ONE {
+                    c |= 1 << i;
+                }
+            }
+            c += 1;
+            assert!(c < 8, "the 3-bit carry cannot absorb the extra 2^32");
+            for i in 0..3 {
+                trace.values[base + i] = F::from_bool((c >> i) & 1 == 1);
+            }
+        };
+        // `HOUT[slot]` is assembled on row 60 (`k = 0`): the a-side owns word 3, the e-side word 7.
+        let carry_cell = (BLOCK - 4) * col::WIDTH
+            + if slot == 3 { col::HOUTA_CARRY } else { col::HOUTE_CARRY };
+        assert_eq!(trace.values[carry_cell], F::ZERO, "the honest final-add carry must be 0 here");
+        trace.values[carry_cell] = F::ONE;
+        if slot == 7 {
+            trace.values[col::H] = big;
+            bump_carry(&mut trace, col::A_CARRY); // h feeds T1, which feeds both a' and e'
+            bump_carry(&mut trace, col::E_CARRY);
+        } else {
+            trace.values[col::D] = big;
+            bump_carry(&mut trace, col::E_CARRY); // d feeds e' only
+        }
+
+        let mut twin = twin_values(&ev);
+        twin[twin_state_read_value(slot)] = big;
+        (ev, trace, RowMajorMatrix::new(twin, 6))
+    }
+
+    #[test]
+    fn a_state_word_wider_than_thirty_two_bits_cannot_be_smuggled_in_as_h() {
+        let (ev, trace, twin) = non_word_state_forgery(7);
+        assert!(rejects(|| run_with_twin(&trace, &ev, &twin, 1 << LOG_HEIGHT)));
+    }
+
+    #[test]
+    fn a_state_word_wider_than_thirty_two_bits_cannot_be_smuggled_in_as_d() {
+        let (ev, trace, twin) = non_word_state_forgery(3);
+        assert!(rejects(|| run_with_twin(&trace, &ev, &twin, 1 << LOG_HEIGHT)));
     }
 
     /// Controller ruling 2 spelled out as a test: the multiset the chip sends must be exactly the
