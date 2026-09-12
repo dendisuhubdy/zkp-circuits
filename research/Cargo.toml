@@ -44,6 +44,10 @@ evm-core = { path = "../guests-compiled/evm-core" }
 hex = "0.4"
 # The oracle for `evm-core`'s 256-bit arithmetic — host tests only, never in a guest.
 num-bigint = "0.4"
+# The oracle for `evm-core`'s opcode semantics and gas (`tests/evm_interp.rs`) — host tests only,
+# never in a guest. Pinned exactly; `default-features = false` keeps the precompile crates' C
+# dependencies (blst, c-kzg, secp256k1) out of the build, since only the bare interpreter is used.
+revm = { version = "=43.0.2", default-features = false, features = ["std"] }
 
 [features]
 default = []
