@@ -265,3 +265,115 @@ fn push_bytes(w: &mut Vec<u32>, bytes: &[u8]) {
         w.push(u32::from_le_bytes(word));
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The ERC-20 fixtures (Task 5): the committed runtime bytecode, Solidity's storage layout, the
+// call encoding, and the pre-state a `transfer` needs. `tests/e2e.rs`'s M4.3 exit test runs these
+// through the compiled guest; nothing here is used by the machine itself.
+// ---------------------------------------------------------------------------------------------
+
+/// The token holder the fixtures start with a balance: the 20-byte address `0x1111…11`, right
+/// aligned in a 256-bit word as the EVM keeps an address.
+pub const ALICE: U256 = U256([0x1111_1111, 0x1111_1111, 0x1111_1111, 0x1111_1111, 0x1111_1111, 0, 0, 0]);
+/// The counterparty: the 20-byte address `0x2222…22`.
+pub const BOB: U256 = U256([0x2222_2222, 0x2222_2222, 0x2222_2222, 0x2222_2222, 0x2222_2222, 0, 0, 0]);
+/// The contract's own address (`0x0…c0de`). Never observed by this bytecode — the ERC-20 uses no
+/// `ADDRESS` — but the layout carries it, so the fixtures name it rather than passing zero.
+pub const TOKEN: U256 = U256([0xc0de, 0, 0, 0, 0, 0, 0, 0]);
+
+/// `_balances`'s slot in `ERC20.sol` (OpenZeppelin v4's layout).
+pub const SLOT_BALANCES: u32 = 0;
+/// `_allowances`'s slot.
+pub const SLOT_ALLOWANCES: u32 = 1;
+/// `_totalSupply`'s slot — a plain `uint256`, so the slot *is* the storage key.
+pub const SLOT_TOTAL_SUPPLY: u32 = 2;
+
+/// The gas the fixtures give a call. A `transfer` costs ~50k (two `SLOAD`s at 2 100, an `SSTORE`
+/// at 2 900 over a non-zero balance and one at 20 000 over a zero one); a round number well above
+/// it keeps the figure from being a moving part of the test.
+const FIXTURE_GAS: u64 = 1_000_000;
+
+/// The ERC-20's **runtime** bytecode: `guests-compiled/evm/contracts/erc20.runtime.hex`, compiled
+/// once by the pinned `solc` that file's `SOLC.md` records. There is no constructor to run — the
+/// state a deployment would have written is seeded as witnesses instead ([`erc20_transfer`]).
+pub fn erc20_code() -> Vec<u8> {
+    const HEX: &str = include_str!("../../guests-compiled/evm/contracts/erc20.runtime.hex");
+    unhex(HEX.trim())
+}
+
+/// Decodes a lowercase hex string. Two lines rather than a runtime dependency on `hex` (which is a
+/// dev-dependency here, and so cannot appear in the library): the only input is a committed file.
+fn unhex(s: &str) -> Vec<u8> {
+    assert!(s.len() % 2 == 0, "hex string has an odd length");
+    let nibble = |c: u8| match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        _ => panic!("not lowercase hex: {:?}", c as char),
+    };
+    s.as_bytes().chunks(2).map(|p| (nibble(p[0]) << 4) | nibble(p[1])).collect()
+}
+
+/// Solidity's storage key for `m[key]` where `m` is at slot `base`:
+/// `keccak256(key as 32 big-endian bytes ‖ base as 32 big-endian bytes)`.
+pub fn mapping_slot(key: &U256, base: u32) -> U256 {
+    let mut msg = [0u8; 64];
+    msg[..32].copy_from_slice(&key.to_be_bytes());
+    msg[32..].copy_from_slice(&U256::from_u32(base).to_be_bytes());
+    U256::from_be_bytes(&keccak::keccak256(&msg))
+}
+
+/// Solidity's storage key for a nested `m[k1][k2]` where `m` is at slot `base`: the inner
+/// mapping's own base is [`mapping_slot`]`(k1, base)`, so this is
+/// `keccak256(k2 ‖ mapping_slot(k1, base))` — `_allowances[owner][spender]` is
+/// `mapping_slot2(&owner, &spender, SLOT_ALLOWANCES)`.
+pub fn mapping_slot2(k1: &U256, k2: &U256, base: u32) -> U256 {
+    let mut msg = [0u8; 64];
+    msg[..32].copy_from_slice(&k2.to_be_bytes());
+    msg[32..].copy_from_slice(&mapping_slot(k1, base).to_be_bytes());
+    U256::from_be_bytes(&keccak::keccak256(&msg))
+}
+
+/// A function's 4-byte selector: the first four bytes of `keccak256` of its canonical signature,
+/// e.g. `selector("transfer(address,uint256)")`.
+pub fn selector(sig: &str) -> [u8; 4] {
+    let k = keccak::keccak256(sig.as_bytes());
+    [k[0], k[1], k[2], k[3]]
+}
+
+/// Calldata for a call to `sig` with 256-bit arguments: the selector then each argument as 32
+/// big-endian bytes — the ABI encoding for the static types this ERC-20 takes (`address`,
+/// `uint256`), an address being its 20 bytes right-aligned already.
+pub fn abi_call(sig: &str, args: &[U256]) -> Vec<u8> {
+    let mut cd = selector(sig).to_vec();
+    for a in args {
+        cd.extend_from_slice(&a.to_be_bytes());
+    }
+    cd
+}
+
+/// `from` transfers `amount` to `to` on an ERC-20 whose pre-state holds each `(holder, balance)`
+/// in `balances` and their sum as `_totalSupply`.
+///
+/// The witnesses supplied are exactly the two balance slots the call touches (`_totalSupply` is
+/// seeded but never read by `transfer`, so it gets no witness — a slot the bytecode *did* touch
+/// without one would be an exceptional halt). The other fixtures in the exit test reuse this
+/// builder and replace `calldata`/`touched` for the function they exercise.
+pub fn erc20_transfer(from: U256, to: U256, amount: U256, balances: &[(U256, U256)]) -> EvmCall {
+    let mut tree = SparseTree::new();
+    let mut supply = U256::ZERO;
+    for (holder, balance) in balances {
+        tree.insert(mapping_slot(holder, SLOT_BALANCES), *balance);
+        supply = supply.add(balance);
+    }
+    tree.insert(U256::from_u32(SLOT_TOTAL_SUPPLY), supply);
+    EvmCall {
+        code: erc20_code(),
+        calldata: abi_call("transfer(address,uint256)", &[to, amount]),
+        address: TOKEN,
+        caller: from,
+        callvalue: U256::ZERO,
+        gas_limit: FIXTURE_GAS,
+        tree,
+        touched: vec![mapping_slot(&from, SLOT_BALANCES), mapping_slot(&to, SLOT_BALANCES)],
+    }
+}
