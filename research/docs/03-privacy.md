@@ -64,10 +64,12 @@ before and after the M4.2 branch:
 | verify time (first, uncached) | 218.1 ms → 250.6 ms | 812.2 ms → 860.7 ms |
 
 That prove time barely moved is what locates the cost: committing a 32-row
-trace is nothing, but *opening* a 2 612-column main-trace leaf at each of the
-production profile's 27 FRI queries is ~565 KB of Merkle leaf data, and the
-zeta/zeta-next opened values another ~84 KB. The keccak chip's **width**, not
-its height, is what every proof pays for. Making the table optional (a proof
+trace is nothing, but every FRI query has to *open* a 2 612-wide main-trace
+leaf. Order-of-magnitude, that accounts for most of it — 27 queries x 2 612
+columns x 8 bytes is ~565 KB of leaf data, and the zeta/zeta-next opened
+values (2 612 columns, two points, a degree-2 extension) another ~84 KB, with
+the chip's permutation columns and quotient chunks making up the rest. The
+keccak chip's **width**, not its height, is what every proof pays for. Making the table optional (a proof
 that declares zero keccak instances rather than one padding block) is the
 obvious lever and is not something M4.2 does; `docs/05-roadmap.md` carries it.
 

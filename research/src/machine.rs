@@ -180,10 +180,20 @@ pub const TIERS: [usize; 6] = [10, 12, 14, 16, 18, 20];
 
 /// M4.2 (controller ruling 1): the sanity ceiling on `Proof::mem_log_height`, the analogue of
 /// `tables::program::MAX_LOG_HEIGHT` for a table that has no module of its own to hold one.
-/// 2^24 rows is 16.7 million memory accesses — four orders of magnitude past anything this
-/// crate proves (a tier-14 guest doing nothing but `KECCAK` reaches ~1.6 million), and small
-/// enough that `1usize << mem_log_height` can never be an absurd shift. Like every other
-/// declared height it is a *defensive* bound, not a soundness one: see `Proof::mem_log_height`.
+/// Like every other declared height it is a *defensive* bound (nothing may reach
+/// `1usize << mem_log_height` unchecked), not a soundness one — see `Proof::mem_log_height`.
+///
+/// 2^24 rows is 16.7 million accesses. Where that actually sits relative to the tiers, since
+/// this is the one declared height whose ceiling is *not* comfortably unreachable: a
+/// `KECCAK` call costs about three instructions (two `li`s and the `ecall`) and 100 accesses,
+/// so a guest doing nothing else reaches roughly `100 · 2^t / 3` accesses at tier `t` —
+/// ~0.5 M at tier 14 (2^20), ~2.2 M at tier 16 (2^22), ~8.7 M at tier 18 (2^24, right at the
+/// ceiling) and ~35 M at tier 20 (2^26, past it). A keccak-saturated tier-18 or tier-20 guest
+/// is therefore the one shape this constant would refuse with
+/// `ProveError::TooManyMemoryAccesses` — an honest execution the prover declines rather than
+/// an unsound one it accepts, and a proof at either tier is far outside what this crate
+/// actually proves today (tier 12 already takes ~24 s). Raising the constant is a one-line
+/// change with no soundness consequence if a guest ever gets there.
 pub const MAX_MEM_LOG_HEIGHT: u8 = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -354,8 +364,10 @@ pub enum ProveError {
     /// shift, for a direct caller who hand-builds an `Execution`.
     TooManyPermutations { perms: usize, log_height: u8 },
     /// M4.2 (controller ruling 1): the memory table's analogue — this execution makes more
-    /// accesses than `MAX_MEM_LOG_HEIGHT` rows can hold. Unreachable at any tier this crate
-    /// proves at (see that constant), kept as the same defense in depth.
+    /// accesses than `MAX_MEM_LOG_HEIGHT` rows can hold. Unlike the three above this is not
+    /// quite unreachable: a guest doing nothing but `KECCAK` passes it at tier 18-20 (see
+    /// `MAX_MEM_LOG_HEIGHT` for the arithmetic). It is still an honest execution the prover
+    /// declines, not an unsound one it accepts.
     TooManyMemoryAccesses { accesses: usize, log_height: u8 },
 }
 #[derive(Debug)]
@@ -521,8 +533,9 @@ pub struct Proof {
     /// be received by a real row here or the bus does not balance, so the table has to be at
     /// least as tall as the traffic it is answering. The tier-derived floor (`t + 2`) is kept
     /// not for soundness but so a proof cannot advertise its own memory-access count below the
-    /// resolution the tier already reveals — a tier-10 guest that makes 12 accesses and a
-    /// tier-10 guest that makes 4 000 declare the same 12, exactly as they did before M4.2.
+    /// resolution the tier already reveals — a tier-10 guest making 200 accesses and one
+    /// making 4 000 both declare `mem_log_height = 12`, exactly as every tier-10 proof did
+    /// before M4.2.
     /// `MAX_MEM_LOG_HEIGHT` is the usual defensive ceiling on an untrusted shift amount.
     pub mem_log_height: u8,
     pub public_values: Vec<u64>,

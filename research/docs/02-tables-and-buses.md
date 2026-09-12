@@ -1201,11 +1201,11 @@ measure_production_profile_at_tier_10_and_12`, the same command
 `docs/03-privacy.md` records): adding this table took a tier-10 proof from
 437 599 to 1 142 262 bytes and a tier-12 proof from 460 242 to 1 161 162 —
 about 705 KB either way, for a guest that never calls `KECCAK`. Prove time
-barely moves (5.99 s → 6.15 s at tier 10; 23.40 s → 23.91 s at tier 12),
-which locates the cost exactly: not in committing a 32-row trace, but in
-*opening* a 2 612-column main-trace leaf at each of the profile's 27 FRI
-queries. The table's width, not its height, is what a proof pays for — the
-one M4.2 number worth carrying into M4.3's own chip design.
+barely moves (5.996 s → 6.154 s at tier 10; 23.40 s → 23.91 s at tier 12),
+which locates the cost: not in committing a 32-row trace, but in *opening* a
+2 612-wide main-trace leaf at each of the profile's 27 FRI queries. The
+table's width, not its height, is what a proof pays for — the one M4.2 number
+worth carrying into M4.3's own chip design.
 
 ## Constraint degree budget
 

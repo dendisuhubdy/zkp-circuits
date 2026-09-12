@@ -5,7 +5,7 @@ use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::isa::Instr;
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, TIERS};
-use rand_zkvm::tables::{alu, cpu, input, memory, nibble, poseidon2, program, range, F};
+use rand_zkvm::tables::{alu, cpu, input, keccak, memory, nibble, poseidon2, program, range, F};
 use std::time::Instant;
 
 fn hr(title: &str) { println!("\n══ {title} {}", "═".repeat(70usize.saturating_sub(title.len()))); }
@@ -31,7 +31,7 @@ fn main() {
     let exec = execute(&program, &inputs, 1 << 20).unwrap();
     println!("inputs {:?} → outputs {:?} in {} cycles ({:?})", inputs, &exec.outputs[..2], exec.cycles(), t.elapsed());
 
-    hr("Part 4 · Arithmetize: eight tables on twelve buses");
+    hr("Part 4 · Arithmetize: nine tables on thirteen buses");
     let tier = Tier::for_cycles(exec.cycles()).unwrap();
     let traces = build_traces(&program, &inputs, &exec, tier).unwrap();
     println!("tier {} → cpu 2^{} rows (actual {} cycles), padding hides the rest", tier.0, tier.0, exec.cycles());
@@ -45,8 +45,13 @@ fn main() {
         ("nibble", traces.nibble.height(), nibble::col::WIDTH + nibble::pre::WIDTH, "256 rows: 16×16 and/or/xor"),
         ("poseidon2", traces.poseidon2.height(), poseidon2::col::WIDTH + poseidon2::pre::WIDTH, "hash permutation: program/input digests, notes"),
         ("input", traces.input.height(), input::col::WIDTH, "private inputs, committed to the salted H_IN digest"),
+        ("keccak", traces.keccak.height(), keccak::col::WIDTH + keccak::pre::WIDTH, "Keccak-f[1600], one row per round; sends its own memory traffic"),
     ] { println!("{name:<10}{h:>10}{w:>8}   {role}"); }
-    println!("buses: PROGRAM PROGRAM_WORD MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 POSEIDON2 INPUT_DIGEST INPUT_READ (LogUp, verified globally)");
+    println!("buses: PROGRAM PROGRAM_WORD MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 POSEIDON2 INPUT_DIGEST INPUT_READ KECCAK (LogUp, verified globally)");
+    // M4.2: this guest never calls KECCAK, so its keccak table is the single padding block
+    // every proof carries — and that one block is the widest table in the batch by an order of
+    // magnitude, which is where a large part of this proof's bytes go (`docs/03-privacy.md`).
+    println!("declared heights: program 2^{} · input 2^{} · keccak 2^{} · memory 2^{}", traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.mem_log_height);
 
     hr("Part 5 · Prove and verify (production FRI: blowup 8, 27 queries, 20 PoW bits, ZK on)");
     let m = Machine::new(FriProfile::Production);
