@@ -150,7 +150,7 @@ mod harness {
     use rand_zkvm::emulator::SPACE_RAM;
     use rand_zkvm::keccak::{keccak_f, state_to_words, words_to_state};
     use rand_zkvm::machine::{make_config, FriProfile, VerifyError};
-    use rand_zkvm::tables::keccak::{col, keccak_trace, KeccakAir, KeccakEvent, BLOCK};
+    use rand_zkvm::tables::keccak::{col, keccak_trace, KeccakAir, KeccakEvent, BLOCK, ROUNDS};
     use rand_zkvm::tables::{bus, F};
 
     /// main = `[gate, clk, ptr]`: one weighted `KECCAK` lookup per row.
@@ -305,6 +305,33 @@ mod harness {
         // the row's own `A` limb from it, rule 6 checks the column parity, rule 7 feeds it to χ.
         let cell = 3 * col::WIDTH + col::AP0 + 17;
         trace.values[cell] = F::ONE - trace.values[cell];
+        assert!(rejects(|| run(&trace, &ev, height)));
+    }
+
+    /// Rule 9 (the round transition, `is_round · (n(A) − out)`): row 24, the first idle row,
+    /// is where round 23's output lands — and it is the only `A` on the block whose value rule
+    /// 5 does *not* also recompute from bits (rule 5 is gated off on idle rows), so a single
+    /// flipped limb there isolates the transition pin itself. It is also exactly the limb that
+    /// would otherwise let a prover write a word of its choosing back into guest RAM.
+    #[test]
+    fn a_flipped_round_transition_limb_is_rejected() {
+        let ev = event();
+        let height = BLOCK * 4;
+        let mut trace = keccak_trace(&[ev], height);
+        trace.values[ROUNDS * col::WIDTH + col::A0 + 7] += F::ONE;
+        assert!(rejects(|| run(&trace, &ev, height)));
+    }
+
+    /// Rule 10 (the idle-row copy, `is_idle · same_block · (n(A) − v(A))`): rule 9 only fires
+    /// on transitions *out of a round row*, so a limb flipped on a later idle row (27 here) is
+    /// past its reach — rule 10's own idle-to-idle copy is what has to catch it, along with the
+    /// write-back message that idle row carries.
+    #[test]
+    fn a_flipped_idle_row_limb_is_rejected() {
+        let ev = event();
+        let height = BLOCK * 4;
+        let mut trace = keccak_trace(&[ev], height);
+        trace.values[(ROUNDS + 3) * col::WIDTH + col::A0 + 11] += F::ONE;
         assert!(rejects(|| run(&trace, &ev, height)));
     }
 }

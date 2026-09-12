@@ -69,10 +69,14 @@
 //! This table, not the cpu table, sends all 100 on the `MEMORY` bus. They are spread over the
 //! block so that no row carries more than a handful of interactions: 2 reads on each of rows
 //! 0..=24 (row `r` takes words `2r`, `2r+1`) and 7 writes on each idle row (idle row `i` takes
-//! words `7i .. 7i+6`, clipped at word 49) — 9 interactions per row, 100 messages per real
-//! block. The message columns are selector-weighted sums over the rows that can carry that
-//! slot, so a slot is one interaction covering the whole block, and on a row where the slot is
-//! idle its count is zero.
+//! words `7i .. 7i+6`, clipped at word 49) — 100 messages per real block. The message columns
+//! are selector-weighted sums over the rows that can carry that slot, so a slot is one
+//! interaction covering the whole block, and on a row where the slot is idle its count is zero.
+//!
+//! Counted as the AIR writes them (which is what the packed-lookup budget sees), that is 9
+//! `MEMORY` interactions on *every* row — the 2 read slots plus the 7 write slots, each a
+//! separate `bus::MEMORY.send` whose count is zero on the rows that carry no such access —
+//! plus the single `KECCAK` entry: 10 interactions per row.
 use super::{bus, F};
 use crate::emulator::SPACE_RAM;
 use crate::keccak::{words_to_state, LANES, RC, ROT, WORDS};
@@ -202,6 +206,13 @@ fn limb_from_bits<E: PrimeCharacteristicRing>(bits: impl Fn(usize) -> E) -> E {
 /// The ρπ source of `B[x, y]`: `b(x, y, z) = A'[x'][y'][(z − ROT[x'][y']) mod 64]` with
 /// `x' = (x + 3y) mod 5`, `y' = x` — Keccak's `B[y][2x+3y] = rot(A'[x][y], ROT[x][y])` inverted
 /// so the consumer (χ) can name its own output coordinates.
+///
+/// Nesting order, since both tables here are `[[_; 5]; 5]` and the two conventions in the
+/// literature differ: `ROT` is indexed `ROT[x][y]` — x (column) outermost, y (row) innermost —
+/// the same coordinate order `lane(x, y) = x + 5y` uses, and the same order `fill_block`'s own
+/// `bmat` reads it in (`ap[lane(xp, yp)].rotate_left(ROT[xp][yp])`). `keccak::ROT`'s own doc
+/// comment is the authority; `tests/keccak.rs` pins `ROT[1][0] = 1` and `ROT[0][1] = 36`, the
+/// asymmetric pair that tells the two conventions apart.
 const fn rho_pi_src(x: usize, y: usize, z: usize) -> usize {
     let xp = (x + 3 * y) % 5;
     let yp = x;

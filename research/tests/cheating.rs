@@ -11,7 +11,7 @@ use rand_zkvm::emulator::{execute, SLOT_W};
 use rand_zkvm::guests;
 use rand_zkvm::isa::{AluOp, Instr, REG_A0, REG_A1};
 use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, Tier, Traces};
-use rand_zkvm::tables::{alu, cpu, limbs, memory, nibble, poseidon2, program, range, F};
+use rand_zkvm::tables::{alu, cpu, keccak, limbs, memory, nibble, poseidon2, program, range, F};
 
 /// `rejects()`, and the two constraint-panic prefixes it matches (`CONSTRAINT_PANIC` and
 /// `LOOKUP_BALANCE_PANIC`, referred to by name in the comments below), now live in
@@ -1384,5 +1384,122 @@ fn a_mult_read_bumped_on_an_input_padding_row_is_rejected() {
     let iw = rand_zkvm::tables::input::col::WIDTH;
     assert!(t.input.height() > 4, "the input table has spare padding rows past the 4 real ones");
     t.input.values[4 * iw + rand_zkvm::tables::input::col::MULT_READ] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// ───────────────────────────── M4.2: the KECCAK syscall ─────────────────────────────
+//
+// `guests::keccak_demo(b"hi")` is one `SYS_KECCAK` cpu row plus one real 32-row keccak block,
+// at tier 10. The block sits first in the keccak table (blocks are filled in event order), so
+// its rows are `0..BLOCK` and every later block is padding.
+
+/// The keccak-side twin of `setup_poseidon2`.
+fn setup_keccak() -> (Machine, rand_zkvm::isa::Program, Traces) {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::keccak_demo(b"hi");
+    let e = execute(&p, &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    (m, p, t)
+}
+
+/// The cpu-table row index of the one `SYS_KECCAK` ecall row.
+fn keccak_row(t: &Traces) -> usize {
+    let w = cpu::col::WIDTH;
+    (0..t.cpu.height())
+        .find(|&r| t.cpu.values[r * w + cpu::col::SYS_KECCAK] == F::ONE)
+        .expect("a SYS_KECCAK row")
+}
+
+/// A flipped state bit inside the permutation is pinned three ways at once (rule 5 recomputes
+/// this row's `A` limb from it, rule 6 the column parity, rule 7 feeds it to χ) and, past
+/// those, changes the output the chip writes back to RAM.
+#[test]
+fn tampering_a_keccak_state_bit_is_rejected() {
+    let (m, p, mut t) = setup_keccak();
+    let w = keccak::col::WIDTH;
+    let cell = 5 * w + keccak::col::AP0 + 100;
+    t.keccak.values[cell] = F::ONE - t.keccak.values[cell];
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// Rule 11's `IS_LAST_ROUND·(IS_REAL − MULT) = 0`: a padding block cannot claim a `KECCAK`
+/// entry it has no syscall behind. `guests::fib` never calls `KECCAK`, so its keccak table is
+/// the single padding block every proof carries — and the forged entry has no consumer either,
+/// so the `KECCAK` bus is left unbalanced on top of the local constraint failure.
+#[test]
+fn bumping_keccak_mult_on_a_padding_block_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = keccak::col::WIDTH;
+    assert_eq!(t.keccak_log_height, 5, "a keccak-free guest still carries one padding block");
+    let row = keccak::ROUNDS - 1; // the block's last round row
+    assert_eq!(t.keccak.values[row * w + keccak::col::IS_REAL], F::ZERO, "block 0 is padding");
+    t.keccak.values[row * w + keccak::col::MULT] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// `IN` is block-constant (rule 1) and equals `A` on row 0 (rule 2), and it is what the chip's
+/// 50 read messages carry — so bumping it uniformly across the block keeps rules 1/2 happy
+/// (row 0's `A` moves with it) and instead breaks the `MEMORY` permutation against the words
+/// the guest actually stored.
+#[test]
+fn a_keccak_input_limb_that_disagrees_with_memory_is_rejected() {
+    let (m, p, mut t) = setup_keccak();
+    let w = keccak::col::WIDTH;
+    for r in 0..keccak::BLOCK {
+        t.keccak.values[r * w + keccak::col::IN0] += F::ONE;
+    }
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// The idle rows' `A` is the permutation's output — what the 50 write-back messages carry.
+/// Bumping it there changes the value written to RAM (and trips rules 9/10, which pin the idle
+/// rows' `A` to the last round's own output).
+#[test]
+fn a_keccak_output_limb_that_disagrees_with_the_permutation_is_rejected() {
+    let (m, p, mut t) = setup_keccak();
+    let w = keccak::col::WIDTH;
+    for r in keccak::ROUNDS..keccak::BLOCK {
+        t.keccak.values[r * w + keccak::col::A0] += F::ONE;
+    }
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// `SYS_KECCAK` joins the `SELECTORS` padding-row gate — and, set on an all-zero padding row,
+/// also asks the `KECCAK` bus for an entry at `(0, 0)` that no real block provides.
+#[test]
+fn bumping_sys_keccak_on_a_padding_row_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = cpu::col::WIDTH;
+    let pad = t.cpu.height() - 1;
+    assert_eq!(t.cpu.values[pad * w + cpu::col::IS_REAL], F::ZERO, "last cpu row is padding");
+    t.cpu.values[pad * w + cpu::col::SYS_KECCAK] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// `an_unbounded_hash_ptr_that_aliases_a_register_key_is_rejected`'s `SYS_KECCAK` twin: the
+/// chip does field addition `PTR + w` for `w < 50` and nothing in the *chip* bounds `PTR`, so
+/// the cpu row's `HASH_PTR` limb decomposition (`HP0..3`/`HP3_HI`, now gated on `SYS_HASH +
+/// SYS_KECCAK`) is what keeps the address off any other `MEMORY` key. Leaving the limbs at
+/// their honest values makes this trip the recomposition equation directly.
+#[test]
+fn an_unbounded_keccak_ptr_is_rejected() {
+    let (m, p, mut t) = setup_keccak();
+    let w = cpu::col::WIDTH;
+    let row = keccak_row(&t);
+    t.cpu.values[row * w + cpu::col::HASH_PTR] = F::from_u32(REG_A0) - F::from_u64(1u64 << 30);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// The `KECCAK` bus in the other direction: a syscall row whose permutation is not in the
+/// keccak table at all (the real block demoted to padding) has no provider for its lookup —
+/// and the 100 `MEMORY` messages the block no longer sends leave that bus unbalanced too.
+#[test]
+fn a_keccak_call_whose_permutation_is_missing_is_rejected() {
+    let (m, p, mut t) = setup_keccak();
+    let w = keccak::col::WIDTH;
+    for r in 0..keccak::BLOCK {
+        t.keccak.values[r * w + keccak::col::IS_REAL] = F::ZERO;
+        t.keccak.values[r * w + keccak::col::MULT] = F::ZERO;
+    }
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
