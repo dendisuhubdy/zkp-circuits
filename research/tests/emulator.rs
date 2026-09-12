@@ -376,3 +376,87 @@ fn a_keccak_pointer_past_the_provable_range_is_an_error() {
     let e = execute(&program(limit), &[], 1 << 16).unwrap();
     assert_eq!(e.events.iter().filter(|ev| ev.keccak_row.is_some()).count(), 1);
 }
+
+/// M4.4: `SYS_SHA256` compresses the 24 words at the **word** address in `a0` in place — words
+/// `0..16` the message block as big-endian-valued `u32`s, words `16..24` the chaining state — in
+/// exactly one cpu row (`next_pc = pc + 4`), the sha256 chip proving the 64 rounds off the cpu
+/// table the way the keccak chip proves its permutation. The 32 RAM accesses it makes (24 reads
+/// at slot 0, then 8 writes at slot 1 — only the state is written back, the block is left alone)
+/// live in `sha256_accesses`, apart from the ecall row's own register accesses, because the
+/// sha256 table is what sends them on the `MEMORY` bus.
+#[test]
+fn sys_sha256_compresses_twenty_four_words_in_place_in_one_cycle() {
+    use rand_zkvm::sha256;
+    const BUF: i32 = 0x400; // byte address; word address 0x100
+    const T0: u32 = 5;
+    const T1: u32 = 6;
+    let ptr = (BUF / 4) as u32;
+    let block: [u32; 16] = std::array::from_fn(|i| 0x0101_0101u32.wrapping_mul(i as u32 + 1));
+    let mut a = Assembler::new(0);
+    // words 0..16 = the block, words 16..24 = the IV, then one SHA256 call, then publish the
+    // eight state words it wrote back.
+    for (i, w) in block.iter().chain(sha256::IV.iter()).enumerate() {
+        a.extend(li(T0, *w as i32));
+        a.push(sw(REG_ZERO, T0, BUF + 4 * i as i32));
+    }
+    a.extend(call_sha256(ptr));
+    for i in 0..8u32 {
+        a.push(lw(T1, REG_ZERO, BUF + 4 * (16 + i) as i32));
+        a.extend(write_output(i, T1));
+    }
+    a.extend(halt());
+    let exec = run(&a.assemble(), &[]);
+
+    let mut want = sha256::IV;
+    sha256::compress(&mut want, &block);
+    assert_eq!(exec.outputs, want, "the state written back is one honest compression");
+
+    let rows: Vec<_> = exec.events.iter().filter_map(|e| e.sha256_row).collect();
+    assert_eq!(rows.len(), 1, "one row per SHA256 call");
+    assert_eq!(rows[0].ptr, ptr);
+    assert_eq!(rows[0].block, block);
+    assert_eq!(rows[0].h_in, sha256::IV);
+    assert_eq!(rows[0].h_out, want);
+
+    let ev = exec.events.iter().find(|e| matches!(e.sys, Some(Syscall::Sha256 { .. }))).unwrap();
+    assert_eq!(rows[0].clk, ev.clk, "the row carries the cycle its lookup is keyed by");
+    assert_eq!(ev.sha256_accesses.len(), 32);
+    assert!(ev.sha256_accesses[..24].iter().all(|m| !m.is_write && m.slot == 0 && m.space == SPACE_RAM));
+    assert!(ev.sha256_accesses[24..].iter().all(|m| m.is_write && m.slot == 1 && m.space == SPACE_RAM));
+    // The reads cover the whole buffer and carry its pre-state; the writes cover words 16..24
+    // only, which is what leaves the message block untouched.
+    assert_eq!(ev.sha256_accesses[..24].iter().map(|m| m.addr).collect::<Vec<_>>(), (0..24).map(|w| ptr + w).collect::<Vec<_>>());
+    assert_eq!(ev.sha256_accesses[..24].iter().map(|m| m.value).collect::<Vec<_>>(), block.iter().chain(sha256::IV.iter()).copied().collect::<Vec<_>>());
+    assert_eq!(ev.sha256_accesses[24..].iter().map(|m| m.addr).collect::<Vec<_>>(), (16..24).map(|w| ptr + w).collect::<Vec<_>>());
+    assert_eq!(ev.sha256_accesses[24..].iter().map(|m| m.value).collect::<Vec<_>>(), want.to_vec());
+    assert_eq!(ev.next_pc, ev.pc + 4, "one cpu row per SHA256 call");
+}
+
+/// M4.4, as for `SYS_KECCAK`: the cpu AIR bounds a `SYS_SHA256` row's pointer to
+/// `ptr < 0x3000_0000`, so the chip's own `PTR + w` address arithmetic can neither wrap nor
+/// alias another `MEMORY` key. The emulator — the reference semantics — refuses every pointer
+/// whose 24-word buffer would cross that boundary rather than produce a trace no AIR can prove.
+#[test]
+fn a_sha256_pointer_past_the_provable_range_is_an_error() {
+    const T0: u32 = 5;
+    let program = |ptr: u32| {
+        let mut a = Assembler::new(0);
+        a.extend(call_sha256(ptr));
+        a.extend(li(T0, 1));
+        a.extend(write_output(0, T0));
+        a.extend(halt());
+        a.assemble()
+    };
+    // Spelled out rather than taken from the constant under test: `SHA256_WORDS = 24` words have
+    // to fit below `0x3000_0000`, so the last legal pointer is `0x3000_0000 - 24`.
+    let limit = 0x3000_0000u32 - 24;
+    assert_eq!(SHA256_PTR_LIMIT, limit);
+    assert_eq!(SHA256_WORDS, 24);
+    assert!(matches!(
+        execute(&program(limit + 1), &[], 1 << 16),
+        Err(ExecError::Sha256PtrOutOfRange(p)) if p == limit + 1
+    ));
+    // The largest still-permitted pointer runs (and compresses 24 words of untouched zeros).
+    let e = execute(&program(limit), &[], 1 << 16).unwrap();
+    assert_eq!(e.events.iter().filter(|ev| ev.sha256_row.is_some()).count(), 1);
+}

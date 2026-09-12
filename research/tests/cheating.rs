@@ -927,6 +927,8 @@ fn rogue_write_out(fin: bool, pc: u32, next_pc: u32, ptr: u32, words: [u32; 4], 
         hash_row: Some(HashRow::WriteOut { fin, words, state }),
         keccak_row: None,
         keccak_accesses: Vec::new(),
+        sha256_row: None,
+        sha256_accesses: Vec::new(),
     }
 }
 
@@ -1024,6 +1026,8 @@ fn a_free_standing_absorb_group_with_a_forged_state_is_rejected() {
                 hash_row: Some(HashRow::Absorb { idx: 0, left_before: 4, words: [digest[0], digest[1], digest[2], digest[3]], active: [true; 4], state_in: [Val::ZERO; 8], state_out }),
                 keccak_row: None,
                 keccak_accesses: Vec::new(),
+                sha256_row: None,
+                sha256_accesses: Vec::new(),
             });
             events.push(rogue_write_out(false, pc, pc, 0x40, [rehashed[0], rehashed[1], rehashed[2], rehashed[3]], state_out));
             events.push(rogue_write_out(true, pc, pc + 4, 0x40, [rehashed[4], rehashed[5], rehashed[6], rehashed[7]], state_out));

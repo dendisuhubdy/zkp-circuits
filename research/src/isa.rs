@@ -33,6 +33,22 @@ pub const KECCAK_WORDS: u32 = 50;
 /// The ABI constant above and the host reference's own state width are the same number stated
 /// twice (`isa` is the syscall contract, `keccak` is the layout); keep them from drifting.
 const _: () = assert!(KECCAK_WORDS as usize == crate::keccak::WORDS);
+/// M4.4: `a0 = ptr` (a WORD address, `MEM_ADDR`'s convention), pointing at the `SHA256_WORDS`
+/// words of one SHA-256 compression's argument: words `0..16` are the 512-bit message block as
+/// sixteen **big-endian-valued** 32-bit words (word `i` is `u32::from_be_bytes` of the block's
+/// bytes `4i..4i+4`, i.e. `sha256::bytes_to_words`' layout), words `16..24` are the chaining
+/// state `H`. Applies one compression, `H <- H + f(H, W)`, over words `16..24` in place and
+/// leaves the message words untouched; it takes no other argument. Like `KECCAK` — and unlike
+/// `POSEIDON2` — this is a single cpu row: the sha256 chip (`tables::sha256`) proves the 64
+/// rounds off the cpu table, so the cpu only witnesses the call. `ptr` is bounded the same way
+/// (`ExecError::Sha256PtrOutOfRange` / `emulator::SHA256_PTR_LIMIT`). Padding and the
+/// Merkle-Damgard loop are the guest's, in `guest_sdk::sha256`.
+pub const SYS_SHA256: u32 = 5;
+/// One message block plus one chaining state in machine words: 16 + 8 (`sha256::WORDS`).
+pub const SHA256_WORDS: u32 = 24;
+/// The ABI constant above and the host reference's own buffer width are the same number stated
+/// twice (`isa` is the syscall contract, `sha256` is the layout); keep them from drifting.
+const _: () = assert!(SHA256_WORDS as usize == crate::sha256::WORDS);
 pub const NUM_OUTPUTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

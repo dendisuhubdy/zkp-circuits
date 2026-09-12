@@ -12,6 +12,13 @@ const SYS_WRITE_OUTPUT: u32 = 1;
 const SYS_READ_INPUT: u32 = 2;
 const SYS_POSEIDON2: u32 = 3;
 const SYS_KECCAK: u32 = 4;
+const SYS_SHA256: u32 = 5;
+
+/// SHA-256's initial hash value `H(0)` (FIPS 180-4 §5.3.3), the chaining state `sha256` starts
+/// from; `research/src/sha256.rs::IV` is the same table host-side.
+const SHA256_IV: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
 
 /// Returns private input word `idx` — bound, since milestone 4.1, to the proof's `H_IN`
 /// commitment (`research/docs/03-privacy.md`): two calls with the same `idx` are guaranteed
@@ -110,6 +117,72 @@ pub fn keccak256(msg: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     for i in 0..8 { out[4 * i..4 * i + 4].copy_from_slice(&state[i].to_le_bytes()); }
     out
+}
+
+/// `ptr`: a 4-byte-aligned pointer to 24 words (96 bytes) holding one SHA-256 compression's
+/// argument — the 512-bit message block as sixteen big-endian-valued words at `0..16`, the
+/// chaining state `H` at `16..24`. One call compresses them, writing `H + f(H, W)` back over
+/// words `16..24` and leaving the block untouched. The syscall takes a **word** address in `a0`,
+/// so this divides the byte pointer by 4, the same convention as `keccak`.
+#[inline(always)]
+pub fn sha256_compress(ptr: *mut u32) {
+    debug_assert!((ptr as u32) % 4 == 0);
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") SYS_SHA256,
+            in("a0") (ptr as u32) / 4,
+            options(nostack),
+        );
+    }
+}
+
+/// SHA-256 (FIPS 180-4) as a software Merkle-Damgård loop over the `SHA256` syscall — the
+/// compression is the chip's, the padding and the chaining are the guest's, exactly as
+/// `keccak256` splits its sponge. One 24-word buffer serves the whole message: words `16..24`
+/// hold the running state across calls, words `0..16` are overwritten with each block.
+///
+/// `research/tests/sha256.rs` transcribes this loop and checks it against the host
+/// `sha256::sha256` at every block-boundary case.
+pub fn sha256(msg: &[u8]) -> [u8; 32] {
+    let mut buf = [0u32; 24];
+    buf[16..].copy_from_slice(&SHA256_IV);
+    let mut block = [0u8; 64];
+    let mut off = 0;
+    // Every whole 64-byte block of the message itself.
+    while msg.len() - off >= 64 {
+        block.copy_from_slice(&msg[off..off + 64]);
+        compress_bytes(&mut buf, &block);
+        off += 64;
+    }
+    // The tail: `rest < 64` leftover bytes, the `0x80` terminator, then eight zero bytes and the
+    // big-endian bit length — in this same block if the terminator left room for them (`rest <
+    // 56`), in one further all-padding block if it did not.
+    let rest = msg.len() - off;
+    block.fill(0);
+    block[..rest].copy_from_slice(&msg[off..]);
+    block[rest] = 0x80;
+    if rest >= 56 {
+        compress_bytes(&mut buf, &block);
+        block.fill(0);
+    }
+    block[56..].copy_from_slice(&(msg.len() as u64).wrapping_mul(8).to_be_bytes());
+    compress_bytes(&mut buf, &block);
+
+    let mut out = [0u8; 32];
+    for i in 0..8 {
+        out[4 * i..4 * i + 4].copy_from_slice(&buf[16 + i].to_be_bytes());
+    }
+    out
+}
+
+/// Packs `block`'s 64 bytes into `buf[0..16]` big-endian — the word order `SYS_SHA256` reads them
+/// in — and compresses `buf` in place.
+fn compress_bytes(buf: &mut [u32; 24], block: &[u8; 64]) {
+    for i in 0..16 {
+        buf[i] = u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
+    }
+    sha256_compress(buf.as_mut_ptr());
 }
 
 // Deviation from the brief's literal `options(nostack, noreturn)`: on this bare-metal target

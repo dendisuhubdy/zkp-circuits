@@ -1362,6 +1362,13 @@ pub fn cpu_trace(program: &Program, inputs: &[u32], salt: [u32; 4], events: &[Cy
                 nibble.and4(hp3_lo, 0);
                 nibble.and4(hp3_hi, 0xC);
             }
+            // M4.4: the `SYS_SHA256` selector, its pointer decomposition and the `SHA256` lookup
+            // are Task 4's work — the chip that would answer the lookup does not exist yet. Until
+            // then this must not fall through to a wildcard: a `SYS_SHA256` row traced as a plain
+            // ecall would carry no selector and no provider, which is precisely the silent
+            // unsoundness `AGENTS.md`'s two invariants exist to prevent. The emulator's own
+            // semantics (and `tests/emulator.rs`) are complete without it.
+            Some(Syscall::Sha256 { .. }) => unimplemented!("SYS_SHA256 cpu rows are wired to the sha256 chip in M4.4 Task 4"),
             None => {}
         }
         // M3.2 hash rows. `hash_ptr_n` remembers the group's `(ptr, n)` from its ecall row
