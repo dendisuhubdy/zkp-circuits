@@ -8,8 +8,8 @@
 | M1.5 | Viewing keys: a one-in-one-out shielded transfer guest with in-circuit commitments and nullifier (software `Arx8` hash), note envelopes (ML-KEM-768 + ChaCha20-Poly1305), party- and transaction-scoped disclosure, row verification against the chain, a simulated ledger (`docs/06-viewing-keys.md`) | a transfer proves at tier 12 and a ledger accepts it; each disclosure scope opens exactly its own rows; every row verifies; a viewing key cannot spend | **done** — 6 tests, Part 9 of the demo |
 | M2 | Sub-word loads/stores, the M extension, a flat-binary loader, `READ_INPUT` bound to something | a guest compiled with an external RISC-V toolchain runs and proves | **done** (M2.1–M2.6, this milestone's six-task implementation plan): verifier key cache — done; FRI retuned to a 100-bit conjectured target — done; the 2^16-row byte table split into 256-row range and nibble tables — done; the ALU's RANGE8 limb checks collapsed to op-gated (`g_ab`/`g_c`) — done; sub-word loads/stores `LB LH LBU LHU SB SH` as a read-modify-write over word-addressed memory — done; the RV32M extension (`MUL MULH MULHU MULHSU DIV DIVU REM REMU`) as exact integer identities — done; 81 tests total. The flat-binary loader and a firmer `READ_INPUT` binding, carried forward as open items, were closed in M4.1 (`docs/superpowers/plans/2026-09-11-zkvm-m4-1.md`) |
 | M3 | Poseidon2 chip, `POSEIDON2` syscall plus `NOTE_COMMIT`/`NULLIFY`/`MERKLE_VERIFY` guest routines, program digest moved in-circuit as a public value; `Arx8` retired and `cm_in` moved from public output to Merkle witness | the zkp6/zkp4 transfer relation re-expressed as a guest proves under `R_exec`, with membership in-circuit | **done** — M3.1 (Poseidon2 chip, one row per round, `POSEIDON2` bus), M3.2 (`POSEIDON2` syscall = 3, absorb/write-back cpu hash rows), M3.3 (`NOTE_COMMIT`/`NULLIFY`/`MERKLE_VERIFY` guest routines, the transfer guest rewritten around in-circuit membership, the ledger's commitment tree, `Arx8` retired) and M3.4 (the program table as a witness trace with an in-circuit decoder, `hc` as an in-circuit digest pinned to `pv::HC0..HC7`, `Machine::verify(hc, proof)`, the verifier key collapsed to one per (tier, declared program height) — deviation 1 below closed) all done — 117 tests, `docs/06-viewing-keys.md` |
-| M4 | EVM and sBPF guest interpreters, Keccak/SHA coprocessors (`docs/04-guests.md`) | an ERC-20 `transfer` and an SPL `Transfer` each prove under `R_exec` | not started — M4.1 (compiled guests, flat-binary loader, `READ_INPUT` bound to `H_IN`) — **done**; M4.2–M4.4 (Keccak-f\[1600\] chip, EVM interpreter, sBPF interpreter/SHA-256 chip — `docs/superpowers/specs/2026-09-11-zkvm-m4-design.md`) not started |
-| Phase Z | Fully shielded pool, zkVM side (`docs/superpowers/specs/2026-09-11-shielded-pool-design.md` §12): looped `MERKLE_VERIFY`, `u64` amounts, the 2-in-2-out `bundle` guest with dummy inputs and `u64` fee/burn conservation, ledger admission and viewing over bundles | `bundle` proves and verifies at a measured tier; every §13 cheating scenario is rejected (structurally or by the STARK); a party's or a transaction's viewing key opens exactly its bundle rows | **done** — the full suite is 167 tests (166 pass, 1 pre-existing ignored); phase Z added 30 of them across Tasks 1–4, 28 in `tests/bundle.rs`, and the 256-bit-`SpendKey` follow-up one more in `tests/viewing.rs` (`docs/06-viewing-keys.md`'s "The `bundle` relation" and "Ledger admission for bundles") |
+| M4 | EVM and sBPF guest interpreters, Keccak/SHA coprocessors (`docs/04-guests.md`) | an ERC-20 `transfer` and an SPL `Transfer` each prove under `R_exec` | in progress — M4.1 (compiled guests, flat-binary loader, `READ_INPUT` bound to `H_IN`) **done**; M4.2 (the Keccak-f\[1600\] chip, `KECCAK` syscall = 4, proof-declared keccak and memory heights, the compiled `keccak256` guest) **done** — the suite is 200 tests now (199 pass, 1 ignored), M4.2 adding 33 of them: `tests/keccak.rs` (12, new), `tests/cheating.rs` (+10), `tests/e2e.rs` (+6), `tests/tables.rs` (+5); M4.3–M4.4 (EVM interpreter, sBPF interpreter/SHA-256 chip — `docs/superpowers/specs/2026-09-11-zkvm-m4-design.md`) not started |
+| Phase Z | Fully shielded pool, zkVM side (`docs/superpowers/specs/2026-09-11-shielded-pool-design.md` §12): looped `MERKLE_VERIFY`, `u64` amounts, the 2-in-2-out `bundle` guest with dummy inputs and `u64` fee/burn conservation, ledger admission and viewing over bundles | `bundle` proves and verifies at a measured tier; every §13 cheating scenario is rejected (structurally or by the STARK); a party's or a transaction's viewing key opens exactly its bundle rows | **done** — the suite stood at 167 tests (166 pass, 1 pre-existing ignored) when phase Z landed; it is 200 now, after M4.2. Phase Z added 30 of them across Tasks 1–4, 28 in `tests/bundle.rs`, and the 256-bit-`SpendKey` follow-up one more in `tests/viewing.rs` (`docs/06-viewing-keys.md`'s "The `bundle` relation" and "Ledger admission for bundles") |
 
 M1's exit criterion as actually delivered is slightly broader than the
 original wording: the demo and test suite exercise four guests, not three,
@@ -51,8 +51,8 @@ deviation from the whitepaper but is worth flagging alongside them.
    computed in-circuit by `cpu`'s digest-row prefix over the program table
    (now a witness trace, `docs/02-tables-and-buses.md`'s in-circuit
    decoder) with the Poseidon2 chip, exactly as the whitepaper wants: one
-   universal verifier key per (tier, declared program height) (`Machine::verifier_key(tier, program_log_height)`,
-   program-independent), `hc` supplied by the caller as an input to
+   universal verifier key per (tier, declared program/input/keccak heights)
+   (`Machine::verifier_key`, program-*content*-independent), `hc` supplied by the caller as an input to
    `Machine::verify(hc, proof)` rather than baked into a per-program
    `CommonData`. What the whitepaper's "public input" framing does *not*
    itself provide — a hiding salt for `hc`, so a verifier who cannot
@@ -76,6 +76,18 @@ deviation from the whitepaper but is worth flagging alongside them.
 5. **Recursion and per-batch aggregation are out of scope** until
    milestone 4 or later; this crate proves and verifies individual guest
    executions only.
+5b. **The keccak table is in every proof, including proofs that never use it**
+   (M4.2, not a whitepaper deviation — an implementation cost worth carrying
+   forward). Its height floors at one 32-row padding block, and a 2 612-column
+   table costs about 705 KB of the production profile's FRI leaf openings
+   regardless of how many rows it has (`docs/03-privacy.md`'s M4.2
+   measurement). Letting a proof declare *zero* keccak instances — dropping
+   the AIR from `chips()` entirely rather than padding it — is the obvious
+   lever and is deliberately not part of M4.2: it changes the batch's instance
+   count, hence `chips()`'s fixed indices, the public-values slot, the
+   `KeyCache` key and `log_ext_degrees`, which is a machine-shape change rather
+   than a table change. M4.3's SHA-256 chip will make the same table twice as
+   expensive to ignore, so this should be settled before it lands.
 6. **Selector refinement (not a deviation, a design choice).** The design
    spec described one flag per mnemonic; the implementation pre-decodes
    23 semantic selector fields instead (`docs/01-isa.md`; M2.5 grew this

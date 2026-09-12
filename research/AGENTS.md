@@ -1,20 +1,26 @@
 # AGENTS.md — `research` (rand_zkvm)
 
 The Rand reference zkVM: an RV32I subset under a zero-knowledge batch STARK
-(Plonky3 0.7, Goldilocks), proved as eight AIR tables exchanging facts over
-twelve LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
-buses), plus the M1.5 viewing-key layer (notes, envelopes, scoped
-disclosure, simulated ledger). Design docs are `docs/01–06`; the README has
-the reading order.
+(Plonky3 0.7, Goldilocks), proved as nine AIR tables exchanging facts over
+thirteen LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
+buses; M4.2 added `keccak` and the `KECCAK` bus), plus the M1.5 viewing-key
+layer (notes, envelopes, scoped disclosure, simulated ledger). Design docs
+are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (167 tests: 166 pass, 1 ignored).
-  Everything uses `FriProfile::Test`; measured, `tests/bundle.rs` takes
-  ~208 s (six proofs: four guest-level, plus one shared by every
-  ledger-level test and one for the 1-real-1-dummy shape),
-  `tests/viewing.rs` ~206 s, `tests/e2e.rs` ~103 s, `tests/cheating.rs`
-  ~26 s and `tests/zk.rs` ~19 s. All green is the bar before any commit.
+- `cargo test` — the whole suite (200 tests: 199 pass, 1 ignored).
+  Everything uses `FriProfile::Test`; measured on the M4.2 branch,
+  `tests/bundle.rs` takes ~222 s (six proofs: four guest-level, plus one
+  shared by every ledger-level test and one for the 1-real-1-dummy shape),
+  `tests/viewing.rs` ~194 s, `tests/e2e.rs` ~99 s, `tests/cheating.rs`
+  ~39 s, `tests/zk.rs` ~18 s, `tests/tables.rs` ~10 s and
+  `tests/keccak.rs` ~1 s (its chip-alone harness proves a 128-row table, so
+  it is cheap despite 2 612 columns). All green is the bar before any
+  commit. Every table's proof got markedly larger in M4.2 — the keccak chip
+  is in every proof, including proofs that never call `KECCAK`
+  (`docs/03-privacy.md`'s M4.2 measurement); that is a known cost, not a
+  regression to chase.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one
   production-profile proof). The test suite covers everything it shows; don't
   run it casually.

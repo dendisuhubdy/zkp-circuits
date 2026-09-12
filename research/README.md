@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 167 tests: emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, viewing keys, shielded-pool bundles
+cargo test              # 200 tests (199 pass, 1 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, viewing keys, shielded-pool bundles
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -40,9 +40,9 @@ you can see the parameter effect directly.
 
 ## The machine in one picture
 
-The relation is proved as one batch of seven AIR tables under a single
+The relation is proved as one batch of nine AIR tables under a single
 commitment and a single FRI opening. Tables never call each other directly;
-they exchange facts through ten named LogUp buses, and the batch verifier
+they exchange facts through thirteen named LogUp buses, and the batch verifier
 checks that every bus balances globally.
 
 ```
@@ -71,15 +71,24 @@ checks that every bus balances globally.
 
                         ┌─────────────┐
                         │  POSEIDON2  │  provides POSEIDON2; consumed by cpu's
-                        └─────────────┘  hash rows and its digest rows (hc)
+                        └─────────────┘  hash rows, its digest rows (hc) and
+                                         its indigest rows (H_IN)
+                        ┌─────────────┐
+                        │    INPUT    │  one row per committed private-input
+                        └─────────────┘  word; INPUT_DIGEST / INPUT_READ (M4.1)
+                        ┌─────────────┐
+                        │   KECCAK    │  Keccak-f[1600], one row per round;
+                        └─────────────┘  provides KECCAK (clk, ptr) and sends
+                                         its own 100 MEMORY accesses (M4.2)
 ```
 
 `range` and `nibble` are preprocessed (committed once, independent of any
 witness, and of any program — since M3.4 that's true of every preprocessed
-table); `program`, `cpu`, `memory`, `alu`, and `poseidon2` are main traces,
-rebuilt per execution (`poseidon2`'s own round-constant/row-kind columns are
-preprocessed too, but its state/S-box columns are not; `program`'s decoder
-columns are all main now — M3.4 retired its preprocessed half entirely).
+table); `program`, `cpu`, `memory`, `alu`, `poseidon2`, `input` and `keccak`
+are main traces, rebuilt per execution (`poseidon2`'s and `keccak`'s own
+round-constant/row-kind columns are preprocessed too, but their state columns
+are not; `program`'s decoder columns are all main now — M3.4 retired its
+preprocessed half entirely).
 Full column lists and constraints: `docs/02-tables-and-buses.md`.
 
 ## How confidential arbitrary computation works
@@ -114,7 +123,7 @@ Execution happens natively and in the clear on the prover's machine (Part
 3) — the emulator is the reference semantics, and nothing about running it
 is itself confidential; confidentiality is a property of the *proof*, not
 of the execution environment. Arithmetization (Part 4) turns that execution
-into eight tables padded to the smallest gas tier that fits, which is why the
+into nine tables padded to the smallest gas tier that fits, which is why the
 trace height — and hence the tier — is the only thing about "how much work
 happened" that a verifier can see. Proving and verifying (Part 5) run
 against Plonky3's hiding FRI PCS, so the main-trace and quotient commitments
@@ -182,13 +191,15 @@ milestone 4 builds first: `docs/04-guests.md`.
 
 | Data | Status |
 |---|---|
-| The program itself, its code hash `hc`, entry point `pc_entry`, gas tier, eight output words | public |
-| Private inputs, every register/memory value, every branch, the exact cycle count, which syscalls ran | hidden |
+| The code hash `hc`, entry point `pc_entry`, gas tier, eight output words, and the declared program / input / keccak / memory table heights | public |
+| The program itself (M3.4 — `verify` takes only `hc`), private inputs, every register/memory value, every branch, the exact cycle count, which syscalls ran | hidden |
 
-`hc` is binding but not hiding — its salt is derived from the program — which
-costs nothing while the verifier holds the program anyway. A shielded
-transfer additionally publishes its spent commitment in the clear until
-`MERKLE_VERIFY` exists (`docs/06-viewing-keys.md`).
+`hc` is binding but not hiding: a verifier who can guess the program can
+confirm the guess against a published `hc`. The four declared heights are
+coarse power-of-two bounds, each with a floor that makes the common case
+uninformative — a keccak-free guest and a one-permutation guest declare the
+same `keccak_log_height`, and every guest whose memory traffic fits the tier's
+own budget declares the same `mem_log_height` (`docs/03-privacy.md`).
 
 Full detail, including the tier-to-row-count table and the delegated-proving
 boundary: `docs/03-privacy.md`.
@@ -198,7 +209,7 @@ boundary: `docs/03-privacy.md`.
 1. **Closed in M3.4.** `hc` is now an ordinary public value, computed
    in-circuit by the program table's digest rows with the Poseidon2 chip,
    and checked by the universal, program-independent verifier key
-   (`Machine::verifier_key(tier, program_log_height)`, still program-*content*-independent). It is still binding but not hiding — a
+   (`Machine::verifier_key`, still program-*content*-independent). It is still binding but not hiding — a
    verifier who can guess the program can still confirm the guess against
    a published `hc` — see `docs/03-privacy.md`.
 2. The gas tier is public per proof, not only as a batch-level histogram.

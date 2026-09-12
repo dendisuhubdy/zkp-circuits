@@ -211,6 +211,18 @@ value" is written to RAM in place at `ptr` rather than into `a0`. `a0`
 ecall's second argument) are still read the ordinary way, on the ecall row
 only.
 
+`KECCAK` (M4.2) is the counter-example, and deliberately so: it **is** a
+single cpu row, because the chip does the memory traffic itself. The cpu row
+reads `a0` the ordinary way, bounds it (`HP0..3`/`HP3_HI`, the same limb
+decomposition a `POSEIDON2` ecall row uses, tightened by one cubic rule to
+`ptr < 0x3000_0000` so the chip's own `PTR + w` addressing cannot leave the
+bounded range), and provides a single `KECCAK` bus message `(clk, ptr)`. It
+never touches the permuted state: the 50 reads at `ts = 4·clk` and the 50
+writes at `ts = 4·clk + 1` are sent by the `keccak` table, off its own
+columns, so the cpu row costs no extra rows and no extra memory slots no
+matter how many words the permutation moves. `docs/02-tables-and-buses.md`'s
+`keccak` section has the schedule.
+
 Before M4.1 there was no RISC-V cross toolchain on the development machine,
 so every guest was written directly against `asm.rs`'s mnemonic helpers
 (`src/asm.rs::ops`) rather than compiled from C or Rust `no_std`. That
