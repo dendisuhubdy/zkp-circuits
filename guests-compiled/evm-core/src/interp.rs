@@ -2,12 +2,14 @@
 //! calldata, code, `SLOAD`/`SSTORE` over Merkle witnesses, 256-bit arithmetic, `KECCAK256`, logs,
 //! `RETURN`/`REVERT` — with the Shanghai static gas schedule and no allocation.
 //!
-//! Everything the run needs is a fixed-size array inside [`Interpreter`], sized by the plan's
-//! limits: the 1024-entry stack (32 KiB), 64 KiB of memory, the jumpdest bitmap over 24 KiB of
-//! code (3 KiB). Nothing is heap-allocated and nothing is copied around: [`Interpreter::new`]
-//! returns the whole ~100 KiB structure through the ABI's indirect-return slot and
-//! [`Interpreter::run`] takes it by value the same way, so the guest can keep the one instance in
-//! `.bss` and never push it onto its 64 KiB stack.
+//! Everything the run needs is a fixed-size array, sized by the plan's limits, and none of it is
+//! heap-allocated. The three big ones — the 1024-entry stack (32 KiB), 64 KiB of memory and the
+//! jumpdest bitmap over 24 KiB of code (3 KiB) — live in [`Buffers`], which the [`Interpreter`]
+//! **borrows**: the guest keeps one `Buffers` in `.bss` (`static mut B: Buffers = Buffers::ZERO;`,
+//! all-zero so it costs no image bytes) and the `Interpreter` itself is a ~2 KiB value that costs
+//! nothing to move, so neither [`Interpreter::new`]'s return nor [`Interpreter::run`]'s `self`
+//! ever puts 100 KiB on the guest's 64 KiB stack. `abi::Workspace` is the whole `.bss` block —
+//! the decoded input plus these buffers — and `abi::run_call` is what the guest actually calls.
 //!
 //! **Out of scope traps.** Every opcode outside the plan's list — the `CALL`/`CREATE` family,
 //! precompiles, the block- and account-info opcodes, `TLOAD`/`TSTORE`, `MCOPY`, `BLOBHASH`,
@@ -116,7 +118,7 @@ pub struct Log {
 }
 
 impl Log {
-    const EMPTY: Log = Log { n_topics: 0, topics: [U256::ZERO; MAX_TOPICS] };
+    pub const EMPTY: Log = Log { n_topics: 0, topics: [U256::ZERO; MAX_TOPICS] };
 }
 
 /// What the run produced. `ret`/`logs` are fixed-size, so `ret_len`/`n_logs` say how much of each
@@ -147,25 +149,43 @@ impl Outcome {
     }
 }
 
+/// The interpreter's three big working arrays, with no borrows of their own so they can sit in a
+/// guest's `.bss` as a plain `static mut B: Buffers = Buffers::ZERO;` and be lent to an
+/// [`Interpreter`] rather than copied into one. 99.6 KiB; the fields are private because only the
+/// interpreter may touch them, and [`Interpreter::new`] resets the two that must start clean.
+pub struct Buffers {
+    stack: [U256; STACK_LIMIT],
+    memory: [u8; MAX_MEMORY_BYTES],
+    /// Bit `i` is set iff `code[i]` is a `JUMPDEST` that is not inside a `PUSHn`'s immediate.
+    jumpdests: [u32; MAX_CODE_BYTES / 32],
+}
+
+impl Buffers {
+    /// All zeros — a valid, unused set of buffers, and a `const` so a `static` holding one lands
+    /// in `.bss` (no image bytes) instead of `.data`.
+    pub const ZERO: Buffers = Buffers {
+        stack: [U256::ZERO; STACK_LIMIT],
+        memory: [0; MAX_MEMORY_BYTES],
+        jumpdests: [0; MAX_CODE_BYTES / 32],
+    };
+}
+
 /// The EVM interpreter over one contract's code, calldata and storage witnesses.
 ///
-/// `h`, `code`, `calldata` and `storage` are borrowed; the stack, the memory, the jumpdest bitmap,
-/// the return buffer and the logs are owned fixed-size arrays. See the module docs on why nothing
-/// here is ever moved by value in practice.
+/// `h`, `code`, `calldata`, `storage` and the big [`Buffers`] are borrowed; only the return buffer
+/// and the logs (2 KiB, and both move straight into the [`Outcome`]) are owned. See the module docs
+/// on why the big arrays are borrowed rather than owned.
 pub struct Interpreter<'a, H: Host> {
     h: &'a mut H,
     code: &'a [u8],
     calldata: &'a [u8],
     env: Env,
     storage: &'a mut StorageTree,
-    stack: [U256; STACK_LIMIT],
+    bufs: &'a mut Buffers,
     sp: usize,
-    memory: [u8; MAX_MEMORY_BYTES],
     /// The highest touched byte rounded up to 32 — what `MSIZE` pushes and what memory expansion
     /// is charged against.
     msize: usize,
-    /// Bit `i` is set iff `code[i]` is a `JUMPDEST` that is not inside a `PUSHn`'s immediate.
-    jumpdests: [u32; MAX_CODE_BYTES / 32],
     pc: usize,
     gas: u64,
     ret: [u8; MAX_RETURN_BYTES],
@@ -187,12 +207,17 @@ impl<'a, H: Host> Interpreter<'a, H> {
     /// be an `assert!`: a panicking guest aborts and produces no proof at all, where an exceptional
     /// halt produces a proof that says the call was invalid. Task 4's input cursor refuses the same
     /// two lengths at parse time; this is the belt to its braces.
+    ///
+    /// `bufs` may be a set of buffers a previous run used: the memory and the jumpdest bitmap are
+    /// reset here (EVM memory reads as zero, and `scan_jumpdests` only ever *sets* bits), while
+    /// the stack needs no reset because `sp` starts at zero and nothing is read above it.
     pub fn new(
         h: &'a mut H,
         code: &'a [u8],
         calldata: &'a [u8],
         env: Env,
         storage: &'a mut StorageTree,
+        bufs: &'a mut Buffers,
     ) -> Self {
         let pre_halt = if code.len() > MAX_CODE_BYTES || calldata.len() > MAX_CALLDATA_BYTES {
             Some(Halt::OutOfBounds)
@@ -204,21 +229,18 @@ impl<'a, H: Host> Interpreter<'a, H> {
         // bitmap without a second branch.
         let code = &code[..min(code.len(), MAX_CODE_BYTES)];
         let calldata = &calldata[..min(calldata.len(), MAX_CALLDATA_BYTES)];
-        // Built in a local so the struct literal below is the only ~100 KiB value in this frame:
-        // it goes straight into the caller's indirect-return slot.
-        let mut jumpdests = [0u32; MAX_CODE_BYTES / 32];
-        scan_jumpdests(code, &mut jumpdests);
+        bufs.memory.fill(0);
+        bufs.jumpdests.fill(0);
+        scan_jumpdests(code, &mut bufs.jumpdests);
         Interpreter {
             h,
             code,
             calldata,
             env,
             storage,
-            stack: [U256::ZERO; STACK_LIMIT],
+            bufs,
             sp: 0,
-            memory: [0; MAX_MEMORY_BYTES],
             msize: 0,
-            jumpdests,
             pc: 0,
             gas: env.gas_limit,
             ret: [0; MAX_RETURN_BYTES],
@@ -332,7 +354,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
                 let len = len_arg(&size)?;
                 self.charge(G_KECCAK256 + G_KECCAK256_WORD * words(len))?;
                 let start = self.mem(&offset, len)?;
-                let d = keccak256(&mut *self.h, &self.memory[start..start + len]);
+                let d = keccak256(&mut *self.h, &self.bufs.memory[start..start + len]);
                 self.push(U256::from_be_bytes(&d))?;
             }
 
@@ -365,19 +387,19 @@ impl<'a, H: Host> Interpreter<'a, H> {
             0x51 => {
                 let offset = self.pop()?;
                 let start = self.mem(&offset, 32)?;
-                let mut b = [0u8; 32];
-                b.copy_from_slice(&self.memory[start..start + 32]);
-                self.push(U256::from_be_bytes(&b))?;
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&self.bufs.memory[start..start + 32]);
+                self.push(U256::from_be_bytes(&bytes))?;
             }
             0x52 => {
                 let (offset, value) = (self.pop()?, self.pop()?);
                 let start = self.mem(&offset, 32)?;
-                self.memory[start..start + 32].copy_from_slice(&value.to_be_bytes());
+                self.bufs.memory[start..start + 32].copy_from_slice(&value.to_be_bytes());
             }
             0x53 => {
                 let (offset, value) = (self.pop()?, self.pop()?);
                 let start = self.mem(&offset, 1)?;
-                self.memory[start] = value.low_u32() as u8;
+                self.bufs.memory[start] = value.low_u32() as u8;
             }
             0x54 => {
                 let slot = self.pop()?;
@@ -431,7 +453,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
                 if self.sp < n {
                     return Err(Halt::StackUnderflow);
                 }
-                let v = self.stack[self.sp - n];
+                let v = self.bufs.stack[self.sp - n];
                 self.push(v)?;
             }
             0x90..=0x9f => {
@@ -439,7 +461,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
                 if self.sp < n + 1 {
                     return Err(Halt::StackUnderflow);
                 }
-                self.stack.swap(self.sp - 1, self.sp - 1 - n);
+                self.bufs.stack.swap(self.sp - 1, self.sp - 1 - n);
             }
 
             // ---- logs ----
@@ -472,7 +494,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
                     return Err(Halt::OutOfBounds);
                 }
                 let start = self.mem(&offset, len)?;
-                self.ret[..len].copy_from_slice(&self.memory[start..start + len]);
+                self.ret[..len].copy_from_slice(&self.bufs.memory[start..start + len]);
                 self.ret_len = len;
                 return Ok(Some(if op == 0xf3 { Halt::Return } else { Halt::Revert }));
             }
@@ -492,7 +514,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
         if self.sp == STACK_LIMIT {
             return Err(Halt::StackOverflow);
         }
-        self.stack[self.sp] = v;
+        self.bufs.stack[self.sp] = v;
         self.sp += 1;
         Ok(())
     }
@@ -502,7 +524,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
             return Err(Halt::StackUnderflow);
         }
         self.sp -= 1;
-        Ok(self.stack[self.sp])
+        Ok(self.bufs.stack[self.sp])
     }
 
     /// The shape every two-operand opcode has: pop the top two — `a` is the top — and push
@@ -546,7 +568,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
         let from = src_offset(&offset);
         for i in 0..len {
             let s = from.saturating_add(i as u64);
-            self.memory[start + i] = if s < src.len() as u64 { src[s as usize] } else { 0 };
+            self.bufs.memory[start + i] = if s < src.len() as u64 { src[s as usize] } else { 0 };
         }
         Ok(())
     }
@@ -557,7 +579,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
             return Err(Halt::BadJump);
         }
         let t = dest.low_u32() as usize;
-        if t >= self.code.len() || (self.jumpdests[t / 32] >> (t % 32)) & 1 == 0 {
+        if t >= self.code.len() || (self.bufs.jumpdests[t / 32] >> (t % 32)) & 1 == 0 {
             return Err(Halt::BadJump);
         }
         self.pc = t;

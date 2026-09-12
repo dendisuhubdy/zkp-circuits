@@ -8,7 +8,7 @@
 //! wrong by hand (`SDIV`/`SMOD` truncation, `SAR`'s sign fill, `BYTE`/`SIGNEXTEND` index
 //! direction, the shifts at counts ≥ 256).
 
-use evm_core::interp::{Env, Halt, Interpreter, Outcome, MAX_CALLDATA_BYTES, MAX_CODE_BYTES};
+use evm_core::interp::{Buffers, Env, Halt, Interpreter, Outcome, MAX_CALLDATA_BYTES, MAX_CODE_BYTES};
 use evm_core::storage::StorageTree;
 use evm_core::u256::U256;
 use rand_zkvm::evm::{empty_root, HostRef, SparseTree};
@@ -25,7 +25,10 @@ fn env() -> Env {
 fn run(code: &[u8], calldata: &[u8]) -> Outcome {
     let mut h = HostRef;
     let mut st = StorageTree::new(empty_root());
-    Interpreter::new(&mut h, code, calldata, env(), &mut st).run()
+    // The interpreter borrows its ~100 KiB of working arrays (Task 4's in-place path), so the test
+    // owns one `Buffers` per run; the guest keeps a single one in `.bss`.
+    let mut b = Box::new(Buffers::ZERO);
+    Interpreter::new(&mut h, code, calldata, env(), &mut st, &mut b).run()
 }
 
 /// Run against a host-built tree, pushing a witness for each of `slots`. Returns the outcome and
@@ -46,7 +49,8 @@ fn run_with(code: &[u8], calldata: &[u8], tree: &SparseTree, slots: &[U256]) -> 
         )
         .unwrap();
     }
-    let o = Interpreter::new(&mut h, code, calldata, env(), &mut st).run();
+    let mut b = Box::new(Buffers::ZERO);
+    let o = Interpreter::new(&mut h, code, calldata, env(), &mut st, &mut b).run();
     let root = st.root();
     (o, root)
 }
@@ -124,7 +128,8 @@ fn stack_limits_out_of_gas_invalid_and_traps() {
     let mut st = StorageTree::new(empty_root());
     let mut e = env();
     e.gas_limit = 4;
-    let o = Interpreter::new(&mut h, &[0x60, 0x01, 0x60, 0x01, 0x01], &[], e, &mut st).run(); // 3 + 3 > 4
+    let mut b = Box::new(Buffers::ZERO);
+    let o = Interpreter::new(&mut h, &[0x60, 0x01, 0x60, 0x01, 0x01], &[], e, &mut st, &mut b).run(); // 3 + 3 > 4
     assert_eq!(o.halt, Halt::OutOfGas);
     assert_eq!(o.gas_used, 4);
     // an outcome that is not Return/Revert has empty return data and no logs

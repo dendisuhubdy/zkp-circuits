@@ -87,8 +87,26 @@ pub struct StorageTree {
 }
 
 impl StorageTree {
+    /// An empty tree with a zero root: a valid, unused value, and a `const` so a `static` holding
+    /// one (the guest's `abi::Workspace` in `.bss`) costs no image bytes. [`reset`](Self::reset)
+    /// gives it the pre-state root of an actual call.
+    pub const ZERO: StorageTree = StorageTree {
+        root: [0; 8],
+        witnesses: [Witness::EMPTY; MAX_WITNESSES],
+        n: 0,
+        indices: [0; MAX_WITNESSES],
+    };
+
     pub fn new(pre_root: [u32; 8]) -> Self {
         StorageTree { root: pre_root, witnesses: [Witness::EMPTY; MAX_WITNESSES], n: 0, indices: [0; MAX_WITNESSES] }
+    }
+
+    /// Re-arm a tree in place for a new call: the given pre-state root, no witnesses. The witness
+    /// array is left as it is — nothing reads past `n`, and `push` overwrites each slot it uses —
+    /// so this is O(1) rather than 17 KiB of stores, which matters in the guest.
+    pub fn reset(&mut self, pre_root: [u32; 8]) {
+        self.root = pre_root;
+        self.n = 0;
     }
 
     /// The current root: the pre-state root until the first [`store`](StorageTree::store), the

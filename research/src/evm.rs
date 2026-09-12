@@ -17,6 +17,8 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use evm_core::abi::{run_call_with, Workspace};
+use evm_core::interp::Outcome;
 use evm_core::u256::U256;
 
 use crate::hash::sponge_hash;
@@ -177,3 +179,89 @@ impl Witness {
 
 /// Words per witness in the input vector: slot 8 + value 8 + `DEPTH` × 8 siblings.
 pub const WITNESS_WORDS: usize = 16 + DEPTH * 8;
+
+/// One call to the EVM guest, host side: everything the input vector holds, plus the storage tree
+/// the witnesses come from. [`input_words`](EvmCall::input_words) encodes it as the machine's
+/// private input and [`expected`](EvmCall::expected) says what the guest must output — the pair
+/// `tests/evm_abi.rs` checks against each other and against digests recomputed from this crate's
+/// own primitives.
+pub struct EvmCall {
+    pub code: Vec<u8>,
+    pub calldata: Vec<u8>,
+    pub address: U256,
+    pub caller: U256,
+    pub callvalue: U256,
+    pub gas_limit: u64,
+    /// The pre-state storage. `witness(slot)` against this is what the guest verifies.
+    pub tree: SparseTree,
+    /// The slots a witness is supplied for, in the order they appear in the vector. A slot the
+    /// bytecode touches without one is an exceptional halt, so this is the call's access list.
+    pub touched: Vec<U256>,
+}
+
+impl EvmCall {
+    /// The input vector, exactly as the plan's Global Constraints lay it out:
+    /// `[n_code, code…, n_calldata, calldata…, address(8), caller(8), callvalue(8), gas_limit(1),
+    /// pre_root(8), n_witnesses(1), witness…]`, byte strings packed 4 per word little-endian and
+    /// zero-padded, 256-bit values as their own little-endian limbs, each witness
+    /// [`WITNESS_WORDS`] long.
+    ///
+    /// Panics on a gas limit above `u32::MAX`, which the single `gas_limit` word cannot carry —
+    /// a test's own constant, not prover-supplied, so an assert is the right choke point here.
+    pub fn input_words(&self) -> Vec<u32> {
+        let mut w = Vec::new();
+        push_bytes(&mut w, &self.code);
+        push_bytes(&mut w, &self.calldata);
+        w.extend_from_slice(&self.address.0);
+        w.extend_from_slice(&self.caller.0);
+        w.extend_from_slice(&self.callvalue.0);
+        assert!(self.gas_limit <= u32::MAX as u64, "the layout's gas_limit is one word");
+        w.push(self.gas_limit as u32);
+        w.extend_from_slice(&self.tree.root());
+        w.push(self.touched.len() as u32);
+        for slot in &self.touched {
+            w.extend_from_slice(&self.tree.witness(slot).words());
+        }
+        w
+    }
+
+    /// Run `evm-core` natively over [`HostRef`] and return the eight public output words, the
+    /// interpreter's outcome, and the post-state tree.
+    ///
+    /// The post-state tree is this call's `tree` with every witness's final value written back —
+    /// for a successful call only: a revert or an exceptional halt changes no state, however far
+    /// the interpreter's own tree got before it failed. When the call did succeed, the host tree's
+    /// root and the guest's witness-updated root are asserted equal, which is the one check that
+    /// `StorageTree::store`'s sibling refresh and `SparseTree`'s rebuild agree.
+    pub fn expected(&self) -> ([u32; 8], Outcome, SparseTree) {
+        let words = self.input_words();
+        // The guest keeps this in `.bss`; a host test boxes it (146 KiB is not for a frame).
+        let mut ws = Box::new(Workspace::ZERO);
+        let (out, o) =
+            run_call_with(&mut HostRef, &mut ws, |i| words[i as usize], words.len() as u32);
+        let mut post = self.tree.clone();
+        if o.status() == 1 {
+            for i in 0..ws.input.storage.len() {
+                let w = ws.input.storage.witness(i);
+                post.insert(w.slot, w.value);
+            }
+            assert_eq!(
+                post.root(),
+                ws.input.storage.root(),
+                "the host tree and the guest's witnesses disagree on the post-state root"
+            );
+        }
+        (out, o, post)
+    }
+}
+
+/// Append a byte string in the input layout: its length, then `ceil(n/4)` words holding four bytes
+/// each little-endian, the last zero-padded.
+fn push_bytes(w: &mut Vec<u32>, bytes: &[u8]) {
+    w.push(bytes.len() as u32);
+    for chunk in bytes.chunks(4) {
+        let mut word = [0u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        w.push(u32::from_le_bytes(word));
+    }
+}
