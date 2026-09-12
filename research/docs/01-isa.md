@@ -147,6 +147,7 @@ needs one, is read through the row's memory-access slot as register `a1`
 | 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, `slot < 8`; constrained directly against the public values, at most once per slot, and any slot never written is pinned to zero |
 | 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — bound to a commitment `H_IN` over the whole private-input vector since milestone 4.1 — two reads of the same `idx` are guaranteed to agree, and `idx >= n_in` cannot be satisfied at all; see `docs/03-privacy.md` |
 | 3 | `POSEIDON2 ptr n` | M3.2 | hashes the `n` words at word address `ptr` (`0 <= n <= POSEIDON2_MAX_WORDS = 4096`) with the Poseidon2 sponge (rate 4, overwrite mode, no padding — `hash::sponge_hash`, the exact `PaddingFreeSponge<_, 8, 4, 4>` semantics) and overwrites `ptr..ptr+8` with the 8-word (lo/hi) digest in place |
+| 4 | `KECCAK ptr` | M4.2 | applies one Keccak-f[1600] permutation in place to the `KECCAK_WORDS = 50` words at word address `ptr` — lane `i`'s low word at `ptr + 2i`, its high word at `ptr + 2i + 1` (`keccak::state_to_words`). Takes no second argument: the state's width is fixed. One cpu row per call (unlike `POSEIDON2`), because the `keccak` chip proves the 24 rounds and sends the permutation's own 100 memory accesses — the cpu table witnesses the call, never the rounds. Padding and rate are the guest's business; `guest_sdk::keccak256` is the Keccak-256 sponge built over it |
 
 ## The flat-binary loader (M4.1)
 

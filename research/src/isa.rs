@@ -20,6 +20,17 @@ pub const SYS_POSEIDON2: u32 = 3;
 /// Hard cap on `POSEIDON2`'s word count: 4096 words is 1024 absorbed blocks, comfortably
 /// within a tier's cycle budget while still bounding the emulator's per-syscall work.
 pub const POSEIDON2_MAX_WORDS: u32 = 4096;
+/// M4.2: `a0 = ptr` (a WORD address, `MEM_ADDR`'s convention), pointing at the `KECCAK_WORDS`
+/// words of a Keccak-f[1600] state in `keccak::state_to_words`' lo/hi-per-lane layout. Applies
+/// one permutation in place and takes no other argument. Unlike `POSEIDON2` this is a single
+/// cpu row: the keccak chip (`tables::keccak`) proves the 24 rounds off the cpu table, so the
+/// cpu only witnesses the call, never the rounds.
+pub const SYS_KECCAK: u32 = 4;
+/// The permutation's state width in machine words: 25 lanes x 2 words (`keccak::WORDS`).
+pub const KECCAK_WORDS: u32 = 50;
+/// The ABI constant above and the host reference's own state width are the same number stated
+/// twice (`isa` is the syscall contract, `keccak` is the layout); keep them from drifting.
+const _: () = assert!(KECCAK_WORDS as usize == crate::keccak::WORDS);
 pub const NUM_OUTPUTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

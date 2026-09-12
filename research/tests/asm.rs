@@ -49,3 +49,13 @@ fn every_guest_decodes() {
 fn bubble_sort_rejects_empty_input() {
     let _ = guests::bubble_sort(&[]);
 }
+
+/// M4.2: `call_keccak` is the `KECCAK` syscall's three-instruction sequence — syscall number in
+/// `a7`, the state's **word** address in `a0`, `ecall` — and every instruction of it round-trips
+/// through the machine's own encoder.
+#[test]
+fn call_keccak_passes_the_syscall_number_and_a_word_address() {
+    let seq = call_keccak(0x400 / 4);
+    assert_eq!(seq, vec![addi(REG_A7, 0, SYS_KECCAK as i32), addi(REG_A0, 0, 0x400 / 4), Instr::Ecall]);
+    for i in &seq { assert_eq!(Instr::decode(i.encode()).unwrap(), *i); }
+}

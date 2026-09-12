@@ -76,7 +76,11 @@ pub fn memory_trace(events: &[CycleEvent], clk_offset: u32, height: usize, count
     // (key, ts, space, addr, value, is_write)
     let mut rows: Vec<(u64, u64, u32, u32, u32, bool)> = Vec::new();
     for e in events {
-        for a in &e.accesses {
+        // M4.2: `keccak_accesses` are the `KECCAK` permutation's own reads and writes. They are
+        // not `accesses` because the cpu table does not send them — the keccak table does — but
+        // this table records *every* access, whoever sends it, or the two sides of the `MEMORY`
+        // bus stop balancing and a permuted word could be read back as something else.
+        for a in e.accesses.iter().chain(e.keccak_accesses.iter()) {
             rows.push((((a.space as u64) << KEY_SHIFT) | a.addr as u64, a.ts(clk_offset + e.clk) as u64, a.space, a.addr, a.value, a.is_write));
         }
     }

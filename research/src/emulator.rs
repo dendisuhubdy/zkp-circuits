@@ -18,7 +18,16 @@ impl MemAccess { pub fn ts(&self, clk: u32) -> u32 { 4 * clk + self.slot } }
 pub struct AluEvent { pub op: AluOp, pub a: u32, pub b: u32, pub c: u32 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Syscall { Halt, WriteOutput { slot: u32, word: u32 }, ReadInput { idx: u32, word: u32 }, Poseidon2 { ptr: u32, n: u32 } }
+pub enum Syscall { Halt, WriteOutput { slot: u32, word: u32 }, ReadInput { idx: u32, word: u32 }, Poseidon2 { ptr: u32, n: u32 }, Keccak { ptr: u32 } }
+
+/// M4.2: the whole of one `KECCAK` syscall, on the single cpu row that issues it. `ptr` is the
+/// state's word address; `input`/`output` are the 50 words before and after the permutation, in
+/// `keccak::state_to_words`' layout. Unlike `HashRow` this is not a row *kind* — a `KECCAK` call
+/// is one row, never a row group — it is the message the keccak chip's table will be built from
+/// (M4.2 Task 4), which is why the permutation's own memory traffic lives beside it in
+/// `CycleEvent::keccak_accesses` rather than in `accesses`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeccakRow { pub ptr: u32, pub input: [u32; 50], pub output: [u32; 50] }
 
 /// Which row of a `POSEIDON2` syscall's row group a `CycleEvent` is, and the extra fields that
 /// row alone needs (the cpu table's hash-row columns, `docs/02-tables-and-buses.md`). `None` on
@@ -57,6 +66,13 @@ pub struct CycleEvent {
     pub a: u32, pub b: u32, pub c: u32, pub alu_out: u32, pub tgt: u32, pub mem_addr: u32, pub mem_val: u32,
     pub sys: Option<Syscall>, pub accesses: Vec<MemAccess>, pub alu: Vec<AluEvent>,
     pub hash_row: Option<HashRow>,
+    /// M4.2: `Some` exactly on a `KECCAK` row, `None` everywhere else.
+    pub keccak_row: Option<KeccakRow>,
+    /// M4.2: the `KECCAK` permutation's own 100 RAM accesses — 50 reads at slot 0, then 50
+    /// writes at slot 1 — kept apart from `accesses` because the *keccak* table, not the cpu
+    /// table, sends them on the `MEMORY` bus. `memory_trace` records both lists; every other
+    /// consumer of `accesses` is a cpu-side one and must keep ignoring these.
+    pub keccak_accesses: Vec<MemAccess>,
 }
 
 #[derive(Clone, Debug)]
@@ -98,10 +114,11 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
         if let Some(op) = op1 { alu_out = op.eval(a, b_eff); alu.push(AluEvent { op, a, b: b_eff, c: alu_out }); }
         // slot-2 ALU: pc + imm
         if dec.is_branch + dec.is_jal + dec.is_auipc == 1 { tgt = pc.wrapping_add(dec.imm); alu.push(AluEvent { op: AluOp::Add, a: pc, b: dec.imm, c: tgt }); }
-        // POSEIDON2 dispatches a whole row-group and `continue`s the outer loop itself; every
-        // other instruction kind (including the other ecall syscalls) falls through to the
-        // single-event push at the bottom, unchanged from before M3.2.
-        let mut hashed = false;
+        // POSEIDON2 (a whole row group) and KECCAK (one row, but with its own memory and
+        // pc/register bookkeeping) push their events themselves and `continue` the outer loop;
+        // every other instruction kind (including the other ecall syscalls) falls through to
+        // the single-event push at the bottom, unchanged from before M3.2.
+        let mut pushed_own_rows = false;
         match instr {
             Instr::AluImm { .. } | Instr::AluReg { .. } => c = alu_out,
             Instr::Lui { imm, .. } => c = imm,
@@ -150,7 +167,7 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
                     events.push(CycleEvent {
                         clk, pc, next_pc: pc, instr, dec, a, b, c: 0, alu_out, tgt, mem_addr, mem_val,
                         sys: Some(Syscall::Poseidon2 { ptr, n }), accesses: acc.clone(), alu: alu.clone(),
-                        hash_row: Some(HashRow::Ecall { ptr, n }),
+                        hash_row: Some(HashRow::Ecall { ptr, n }), keccak_row: None, keccak_accesses: Vec::new(),
                     });
                     clk += 1;
 
@@ -182,6 +199,7 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
                             clk, pc, next_pc: pc, instr, dec: Decoded::default(), a: 0, b: 0, c: 0,
                             alu_out: 0, tgt: 0, mem_addr: 0, mem_val: 0, sys: None, accesses: racc, alu: Vec::new(),
                             hash_row: Some(HashRow::Absorb { idx, left_before: left, words, active, state_in, state_out }),
+                            keccak_row: None, keccak_accesses: Vec::new(),
                         });
                         state = state_out;
                         left -= cnt;
@@ -207,13 +225,47 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
                         events.push(CycleEvent {
                             clk, pc, next_pc: row_next_pc, instr, dec: Decoded::default(), a: 0, b: 0, c: 0,
                             alu_out: 0, tgt: 0, mem_addr: 0, mem_val: 0, sys: None, accesses: wacc, alu: Vec::new(),
-                            hash_row: Some(HashRow::WriteOut { fin, words, state }),
+                            hash_row: Some(HashRow::WriteOut { fin, words, state }), keccak_row: None, keccak_accesses: Vec::new(),
                         });
                         clk += 1;
                     }
                     regs[0] = 0;
                     pc = pc.wrapping_add(4);
-                    hashed = true;
+                    pushed_own_rows = true;
+                } else if num == SYS_KECCAK {
+                    // One cpu row, one permutation. The 50 words at `ptr` are read at slot 0 and
+                    // the permuted state written back at slot 1 — `MemAccess::ts` is `4*clk +
+                    // slot`, so the reads all sit at `4*clk` and the writes at `4*clk + 1`,
+                    // ordered and distinct from the ecall row's own register accesses (those are
+                    // `SPACE_REG`). These go in `keccak_accesses`, not `accesses`: the memory
+                    // table records them, but the *keccak* table is what sends them on the
+                    // `MEMORY` bus (M4.2 Task 4).
+                    let ptr = arg0;
+                    let mut input = [0u32; crate::keccak::WORDS];
+                    let mut kacc = Vec::with_capacity(2 * crate::keccak::WORDS);
+                    for k in 0..KECCAK_WORDS {
+                        let addr = ptr.wrapping_add(k);
+                        let w = *ram.get(&addr).unwrap_or(&0);
+                        input[k as usize] = w;
+                        kacc.push(MemAccess { space: SPACE_RAM, addr, slot: 0, value: w, is_write: false });
+                    }
+                    let mut st = crate::keccak::words_to_state(&input);
+                    crate::keccak::keccak_f(&mut st);
+                    let output = crate::keccak::state_to_words(&st);
+                    for k in 0..KECCAK_WORDS {
+                        let addr = ptr.wrapping_add(k);
+                        ram.insert(addr, output[k as usize]);
+                        kacc.push(MemAccess { space: SPACE_RAM, addr, slot: 1, value: output[k as usize], is_write: true });
+                    }
+                    events.push(CycleEvent {
+                        clk, pc, next_pc: pc.wrapping_add(4), instr, dec, a, b, c: 0, alu_out, tgt, mem_addr, mem_val,
+                        sys: Some(Syscall::Keccak { ptr }), accesses: acc.clone(), alu: alu.clone(), hash_row: None,
+                        keccak_row: Some(KeccakRow { ptr, input, output }), keccak_accesses: kacc,
+                    });
+                    clk += 1;
+                    regs[0] = 0;
+                    pc = pc.wrapping_add(4);
+                    pushed_own_rows = true;
                 } else {
                     sys = Some(match num {
                         SYS_HALT => Syscall::Halt,
@@ -234,8 +286,8 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
                 }
             }
         }
-        if hashed {
-            // `POSEIDON2` already pushed its whole row group above (including its own
+        if pushed_own_rows {
+            // `POSEIDON2`/`KECCAK` already pushed their rows above (including their own
             // register/memory-write bookkeeping and `regs[0] = 0`/`pc` advance) — do not fall
             // through to the single-event push below, which would push a stray extra row.
             continue;
@@ -247,7 +299,7 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
         }
         regs[0] = 0;
         let halted = matches!(sys, Some(Syscall::Halt));
-        events.push(CycleEvent { clk, pc, next_pc, instr, dec, a, b, c, alu_out, tgt, mem_addr, mem_val, sys, accesses: acc, alu, hash_row: None });
+        events.push(CycleEvent { clk, pc, next_pc, instr, dec, a, b, c, alu_out, tgt, mem_addr, mem_val, sys, accesses: acc, alu, hash_row: None, keccak_row: None, keccak_accesses: Vec::new() });
         clk += 1;
         if halted { return Ok(Execution { events, outputs, halted: true }); }
         pc = next_pc;

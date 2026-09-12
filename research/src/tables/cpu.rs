@@ -1235,6 +1235,11 @@ pub fn cpu_trace(program: &Program, inputs: &[u32], salt: [u32; 4], events: &[Cy
             Some(Syscall::WriteOutput { slot, .. }) => { r[SYS_WRITE] = F::ONE; r[OUT_SEL0 + slot as usize] = F::ONE; written[slot as usize] += 1; }
             Some(Syscall::ReadInput { .. }) => r[SYS_READ] = F::ONE,
             Some(Syscall::Poseidon2 { .. }) => r[SYS_HASH] = F::ONE,
+            // M4.2: the emulator executes `KECCAK` (it is the reference semantics), but the cpu
+            // table has no selector for it until Task 4 adds the keccak chip and its bus. Fail
+            // loudly rather than emit an ecall row with no syscall selector set at all, which
+            // the AIR would either reject or — worse — accept as some other syscall.
+            Some(Syscall::Keccak { .. }) => panic!("KECCAK is not provable yet: the cpu table gets its selector and bus send in M4.2 Task 4"),
             None => {}
         }
         // M3.2 hash rows. `hash_ptr_n` remembers the group's `(ptr, n)` from its ecall row
