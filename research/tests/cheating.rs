@@ -1402,6 +1402,27 @@ fn setup_keccak() -> (Machine, rand_zkvm::isa::Program, Traces) {
     (m, p, t)
 }
 
+/// A keccak table that actually has a padding block to forge on. M4.2 Task 6 made the table
+/// optional, so a keccak-free guest no longer carries one at all, and `setup_keccak`'s single
+/// permutation fills its one block exactly (`klh = 5`, 32 rows, all real). Three permutations
+/// need three 32-row blocks rounded up to `2^7 = 128` rows, i.e. four blocks — blocks 0..=2
+/// real, **block 3 padding**.
+fn setup_keccak_with_a_padding_block() -> (Machine, rand_zkvm::isa::Program, Traces) {
+    const BUF: i32 = 0x1000;
+    let m = Machine::new(FriProfile::Test);
+    let mut a = Assembler::new(0);
+    a.extend(li(8, BUF));
+    for _ in 0..3 {
+        a.extend(call_keccak(BUF / 4));
+    }
+    a.extend(halt());
+    let p = a.assemble();
+    let e = execute(&p, &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    assert_eq!(t.keccak_log_height, 7, "three blocks rounded up to four");
+    (m, p, t)
+}
+
 /// The cpu-table row index of the one `SYS_KECCAK` ecall row.
 fn keccak_row(t: &Traces) -> usize {
     let w = cpu::col::WIDTH;
@@ -1418,22 +1439,43 @@ fn tampering_a_keccak_state_bit_is_rejected() {
     let (m, p, mut t) = setup_keccak();
     let w = keccak::col::WIDTH;
     let cell = 5 * w + keccak::col::AP0 + 100;
-    t.keccak.values[cell] = F::ONE - t.keccak.values[cell];
+    let kt = t.keccak.as_mut().expect("keccak_demo declares a keccak table");
+    kt.values[cell] = F::ONE - kt.values[cell];
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// Rule 11's `IS_LAST_ROUND·(IS_REAL − MULT) = 0`: a padding block cannot claim a `KECCAK`
-/// entry it has no syscall behind. `guests::fib` never calls `KECCAK`, so its keccak table is
-/// the single padding block every proof carries — and the forged entry has no consumer either,
-/// so the `KECCAK` bus is left unbalanced on top of the local constraint failure.
+/// entry it has no syscall behind. The forged entry has no consumer either, so the `KECCAK`
+/// bus is left unbalanced on top of the local constraint failure. (Before M4.2 Task 6 this
+/// used `guests::fib`, whose keccak table was the one padding block every proof carried; the
+/// table is optional now, so the padding block has to come from a guest that genuinely has
+/// one — three permutations rounded up to four blocks.)
 #[test]
 fn bumping_keccak_mult_on_a_padding_block_is_rejected() {
-    let (m, p, mut t) = setup();
+    let (m, p, mut t) = setup_keccak_with_a_padding_block();
+    let kt = t.keccak.as_mut().expect("this guest declares a keccak table");
     let w = keccak::col::WIDTH;
-    assert_eq!(t.keccak_log_height, 5, "a keccak-free guest still carries one padding block");
-    let row = keccak::ROUNDS - 1; // the block's last round row
-    assert_eq!(t.keccak.values[row * w + keccak::col::IS_REAL], F::ZERO, "block 0 is padding");
-    t.keccak.values[row * w + keccak::col::MULT] = F::ONE;
+    let row = 3 * keccak::BLOCK + keccak::ROUNDS - 1; // block 3's last round row
+    assert_eq!(kt.values[row * w + keccak::col::IS_REAL], F::ZERO, "block 3 is padding");
+    kt.values[row * w + keccak::col::MULT] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// M4.2 (Task 6): the cpu table is unchanged by making the keccak table optional — it is the
+/// *bus* that does the work. Take `keccak_demo`'s honest traces, drop the keccak table
+/// entirely (exactly the shape a keccak-free proof has) and leave the real `SYS_KECCAK` cpu row
+/// in place: the `KECCAK` bus now has a consumer and no provider at all, so it cannot balance.
+/// This is the check that makes "no keccak table" safe rather than merely smaller.
+#[test]
+fn a_keccak_syscall_without_a_keccak_table_is_rejected() {
+    let (m, p, mut t) = setup_keccak();
+    assert_eq!(t.keccak_log_height, 5, "the honest witness declares one block");
+    assert_eq!(t.cpu.height(), Tier(10).cpu_height());
+    let w = cpu::col::WIDTH;
+    let row = keccak_row(&t);
+    assert_eq!(t.cpu.values[row * w + cpu::col::SYS_KECCAK], F::ONE, "the syscall row stays");
+    t.keccak = None;
+    t.keccak_log_height = 0;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
@@ -1445,8 +1487,9 @@ fn bumping_keccak_mult_on_a_padding_block_is_rejected() {
 fn a_keccak_input_limb_that_disagrees_with_memory_is_rejected() {
     let (m, p, mut t) = setup_keccak();
     let w = keccak::col::WIDTH;
+    let kt = t.keccak.as_mut().expect("keccak_demo declares a keccak table");
     for r in 0..keccak::BLOCK {
-        t.keccak.values[r * w + keccak::col::IN0] += F::ONE;
+        kt.values[r * w + keccak::col::IN0] += F::ONE;
     }
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
@@ -1458,17 +1501,21 @@ fn a_keccak_input_limb_that_disagrees_with_memory_is_rejected() {
 fn a_keccak_output_limb_that_disagrees_with_the_permutation_is_rejected() {
     let (m, p, mut t) = setup_keccak();
     let w = keccak::col::WIDTH;
+    let kt = t.keccak.as_mut().expect("keccak_demo declares a keccak table");
     for r in keccak::ROUNDS..keccak::BLOCK {
-        t.keccak.values[r * w + keccak::col::A0] += F::ONE;
+        kt.values[r * w + keccak::col::A0] += F::ONE;
     }
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
 /// `SYS_KECCAK` joins the `SELECTORS` padding-row gate — and, set on an all-zero padding row,
-/// also asks the `KECCAK` bus for an entry at `(0, 0)` that no real block provides.
+/// also asks the `KECCAK` bus for an entry at `(0, 0)` that nothing provides (M4.2 Task 6:
+/// `guests::fib` declares no keccak table at all now, so there is not even a padding block on
+/// the other side of that bus).
 #[test]
 fn bumping_sys_keccak_on_a_padding_row_is_rejected() {
     let (m, p, mut t) = setup();
+    assert_eq!(t.keccak_log_height, 0, "a keccak-free guest carries no keccak table");
     let w = cpu::col::WIDTH;
     let pad = t.cpu.height() - 1;
     assert_eq!(t.cpu.values[pad * w + cpu::col::IS_REAL], F::ZERO, "last cpu row is padding");
@@ -1497,9 +1544,10 @@ fn an_unbounded_keccak_ptr_is_rejected() {
 fn a_keccak_call_whose_permutation_is_missing_is_rejected() {
     let (m, p, mut t) = setup_keccak();
     let w = keccak::col::WIDTH;
+    let kt = t.keccak.as_mut().expect("keccak_demo declares a keccak table");
     for r in 0..keccak::BLOCK {
-        t.keccak.values[r * w + keccak::col::IS_REAL] = F::ZERO;
-        t.keccak.values[r * w + keccak::col::MULT] = F::ZERO;
+        kt.values[r * w + keccak::col::IS_REAL] = F::ZERO;
+        kt.values[r * w + keccak::col::MULT] = F::ZERO;
     }
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
@@ -1518,9 +1566,12 @@ fn a_keccak_call_whose_permutation_is_missing_is_rejected() {
 fn a_keccak_height_past_the_tiers_ceiling_is_rejected_before_any_verifier_key_is_built() {
     use rand_zkvm::machine::VerifyError;
     let prover = Machine::new(FriProfile::Test);
-    let p = guests::fib(10);
+    // M4.2 (Task 6): a guest that actually calls `KECCAK`, so the honest proof carries the
+    // ninth instance and the attacker's `degree_bits` edit below has a keccak entry to edit.
+    let p = guests::keccak_demo(b"hi");
     let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.keccak_log_height, 5);
+    assert_eq!(proof.batch.degree_bits.len(), 9);
     assert_eq!(Tier(10).max_keccak_log_height(), 15);
     // `t + 6`, with `degree_bits` adjusted to match (the keccak instance is last in `chips()`
     // order; `+ 1` is the hiding config's `is_zk`).
@@ -1529,6 +1580,25 @@ fn a_keccak_height_past_the_tiers_ceiling_is_rejected_before_any_verifier_key_is
     proof.batch.degree_bits[last] = 16 + 1;
     let verifier = Machine::new(FriProfile::Test);
     assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::KeccakHeightExceedsTier)));
+    assert_eq!(verifier.cached_keys(), 0, "the range check must precede the verifier key");
+}
+
+/// The lower bound's other half, now that M4.2 Task 6 has carved `0` out of it: `0` means "no
+/// keccak table" and is legal, but any *other* value below one full 32-row block is still
+/// nonsense — a table too short to hold the permutation it claims — and is rejected before it
+/// can size anything.
+#[test]
+fn a_nonzero_keccak_height_below_one_block_is_rejected_before_any_verifier_key_is_built() {
+    use rand_zkvm::machine::VerifyError;
+    let prover = Machine::new(FriProfile::Test);
+    let p = guests::keccak_demo(b"hi");
+    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    assert_eq!(proof.keccak_log_height, 5);
+    proof.keccak_log_height = 3;
+    let last = proof.batch.degree_bits.len() - 1;
+    proof.batch.degree_bits[last] = 3 + 1;
+    let verifier = Machine::new(FriProfile::Test);
+    assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::KeccakHeight)));
     assert_eq!(verifier.cached_keys(), 0, "the range check must precede the verifier key");
 }
 

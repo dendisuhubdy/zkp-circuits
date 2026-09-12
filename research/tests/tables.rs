@@ -604,6 +604,20 @@ fn alu_max_constraint_degree_is_pinned() {
     // any declared program height give the same numbers. `Tier(10)`/`MIN_LOG_HEIGHT` (the
     // smallest of each) are used only because `max_constraint_degrees` needs concrete values
     // to size the tables.
+    // M4.2 (Task 6): the keccak table is optional per proof, so `chips()` — and therefore this
+    // list — has two shapes. Pin both. `klh = 0` is the eight-chip batch a keccak-free proof
+    // uses; `klh = keccak::MIN_LOG_HEIGHT` is the nine-chip one. Every shared table's degree
+    // must be identical between them: dropping an instance changes the batch's instance count,
+    // not any other AIR's constraints or its own packed lookups.
+    let keccak_free = max_constraint_degrees(
+        Tier(10),
+        MIN_LOG_HEIGHT,
+        rand_zkvm::tables::input::MIN_LOG_HEIGHT,
+        0,
+        Tier(10).min_mem_log_height(),
+    );
+    assert_eq!(keccak_free.len(), 8, "eight chips when the proof declares no keccak table");
+
     let degrees = max_constraint_degrees(
         Tier(10),
         MIN_LOG_HEIGHT,
@@ -612,6 +626,7 @@ fn alu_max_constraint_degree_is_pinned() {
         Tier(10).min_mem_log_height(),
     );
     assert_eq!(degrees.len(), 9, "one degree per chip in machine::chips() order");
+    assert_eq!(keccak_free[..], degrees[..8], "the other eight tables are unaffected");
 
     // program: M3.4's main-trace in-circuit decoder. Every one-hot flag pin
     // (`flag*(op-code)=0`) and field-consistency equation is at most degree 2 in the

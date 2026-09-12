@@ -124,9 +124,12 @@ mod chip {
         assert_eq!(limbs_to_words(&t.row_slice(ROUNDS).unwrap(), col::A0), state_to_words(&zero));
     }
 
+    /// M4.2 (Task 6): no permutations means *no table*, not one padding block — `0` is the
+    /// "absent" marker `machine::chips` reads to build an eight-chip batch. From one
+    /// permutation on, the one-block floor is back.
     #[test]
-    fn keccak_log_height_floors_at_one_block() {
-        assert_eq!(keccak::keccak_log_height(0), 5);
+    fn keccak_log_height_is_zero_without_events_and_floors_at_one_block() {
+        assert_eq!(keccak::keccak_log_height(0), 0);
         assert_eq!(keccak::keccak_log_height(1), 5);
         assert_eq!(keccak::keccak_log_height(2), 6);
         assert_eq!(keccak::keccak_log_height(3), 7);

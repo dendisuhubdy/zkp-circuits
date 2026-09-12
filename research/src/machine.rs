@@ -294,18 +294,31 @@ where
     }
 }
 
-/// `Poseidon2` is appended last: `i == 1` (`Cpu`) must stay the public-values slot that
+/// New chips are appended at the end: `i == 1` (`Cpu`) must stay the public-values slot that
 /// `prove_traces`/`verify` hard-code, so every new chip since M2 has gone at the end rather
 /// than disturbing that index. M3.4: no longer takes a `Program` — `ProgramAir` is shape-only
 /// now (like `CpuAir`), so the whole chip set is a pure function of `tier`, and `verifier_key`
 /// collapses to one entry per tier.
-/// M4.2: `keccak_height` is the *proof-declared* keccak table height (`1 << keccak_log_height`),
-/// not a tier-derived one — the same treatment `program`'s and `input`'s heights get, and for
-/// the same reason (a guest's permutation count has nothing to do with its cycle budget). It
-/// reaches the chip set the way `poseidon2_height` does, as a field of the variant, because the
-/// keccak table has preprocessed columns whose height it needs.
-pub fn chips(tier: Tier, keccak_height: usize) -> Vec<Chip> {
-    vec![
+/// M4.2: `keccak_log_height` is the *proof-declared* keccak table height, as a base-2 log — not
+/// a tier-derived one, the same treatment `program`'s and `input`'s heights get, and for the
+/// same reason (a guest's permutation count has nothing to do with its cycle budget). The
+/// height reaches the chip set the way `poseidon2_height` does, as a field of the variant,
+/// because the keccak table has preprocessed columns whose height it needs.
+///
+/// M4.2 (Task 6): **the keccak table is optional per proof.** `keccak_log_height == 0` means the
+/// proof declares no keccak table and this returns eight chips; any other value returns nine,
+/// with `Chip::Keccak` last. The keccak chip is 2 612 + 99 columns and every FRI query opens a
+/// leaf of that width, so carrying it unused cost ~705 KB per production proof — enough to push
+/// a ~300 KB shielded bundle proof past the node's 1 MiB cap (`docs/03-privacy.md`'s M4.2
+/// measurement). Dropping it is safe because the `KECCAK` bus then has no provider at all: a cpu
+/// row with `SYS_KECCAK = 1` leaves the bus unbalanced and cannot be proved. Nothing about the
+/// cpu table or the keccak AIR changes — only whether the instance is in the batch.
+///
+/// The keccak instance is appended **last** precisely so that dropping it cannot disturb any
+/// other chip's index — in particular `i == 1` (`Cpu`), the public-values slot `prove_traces`
+/// and `verify` hard-code, and `i == 2` (`Memory`), which `tests/cheating.rs` indexes directly.
+pub fn chips(tier: Tier, keccak_log_height: u8) -> Vec<Chip> {
+    let mut v = vec![
         Chip::Program(ProgramAir),
         Chip::Cpu(CpuAir),
         Chip::Memory(MemoryAir),
@@ -314,8 +327,11 @@ pub fn chips(tier: Tier, keccak_height: usize) -> Vec<Chip> {
         Chip::Nibble(NibbleAir),
         Chip::Poseidon2(Poseidon2Air, tier.poseidon2_height()),
         Chip::Input(crate::tables::input::InputAir),
-        Chip::Keccak(KeccakAir, keccak_height),
-    ]
+    ];
+    if keccak_log_height != 0 {
+        v.push(Chip::Keccak(KeccakAir, 1usize << keccak_log_height));
+    }
+    v
 }
 
 pub struct Traces {
@@ -331,10 +347,14 @@ pub struct Traces {
     /// M4.1: the input table's height, as a base-2 log — the `program_log_height` doc
     /// comment's rule, applied to `tables::input::input_log_height`.
     pub input_log_height: u8,
-    pub keccak: RowMajorMatrix<Val>,
+    /// M4.2 (Task 6): `None` for a guest that never calls `KECCAK` — the batch then has eight
+    /// instances, not nine, and the `KECCAK` bus no provider. `Some` iff
+    /// `keccak_log_height != 0`; the two are set together and `as_slice`/`chips` must agree.
+    pub keccak: Option<RowMajorMatrix<Val>>,
     /// M4.2: the keccak table's height, as a base-2 log — the same rule again, applied to
     /// `tables::keccak::keccak_log_height` (one 32-row block per permutation, floored at one
-    /// block so the table exists even in a proof with no `KECCAK` call at all).
+    /// block). M4.2 (Task 6): `0` is the distinguished "no keccak table in this proof" value,
+    /// not a height — see `keccak` above and `machine::chips`.
     pub keccak_log_height: u8,
     /// M4.2 (controller ruling 1): the memory table's height, as a base-2 log — proof-declared
     /// like the three above, but with a tier-derived *floor* the other three have no analogue
@@ -342,8 +362,16 @@ pub struct Traces {
     pub mem_log_height: u8,
 }
 impl Traces {
-    pub fn as_slice(&self) -> [&RowMajorMatrix<Val>; 9] { [&self.program, &self.cpu, &self.memory, &self.alu, &self.range, &self.nibble, &self.poseidon2, &self.input, &self.keccak] }
-    pub fn heights(&self) -> [usize; 9] { self.as_slice().map(|m| m.height()) }
+    /// The traces in `chips()` order — eight entries, or nine when this proof declares a keccak
+    /// table (M4.2, Task 6: a `Vec`, not a fixed-size array, because the batch's instance count
+    /// is now per-proof). The `i`-th entry pairs with the `i`-th chip, which is what keeps
+    /// `i == 1`'s public-values slot correct in both shapes.
+    pub fn as_slice(&self) -> Vec<&RowMajorMatrix<Val>> {
+        let mut v = vec![&self.program, &self.cpu, &self.memory, &self.alu, &self.range, &self.nibble, &self.poseidon2, &self.input];
+        if let Some(keccak) = &self.keccak { v.push(keccak); }
+        v
+    }
+    pub fn heights(&self) -> Vec<usize> { self.as_slice().iter().map(|m| m.height()).collect() }
 }
 
 #[derive(Debug)]
@@ -381,9 +409,10 @@ pub enum VerifyError {
     /// M4.1: the input table's own analogue of `ProgramHeight` — `proof.input_log_height` is
     /// outside `[tables::input::MIN_LOG_HEIGHT, tables::input::MAX_LOG_HEIGHT]`.
     InputHeight,
-    /// M4.2: the keccak table's own analogue — `proof.keccak_log_height` is below
-    /// `tables::keccak::MIN_LOG_HEIGHT` (the one-block floor every proof carries). Checked
-    /// before the declared height is used to size a table.
+    /// M4.2: the keccak table's own analogue — `proof.keccak_log_height` is non-zero and below
+    /// `tables::keccak::MIN_LOG_HEIGHT` (the one-block floor a table that exists at all
+    /// carries). Checked before the declared height is used to size a table. M4.2 (Task 6):
+    /// `0` is exempt, and means the proof declares no keccak table at all.
     KeccakHeight,
     /// M4.2 (controller ruling 2): `proof.keccak_log_height` exceeds what the declared tier
     /// could possibly need — `Tier::max_keccak_log_height`, `t + 5`, since a permutation costs
@@ -441,7 +470,10 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], salt: [u32; 4], ex
     if keccak_log_height > tier.max_keccak_log_height() {
         return Err(ProveError::TooManyPermutations { perms: keccak_events.len(), log_height: keccak_log_height });
     }
-    let keccak_t = keccak_trace(&keccak_events, 1usize << keccak_log_height);
+    // M4.2 (Task 6): no permutations, no table. `keccak_log_height == 0` and `keccak == None`
+    // are set here together and travel together from this point on — `chips` builds eight
+    // instances from the first, `as_slice` supplies eight traces from the second.
+    let keccak_t = (keccak_log_height != 0).then(|| keccak_trace(&keccak_events, 1usize << keccak_log_height));
     let cpu = cpu_trace(program, inputs, salt, &exec.events, tier.cpu_height(), &mut range, &mut nibble);
     // M4.2 (controller ruling 1): the memory table's height is declared, not derived. Count the
     // rows `memory_trace` will actually hold — one per `accesses` entry and one per
@@ -519,6 +551,15 @@ pub struct Proof {
     /// M4.2: the keccak table's height, declared by the prover — the same rule once more
     /// (`tables::keccak::keccak_log_height`), bounded above by the declared tier
     /// (`Tier::max_keccak_log_height`).
+    ///
+    /// M4.2 (Task 6): **`0` means the batch carries no keccak table**, and is the value every
+    /// proof whose guest never executes a `KECCAK` gets. It is public, and it says exactly one
+    /// thing a non-zero height does not: "this program made no `KECCAK` call". That is the same
+    /// class of leak `program_log_height` already is — a coarse, structural fact about the
+    /// program rather than about its data (`docs/03-privacy.md`'s "What a proof leaks").
+    /// The saving is large: the keccak chip is 2 612 + 99 columns, and every FRI query opens a
+    /// leaf of that width whether the table has 32 rows or 32 768, so a padding-block-only table
+    /// cost ~705 KB of every production proof.
     pub keccak_log_height: u8,
     /// M4.2 (controller ruling 1): the memory table's height, declared by the prover as
     /// `max(t + 2, log2_ceil(accesses + 1))`. `verify` checks only
@@ -614,12 +655,16 @@ const KEY_CACHE_CAPACITY: usize = 64;
 /// so `CommonData`'s per-instance degree-bit bookkeeping depends on it too, even though the
 /// program table has no preprocessed *columns* of its own any more; M4.1 adds the input
 /// table's own height as a third, independent key component for the same reason; M4.2 adds the
-/// keccak table's as a fourth). The memory table's own declared height (M4.2, controller
+/// keccak table's as a fourth; M4.2 Task 6 makes `klh = 0` — the eight-chip, keccak-table-free
+/// batch — a distinct fourth-component value rather than an impossible one, and it must be,
+/// since its `CommonData` has eight `lookups` entries and no keccak preprocessed columns).
+/// The memory table's own declared height (M4.2, controller
 /// ruling 1) is deliberately *not* a fifth component — see `Machine::verifier_key` for why the
 /// `CommonData` this caches is invariant to it. Bounded by
 /// `TIERS.len() * (program::MAX_LOG_HEIGHT − program::MIN_LOG_HEIGHT + 1) *
 /// (input::MAX_LOG_HEIGHT − input::MIN_LOG_HEIGHT + 1) *
-/// (max tier's keccak range, `t + 5 − keccak::MIN_LOG_HEIGHT + 1` = 21 at tier 20)` distinct
+/// (max tier's keccak range, `t + 5 − keccak::MIN_LOG_HEIGHT + 2` = 22 at tier 20, the `+ 2`
+/// counting M4.2 Task 6's `klh = 0`, "no keccak table", as its own value)` distinct
 /// keys in the worst case —
 /// comfortably able to exceed `KEY_CACHE_CAPACITY` if a caller proves at many different
 /// program/input sizes, unlike the tier-only cache this replaces, so the FIFO eviction here is
@@ -655,7 +700,8 @@ impl Machine {
     fn log_ext_degrees(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, mem_log_height: u8) -> Vec<usize> {
         let zk = self.config.is_zk();
         // Order matches `chips()`: program, cpu, memory, alu, range, nibble, poseidon2, input,
-        // keccak. M4.2 (controller ruling 1): the memory entry is the *declared*
+        // and — only when this proof declares a keccak table — keccak.
+        // M4.2 (controller ruling 1): the memory entry is the *declared*
         // `mem_log_height`, not a tier-derived one — `build_traces_salted` sizes the memory
         // trace with exactly the value it puts in `Traces`/`Proof`, so the two cannot drift,
         // and `verify` range-checks the declaration before it reaches here.
@@ -667,14 +713,23 @@ impl Machine {
                 .iter().map(|h| h.trailing_zeros() as usize + zk),
         );
         v.push(input_log_height as usize + zk);
-        v.push(keccak_log_height as usize + zk);
+        // M4.2 (Task 6): the keccak entry exists only when the proof declares a keccak table.
+        // `keccak_log_height == 0` means there is no ninth instance, so there is no ninth
+        // degree-bit either — and `verify`'s `proof.batch.degree_bits != …` equality check
+        // therefore also pins the batch's instance *count* to what `chips` builds.
+        if keccak_log_height != 0 {
+            v.push(keccak_log_height as usize + zk);
+        }
         v
     }
 
     /// The preprocessed commitment (range + nibble tables + Poseidon2 round constants, plus
     /// the degree-bit bookkeeping every instance needs including `program`'s and `input`'s)
     /// for `(tier, program_log_height, input_log_height, keccak_log_height)`, cached — see
-    /// `KeyCache`. M4.2 (controller ruling 1): `mem_log_height` is a parameter but deliberately
+    /// `KeyCache`. M4.2 (Task 6): `keccak_log_height = 0` is a perfectly ordinary key value —
+    /// it selects the eight-chip batch, whose preprocessed commitment omits the keccak table's
+    /// 99 periodic columns entirely, so it genuinely is a *different* key, not a missing one.
+    /// M4.2 (controller ruling 1): `mem_log_height` is a parameter but deliberately
     /// *not* part of the cache key. The memory table declares no preprocessed columns, so it
     /// contributes nothing to the global preprocessed commitment (`from_airs_and_degrees`
     /// pushes `None` for it regardless of its degree bits), and it declares no periodic columns
@@ -696,7 +751,7 @@ impl Machine {
         if let Some(hit) = self.keys.lock().unwrap().get(&key) {
             return hit;
         }
-        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier, 1usize << keccak_log_height), &self.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, mem_log_height)).common);
+        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier, keccak_log_height), &self.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, mem_log_height)).common);
         self.keys.lock().unwrap().insert(key, common.clone());
         common
     }
@@ -745,8 +800,12 @@ impl Machine {
     /// `public_values`) — kept in the signature for symmetry with `prove`/`prove_on`, which
     /// still need the program to execute it and build `traces` in the first place.
     pub fn prove_traces(&self, _program: &Program, traces: &Traces, tier: Tier) -> Proof {
-        let airs = chips(tier, 1usize << traces.keccak_log_height);
+        let airs = chips(tier, traces.keccak_log_height);
         let mats = traces.as_slice();
+        // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
+        // traces, so the two must agree — a mismatch would `zip` short and silently prove a
+        // different batch than the degree bits describe.
+        assert_eq!(airs.len(), mats.len(), "one trace per chip: keccak_log_height and Traces::keccak disagree");
         let instances: Vec<StarkInstance<'_, Config, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
         }).collect();
@@ -839,8 +898,12 @@ impl Machine {
             }
         };
         let traces = build_traces_salted(program, inputs, salt, &exec, tier)?;
-        let airs = chips(tier, 1usize << traces.keccak_log_height);
+        let airs = chips(tier, traces.keccak_log_height);
         let mats = traces.as_slice();
+        // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
+        // traces, so the two must agree — a mismatch would `zip` short and silently prove a
+        // different batch than the degree bits describe.
+        assert_eq!(airs.len(), mats.len(), "one trace per chip: keccak_log_height and Traces::keccak disagree");
         let instances: Vec<StarkInstance<'_, SC, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
         }).collect();
@@ -896,19 +959,29 @@ impl Machine {
         if !(crate::tables::input::MIN_LOG_HEIGHT..=crate::tables::input::MAX_LOG_HEIGHT).contains(&proof.input_log_height) {
             return Err(VerifyError::InputHeight);
         }
-        // M4.2: `proof.keccak_log_height` is untrusted the same way — rejected before it sizes
-        // the keccak table (`1usize << keccak_log_height`, an absurd shift otherwise).
-        if proof.keccak_log_height < crate::tables::keccak::MIN_LOG_HEIGHT {
-            return Err(VerifyError::KeccakHeight);
-        }
-        // M4.2 (controller ruling 2): and bounded above by the tier, which is already known
-        // good — `klh ≤ t + 5`, since a permutation costs a cycle. This is the check that stops
-        // a proof from asking a tier-10 verifier to build (and a tier-10 prover to commit to) a
-        // keccak table with more permutation slots than the tier has cycles; it runs *before*
-        // `log_ext_degrees` and `verifier_key`, so a bogus declaration costs the verifier a
-        // comparison, not a multi-second preprocessed-commitment recomputation.
-        if proof.keccak_log_height > proof.tier.max_keccak_log_height() {
-            return Err(VerifyError::KeccakHeightExceedsTier);
+        // M4.2 (Task 6): `keccak_log_height == 0` declares *no* keccak table — the batch has
+        // eight instances, the `KECCAK` bus has no provider, and there is no height to range-
+        // check. Nothing about that needs the verifier's trust: `chips` and `log_ext_degrees`
+        // both read the same declared `0`, so the degree-bits equality check below pins the
+        // instance count, and a cpu row claiming `SYS_KECCAK` on an unprovided bus cannot
+        // balance (`tests/cheating.rs::a_keccak_syscall_without_a_keccak_table_is_rejected`).
+        // A non-zero declaration gets exactly the checks it always did.
+        if proof.keccak_log_height != 0 {
+            // M4.2: `proof.keccak_log_height` is untrusted the same way — rejected before it
+            // sizes the keccak table (`1usize << keccak_log_height`, an absurd shift otherwise).
+            if proof.keccak_log_height < crate::tables::keccak::MIN_LOG_HEIGHT {
+                return Err(VerifyError::KeccakHeight);
+            }
+            // M4.2 (controller ruling 2): and bounded above by the tier, which is already known
+            // good — `klh ≤ t + 5`, since a permutation costs a cycle. This is the check that
+            // stops a proof from asking a tier-10 verifier to build (and a tier-10 prover to
+            // commit to) a keccak table with more permutation slots than the tier has cycles; it
+            // runs *before* `log_ext_degrees` and `verifier_key`, so a bogus declaration costs
+            // the verifier a comparison, not a multi-second preprocessed-commitment
+            // recomputation.
+            if proof.keccak_log_height > proof.tier.max_keccak_log_height() {
+                return Err(VerifyError::KeccakHeightExceedsTier);
+            }
         }
         // M4.2 (controller ruling 1): `proof.mem_log_height` is untrusted the same way. The
         // floor is the tier's own `2^(t+2)` (so the declaration reveals nothing the tier did
@@ -917,8 +990,13 @@ impl Machine {
         if !(proof.tier.min_mem_log_height()..=MAX_MEM_LOG_HEIGHT).contains(&proof.mem_log_height) {
             return Err(VerifyError::MemoryHeight);
         }
+        // M4.2 (Task 6): a `Vec` comparison, so this is simultaneously the check that
+        // `degree_bits.len()` equals the batch's chip count — eight without a keccak table, nine
+        // with one — and the check that every declared height matches. A proof that claims
+        // `keccak_log_height = 0` while carrying nine instances (or vice versa) fails here,
+        // before `chips` builds anything.
         if proof.batch.degree_bits != self.log_ext_degrees(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.mem_log_height) { return Err(VerifyError::Tier); }
-        let airs = chips(proof.tier, 1usize << proof.keccak_log_height);
+        let airs = chips(proof.tier, proof.keccak_log_height);
         let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
         let pvs: Vec<Vec<Val>> = (0..airs.len()).map(|i| if i == 1 { pv_vals.clone() } else { vec![] }).collect();
         let common = self.verifier_key(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.mem_log_height);
@@ -944,7 +1022,7 @@ impl Machine {
 pub fn max_constraint_degrees(tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, mem_log_height: u8) -> Vec<usize> {
     let machine = Machine::new(FriProfile::Test);
     let key_cfg = key_config(machine.profile);
-    let airs = chips(tier, 1usize << keccak_log_height);
+    let airs = chips(tier, keccak_log_height);
     let is_zk = machine.config.is_zk();
     let ext_degrees = machine.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, mem_log_height);
     let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &ext_degrees);

@@ -98,7 +98,10 @@ pub const READS_PER_ROW: usize = 2;
 /// Writes per idle row (8 rows × 7 = 56 slots, clipped to the 50 real words).
 pub const WRITES_PER_ROW: usize = 7;
 
-/// One block is the floor: a trace with no events at all still needs one padding block.
+/// One block is the floor *for a table that exists at all*: a trace with at least one event
+/// needs at least one block. M4.2 (Task 6): a proof whose guest never calls `KECCAK` carries no
+/// keccak table, declaring `keccak_log_height = 0` instead — see `keccak_log_height` below and
+/// `machine::chips`.
 pub const MIN_LOG_HEIGHT: u8 = 5; // 1 << 5 == BLOCK
 // M4.2 (controller ruling 2): there is deliberately no `MAX_LOG_HEIGHT` here, unlike
 // `tables::program` and `tables::input`. A permutation costs a cycle, so the tier already
@@ -107,8 +110,20 @@ pub const MIN_LOG_HEIGHT: u8 = 5; // 1 << 5 == BLOCK
 // tighter *disagreeing* bound (see that method's doc comment). One ceiling, not two.
 
 /// `max(5, log2_ceil(32 · n_perms))` — one 32-row block per permutation, rounded up to a power
-/// of two, floored at a single block.
+/// of two, floored at a single block — **except** for `n_perms == 0`, which is `0`.
+///
+/// M4.2 (Task 6): `0` is not a height, it is the marker for "this proof has no keccak table".
+/// Through Task 5 a permutation-free guest still carried one 32-row padding block, and a
+/// 2 612-column table costs ~705 KB of FRI leaf openings at the production profile no matter
+/// how few rows it has — so every proof on the chain, shielded bundle proofs included, paid for
+/// a table it never used. `machine::chips` reads this value: `0` builds an eight-chip batch with
+/// no keccak instance at all, anything else the nine-chip one. The `KECCAK` bus then has no
+/// provider, which is exactly what makes a cpu row claiming `SYS_KECCAK` unprovable
+/// (`tests/cheating.rs::a_keccak_syscall_without_a_keccak_table_is_rejected`).
 pub fn keccak_log_height(n_perms: usize) -> u8 {
+    if n_perms == 0 {
+        return 0;
+    }
     super::pad_height(BLOCK * n_perms, BLOCK).trailing_zeros() as u8
 }
 
