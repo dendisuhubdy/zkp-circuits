@@ -147,6 +147,7 @@ needs one, is read through the row's memory-access slot as register `a1`
 | 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, `slot < 8`; constrained directly against the public values, at most once per slot, and any slot never written is pinned to zero |
 | 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — bound to a commitment `H_IN` over the whole private-input vector since milestone 4.1 — two reads of the same `idx` are guaranteed to agree, and `idx >= n_in` cannot be satisfied at all; see `docs/03-privacy.md` |
 | 3 | `POSEIDON2 ptr n` | M3.2 | hashes the `n` words at word address `ptr` (`0 <= n <= POSEIDON2_MAX_WORDS = 4096`) with the Poseidon2 sponge (rate 4, overwrite mode, no padding — `hash::sponge_hash`, the exact `PaddingFreeSponge<_, 8, 4, 4>` semantics) and overwrites `ptr..ptr+8` with the 8-word (lo/hi) digest in place |
+| 4 | `KECCAK ptr` | M4.2 | applies one Keccak-f[1600] permutation in place to the `KECCAK_WORDS = 50` words at word address `ptr` (`ptr <= KECCAK_PTR_LIMIT = 0x3000_0000 - 50`, so the whole state stays below `2^30`; the cpu AIR's own bound on a `SYS_KECCAK` row is the marginally looser `ptr < 0x3000_0000`) — lane `i`'s low word at `ptr + 2i`, its high word at `ptr + 2i + 1` (`keccak::state_to_words`). Takes no second argument: the state's width is fixed. One cpu row per call (unlike `POSEIDON2`), because the `keccak` chip proves the 24 rounds and sends the permutation's own 100 memory accesses — the cpu table witnesses the call, never the rounds. Padding and rate are the guest's business; `guest_sdk::keccak256` is the Keccak-256 sponge built over it |
 
 ## The flat-binary loader (M4.1)
 
@@ -209,6 +210,18 @@ value" is written to RAM in place at `ptr` rather than into `a0`. `a0`
 (`ptr`) and `a1` (`n`, read through the memory slot exactly like any other
 ecall's second argument) are still read the ordinary way, on the ecall row
 only.
+
+`KECCAK` (M4.2) is the counter-example, and deliberately so: it **is** a
+single cpu row, because the chip does the memory traffic itself. The cpu row
+reads `a0` the ordinary way, bounds it (`HP0..3`/`HP3_HI`, the same limb
+decomposition a `POSEIDON2` ecall row uses, tightened by one cubic rule to
+`ptr < 0x3000_0000` so the chip's own `PTR + w` addressing cannot leave the
+bounded range), and provides a single `KECCAK` bus message `(clk, ptr)`. It
+never touches the permuted state: the 50 reads at `ts = 4·clk` and the 50
+writes at `ts = 4·clk + 1` are sent by the `keccak` table, off its own
+columns, so the cpu row costs no extra rows and no extra memory slots no
+matter how many words the permutation moves. `docs/02-tables-and-buses.md`'s
+`keccak` section has the schedule.
 
 Before M4.1 there was no RISC-V cross toolchain on the development machine,
 so every guest was written directly against `asm.rs`'s mnemonic helpers

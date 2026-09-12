@@ -21,6 +21,18 @@ pub mod compiled {
         const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/fib.bin");
         Program::from_flat_binary(0x1000, BIN).expect("fib.bin is a committed, known-good build")
     }
+
+    /// M4.2's exit guest: Keccak-256 over the `KECCAK` syscall, compiled from
+    /// `guests-compiled/keccak256` (see that Makefile's header for the exact `rustc +1.98.1`
+    /// build) and committed as `guests-compiled/bin/keccak256.bin`. `input[0]` is the message's
+    /// byte length, `input[1..]` the message four bytes per word little-endian; the 32-byte
+    /// digest comes back in output slots 0..7 the same way. The sponge is `guest_sdk::keccak256`
+    /// — ordinary compiled guest code — so the only thing the chip proves is the permutation
+    /// itself, which is the whole point of the milestone.
+    pub fn keccak256() -> Program {
+        const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/keccak256.bin");
+        Program::from_flat_binary(0x1000, BIN).expect("keccak256.bin is a committed, known-good build")
+    }
 }
 
 /// out0 = fib(n) mod 2^32, computed with a counted loop.
@@ -268,6 +280,41 @@ pub fn poseidon2_demo(msg: &[u32]) -> Program {
     a.assemble()
 }
 
+/// M4.2 demo: `keccak256(msg)` for a message that fits one rate block (≤ 135 bytes, so a
+/// single permutation), with the sponge itself in guest code — exactly what `guest-sdk`'s own
+/// `keccak256` does, transcribed against `asm.rs`: XOR the padded 136-byte block into the first
+/// 34 words of a 50-word state, call `KECCAK` once, and publish the first 8 words of the
+/// permuted state as the 32-byte digest.
+///
+/// Words 34..49 of the state start at zero and are never written, so the emulator's
+/// never-written-reads-zero rule supplies them (and the memory table's own "first touch of a
+/// fresh address as a read returns zero" rule proves it).
+///
+/// The state's base address is held in a register (`S0`), not folded into each `sw`'s
+/// immediate: `HEAP + 4·49` is far outside a 12-bit signed I-type field, and AGENTS.md
+/// invariant 3 is exactly the silent wrap that would cause.
+pub fn keccak_demo(msg: &[u8]) -> Program {
+    assert!(msg.len() <= 135, "keccak_demo hashes one rate block");
+    let mut block = [0u8; 136];
+    block[..msg.len()].copy_from_slice(msg);
+    block[msg.len()] ^= 0x01;
+    block[135] ^= 0x80;
+    let mut a = Assembler::new(0);
+    a.extend(li(S0, HEAP));
+    for i in 0..34 {
+        let w = u32::from_le_bytes(block[4 * i..4 * i + 4].try_into().unwrap());
+        a.extend(li(T0, w as i32));
+        a.push(sw(S0, T0, 4 * i as i32));
+    }
+    a.extend(call_keccak(HEAP / 4));
+    for k in 0..8 {
+        a.push(lw(T0, S0, 4 * k as i32));
+        a.extend(write_output(k as u32, T0));
+    }
+    a.extend(halt());
+    a.assemble()
+}
+
 /// (name, program, private inputs)
 pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
     vec![
@@ -279,6 +326,7 @@ pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
         ("sub_word_checksum", sub_word_checksum(), vec![]),
         ("muldiv", muldiv(), vec![]),
         ("poseidon2_demo", poseidon2_demo(&[1, 2, 3, 4, 5]), vec![]),
+        ("keccak_demo", keccak_demo(b"hello"), vec![]),
     ]
 }
 

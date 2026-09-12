@@ -1,9 +1,10 @@
 # The tables and their buses
 
-The relation is proved as one batch of eight AIR tables under one commitment
-and one FRI opening (`p3-batch-stark`). Tables never call each other
-directly; they exchange facts through named LogUp buses, and the batch
-verifier checks that every bus balances globally.
+The relation is proved as one batch of **eight AIR tables, nine when a proof
+declares a keccak table** (M4.2), under one commitment and one FRI opening
+(`p3-batch-stark`). Tables never call each other directly; they exchange facts
+through named LogUp buses, and the batch verifier checks that every bus
+balances globally.
 
 ```
                                   ┌───────────┐
@@ -42,17 +43,35 @@ verifier checks that every bus balances globally.
                     provides POSEIDON2 (lookup); consumed by cpu's hash rows
                     (a POSEIDON2 syscall), its digest rows (M3.4, hc),
                     *and* its indigest rows (M4.1, H_IN)
+
+                        ┌─────────────┐
+                        │   KECCAK    │  main; OPTIONAL — present only when
+                        └─────────────┘  Proof::keccak_log_height != 0, and
+                                         then of height 1 << that
+                    provides KECCAK (clk, ptr) (lookup); consumed by cpu's
+                    SYS_KECCAK rows. Unlike every other chip it also *sends*
+                    on MEMORY — its own 50 reads and 50 writes per block, so
+                    the cpu row that asks for a permutation never carries the
+                    permuted words at all (M4.2). A guest that makes no KECCAK
+                    call declares keccak_log_height = 0 and the instance is
+                    absent from the batch entirely
 ```
 
-Twelve buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
+Thirteen buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
 `INPUT_READ` (M4.1, carried by the new `input` table), `MEMORY`, `ALU`,
 `RANGE8` and `POW2` (carried by the range table), `AND4`, `OR4`, `XOR4`
-(carried by the nibble table), and `POSEIDON2` (carried by the poseidon2
-table). Every one of these except `MEMORY` is a `LookupBus` (a subset
+(carried by the nibble table), `POSEIDON2` (carried by the poseidon2
+table), and `KECCAK` (M4.2, carried by the keccak table — and so declared but
+**unprovided** in a proof that has no keccak table, which is exactly what
+makes a `SYS_KECCAK` cpu row unprovable there). Every one of these
+except `MEMORY` is a `LookupBus` (a subset
 check: every value a consumer sends must appear, with enough multiplicity,
 in the provider's table). `MEMORY` is a `PermutationCheckBus` — both sides
 are prover-supplied main-trace rows, and the argument proved is multiset
-equality, not a lookup into a fixed table.
+equality, not a lookup into a fixed table. Since M4.2 the memory table is
+not the only *receiver* on it and the cpu table not the only sender: the
+keccak chip sends its own traffic, and `memory_trace` records it
+(`CycleEvent::keccak_accesses`) alongside the cpu's own.
 
 ## `input` — main, `col::WIDTH = 4` (M4.1)
 
@@ -464,6 +483,54 @@ still under the degree-8 ceiling). Together the three cover every
 transition that could land on `hash_fin = 1`, so a `POSEIDON2` call now
 always writes both digest rows.
 
+**Entry gates (audit ZC1/ZC2, 2026-09-12).** Every rule above is gated on
+the *current* row already being inside a group. Nothing constrained what
+may **precede** an `is_hash` or `is_hash_out` row — unlike the digest and
+indigest prefixes, which have proper entry control (first-row pin,
+contiguous prefix, forced `digest_last -> is_indigest`/`is_salt`
+transitions). A witness could therefore splice a free-standing write-back
+*pair* in after any ordinary row: four `MEMORY` writes per row at a
+`hash_ptr` that is a free, unbounded field element (the `sys_hash`-gated
+`hp0..3` decomposition never fires on such a row, and the `continues`
+carry-forward only ever propagates *into* a group from its own ecall row),
+no permutation consumed (`is_hash_or_digest` excludes `is_hash_out`), and
+`hv0..3` pinned only to a free `hs`. Eight arbitrary RAM words at an
+attacker-chosen cycle is a total break of execution integrity: plant
+values later honest loads read, then fabricate a fully consistent
+execution ending in any output. Three transition gates close it —
+
+- `(1 - sys_hash - is_hash)·n(is_hash) = 0` — an absorb row may only
+  follow the ecall row or another absorb row;
+- `(1 - sys_hash - is_hash - is_hash_out)·n(is_hash_out) = 0` — a
+  write-back row may only follow the ecall row (the `n = 0` case), an
+  absorb row, or the first write-back row;
+- `hash_fin·n(is_hash_out) = 0` — nothing hash-shaped follows the second
+  write-back row; the group ends there.
+
+All three are products of two degree-1 selectors (degree 2; cpu's pinned
+degree 8 is unmoved). Every other row kind is excluded by having neither
+`sys_hash` nor `is_hash`/`is_hash_out` set: an ordinary instruction row, a
+digest or indigest row, a padding row — and a `sys_keccak` row, which is
+an *ordinary-shaped* ecall row (one row, `continues` keys off `sys_hash`
+alone), so like `sys_write` it may not be followed by a hash row. Only
+`sys_hash` opens a row-group.
+
+Alongside them, `hash_fin` itself is pinned to write-back rows:
+`hash_fin·(1 - is_hash_out) = 0`. It was previously free on every other
+row, and setting it on the ecall row drives `continues` to 0 there — so
+the rest of the group's `hash_ptr`/`hash_n` stop being carried from the
+ecall row's range-checked values and become free field elements on the
+`MEMORY` bus (the mod-`p` key-aliasing hole the address bound above
+closes, one row later), while the ecall row's own `next_pc` snaps to
+`pc + 4` under the generic fallthrough rule and silently swallows one
+instruction. Four attack-witness regression tests in `tests/cheating.rs`
+build the complete forged witnesses through the honest trace builders
+(`a_free_standing_write_back_pair_after_an_ordinary_row_is_rejected` and
+its `_after_a_hash_group_`/`_after_a_keccak_row_` siblings,
+`a_free_standing_absorb_group_with_a_forged_state_is_rejected`,
+`hash_fin_on_the_ecall_row_detaching_hash_ptr_is_rejected`); each verifies
+with the gates removed and is rejected with them in.
+
 **Canonical digest encoding.** `hv_lo + hv_hi·2^32 = hs_lane` is only a
 *field* identity — for any lane value `v < 2^32 - 1` the non-canonical
 pair `(v + 1, 2^32 - 1)` satisfies it too (`(v+1) + (2^32-1)·2^32 = v + p
@@ -515,6 +582,11 @@ wherever its message is unconstrained):
 - *padding*: `sys_hash is_hash is_hash_out hash_fin` are `SELECTORS`
   entries, so `(1 - is_real)·v = 0` forces all four to 0 — no lookup on
   either bus fires with a nonzero count there.
+- *every row that is none of the above* (ordinary instruction, digest,
+  indigest, `sys_keccak`, padding): the entry gates above force
+  `n(is_hash) = n(is_hash_out) = 0`, so no hash-shaped row can begin
+  anywhere but inside a group its own ecall row opened, and `hash_fin` is
+  zero on it (`hash_fin·(1 - is_hash_out) = 0`).
 
 ### M3.4: the digest-row prefix — `hc` in-circuit
 
@@ -649,6 +721,53 @@ checked by `Machine::verify` against a caller-supplied value — it is a
 guest-visible commitment the guest itself opens (with the salt) if it
 chooses to, not a verifier-side identity check.
 
+### M4.2: the `KECCAK` ecall row
+
+One row, never a row group — the shortest syscall shape in the table, and the
+only one whose work happens entirely in another chip. It adds exactly one
+column, `SYS_KECCAK` (appended at the end of the column list rather than
+slotted next to the other selectors, so no existing index moves), which joins
+the ecall one-hot (`SYS_HALT + SYS_WRITE + SYS_READ + SYS_HASH + SYS_KECCAK`)
+and the padding-row `SELECTORS` gate.
+
+What the row constrains:
+
+- `A = SYS_KECCAK`'s syscall number (4) and `HASH_PTR = B` — `a0`, read the
+  ordinary way through the register-2 slot, is the state's word address. The
+  row **reuses** the `SYS_HASH` group's `HASH_PTR`/`HP0..3`/`HP3_HI` columns
+  rather than adding its own; the "CRITICAL 1" limb decomposition
+  (`HASH_PTR = Σ HP_i·2^(8i)`, four `RANGE8` lookups, `AND4[hp3_lo, 0, 0]`
+  and `AND4[HP3_HI, 0xC, 0]`) is gated on `SYS_HASH + SYS_KECCAK`, which are
+  mutually exclusive, so the count stays ≤ 1 and the bound costs nothing new.
+- The rest of the hash group's shared columns are pinned to zero here
+  (`HASH_N`, `HASH_LEFT`, `HASH_IDX`, `HS0..7`), so a keccak row cannot
+  smuggle a half-formed hash claim through a row no hash rule gates on. It
+  also does not route: `continues` keys off `SYS_HASH` alone, so a keccak row
+  falls through to the ordinary `NEXT_PC = PC + 4` rule.
+- **The cubic pointer rule.** `AND4[HP3_HI, 0xC, 0]` alone gives
+  `HP3_HI ∈ {0,1,2,3}`, i.e. `ptr < 2^30`. The keccak chip addresses
+  `PTR .. PTR + 49` by plain field addition and has nothing of its own that
+  bounds `PTR`, so the top nibble is tightened one step further —
+  `SYS_KECCAK · HP3_HI · (HP3_HI − 1) · (HP3_HI − 2) = 0`, hence
+  `ptr ≤ 0x2fff_ffff` and `ptr + 49 < 2^30` with room to spare. Degree 4 on a
+  selector-gated product of one column, well under this table's degree-8
+  ceiling. The emulator enforces a marginally *tighter* bound as reference
+  semantics (`ExecError::KeccakPtrOutOfRange`, `KECCAK_PTR_LIMIT =
+  0x3000_0000 − 50`, which keeps the whole 50-word state under `2^30` and so
+  refuses the top 49 pointers this rule would admit), so no honest execution
+  exists that this rule could not prove.
+  `tests/cheating.rs`'s `a_keccak_pointer_with_hp3_hi_equal_to_three_is_
+  rejected` is the regression, with `a_relocated_keccak_pointer_inside_the_
+  bound_still_proves` as its control.
+- `bus::KECCAK.lookup_key([CLK, HASH_PTR], count = SYS_KECCAK)` — the whole
+  handshake. `CLK` is this table's own digest-prefix-shifted clock, which is
+  also what the chip's `4·CLK`/`4·CLK + 1` memory timestamps are built from,
+  so the pair identifies the cpu row and the chip's block as one event.
+
+Note what is **not** here: the 50 input words, the 50 output words, and the
+100 memory messages that move them. Those belong to the `keccak` table, which
+is why a permutation costs one cpu row and four memory slots instead of 100.
+
 ## `memory` — main, `col::WIDTH = 12`
 
 Columns: `space addr ts value is_write is_real addr_changed diff_inv`, then
@@ -660,8 +779,46 @@ in the same table as RAM instead of costing the CPU 32 dedicated columns.
 The **timestamp rule**: `ts = 4·clk + slot`, with `slot ∈ {0,1,2,3}` for the
 register-1 read, register-2 read, the RAM/`a1` access, and the register
 write respectively (`SLOT_R1..SLOT_W` in `emulator.rs`). This bounds every
-cycle to at most four memory accesses and gives every access in the whole
-execution a distinct, orderable key.
+*cpu-issued* access to at most four per cycle and gives every access in the
+whole execution a distinct, orderable key. M4.2 adds one sender that is not
+the cpu table: a `KECCAK` row's 100 accesses (50 reads at slot 0, 50 writes
+at slot 1) are sent by the **keccak** chip off its own columns, and land here
+like any other — the slot numbering still separates them from the ecall row's
+own register reads, which live in `SPACE_REG`.
+
+### Height (M4.2, controller ruling 1)
+
+Through M4.1 this table's height was flatly `2^(ℓ+2)` — four accesses per
+cycle times `2^ℓ` cycles. A `KECCAK` row breaks that assumption by two orders
+of magnitude, so M4.2's first cut sized the table
+`log2_ceil(2^(ℓ+2) + 100·2^(klh−5))`, a function of the tier and the declared
+keccak height. That is verifier-computable but wrong in practice: `klh` floored
+at 5 at the time (every proof carried one keccak block, real or padding — Task
+6 has since made the table optional, so a keccak-free proof declares `klh = 0`),
+so the `+100`
+term was never zero and *every* proof — a guest that never calls `KECCAK`
+included — paid for a doubled memory table (at tier 10, `4 096 + 100 → 2^13`).
+
+The height is a **proof-declared** parameter instead, `Proof::mem_log_height`,
+the same treatment `program`, `input` and `keccak` already get. The prover
+declares `max(ℓ + 2, log2_ceil(accesses + 1))` — counting every `accesses` and
+`keccak_accesses` entry the trace will hold, plus the one padding row the
+table's own invariant requires — and `verify` checks only
+`ℓ + 2 ≤ mem_log_height ≤ MAX_MEM_LOG_HEIGHT` (24).
+
+**Why that one-sided check is enough.** The table's size is not a resource a
+prover can win by misdeclaring. Too large only costs the prover: extra rows
+are `is_real = 0` padding, already pinned to send nothing on any bus. Too
+small is not an attack but an impossibility: every message the cpu and keccak
+tables send on `MEMORY` has to be received by a real row here, so the table
+cannot be shorter than the traffic it answers. The `ℓ + 2` floor is kept for
+*privacy*, not soundness — without it a proof would advertise its guest's
+memory-access count at finer resolution than the tier already publishes; with
+it, a tier-10 guest making 12 accesses and one making 4 000 both declare 12.
+`MAX_MEM_LOG_HEIGHT` is the usual defensive ceiling on an untrusted shift.
+`tests/e2e.rs`'s three height tests pin all of this: the floor for a
+keccak-free guest, the floor still winning at three permutations (300
+accesses), and the count taking over at forty (4 000).
 
 Constraints: `addr_changed` is `(space,addr)` differing from the next row,
 checked with an inverse column; when the address is unchanged, `ts` must
@@ -990,13 +1147,171 @@ poseidon2 trace for every guest (none of them called `POSEIDON2` yet); a
 guest that still doesn't call it (every guest but `poseidon2_demo`) gets
 exactly that same all-padding trace today.
 
+## `keccak` — main, `col::WIDTH = 2612` + preprocessed, `pre::WIDTH = 99` (M4.2)
+
+Keccak-f[1600] as a hand-written AIR, **one row per round**, in fixed 32-row
+blocks (24 round rows + 8 idle rows) — the `poseidon2` chip's shape, with
+Plonky3's own `keccak-air` *column layout* (the vendored 0.7 set ships
+`p3-keccak`, the scalar permutation, but no `p3-keccak-air`, so the AIR
+itself is written here; `docs/04-guests.md` has that correction). Height is
+`1 << Proof::keccak_log_height`, proof-declared like `program`'s and
+`input`'s: one block per permutation, floored at a single block, and
+ceilinged twice — by the *tier*, `klh ≤ ℓ + 5`, since a permutation costs a cpu
+row and therefore a cycle (`machine::Tier::max_keccak_log_height`), and by the
+flat `MAX_LOG_HEIGHT = 20`. The tier relation is the tighter of the two at
+every tier but the largest (at tier 10 the flat cap would admit 32 768
+permutation slots for at most 1 023 possible calls), and it is the one that
+says what a proof can honestly *need* — but it is not a cheap bound at the top
+tier, where it admits `klh = 25` and therefore a 2^25-row, 99-column
+preprocessed trace built before anything else could reject the proof. So both
+are enforced, on both sides, as `min(ℓ + 5, 20)` (M4.2, Task 5 review).
+
+**The table is optional per proof** (M4.2, Task 6). `keccak_log_height = 0`
+is not a height: it is the declaration "this proof has no keccak table", and
+`machine::chips` then returns eight chips instead of nine. Through the first
+cut of M4.2 a keccak-free guest still carried one 32-row padding block, and
+because FRI openings scale with a batch's *column* count rather than its row
+count, that block cost ~1.91 MB of every production proof at the restored
+80-query profile (~705 KB at the 27 queries the M4.2 table below was measured
+at) — more than a shielded bundle proof's entire budget (`docs/03-privacy.md`). Dropping the
+instance is safe without touching the cpu table or the keccak AIR: with no
+keccak table in the batch the `KECCAK` bus has **no provider**, so any cpu row
+with `SYS_KECCAK = 1` leaves it unbalanced and the proof cannot be built
+(`tests/cheating.rs::a_keccak_syscall_without_a_keccak_table_is_rejected`).
+The keccak chip is appended last in `chips()` exactly so that removing it
+disturbs no other instance's index — `i == 1` (cpu) is still the
+public-values slot, `i == 2` still memory. `Machine::verify` range-checks
+`keccak_log_height` only when it is non-zero (`0` is exempt; any *other*
+value outside `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` is still
+`VerifyError::KeccakHeight`, and one inside it but past `ℓ + 5` is
+`VerifyError::KeccakHeightExceedsTier`), and the
+`degree_bits` equality check pins the instance count in both shapes, since
+`log_ext_degrees` emits the keccak entry only when the table is present.
+
+The design spec estimated ~2,650 main columns; the built table is exactly
+**2,612**, pinned by `tests/tables.rs`'s shape test.
+
+**Preprocessed columns** (period 32, `pre::WIDTH = 99`): `IS_ROUND0 + r` (a
+24-wide one-hot over the round rows), `IS_FIRST` (row 0), `IS_LAST_ROUND`
+(row 23), `IS_IDLE` (rows 24..31), `IS_IDLE0 + i` (an 8-wide one-hot over the
+idle rows), and `RC0 + z` (bit `z` of this round's iota constant, zero on
+idle rows). `24 + 1 + 1 + 1 + 8 + 64 = 99`. All of it depends only on the
+height, which is why it is generated by the height-carrying
+`KeccakAir::preprocessed_trace_at` rather than the `BaseAir` trait method
+(the same split `poseidon2` makes).
+
+**Main columns** (`col::WIDTH = 2612`): `IS_REAL`, `MULT`, `CLK`, `PTR`; `IN`
+(100 16-bit limbs — the permutation's input, copied down every row of the
+block); `A` (100 limbs — the state *entering* this round, and on the idle
+rows the permutation's output); `C`/`C'` (2 x 5 x 64 bits — the column
+parities and `C' = C XOR D`); `A'` (25 x 64 bits, the post-theta state
+`A XOR D`); `A''` (100 limbs, post-rho-pi-chi); the 64 bits of `A''[0,0]`;
+and the 4 limbs of `A'''[0,0]` (post-iota).
+`4 + 100 + 100 + 320 + 320 + 1600 + 100 + 64 + 4 = 2612`. A lane is addressed
+`lane(x, y) = x + 5y`, a limb `l` covers bits `16l..16l+15`, and a 32-bit
+word `w` is limbs `4*(w/2) + 2*(w%2)` (low) and `+1` (high) — exactly
+`keccak::state_to_words`' packing.
+
+**The round arithmetic**, as rules 4–10 (the numbering in `eval`):
+
+4. `C'[x][z] = C[x][z] XOR D[x][z]` with `D[x] = C[x-1] XOR rotl(C[x+1], 1)`
+   — a three-way XOR, degree 3.
+5. `A` reconstructed limb by limb from bits: `A = A' XOR C XOR C'` (since
+   `A' = A XOR D` and `C' = C XOR D`), each limb a sum
+   `Σ_{i<16} 2^i · xor3(…)`.
+6. `C[x]` is the true column parity of `A[x, ·]` — the degree-3 parity triple
+   product.
+7. chi over the rho-pi-permuted `A'`: `p XOR (NOT q AND r)`, degree 3,
+   producing `A''`.
+8. iota on lane (0,0): bind `A''[0,0]`'s bits to its limbs, then XOR the
+   preprocessed round constant into them to get `A'''[0,0]`.
+9. Round transition: the next row's `A` is this round's output.
+10. Idle-row copy: every idle row of the block holds that same output.
+
+Rules 4, 6, 7 and 8 are written **ungated**: on an idle row every bit column
+in them is zero and each reads `0 = 0`, so gating them with `is_round` would
+only cost a degree. Rule 5 genuinely must be switched off on idle rows (there
+`A` holds the output while the bits are zero) and is — but spelled
+`is_round · A_limb = Σ …` rather than `is_round · (A_limb − Σ …)`, the same
+statement on round rows at degree 3 instead of 4.
+
+**Why there are no `RANGE8` lookups here.** Every limb this table exposes is
+derived from `assert_bool`'d bits (rules 5, 7, 8), so a limb is a sum of 16
+booleans times powers of two: a genuine 16-bit integer in a field far larger
+than `2^16`, with no wraparound available. `IN` inherits it through rules 2
+and 1, the idle rows' `A` through rules 9 and 10. So the 32-bit words this
+chip puts on `MEMORY` (`lo + 2^16 · hi`) are true 32-bit words without a
+single range lookup — the one table in the machine that needs none.
+
+**Row semantics.** Row 0: `IN = A` (rule 2), the raw permutation input.
+`IS_REAL`, `CLK`, `PTR` and all 100 `IN` limbs are block-constant (rule 1).
+Round row `r` holds the state entering round `r`; the first idle row (24)
+holds round 23's output, and rows 25–31 copy it.
+
+**Bus.** On the last round row, provides `[CLK, PTR]` on `KECCAK` with count
+`MULT`, and `MULT` is constrained **equal** to `IS_REAL` there — not merely
+bounded by it, which is where this AIR is deliberately stricter than
+`poseidon2`'s. A real-but-unpaid `poseidon2` block is inert. A real-but-unpaid
+keccak block is not: this chip sends its own memory traffic gated on `IS_REAL`
+alone, so a prover could flip a padding block to `IS_REAL = 1`, point `PTR` at
+live guest RAM and pick any `CLK`, and it would honestly read 50 words and
+honestly write their permutation back for a later `lw` to pick up — a
+Keccak-f the guest never asked for, with a perfectly consistent memory table.
+`MULT = IS_REAL` makes the `KECCAK` bus balance a one-to-one pairing of real
+blocks with cpu `SYS_KECCAK` rows (the key carries the cpu's unique `clk`), so
+a block no syscall issued cannot exist. `tests/keccak.rs`'s `unpaid` module
+has both directions.
+
+The **`MEMORY` schedule** spreads the 100 accesses over the block so no row
+carries more than a handful of interactions: 2 reads on each of rows 0..=24
+(row `r` takes words `2r`, `2r+1`) at `ts = 4·CLK`, and 7 writes on each idle
+row (idle row `i` takes words `7i .. 7i+6`, clipped at word 49) at
+`ts = 4·CLK + 1`. The message columns are selector-weighted sums over the rows
+that can carry that slot — the selectors are preprocessed one-hots, so at most
+one is 1 per row, each slot is a single well-defined access, and on a row that
+carries none the count is zero. Counted as the AIR writes them (which is what
+the packed-lookup budget sees), that is 9 `MEMORY` interactions on *every* row
+plus the single `KECCAK` entry: 10 per row.
+
+**Padding.** The round selectors are preprocessed and periodic, so every block
+in the trace — real or not — must carry a genuine, self-consistent permutation
+trace to satisfy them. `keccak_trace` fills every padding block with the honest
+permutation of the all-zero state and marks it only by `IS_REAL = MULT = 0`
+(AGENTS.md invariant 2: with `IS_REAL` zero every bus count on the row is zero
+too, so a padding block sends no memory traffic and provides no `KECCAK`
+entry). `tests/keccak.rs` checks the filler's arithmetic against `p3_keccak`
+on 1,000 random states, and runs the chip alone under the real batch STARK
+with throwaway consumers on both of its buses.
+
+**What the table costs, and why it is optional.** It is not free. Measured at
+`FriProfile::Production` on `guests::fib` (`tests/e2e.rs::
+measure_production_profile_at_tier_10_and_12`, the same command
+`docs/03-privacy.md` records): carrying this table took a tier-10 proof from
+437 599 to 1 142 262 bytes and a tier-12 proof from 460 242 to 1 161 162 —
+about 705 KB either way, for a guest that never calls `KECCAK` — at the 27
+queries in force when that measurement was taken; the same delta re-measured
+at the restored 80-query profile is +1.91 MB. Prove time
+barely moves (5.996 s → 6.154 s at tier 10; 23.40 s → 23.91 s at tier 12),
+which locates the cost: not in committing a 32-row trace, but in *opening* a
+2 612-wide main-trace leaf at each of the profile's 80 FRI queries (27 when
+that measurement was taken — see `docs/03-privacy.md`'s profile table). The
+table's width, not its height, is what a proof pays for — the one M4.2 number
+worth carrying into M4.3's own chip design. That number is why Task 6 made the
+instance optional rather than merely small: at 705 KB per proof (1.91 MB at
+the restored 80-query profile) a shielded
+bundle proof (~300 KB) would no longer fit the node's 1 MiB cap, and no amount
+of shrinking a 32-row padding block could have changed that. Keccak-free
+proofs are back to their pre-M4.2 sizes; only guests that call `KECCAK` pay.
+
 ## Constraint degree budget
 
 Measured (`p3_batch_stark::symbolic::get_max_constraint_degree`, pinned by
 `tests/tables.rs::alu_max_constraint_degree_is_pinned`) against the real,
 same-bus-packed lookup contexts (M4.1, `machine::chips()` order): `program`
 2, `cpu` 8, `memory` 4, `alu` 8, `range` 2, `nibble` 2, `poseidon2` 4,
-`input` 2 — `alu`'s comes from the M2.6 `div`
+`input` 2, `keccak` 3 (M4.2; that last entry exists only in the nine-chip
+shape — the pin test asserts both, and that the other eight degrees are
+identical between them) — `alu`'s comes from the M2.6 `div`
 sign-fix identity, `cpu`'s from its packed lookup fraction-pins rather than
 its own row logic (whose costliest single constraint is only degree 6),
 `poseidon2`'s from its S-box split (see that table's own section). M3.2's
@@ -1039,6 +1354,32 @@ degree is 2: `IS_REAL` alone (degree 1) provides `INPUT_DIGEST`, and
 `IS_REAL * MULT_READ` (degree 2) provides `INPUT_READ` — the same ceiling
 the earlier, since-replaced single-bus `IS_REAL * (1 + MULT_READ)` formula
 had.
+
+**M4.2's keccak chip measures 3 — including its packed lookups, which is the
+number that was actually in doubt.** The AIR's own row logic is 3 by
+construction: the three rules that must be cubic (`xor3`, the parity triple
+product, chi's `p XOR (NOT q AND r)`) and every other rule written to stay at
+or under them — rule 5 deliberately spelled `is_round · A = Σ …` rather than
+`is_round · (A − Σ …)` precisely to avoid a fourth degree. The open
+engineering risk going into the task was the *lookup* side: this chip writes
+10 bus interactions on every row (9 `MEMORY` slots plus the `KECCAK` entry),
+all but one of them on the same bus, and `p3-batch-stark` packs same-bus
+lookups together up to the largest fraction-pin degree that keeps the quotient
+chunk count fixed — so a chip with that many same-bus messages could plausibly
+have been pushed past its row logic's own degree by the packing alone. It is
+not: the selector-weighted message columns times a degree-2 `IS_REAL · sel_sum`
+count keep the packed fractions at 3 as well, and
+`tests/tables.rs::alu_max_constraint_degree_is_pinned` pins the measurement
+(`degrees[8] == 3`). The named fallback — spreading the sends over more rows
+if packing had cost a degree — was not needed.
+
+Because no table here declares periodic columns, every one of these numbers
+is invariant to trace height: `get_max_constraint_degree` short-circuits on
+`layout.num_periodic_columns == 0` and returns the cached degree multiple.
+That is also the argument (M4.2, controller ruling 1) for `mem_log_height`
+not being part of the `KeyCache` key — the memory table's packed `Lookups`,
+and hence the `CommonData` the key caches, are the same at every declared
+memory height.
 
 This config's ceiling is degree 8 (`generic_config`'s `log_blowup = 3` plus this
 machine's `is_zk = 1` hiding: `constraint_degree = max_degree + 1 ≤ 9` ⇒

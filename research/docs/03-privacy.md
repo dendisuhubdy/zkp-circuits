@@ -21,27 +21,76 @@ round constants are likewise derived from a fixed development seed
 — a placeholder for the same reason: correct math, wrong constants for
 production.
 
-`Machine::new` takes a `FriProfile`: `Production` (27 FRI queries, 20
+`Machine::new` takes a `FriProfile`: `Production` (80 FRI queries, 20
 proof-of-work bits, `max_log_arity: 3` — folding arity 8) or `Test` (16
 queries, 4 PoW bits, for a fast `cargo test`). Both use blowup 8 and the same
 hiding PCS; only the query count, grinding difficulty, and folding arity
-differ. `Production`'s numbers (M2.2) are tuned to the ethSTARK conjectured-
-soundness bound `log_blowup·num_queries + query_pow_bits ≥ 100`:
-`3·27+20 = 101`; `Test`'s (`3·16+4 = 52`) is not a production target, only
-fast enough for the suite. Neither profile is any less zero-knowledge than
-the other — only proof size and conjectured soundness change with the query
-count.
+differ.
 
-Before M2.2, `Production` ran 80 queries / 20 PoW bits with `max_log_arity:
-1` — conjectured soundness `3·80+20 = 260` bits, far past the 100-bit
-target, at a proportional cost in proof size. Measured on `guests::fib` at
-tier 10 and tier 12 (`cargo test --release --test e2e
-measure_production_profile_at_tier_10_and_12 -- --ignored --nocapture`,
-`tests/e2e.rs`). The verify times below are each program's *first* verify on
-a fresh `Machine` — an uncached `verifier_key` recomputation, which
-dominates them (see "What `verify` actually checks" below); a cached verify
-of the same proof runs under 40% of that, per
-`tests/e2e.rs::verifier_key_is_cached_after_first_verify`:
+| | queries | PoW bits | blowup | conjectured | proven (proximity gaps) |
+| --- | --- | --- | --- | --- | --- |
+| `Production` | 80 | 20 | 8 | `3·80+20 = 260` | ~86 bits |
+| `Test` | 16 | 4 | 8 | `3·16+4 = 52` | ~17 bits |
+
+`Production` is the whitepaper's own parameter table (Draft 3, Part III: FRI
+80/8/20), **restored on 2026-09-12** after the zk audit (finding ZM1). M2.2
+had retuned it to 27 queries, which met the ethSTARK *conjectured* bound
+`log_blowup·num_queries + query_pow_bits ≥ 100` (`3·27+20 = 101`) but
+silently abandoned the *proven* floor the 80-query choice exists to keep: the
+proven proximity-gaps bound is ~86 bits at q=80/g=20 and scales roughly
+linearly in the query count, so 27 queries leaves only ~42 proven bits (a
+provable 100 would need q=97 or g=34). The paper's Part III reconciliation
+weighed exactly that trade and kept q=80/g=20, and this profile is
+consensus-facing — genesis-bound through the node's chain config, never
+proof-supplied — so it follows the paper. `Test`'s numbers are not a
+production target, only fast enough for the suite. Neither profile is any
+less zero-knowledge than the other — only proof size and soundness change
+with the query count.
+
+**A 27-query proof and an 80-query verifier are mutually incompatible**, in
+both directions, so this is a hard fork for proofs: every node in a fleet
+must run the same build, and a chain carrying 27-query proofs needs a new
+chain id to move.
+
+Measured on `guests::fib` at tier 10 and tier 12 (`cargo test --release
+--test e2e measure_production_profile_at_tier_10_and_12 -- --ignored
+--nocapture`, `tests/e2e.rs`), immediately before and after the revert on the
+same machine:
+
+| | tier 10 | tier 12 |
+| --- | --- | --- |
+| proof size, 27 queries | 435 529 bytes | 460 441 bytes |
+| proof size, 80 queries | **1 202 416 / 1 195 120 bytes** | **1 252 338 / 1 263 921 bytes** |
+| prove time (27 → 80) | 5.96 s → 6.05 s, 5.81 s | 22.91 s → 22.78 s, 22.74 s |
+| verify time, first and uncached (27 → 80) | 213.2 ms → 232.7 ms, 232.3 ms | 809.2 ms → 837.5 ms, 842.0 ms |
+
+Two consecutive runs are given for the 80-query row for the same reason the
+M4.2 table gives two: the hiding PCS draws fresh entropy per proof, so the
+postcard encoding moves by about a percent run to run. Proof size grows by
+~2.75x, a little under the 80/27 = 2.96 the query count alone suggests
+(the parts of a proof that do not scale with queries dilute it). Prove and
+first-verify time barely move, for the same reason they barely moved when
+M2.2 cut the queries: both are dominated by trace commitment and, for the
+first verify, the uncached `verifier_key` recomputation — costs the query
+count does not touch.
+
+**Consequence for the node's 1 MiB proof cap.** At 80 queries a *keccak-free*
+tier-10 proof is already ~1.20 MB, past the 1 MiB cap the full node applies
+to a submitted proof, and a proof carrying the keccak table measures
+3 106 757 bytes at tier 10 (a +1.91 MB delta over keccak-free, the 80-query
+restatement of the +705 KB M4.2 measured at 27 queries). The cap is the
+node's constant, not this crate's, but it has to be raised in the same change
+that ships this profile or no production proof will be accepted.
+
+The verify times above are each program's *first* verify on a fresh
+`Machine` — an uncached `verifier_key` recomputation, which dominates them
+(see "What `verify` actually checks" below); a cached verify of the same
+proof runs under 40% of that, per
+`tests/e2e.rs::verifier_key_is_cached_after_first_verify`.
+
+**M2.1 → M2.3 history**, kept for the shape of that improvement rather than
+as a current baseline (these are 27-query-era or older numbers, on the
+pre-M3.4 machine):
 
 | | tier 10 (M2.1 → M2.2 → M2.3) | tier 12 (M2.1 → M2.2 → M2.3) |
 | --- | --- | --- |
@@ -49,7 +98,77 @@ of the same proof runs under 40% of that, per
 | prove time | 21.61 s → 20.88 s → 3.11 s | 29.69 s → 29.45 s → 11.44 s |
 | verify time (first, uncached) | 2.166 s → 2.148 s → 16.0 ms | 2.178 s → 2.141 s → 18.0 ms |
 
-M2.2 (80 → 27 queries, retuned to the 100-bit conjectured target) cut proof
+Those are **M2.3-era** numbers, kept for the M2.1 → M2.3 shape of the
+improvement rather than as a current baseline: the M4.2 table below starts from
+437 599 bytes at tier 10, not 268 288, because M3.4 (the in-circuit program
+digest — digest rows in the cpu table, a proof-declared program-table height)
+and M4.1 (the input table, the `INPUT_DIGEST`/`INPUT_READ` buses, the salted
+H_IN) each grew every proof in between. `b1d01d9`, this branch's base, is where
+that growth had landed when M4.2 began.
+
+**M4.2's own measurement, same command, same guest — at 27 queries.** Every
+number in this subsection was taken before the 2026-09-12 profile revert; at
+80 queries each of them is roughly 2.75x larger (the keccak delta re-measured
+directly: 3 106 757 bytes for a keccak-carrying tier-10 proof against
+1 195 120 keccak-free, i.e. +1.91 MB rather than +705 KB). The *shape* of the
+comparison — what the optional table buys — is unchanged, which is why the
+27-query numbers are kept rather than restated. A 2 612-column table is
+expensive in *proof size* regardless of how few rows it holds, because every
+FRI query opens a main-trace leaf of the batch's full width. The first cut of
+M4.2 put the keccak table in every proof (its height floored at one 32-row
+block whether or not the guest called `KECCAK`), and the measurement below is
+what that cost. **Task 6 made the table optional** — a guest that makes no
+`KECCAK` call declares `keccak_log_height = 0` and the instance is left out of
+the batch — and a keccak-free proof is back within about half a percent of its
+pre-M4.2 size. Measured on `guests::fib`:
+
+| | tier 10 | tier 12 |
+| --- | --- | --- |
+| before the keccak table (branch base `b1d01d9`, i.e. M4.1 as shipped) | 437 599 bytes | 460 242 bytes |
+| with the padding block every proof carried (Task 5) | 1 142 262 bytes | 1 161 162 bytes |
+| keccak-free, the table now optional (Task 6) | **439 816 / 440 456 bytes** | **464 891 / 460 924 bytes** |
+| what a guest that *does* call `KECCAK` still pays | +~705 KB (+1.91 MB at 80 queries) | +~701 KB |
+| prove time (before / Task 5 / Task 6) | 5.996 s / 6.154 s / 6.48 s, 6.36 s | 23.40 s / 23.91 s / 23.61 s, 25.15 s |
+| verify time, first and uncached (before / Task 5 / Task 6) | 218.1 ms / 250.6 ms / 224.3 ms, 219.8 ms | 812.2 ms / 860.7 ms / 827.8 ms, 824.3 ms |
+
+The Task 6 row gives both of two consecutive runs of the same command: the
+hiding PCS draws fresh entropy per proof, so the postcard encoding moves by
+roughly a percent run to run, which is the same order as the residual gap to
+the pre-M4.2 number. The proof also genuinely carries two more declared-height
+bytes than it did at `b1d01d9` (`keccak_log_height`, `mem_log_height`).
+
+That prove time barely moved when the table was added is what locates the
+cost: committing a 32-row
+trace is nothing, but every FRI query has to *open* a 2 612-wide main-trace
+leaf. Order-of-magnitude, that accounts for most of it — 27 queries x 2 612
+columns x 8 bytes is ~565 KB of leaf data (and 80 queries, the profile
+restored on 2026-09-12, ~1.67 MB — the M4.2 numbers in this section are all
+27-query numbers, taken before the revert), and the zeta/zeta-next opened
+values (2 612 columns, two points, a degree-2 extension) another ~84 KB, with
+the chip's permutation columns and quotient chunks making up the rest. The
+keccak chip's **width**, not its height, is what a proof carrying it pays for
+— which is why Task 6 removes the instance rather than shrinking it: no row
+count would have brought a ~300 KB shielded bundle proof plus 705 KB (1.91 MB
+at 80 queries) back
+under the node's 1 MiB cap.
+
+At `FriProfile::Test` the same comparison is 275 916 bytes at the base
+`b1d01d9` (tier 10, `fib(10)`; three runs measured 274 156 / 275 916 /
+276 684) against 276 654 bytes here — the number
+`tests/e2e.rs::a_keccak_free_proof_carries_no_keccak_table` asserts within 5%,
+so a keccak table silently creeping back into keccak-free proofs fails the
+suite rather than quietly costing every proof on the chain.
+
+A second, smaller number in the same measurement is M4.2's own controller
+ruling 1. The first cut of the milestone sized the memory table
+`log2_ceil(2^(ℓ+2) + 100·2^(klh−5))`, which doubled it for every proof in
+existence (`klh` floored at 5 then, so the `+100` was never zero). Making the height
+proof-declared instead recovers 14 767 bytes and 1.79 s of prove time at tier
+10 (1 157 029 → 1 142 262 bytes, 7.94 s → 6.15 s) and 22 316 bytes and 4.65 s
+at tier 12 (1 183 478 → 1 161 162 bytes, 28.56 s → 23.91 s).
+
+M2.2 (80 → 27 queries, retuned to the 100-bit conjectured target — since
+reverted, see the profile table above) cut proof
 size to roughly a third at the same conjectured soundness margin; prove and
 first-verify times moved by noise, not by the query-count change, because
 both were dominated by costs the query count and fold width don't touch:
@@ -212,19 +331,41 @@ caller-supplied `hc`, word for word (`public_values[IN0..IN7]`, `H_IN`, is
 *not* checked here — it has no caller-supplied counterpart to check
 against, unlike `hc`; see "Private inputs are bound to `H_IN`", above);
 `public_values[TIER]` equals
-`proof.tier`; `proof.tier` is one of the six values in `TIERS` (an
+`proof.tier`; and then — all of it in `machine::check_declared_heights`, which
+`verify` calls before it sizes anything, and which is a free function over the
+declared values precisely so these bounds can be tested at tiers no test could
+afford to prove at — `proof.tier` is one of the six values in `TIERS` (an
 attacker-chosen out-of-range tier is rejected here, before it can be used to
 compute a table height and panic); `proof.program_log_height` is within
 `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` (review fix — the same defensive pattern,
 `VerifyError::ProgramHeight` rather than a panic on an absurd shift);
 `proof.input_log_height` is within its own `[MIN_LOG_HEIGHT,
 MAX_LOG_HEIGHT]` (M4.1, the `input` table's exact analogue of the same
-check); the
-proof's degree bits match the heights that tier (and the declared program
-and input heights) imply for all eight tables; and finally the batch
-STARK itself, against a verifier key recomputed from the tier and the two
+check); `proof.keccak_log_height` is either `0` — M4.2 Task 6's "this proof has no
+keccak table", exempt from the range check because there is no height to
+check — or within `[tables::keccak::MIN_LOG_HEIGHT,
+tables::keccak::MAX_LOG_HEIGHT]` *and* no larger than what the declared tier
+could possibly need (M4.2, `VerifyError::KeccakHeight` /
+`KeccakHeightExceedsTier` — a permutation costs a cycle, so `klh <= tier + 5`,
+capped absolutely at 20; the tier half alone would let a tier-20 header ask for
+a 2^25-row preprocessed keccak trace, which is why the Task 5 review put the
+flat cap back. Both are checked before any table is sized or any verifier key
+built, which
+`tests/cheating.rs::a_keccak_height_past_the_tiers_ceiling_is_rejected_
+before_any_verifier_key_is_built` and its `..._past_the_absolute_cap_...`
+sibling assert by observing `cached_keys() == 0` after the rejection);
+`proof.mem_log_height` is within
+`[tier + 2, MAX_MEM_LOG_HEIGHT]` (M4.2 — the memory table's height is
+proof-declared now, see "Tiers: what padding hides" below; both ends are
+pinned by `tests/cheating.rs`, the ceiling since the Task 5 review); the
+proof's degree bits match the heights that tier (and the four declared
+heights) imply for all eight tables — nine when `keccak_log_height != 0`, and
+since that comparison is of whole lists it is simultaneously the check that
+the batch has the right *number* of instances for what the proof declares;
+and finally the batch
+STARK itself, against a verifier key recomputed from the tier and the
 declared heights — `Machine::verifier_key(tier, program_log_height,
-input_log_height)`, which includes
+input_log_height, keccak_log_height)`, which includes
 the range and nibble tables' preprocessed commitments (256 rows each, since
 M2.3 split the 2^16-row byte table in two) and the Poseidon2 chip's
 round-constant table. M3.4:
@@ -232,9 +373,20 @@ round-constant table. M3.4:
 `base_pc` to check it against — it is read out of the proof and bound only
 in-circuit, to the digest group's own `pc` (and, indirectly, to `hc` itself,
 since `Program::digest` absorbs `base_pc`). `Machine::verifier_key` caches
-this by `(tier, program_log_height, input_log_height)` now (M4.1 grew the
-2-tuple to a 3-tuple — two independent, unrelated height parameters, so a
-folded single value would obscure rather than simplify) — still
+this by `(tier, program_log_height, input_log_height, keccak_log_height)`
+now (M4.1 grew the 2-tuple to a 3-tuple and M4.2's keccak table to a
+4-tuple — independent, unrelated height parameters, so a folded single
+value would obscure rather than simplify). `keccak_log_height = 0` is an
+ordinary value of that fourth component and a genuinely distinct key: it
+selects the eight-chip batch, whose preprocessed commitment omits the keccak
+table's 99 periodic columns entirely. `mem_log_height` is deliberately *not* a
+fifth key component — nor, since the M4.2 review, a parameter at all: the
+memory table declares neither preprocessed nor periodic columns, so the
+`CommonData` this caches is identical at every declared memory height
+(`docs/02`'s degree-budget section has the argument), and the function feeds
+`log_ext_degrees` the tier's own floor. The declared `mem_log_height` is still
+checked, just elsewhere: by `check_declared_heights` and by the `degree_bits`
+list comparison above. Still
 program-*content*-independent (review fix: the program table's height is a
 value the prover declares per proof, not derived from the tier, so the
 cache key needs it too
@@ -250,7 +402,10 @@ end of `docs/superpowers/plans/2026-09-11-zkvm-m4-1.md`).
 
 Trace height never reflects the actual cycle count; it is padded up to the
 smallest tier that fits. `cpu` and `alu` pad to `2^ℓ` and `2^(ℓ+1)` rows,
-`memory` to `2^(ℓ+2)` (four accesses per cycle, worst case), `poseidon2` to
+`memory` to **at least** `2^(ℓ+2)` (four cpu-issued accesses per cycle, worst
+case — M4.2 makes this a floor rather than the height, since a `KECCAK` row
+makes 100 accesses that the keccak chip, not the cpu, sends; see below),
+`poseidon2` to
 `2^(ℓ+2)` (M3.4: bumped from `2^(ℓ+1)` to fit the program digest's own
 `⌈len/4⌉` permutations on top of any guest hashing — `docs/02`'s
 `Tier::poseidon2_height` comment has the exact numbers); `program` (M3.4:
@@ -258,22 +413,52 @@ now a main table) pads to `1 << Proof::program_log_height` — a value the
 *prover* declares per proof from the program's own length, not derived
 from the tier at all (review fix: an earlier version of this milestone set
 it to `cpu_height()`, unsafe — see `docs/02-tables-and-buses.md`'s
-"Height" section under the program table); `range` and `nibble` are each
+"Height" section under the program table); `keccak` (M4.2) is **absent entirely** unless the guest calls `KECCAK`, and
+otherwise pads to
+`1 << Proof::keccak_log_height`, one 32-row block per permutation, floored
+at one block and ceilinged at `2^(ℓ+5)`; `memory` (M4.2, controller ruling
+1) is proof-declared too — `max(ℓ + 2, log2_ceil(accesses + 1))`, so a guest
+whose `KECCAK` calls push it past the tier's four-per-cycle budget grows the
+table instead of failing, and every other guest pays exactly the `2^(ℓ+2)`
+it always did; `range` and `nibble` are each
 always the fixed 256 rows. Padding rows carry `is_real = 0` (or, for
 `program`, `valid = 0`) and emit nothing on any bus.
+
+**Two more public numbers, and what they do and do not reveal.**
+`keccak_log_height` is an upper bound on the number of `KECCAK`
+permutations, rounded up to a power of two — exactly the role
+`program_log_height` plays for program size. Above zero it is coarse (5
+covers 1 permutation, 6 covers 2, 7 covers 3–4, …), so it bounds the count to
+within a factor of two and no better. **`0` is exact, and it is the one
+disclosure this number makes precisely: "this program made no `KECCAK` call
+at all"** (M4.2, Task 6). That is deliberate, and it is the same class of leak
+`program_log_height` already is — a coarse structural fact about the
+*program*, not about its data: a verifier learns that this guest does not
+hash, exactly as it already learns roughly how long the guest is. It is paid
+for: a keccak-free proof drops the 2 612-column keccak table from the batch
+and is ~1.91 MB smaller at the production profile (~705 KB at the 27 queries
+M4.2 measured), which is the difference
+between a shielded bundle proof fitting the node's 1 MiB cap and not.
+Through the first cut of M4.2 the height floored at 5 and "zero" and "one"
+were indistinguishable; that indistinguishability cost every proof on the
+chain the full table, and was traded away knowingly.
+`mem_log_height`'s tier floor plays the same role for memory traffic: below
+`2^(ℓ+2)` accesses the declaration is constant at `ℓ + 2` and says nothing
+the tier did not already, and it only starts tracking the real count once a
+guest exceeds what the tier already budgeted for.
 Digest rows are **not** padding — they are real, `is_real = 1` rows that
 count against the tier's cycle budget just like ordinary instructions do
 (`Program::digest_rows()` added to `Execution::cycles()` before choosing a
 tier).
 
-| Tier `ℓ` | `cpu` rows | `alu` rows | `memory` rows | max cycles |
-|---|---|---|---|---|
-| 10 | 1 024 | 2 048 | 4 096 | 1 023 |
-| 12 | 4 096 | 8 192 | 16 384 | 4 095 |
-| 14 | 16 384 | 32 768 | 65 536 | 16 383 |
-| 16 | 65 536 | 131 072 | 262 144 | 65 535 |
-| 18 | 262 144 | 524 288 | 1 048 576 | 262 143 |
-| 20 | 1 048 576 | 2 097 152 | 4 194 304 | 1 048 575 |
+| Tier `ℓ` | `cpu` rows | `alu` rows | `memory` rows (floor) | max `keccak` rows | max cycles |
+|---|---|---|---|---|---|
+| 10 | 1 024 | 2 048 | 4 096 | 32 768 | 1 023 |
+| 12 | 4 096 | 8 192 | 16 384 | 131 072 | 4 095 |
+| 14 | 16 384 | 32 768 | 65 536 | 524 288 | 16 383 |
+| 16 | 65 536 | 131 072 | 262 144 | 2 097 152 | 65 535 |
+| 18 | 262 144 | 524 288 | 1 048 576 | 8 388 608 | 262 143 |
+| 20 | 1 048 576 | 2 097 152 | 4 194 304 | 33 554 432 | 1 048 575 |
 
 A run that needs more than `tier.max_cycles()` cycles for its chosen tier is
 refused by `build_traces`, not silently truncated.
@@ -286,6 +471,8 @@ refused by `build_traces`, not silently truncated.
 | Code hash `hc` | public — an in-circuit digest (M3.4), binding but not hiding: it still identifies the program to anyone who can guess it |
 | Entry point `pc_entry` | public |
 | Gas tier `ℓ` | public per proof (the proof's own size already reveals its trace height, so hiding the tier index buys nothing at the single-proof level; a batch-level histogram, as the whitepaper describes, is a property of the aggregation layer, not of one proof) |
+| `keccak_log_height` (M4.2) | public — an upper bound on the number of `KECCAK` permutations, rounded up to a power of two, exactly as `program_log_height` is for program size: above zero it reveals the count to within a factor of two. `0` is exact and means "this program made no `KECCAK` call" (M4.2, Task 6 — the proof then carries no keccak table at all, which is what makes it ~1.91 MB smaller at the production profile, ~705 KB at the 27 queries M4.2 measured); the same class of structural, program-shaped leak `program_log_height` is |
+| `mem_log_height` (M4.2) | public — the memory table's declared height, floored at the tier's own `2^(ℓ+2)`. Constant, and so uninformative, for every guest whose memory traffic fits what the tier already budgets; above that it bounds the access count to within a factor of two |
 | Eight output words | public |
 | Private inputs (`READ_INPUT` values) | hidden — witness only; bound (M4.1) to a salted, hiding commitment `H_IN = pv::IN0..IN7` so repeated reads of the same index agree and out-of-range reads are unsatisfiable, but `H_IN` itself opens nothing without the salt (never published) |
 | Every register and memory value | hidden |

@@ -21,7 +21,7 @@ slower than the RISC-V native path:
 
 | EVM opcode(s) | Coprocessor needed | Notes |
 |---|---|---|
-| `KECCAK256` | Keccak-f\[1600\] table | the vendored Plonky3 0.7 set has `p3-keccak` (the permutation) but no `p3-keccak-air` — M4.2 hand-writes the chip (`docs/superpowers/specs/2026-09-11-zkvm-m4-design.md` §3) |
+| `KECCAK256` | Keccak-f\[1600\] table | **done (M4.2)** — the vendored Plonky3 0.7 set had `p3-keccak` (the permutation) but no `p3-keccak-air`, so the chip was hand-written: `tables::keccak`, 2 612 main columns, one row per round in 32-row blocks, `docs/02-tables-and-buses.md`'s `keccak` section. The sponge (rate, padding, squeeze) stays in guest code |
 | `ADDMOD`, `MULMOD`, `EXP` | 256-bit modular arithmetic | native words are 32-bit; a 256-bit value is eight limbs, and mulmod/expmod need a dedicated multi-limb multiplier, not four chained 32-bit ALU ops |
 | `ECRECOVER` (and any signature-checking precompile) | secp256k1 recovery | needs field/group arithmetic over a non-Goldilocks curve; this is exactly the CPI/secp256k1 gap noted for `randprotocol-svm` and is shared work |
 | `SLOAD`/`SSTORE` | Merkle-witness syscalls | EVM storage is a sparse Merkle tree keyed by 256-bit slots; each access becomes a `MERKLE_VERIFY`-style syscall against a public state root, which is milestone 3 machinery, not milestone 4's |
@@ -59,12 +59,24 @@ running through the general-purpose ALU.
 
 The EVM interpreter, because it is the more immediately useful target (an
 ERC-20 `transfer` proving under `R_exec` is the milestone's own exit
-criterion). The vendored Plonky3 0.7 set has no `p3-keccak-air` (only the
-bare `p3-keccak` permutation — corrected above), so M4.2 hand-writes the
-Keccak-f[1600] chip rather than reusing an upstream one; this is now a
-known, scoped cost rather than an unknown. The sBPF interpreter and its
-coprocessors follow once the general "interpreter guest + coprocessor
-table" pattern is proven out once, on the EVM.
+criterion). The vendored Plonky3 0.7 set had no `p3-keccak-air` (only the
+bare `p3-keccak` permutation — corrected above), so M4.2 hand-wrote the
+Keccak-f[1600] chip rather than reusing an upstream one. That is now done and
+measured, not an estimate: 2 612 main columns (the design spec guessed
+~2,650), max constraint degree 3, one `SYS_KECCAK` cpu row per permutation,
+and the chip sending its own 100 memory accesses. The one number the design
+did not anticipate is what a 2 612-column table costs in *proof size* — about
+1.91 MB at the production profile, whatever its row count, because FRI openings
+scale with a batch's column count (~705 KB at the 27 queries M4.2 measured, 80
+since the 2026-09-12 revert; `docs/03-privacy.md`'s M4.2 measurement).
+As first built, every proof paid that, since the table's height floored at one
+padding block; M4.2's Task 6 made the table **optional per proof**
+(`keccak_log_height = 0`, no keccak instance in the batch), so only a guest
+that actually calls `KECCAK` pays it.
+The sBPF interpreter and its coprocessors follow once the general
+"interpreter guest + coprocessor table" pattern is proven out once, on the
+EVM; M4.3's SHA-256 chip should plan its column budget against that number —
+and should be optional the same way.
 
 ## Compiled guests (M4.1)
 
@@ -116,17 +128,47 @@ a genuine backward branch to satisfy `-> !` without needing to synthesize
 word is never actually executed (the preceding `ecall` halts first), it
 only needs to be *decodable*, which it now is.
 
-Measured numbers for the first guest built this way:
+Measured numbers, `FriProfile::Test`, re-measured on the M4.2 branch. `fib`
+makes no `KECCAK` call, so since Task 6 made the keccak table optional its
+proof is back where it was before M4.2 (271,600–275,889 bytes then, 271,987
+now); the mid-milestone figure, when every proof carried the table, was
+729,254 bytes. `keccak256` does call it, and pays for it:
 
-| Guest | Source | Tier | Cycles | Proof size |
-|---|---|---|---|---|
-| `fib(20)`, compiled (`guests::compiled::fib`) | `guests-compiled/fib` | `Tier(10)` | 136 | 271,600–275,889 bytes over three proofs (varies per proof with the hiding salt; measured after the input table landed — the 253,208 figure recorded before it is not comparable) |
+| Guest | Source | Words | Tier | Cycles | Proof size |
+|---|---|---|---|---|---|
+| `fib(20)`, compiled (`guests::compiled::fib`) | `guests-compiled/fib` | 26 | `Tier(10)` | 136 | 271,987 bytes |
+| `keccak256(135 bytes)`, compiled (`guests::compiled::keccak256`) | `guests-compiled/keccak256` | 461 | `Tier(12)` | 2,848 | 745,151 bytes |
 
-Measured by `research/tests/e2e.rs`'s `compiled_fib_proves_and_verifies`
-(`cargo +1.98.1 test -p rand_zkvm --test e2e compiled_fib -- --nocapture`,
-`FriProfile::Test`), and confirmed against the hand-written
-`guests::fib` guest by `compiled_fib_matches_the_hand_written_guest` (same
-output, same public values, run through the same emulator).
+`fib` is measured by `research/tests/e2e.rs`'s
+`compiled_fib_proves_and_verifies` (`cargo +1.98.1 test --release --test e2e
+compiled_fib -- --nocapture`) and confirmed against the hand-written
+`guests::fib` by `compiled_fib_matches_the_hand_written_guest` (same output,
+same public values, same emulator).
+
+### The `keccak256` guest — M4.2's exit test
+
+`guests-compiled/keccak256` is the milestone's exit criterion made
+executable: Keccak-256 of a message, computed by a *compiled* guest, matching
+the host `keccak::keccak256`. The message arrives as private input
+(`input[0]` the byte length, `input[1..]` four bytes per word,
+little-endian); the 32-byte digest goes to output slots 0..7 the same way.
+The sponge — the 136-byte rate, the `0x01`/`0x80` padding, the squeeze — is
+`guest_sdk::keccak256`, ordinary compiled guest code; only the permutation is
+the `KECCAK` syscall. `research/tests/keccak.rs` transcribes that same loop
+and checks it against the host at every block-boundary case (0, 1, 135, 136,
+137, 272 bytes), since `guest-sdk` itself only builds for
+`riscv32im-unknown-none-elf` and cannot be linked into the test binary.
+
+`compiled_keccak256_matches_the_host_in_one_permutation` runs it on a
+135-byte message — one byte shy of the rate, so the padding fits the same
+block and the whole hash is exactly **one** permutation
+(`keccak_log_height = 5`, the floor). Measured: 461 program words, 2 848
+cycles, `Tier(12)`, `mem_log_height = 14` (tier 12's own floor — one
+permutation's 100 accesses do not move it), 745 151-byte proof, 23.5 s prove
+and 853 ms verify at `FriProfile::Test`. The cycle count is dominated by the
+guest's byte-at-a-time input unpacking (one `READ_INPUT` per four bytes plus
+a per-byte shift/store loop), not by the hash: the permutation itself is a
+single cpu row.
 
 ## Hand-written note-layer guests (not this milestone's pipeline)
 

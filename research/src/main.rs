@@ -5,7 +5,7 @@ use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::isa::Instr;
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, TIERS};
-use rand_zkvm::tables::{alu, cpu, input, memory, nibble, poseidon2, program, range, F};
+use rand_zkvm::tables::{alu, cpu, input, keccak, memory, nibble, poseidon2, program, range, F};
 use std::time::Instant;
 
 fn hr(title: &str) { println!("\n══ {title} {}", "═".repeat(70usize.saturating_sub(title.len()))); }
@@ -31,10 +31,22 @@ fn main() {
     let exec = execute(&program, &inputs, 1 << 20).unwrap();
     println!("inputs {:?} → outputs {:?} in {} cycles ({:?})", inputs, &exec.outputs[..2], exec.cycles(), t.elapsed());
 
-    hr("Part 4 · Arithmetize: eight tables on twelve buses");
-    let tier = Tier::for_cycles(exec.cycles()).unwrap();
+    hr("Part 4 · Arithmetize: eight tables on thirteen buses (nine with a keccak table)");
+    // M3.4/M4.1: the cpu table's two digest-row prefixes (program `hc` and the salted `H_IN`)
+    // count as cycles too — and the auto-tier pick fits the Poseidon2 permutation budget as
+    // well as the cycle budget (audit ZH1, 2026-09-12).
+    let digest_rows = program.digest_rows() + rand_zkvm::hash::input_digest_row_count(inputs.len());
+    let cycles = exec.cycles() + digest_rows;
+    // The permutation count is digest rows *plus* the guest's own `POSEIDON2` absorb rows — the
+    // same sum `Machine::prove_salted` forms. `balance_check` makes no `POSEIDON2` call, so this
+    // term is zero for this demo; it is written out anyway because omitting it is exactly the
+    // mistake audit ZH1 fixed.
+    let absorb_rows = exec.events.iter()
+        .filter(|e| matches!(e.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. })))
+        .count();
+    let tier = Tier::for_workload(cycles, digest_rows + absorb_rows).unwrap();
     let traces = build_traces(&program, &inputs, &exec, tier).unwrap();
-    println!("tier {} → cpu 2^{} rows (actual {} cycles), padding hides the rest", tier.0, tier.0, exec.cycles());
+    println!("tier {} → cpu 2^{} rows (actual {cycles} cycles incl. {digest_rows} digest rows), padding hides the rest", tier.0, tier.0);
     println!("{:<10}{:>10}{:>8}   {}", "table", "rows", "cols", "role");
     for (name, h, w, role) in [
         ("program", traces.program.height(), program::col::WIDTH, "witness ROM + in-circuit decoder; hc is proved, not preprocessed"),
@@ -46,9 +58,26 @@ fn main() {
         ("poseidon2", traces.poseidon2.height(), poseidon2::col::WIDTH + poseidon2::pre::WIDTH, "hash permutation: program/input digests, notes"),
         ("input", traces.input.height(), input::col::WIDTH, "private inputs, committed to the salted H_IN digest"),
     ] { println!("{name:<10}{h:>10}{w:>8}   {role}"); }
-    println!("buses: PROGRAM PROGRAM_WORD MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 POSEIDON2 INPUT_DIGEST INPUT_READ (LogUp, verified globally)");
+    match &traces.keccak {
+        Some(k) => println!(
+            "{:<10}{:>10}{:>8}   {}",
+            "keccak", k.height(), keccak::col::WIDTH + keccak::pre::WIDTH,
+            "Keccak-f[1600], one row per round; sends its own memory traffic",
+        ),
+        // M4.2 (Task 6): the keccak table is optional per proof. This guest never calls KECCAK,
+        // so the ninth instance is simply absent — and since the keccak chip is the widest table
+        // in the batch by an order of magnitude, leaving it out is where this proof's bytes were
+        // won back (~1.91 MB at the production profile's 80 queries, ~705 KB at the 27 M4.2
+        // measured; `docs/03-privacy.md`).
+        None => println!("{:<10}{:>10}{:>8}   {}", "keccak", "—", "—", "absent: this guest makes no KECCAK call"),
+    }
+    println!("buses: PROGRAM PROGRAM_WORD MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 POSEIDON2 INPUT_DIGEST INPUT_READ KECCAK (LogUp, verified globally)");
+    println!("declared heights: program 2^{} · input 2^{} · keccak {} · memory 2^{}",
+        traces.program_log_height, traces.input_log_height,
+        if traces.keccak_log_height == 0 { "absent".to_string() } else { format!("2^{}", traces.keccak_log_height) },
+        traces.mem_log_height);
 
-    hr("Part 5 · Prove and verify (production FRI: blowup 8, 27 queries, 20 PoW bits, ZK on)");
+    hr("Part 5 · Prove and verify (production FRI: blowup 8, 80 queries, 20 PoW bits, ZK on)");
     let m = Machine::new(FriProfile::Production);
     let hc = program.code_hash();
     println!("hc = {hc}");
@@ -72,7 +101,14 @@ fn main() {
     hr("Part 7 · Zero knowledge and tier padding");
     let (p1, _) = m.prove(&program, &inputs, None).unwrap();
     let (p2, _) = m.prove(&program, &[1000, 0, 0, 0], None).unwrap();
-    println!("same output, different private inputs: public values equal = {}, proof bytes equal = {}", p1.public_values == p2.public_values, p1.to_bytes() == p2.to_bytes());
+    println!("same output, different private inputs: public values differ only in the salted H_IN = {}, proof bytes equal = {}", {
+        // M4.1: `pv::IN0..7` is a *salted*, hiding commitment (fresh OS entropy per proof), so
+        // the two vectors are no longer equal — the ZK story is that the only words that may
+        // differ are exactly the eight H_IN words (and these two input vectors genuinely
+        // produce different H_INs).
+        let diff: Vec<usize> = (0..p1.public_values.len()).filter(|&i| p1.public_values[i] != p2.public_values[i]).collect();
+        diff == (cpu::pv::IN0..cpu::pv::IN0 + 8).collect::<Vec<_>>()
+    }, p1.to_bytes() == p2.to_bytes());
     let (p3, _) = m.prove(&program, &inputs, Some(Tier(12))).unwrap();
     println!("same run at tier 12: {} bytes (tier 10: {} bytes) — size reveals the tier, never the cycle count", p3.size(), p1.size());
 

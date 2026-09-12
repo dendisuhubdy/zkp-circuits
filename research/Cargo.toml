@@ -26,12 +26,16 @@ p3-fri = "=0.7.0"
 p3-dft = "=0.7.0"
 p3-merkle-tree = "=0.7.0"
 p3-symmetric = "=0.7.0"
+p3-keccak = "=0.7.0"
 rand = { version = "0.10", features = ["std_rng"] }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 ml-kem = "=0.3.2"
 chacha20poly1305 = "=0.11.0"
 rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
+
+[dev-dependencies]
+hex = "0.4"
 
 [features]
 default = []

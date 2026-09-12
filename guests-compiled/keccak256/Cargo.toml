@@ -1,0 +1,18 @@
+[package]
+name = "keccak256-guest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+guest-sdk = { path = "../../guest-sdk" }
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
+codegen-units = 1
+
+# Its own workspace root — never swept into `research`'s or any future root workspace's
+# `cargo test`/`cargo build`, so a plain `cargo test` from `research/` never needs the
+# riscv32im target installed.
+[workspace]

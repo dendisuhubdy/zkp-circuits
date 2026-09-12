@@ -1,20 +1,33 @@
 # AGENTS.md — `research` (rand_zkvm)
 
 The Rand reference zkVM: an RV32I subset under a zero-knowledge batch STARK
-(Plonky3 0.7, Goldilocks), proved as eight AIR tables exchanging facts over
-twelve LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
-buses), plus the M1.5 viewing-key layer (notes, envelopes, scoped
-disclosure, simulated ledger). Design docs are `docs/01–06`; the README has
-the reading order.
+(Plonky3 0.7, Goldilocks), proved as eight AIR tables — nine when a proof
+declares a keccak table — exchanging facts over
+thirteen LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
+buses; M4.2 added `keccak` and the `KECCAK` bus, and made that one table
+optional per proof: `Proof::keccak_log_height = 0` means the batch has no
+keccak instance at all), plus the M1.5 viewing-key
+layer (notes, envelopes, scoped disclosure, simulated ledger). Design docs
+are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (167 tests: 166 pass, 1 ignored).
-  Everything uses `FriProfile::Test`; measured, `tests/bundle.rs` takes
-  ~208 s (six proofs: four guest-level, plus one shared by every
-  ledger-level test and one for the 1-real-1-dummy shape),
-  `tests/viewing.rs` ~206 s, `tests/e2e.rs` ~103 s, `tests/cheating.rs`
-  ~26 s and `tests/zk.rs` ~19 s. All green is the bar before any commit.
+- `cargo test` — the whole suite (223 tests: 222 pass, 1 ignored).
+  Everything uses `FriProfile::Test`; measured in one run at the end of the
+  2026-09-12 audit-port wave, `tests/bundle.rs` takes ~213 s (six proofs:
+  four guest-level, plus one shared by every ledger-level test and one for
+  the 1-real-1-dummy shape), `tests/viewing.rs` ~208 s, `tests/e2e.rs`
+  ~99 s, `tests/cheating.rs` ~47 s, `tests/zk.rs` ~18 s,
+  `tests/tables.rs` ~10 s and `tests/keccak.rs` ~1 s (its chip-alone
+  harness proves a 128-row table, so it is cheap despite 2 612 columns).
+  All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a
+  keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with
+  a batch's column count, so carrying it costs ~1.91 MB at the production
+  profile — 80 queries since the 2026-09-12 audit revert; it was ~705 KB at
+  the 27 queries M4.2 measured (`docs/03-privacy.md`'s profile table and M4.2
+  measurement). That is a known cost of
+  using the syscall, not a regression to chase; a guest that makes no `KECCAK`
+  call does not pay it, because the table is left out of the batch entirely.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one
   production-profile proof). The test suite covers everything it shows; don't
   run it casually.
@@ -36,7 +49,13 @@ first of all:
    in `src/tables/alu.rs`.
 3. **`lw`/`sw`/`addi` immediates are real 12-bit signed RISC-V I-type
    fields** (`Instr::encode`'s `i_type` masks to `imm & 0xfff`; `decode`
-   sign-extends it back via `sext(.., 12)`) — any hand-assembled guest's
+   sign-extends it back via `sext(.., 12)`). Since the 2026-09-12 audit
+   (ZM3) `encode` *asserts* every field width — an out-of-range I-/S-type
+   immediate, shift amount, branch or `jal` offset, or a `lui`/`auipc` with
+   low bits set, now panics at the choke point instead of being silently
+   truncated into wrong code. That catches the literal-constant case; it
+   does **not** catch the one below, which is about an offset that is in
+   range but applied to the wrong base: any hand-assembled guest's
    compile-time RAM offset outside `[-2048, 2047]` *from whatever value the
    base register holds* silently wraps, addressing the wrong cell, with no
    error at assembly, execution, or proving time (a wrapped write and its
