@@ -23,6 +23,8 @@
 //! for (8 gas a byte, plus any memory expansion), because a contract's gas must not depend on what
 //! the guest chooses to bind. The public output hashes the topics only (Task 4).
 
+use core::cmp::min;
+
 use crate::keccak256;
 use crate::storage::{StorageError, StorageTree};
 use crate::u256::U256;
@@ -170,12 +172,21 @@ pub struct Interpreter<'a, H: Host> {
     ret_len: usize,
     logs: [Log; MAX_LOGS],
     n_logs: usize,
+    /// Set by `new` when the code or the calldata is above its limit, and returned by `run` before
+    /// a single opcode executes. An over-long input is the prover's doing, so it has to be an
+    /// exceptional halt the proof reports — never a panic, which in the guest is an abort and no
+    /// proof at all.
+    pre_halt: Option<Halt>,
 }
 
 impl<'a, H: Host> Interpreter<'a, H> {
-    /// Panics if `code` or `calldata` is above its limit. Both are choke-point asserts rather than
-    /// silent truncation: Task 4's input cursor rejects an over-long input before it gets here, and
-    /// a truncated program that ran anyway would prove the wrong thing.
+    /// Never panics. `code` above [`MAX_CODE_BYTES`] or `calldata` above [`MAX_CALLDATA_BYTES`]
+    /// arms `pre_halt`, which [`run`](Interpreter::run) returns as an exceptional halt before
+    /// anything executes, so the storage root, the return data, the logs and the gas counter are all
+    /// left as they were. Both lengths come out of the prover-supplied input vector, so neither may
+    /// be an `assert!`: a panicking guest aborts and produces no proof at all, where an exceptional
+    /// halt produces a proof that says the call was invalid. Task 4's input cursor refuses the same
+    /// two lengths at parse time; this is the belt to its braces.
     pub fn new(
         h: &'a mut H,
         code: &'a [u8],
@@ -183,8 +194,16 @@ impl<'a, H: Host> Interpreter<'a, H> {
         env: Env,
         storage: &'a mut StorageTree,
     ) -> Self {
-        assert!(code.len() <= MAX_CODE_BYTES, "code above EIP-170's limit");
-        assert!(calldata.len() <= MAX_CALLDATA_BYTES, "calldata above the plan's limit");
+        let pre_halt = if code.len() > MAX_CODE_BYTES || calldata.len() > MAX_CALLDATA_BYTES {
+            Some(Halt::OutOfBounds)
+        } else {
+            None
+        };
+        // Nothing past either cap is ever stored or read: the slices are capped here (they are
+        // borrowed, so this copies nothing), which is also what keeps `scan_jumpdests` inside the
+        // bitmap without a second branch.
+        let code = &code[..min(code.len(), MAX_CODE_BYTES)];
+        let calldata = &calldata[..min(calldata.len(), MAX_CALLDATA_BYTES)];
         // Built in a local so the struct literal below is the only ~100 KiB value in this frame:
         // it goes straight into the caller's indirect-return slot.
         let mut jumpdests = [0u32; MAX_CODE_BYTES / 32];
@@ -206,11 +225,27 @@ impl<'a, H: Host> Interpreter<'a, H> {
             ret_len: 0,
             logs: [Log::EMPTY; MAX_LOGS],
             n_logs: 0,
+            pre_halt,
         }
     }
 
     /// Execute until the code halts.
     pub fn run(mut self) -> Outcome {
+        if let Some(halt) = self.pre_halt {
+            // The call never began, so nothing was spent — the "an exceptional halt burns the whole
+            // limit" rule below is about a run that started and then failed, and this is a malformed
+            // call rather than a failed one. Everything else is untouched by construction: `ret`,
+            // `logs` and the gas counter are as `new` left them and the storage tree still holds the
+            // pre-state root.
+            return Outcome {
+                halt,
+                gas_used: 0,
+                ret: self.ret,
+                ret_len: self.ret_len,
+                logs: self.logs,
+                n_logs: self.n_logs,
+            };
+        }
         let halt = loop {
             match self.step() {
                 Ok(None) => {}

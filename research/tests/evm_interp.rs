@@ -8,7 +8,7 @@
 //! wrong by hand (`SDIV`/`SMOD` truncation, `SAR`'s sign fill, `BYTE`/`SIGNEXTEND` index
 //! direction, the shifts at counts ≥ 256).
 
-use evm_core::interp::{Env, Halt, Interpreter, Outcome};
+use evm_core::interp::{Env, Halt, Interpreter, Outcome, MAX_CALLDATA_BYTES, MAX_CODE_BYTES};
 use evm_core::storage::StorageTree;
 use evm_core::u256::U256;
 use rand_zkvm::evm::{empty_root, HostRef, SparseTree};
@@ -329,6 +329,59 @@ fn dup_swap_and_push_padding() {
     want[0] = 0xaa;
     want[1] = 0xbb;
     assert_eq!(ret_u256(&run(&c2, &[])), U256::from_be_bytes(&want));
+}
+
+/// A program that moves the storage root and emits a log if it runs at all: `SSTORE(1, 1)`,
+/// `LOG0(0, 0)`, `STOP`. Used by the two over-long-input tests, where it must *not* run.
+fn sstore_and_log() -> Vec<u8> {
+    vec![0x60, 0x01, 0x60, 0x01, 0x55, 0x5f, 0x5f, 0xa0, 0x00]
+}
+
+/// Both lengths come out of the prover-supplied input vector, so an over-long one has to be an
+/// exceptional halt the proof reports. A panic would be an abort in the guest — no proof at all —
+/// and the `assert!`s this replaced were exactly that.
+#[test]
+fn code_longer_than_the_cap_is_an_exceptional_halt_not_a_panic() {
+    let mut t = SparseTree::new();
+    t.insert(U256::from_u32(1), U256::from_u32(41));
+    let pre = t.root();
+    // The root-moving program, padded one byte past EIP-170. The padding is JUMPDESTs, which the
+    // program never reaches but the bitmap scan would: without the cap in `new`, byte 24 576 sets a
+    // bit one word past the 768-word bitmap, which is an index-out-of-bounds panic of its own.
+    let mut over = sstore_and_log();
+    over.resize(MAX_CODE_BYTES + 1, 0x5b);
+    let (o, root) = run_with(&over, &[], &t, &[U256::from_u32(1)]);
+    assert_eq!(o.status(), 2);
+    assert_eq!(o.halt, Halt::OutOfBounds);
+    assert_eq!(o.gas_used, 0);
+    assert_eq!(o.ret_len, 0);
+    assert_eq!(o.n_logs, 0);
+    assert_eq!(root, pre, "the pre-state root must not move");
+    // exactly the cap still runs, JUMPDEST bitmap included out to the last byte
+    let at = vec![0x5b; MAX_CODE_BYTES];
+    let oa = run(&at, &[]);
+    assert_eq!(oa.halt, Halt::Stop);
+    assert_eq!(oa.gas_used, MAX_CODE_BYTES as u64);
+}
+
+#[test]
+fn calldata_longer_than_the_cap_is_an_exceptional_halt_not_a_panic() {
+    let mut t = SparseTree::new();
+    t.insert(U256::from_u32(1), U256::from_u32(41));
+    let pre = t.root();
+    let over = vec![7u8; MAX_CALLDATA_BYTES + 1];
+    let (o, root) = run_with(&sstore_and_log(), &over, &t, &[U256::from_u32(1)]);
+    assert_eq!(o.status(), 2);
+    assert_eq!(o.halt, Halt::OutOfBounds);
+    assert_eq!(o.gas_used, 0);
+    assert_eq!(o.ret_len, 0);
+    assert_eq!(o.n_logs, 0);
+    assert_eq!(root, pre, "the pre-state root must not move");
+    // exactly the cap still runs, and CALLDATASIZE sees all of it
+    let mut c = vec![0x36];
+    c.extend(ret_top());
+    let at = vec![7u8; MAX_CALLDATA_BYTES];
+    assert_eq!(ret_u256(&run(&c, &at)), U256::from_u32(MAX_CALLDATA_BYTES as u32));
 }
 
 /// The plan's scope, opcode by opcode: every byte on the list must *not* trap (whatever else it
