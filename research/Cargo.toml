@@ -36,6 +36,7 @@ rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
 
 [dev-dependencies]
 hex = "0.4"
+sha2 = { version = "=0.10.9", features = ["compress"] }
 
 [features]
 default = []
