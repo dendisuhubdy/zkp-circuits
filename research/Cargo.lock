@@ -323,6 +323,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "evm-core"
+version = "0.1.0"
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -592,6 +596,16 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-bigint"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
@@ -728,7 +742,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f45f7364ae3aac1bd42e8dfec4aa76d1bc9087c4749649c893a671e386e96727"
 dependencies = [
  "itertools 0.15.0",
- "num-bigint",
+ "num-bigint 0.5.1",
  "p3-maybe-rayon",
  "p3-util",
  "paste",
@@ -765,7 +779,7 @@ version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c62b44c110832ba3d3a5c11160f591205e23f81a08ceb8c7be1a3a71fc4c214"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.5.1",
  "p3-dft",
  "p3-field",
  "p3-mds",
@@ -798,7 +812,7 @@ checksum = "6fe175bcc36c74b4252d5e50bf188c0b2e0c58d3c537a579efeb1cae213e19bf"
 dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.15.0",
- "num-bigint",
+ "num-bigint 0.5.1",
  "p3-air",
  "p3-field",
  "p3-matrix",
@@ -1080,8 +1094,10 @@ name = "rand_zkvm"
 version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
+ "evm-core",
  "hex",
  "ml-kem",
+ "num-bigint 0.4.8",
  "p3-air",
  "p3-batch-stark",
  "p3-challenger",
