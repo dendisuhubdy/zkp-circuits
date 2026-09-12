@@ -53,7 +53,7 @@ fn host_and_guest_hash_the_same_leaves_indices_and_roots() {
     let t = SparseTree::new();
     assert_eq!(t.root(), empty_root());
     let guest = StorageTree::new(empty_root());
-    assert_eq!(guest.root, empty_root());
+    assert_eq!(guest.root(), empty_root());
 }
 
 /// The leaf is canonical in the value: a slot never written, a slot absent from the tree and a
@@ -110,12 +110,12 @@ fn stores_recompute_the_root_the_host_tree_agrees_with_including_across_shared_p
         let prev = g.store(&mut h, sl, s(7 + i as u32)).unwrap();
         assert_eq!(prev, s(100 * (i as u32 + 1)));
         t.insert(*sl, s(7 + i as u32));
-        assert_eq!(g.root, t.root(), "root after updating slot {i}");
+        assert_eq!(g.root(), t.root(), "root after updating slot {i}");
     }
     // a second store of the same slot, and a store to zero (deletion) both agree too
     assert_eq!(g.store(&mut h, &slots[3], s(0)).unwrap(), s(10));
     t.insert(slots[3], s(0));
-    assert_eq!(g.root, t.root());
+    assert_eq!(g.root(), t.root());
     // reading back what we wrote needs no re-verification and returns the new values
     for (i, sl) in slots.iter().enumerate() { assert_eq!(g.load(&mut h, sl).unwrap(), if i == 3 { s(0) } else { s(7 + i as u32) }); }
 }
@@ -131,8 +131,35 @@ fn a_never_verified_witness_still_verifies_after_another_slots_store() {
     for i in 0..4u32 { g.push(&mut h, into_guest(t.witness(&s(i)))).unwrap(); }
     g.store(&mut h, &s(0), s(999)).unwrap();
     t.insert(s(0), s(999));
-    assert_eq!(g.root, t.root());
+    assert_eq!(g.root(), t.root());
     for i in 1..4u32 { assert_eq!(g.load(&mut h, &s(i)).unwrap(), s(10 * (i + 1)), "slot {i} after the store"); }
+}
+
+/// A witness is folded down the path of **its own slot**: `push` derives the leaf position from
+/// `w.slot` and nothing else can supply one, so a witness carrying another slot's siblings fails
+/// rather than verifying at a stale or borrowed index. (`StorageTree`'s fields are private for
+/// exactly this reason — with `witnesses`/`n` writable, a tree built by assignment would keep the
+/// index cache's initial zero and fold every witness down the path of index 0.)
+#[test]
+fn a_witness_is_verified_at_its_own_slots_index() {
+    let mut t = SparseTree::new();
+    t.insert(s(1), s(11));
+    t.insert(s(2), s(22));
+    let mut h = HostRef;
+    // slot 1 and slot 2 are at different leaf positions, so one's siblings are not the other's
+    assert_ne!(slot_index(&s(1)), slot_index(&s(2)));
+    let mut g = StorageTree::new(t.root());
+    g.push(&mut h, into_guest(t.witness(&s(1)))).unwrap();
+    assert_eq!(g.load(&mut h, &s(1)).unwrap(), s(11));
+    assert!(g.witness(0).verified);
+    // the same value and siblings, relabelled with slot 2: now folded down slot 2's path, so it
+    // cannot reach the root
+    let mut relabelled = into_guest(t.witness(&s(1)));
+    relabelled.slot = s(2);
+    let mut g2 = StorageTree::new(t.root());
+    g2.push(&mut h, relabelled).unwrap();
+    assert!(matches!(g2.load(&mut h, &s(2)), Err(gs::StorageError::BadWitness)));
+    assert!(!g2.witness(0).verified);
 }
 
 #[test]
@@ -142,7 +169,7 @@ fn pushing_more_than_max_witnesses_is_rejected() {
     let mut h = HostRef;
     let mut g = StorageTree::new(t.root());
     for i in 0..gs::MAX_WITNESSES as u32 { g.push(&mut h, into_guest(t.witness(&s(i)))).unwrap(); }
-    assert_eq!(g.n, gs::MAX_WITNESSES);
+    assert_eq!(g.len(), gs::MAX_WITNESSES);
     let extra = into_guest(t.witness(&s(gs::MAX_WITNESSES as u32)));
     assert!(matches!(g.push(&mut h, extra), Err(gs::StorageError::TooMany)));
 }

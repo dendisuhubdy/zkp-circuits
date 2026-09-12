@@ -69,10 +69,18 @@ pub enum StorageError {
 }
 
 /// The guest's view of contract storage: a root and up to [`MAX_WITNESSES`] witnesses.
+///
+/// Every field is private and [`push`](StorageTree::push) is the only way a witness gets in,
+/// because `indices` — each witness's leaf position, cached so `store` does no Keccak per witness
+/// per level — has to stay in step with the witness beside it. With public fields, building a tree
+/// by assignment (`t.witnesses[0] = w; t.n = 1;`) would leave a stale `indices[0] = 0` and fold the
+/// witness down the wrong path; `push` computes the index from the witness's own slot, so the two
+/// cannot come apart. Read access is [`root`](StorageTree::root), [`len`](StorageTree::len) and
+/// [`witness`](StorageTree::witness).
 pub struct StorageTree {
-    pub root: [u32; 8],
-    pub witnesses: [Witness; MAX_WITNESSES],
-    pub n: usize,
+    root: [u32; 8],
+    witnesses: [Witness; MAX_WITNESSES],
+    n: usize,
     /// `slot_index` of each pushed witness, cached at `push` so `store` does no Keccak per
     /// witness per level (16 × 32 of them otherwise).
     indices: [u32; MAX_WITNESSES],
@@ -83,6 +91,29 @@ impl StorageTree {
         StorageTree { root: pre_root, witnesses: [Witness::EMPTY; MAX_WITNESSES], n: 0, indices: [0; MAX_WITNESSES] }
     }
 
+    /// The current root: the pre-state root until the first [`store`](StorageTree::store), the
+    /// post-state root after the last one. The public output binds both.
+    pub fn root(&self) -> [u32; 8] {
+        self.root
+    }
+
+    /// How many witnesses were pushed.
+    pub fn len(&self) -> usize {
+        self.n
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    /// The `i`th pushed witness. Panics if `i >= len()`.
+    pub fn witness(&self, i: usize) -> &Witness {
+        assert!(i < self.n);
+        &self.witnesses[i]
+    }
+
+    /// Take a witness, computing its leaf position from its own slot. The index is never supplied
+    /// from outside, which is what keeps `indices` honest.
     pub fn push<H: Host>(&mut self, h: &mut H, w: Witness) -> Result<(), StorageError> {
         if self.n == MAX_WITNESSES {
             return Err(StorageError::TooMany);
