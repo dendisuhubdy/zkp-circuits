@@ -148,6 +148,7 @@ needs one, is read through the row's memory-access slot as register `a1`
 | 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — bound to a commitment `H_IN` over the whole private-input vector since milestone 4.1 — two reads of the same `idx` are guaranteed to agree, and `idx >= n_in` cannot be satisfied at all; see `docs/03-privacy.md` |
 | 3 | `POSEIDON2 ptr n` | M3.2 | hashes the `n` words at word address `ptr` (`0 <= n <= POSEIDON2_MAX_WORDS = 4096`) with the Poseidon2 sponge (rate 4, overwrite mode, no padding — `hash::sponge_hash`, the exact `PaddingFreeSponge<_, 8, 4, 4>` semantics) and overwrites `ptr..ptr+8` with the 8-word (lo/hi) digest in place |
 | 4 | `KECCAK ptr` | M4.2 | applies one Keccak-f[1600] permutation in place to the `KECCAK_WORDS = 50` words at word address `ptr` (`ptr <= KECCAK_PTR_LIMIT = 0x3000_0000 - 50`, so the whole state stays below `2^30`; the cpu AIR's own bound on a `SYS_KECCAK` row is the marginally looser `ptr < 0x3000_0000`) — lane `i`'s low word at `ptr + 2i`, its high word at `ptr + 2i + 1` (`keccak::state_to_words`). Takes no second argument: the state's width is fixed. One cpu row per call (unlike `POSEIDON2`), because the `keccak` chip proves the 24 rounds and sends the permutation's own 100 memory accesses — the cpu table witnesses the call, never the rounds. Padding and rate are the guest's business; `guest_sdk::keccak256` is the Keccak-256 sponge built over it |
+| 5 | `SHA256 ptr` | M4.4 | applies one SHA-256 compression in place to the `SHA256_WORDS = 24` words at word address `ptr` (`ptr <= SHA256_PTR_LIMIT = 0x3000_0000 - 24`, so the whole buffer stays below `2^30`; the cpu AIR's own bound on a `SYS_SHA256` row is the marginally looser `ptr < 0x3000_0000`). Words `0..16` are the 512-bit message block as sixteen **big-endian-valued** 32-bit words (word `i` holds the block's bytes `4i..4i+4` as `u32::from_be_bytes`, `sha256::bytes_to_words`' layout); words `16..24` are the chaining state `H[0..8]`. The syscall computes `H <- H + f(H, W)` (FIPS 180-4 §6.2.2) and writes the new state back over words `16..24`, leaving the message words untouched — so a Merkle-Damgard loop can refill just the block slot for the next call. Takes no second argument: both widths are fixed. One cpu row per call, like `KECCAK`, because the `sha256` chip proves the 64 rounds and sends the compression's own 32 memory accesses (24 reads, 8 write-backs). Padding and the Merkle-Damgard loop are the guest's business; `guest_sdk::sha256` is the full hash built over it |
 
 ## The flat-binary loader (M4.1)
 
@@ -222,6 +223,18 @@ writes at `ts = 4·clk + 1` are sent by the `keccak` table, off its own
 columns, so the cpu row costs no extra rows and no extra memory slots no
 matter how many words the permutation moves. `docs/02-tables-and-buses.md`'s
 `keccak` section has the schedule.
+
+`SHA256` (M4.4) is the same shape, one milestone later and at a quarter the
+width: one cpu row, `a0` read the ordinary way and bounded by the very same
+`HP0..3`/`HP3_HI` columns (their limb decomposition is gated on `SYS_HASH +
+SYS_KECCAK + SYS_SHA256` now) with the same cubic rule tightening it to
+`ptr < 0x3000_0000`, a single `SHA256` bus message `(clk, ptr)`, and not one of
+the 24 words it reads or the 8 it writes back on the cpu table's own memory
+slots — those are the `sha256` chip's 32 `MEMORY` sends, 24 reads at
+`ts = 4·clk` and 8 writes at `ts = 4·clk + 1`. The difference from `KECCAK` is
+what the syscall leaves behind: `KECCAK` overwrites all 50 state words, while
+`SHA256` overwrites only words `16..24`, which is what makes the buffer
+reusable across the blocks of one message.
 
 Before M4.1 there was no RISC-V cross toolchain on the development machine,
 so every guest was written directly against `asm.rs`'s mnemonic helpers

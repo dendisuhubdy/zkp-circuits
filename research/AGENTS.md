@@ -1,25 +1,29 @@
 # AGENTS.md — `research` (rand_zkvm)
 
 The Rand reference zkVM: an RV32I subset under a zero-knowledge batch STARK
-(Plonky3 0.7, Goldilocks), proved as eight AIR tables — nine when a proof
-declares a keccak table — exchanging facts over
-thirteen LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
+(Plonky3 0.7, Goldilocks), proved as eight AIR tables plus either of two
+optional hash chips — nine with a keccak table, nine with a sha256 one, ten with
+both — exchanging facts over
+fourteen LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
 buses; M4.2 added `keccak` and the `KECCAK` bus, and made that one table
 optional per proof: `Proof::keccak_log_height = 0` means the batch has no
-keccak instance at all), plus the M1.5 viewing-key
+keccak instance at all; M4.4 added `sha256` and the `SHA256` bus on exactly
+those terms and independently, `Proof::sha256_log_height = 0`), plus the M1.5
+viewing-key
 layer (notes, envelopes, scoped disclosure, simulated ledger). Design docs
 are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (223 tests: 222 pass, 1 ignored).
-  Everything uses `FriProfile::Test`; measured in one run at the end of the
-  2026-09-12 audit-port wave, `tests/bundle.rs` takes ~213 s (six proofs:
+- `cargo test` — the whole suite (255 tests: 253 pass, 2 ignored).
+  Everything uses `FriProfile::Test`; measured in one run at the end of M4.4's
+  chip tasks, `tests/bundle.rs` takes ~230 s (six proofs:
   four guest-level, plus one shared by every ledger-level test and one for
-  the 1-real-1-dummy shape), `tests/viewing.rs` ~208 s, `tests/e2e.rs`
-  ~99 s, `tests/cheating.rs` ~47 s, `tests/zk.rs` ~18 s,
-  `tests/tables.rs` ~10 s and `tests/keccak.rs` ~1 s (its chip-alone
-  harness proves a 128-row table, so it is cheap despite 2 612 columns).
+  the 1-real-1-dummy shape), `tests/viewing.rs` ~212 s, `tests/e2e.rs`
+  ~108 s, `tests/cheating.rs` ~43 s, `tests/zk.rs` ~19 s,
+  `tests/tables.rs` ~11 s, `tests/keccak.rs` ~1 s (its chip-alone
+  harness proves a 128-row table, so it is cheap despite 2 612 columns) and
+  `tests/sha256.rs` ~1 s (same trick, a 64-row block).
   All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a
   keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with
   a batch's column count, so carrying it costs ~1.91 MB at the production
@@ -28,6 +32,13 @@ are `docs/01–06`; the README has the reading order.
   measurement). That is a known cost of
   using the syscall, not a regression to chase; a guest that makes no `KECCAK`
   call does not pay it, because the table is left out of the batch entirely.
+  M4.4's `SHA256` costs the same way and a quarter as much — the chip is
+  466 + 10 columns, measured at +92 307 bytes at `FriProfile::Test` and
+  +400 563 at the production profile (same guest, same tier, instance in versus
+  out: `tests/e2e.rs::
+  a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile`
+  and its `#[ignore]`d production twin). Both tables are optional and
+  independent, so a guest pays for the hash it actually calls.
 - `cargo run --release` — the narrated demo, 5–6 min wall time (one
   production-profile proof). The test suite covers everything it shows; don't
   run it casually.

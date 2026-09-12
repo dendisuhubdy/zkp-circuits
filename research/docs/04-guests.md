@@ -39,7 +39,7 @@ wants:
 
 | SVM primitive | Coprocessor needed | Notes |
 |---|---|---|
-| `sol_sha256` | SHA-256 table | same shape of problem as Keccak: a fixed permutation run many times |
+| `sol_sha256` | SHA-256 table | **done (M4.4)** — `tables::sha256`, 466 main columns + 10 preprocessed, one row per round in 64-row blocks with no idle rows, behind `SYS_SHA256 = 5` (one compression per cpu row, the chip sending its own 32 memory accesses). Optional per proof like keccak's, and measured: +92 KB at `FriProfile::Test`, +400 KB at the production profile. `docs/02-tables-and-buses.md`'s `sha256` section; padding and the Merkle–Damgård loop stay in guest code (`guest_sdk::sha256`) |
 | `sol_ed25519` verify | Ed25519 | needed for signature-verifying programs; today's `randprotocol-svm` has no secp256k1 *or* Ed25519 support and no Instructions sysvar, which blocks this and the bridge use case alike |
 | 64-bit multiply/shift | limb doubling | every sBPF register is 64 bits; each op costs roughly two RV32 operations interpreted, the RV64-vs-RV32 tradeoff from `docs/01-isa.md` showing up concretely here |
 
@@ -77,6 +77,15 @@ The sBPF interpreter and its coprocessors follow once the general
 "interpreter guest + coprocessor table" pattern is proven out once, on the
 EVM; M4.3's SHA-256 chip should plan its column budget against that number —
 and should be optional the same way.
+
+**That is what M4.4's chip did, and the arithmetic held.** `tables::sha256` is
+466 main columns + 10 preprocessed against keccak's 2 612 + 99, and its measured
+proof-size cost is +400 563 bytes at the production profile against keccak's
++1.91 MB — a ratio of 0.21 where the column ratio is 0.176, so proof size really
+does track a chip's *width* nearly linearly and a chip can be budgeted for before
+it is built. It is optional the same way (`sha256_log_height = 0`, no instance in
+the batch), and independently, so a guest pays for the hash it actually calls and
+nothing else.
 
 ## Compiled guests (M4.1)
 
@@ -127,6 +136,15 @@ a genuine backward branch to satisfy `-> !` without needing to synthesize
 `unreachable` at all — the function still never returns, and the trailing
 word is never actually executed (the preceding `ecall` halts first), it
 only needs to be *decodable*, which it now is.
+
+The hand-written `guests::sha256_demo` (M4.4) is the sha256 analogue of
+`keccak_demo`: a 55-byte message, padded at assembly time into a single 512-bit
+block, one `SYS_SHA256` call, the 8 digest words published — 116 program words and
+116 cycles at tier 10, `sha256_log_height = 6` (the floor), 1 615 520 bytes at the
+production profile, checked against the host `sha256::sha256` by
+`tests/e2e.rs::sha256_demo_proves_and_verifies_with_one_sha256_block`. The general
+Merkle–Damgård loop and runtime padding live in `guest_sdk::sha256`, where
+`keccak256`'s sponge lives; a compiled guest over it is M4.4's later business.
 
 Measured numbers, `FriProfile::Test`, re-measured on the M4.2 branch. `fib`
 makes no `KECCAK` call, so since Task 6 made the keccak table optional its

@@ -1,8 +1,10 @@
 # The tables and their buses
 
-The relation is proved as one batch of **eight AIR tables, nine when a proof
-declares a keccak table** (M4.2), under one commitment and one FRI opening
-(`p3-batch-stark`). Tables never call each other directly; they exchange facts
+The relation is proved as one batch of **eight AIR tables, plus either of two
+optional hash chips — nine with a keccak table (M4.2), nine with a sha256 one
+(M4.4), ten with both** — under one commitment and one FRI opening
+(`p3-batch-stark`). Ten tables exist; how many a given proof carries is its own
+declaration (`Proof::keccak_log_height`, `Proof::sha256_log_height`). Tables never call each other directly; they exchange facts
 through named LogUp buses, and the batch verifier checks that every bus
 balances globally.
 
@@ -55,15 +57,25 @@ balances globally.
                     permuted words at all (M4.2). A guest that makes no KECCAK
                     call declares keccak_log_height = 0 and the instance is
                     absent from the batch entirely
+
+                        ┌─────────────┐
+                        │   SHA256    │  main; OPTIONAL the same way, and
+                        └─────────────┘  independently — present only when
+                                         Proof::sha256_log_height != 0
+                    provides SHA256 (clk, ptr) (lookup); consumed by cpu's
+                    SYS_SHA256 rows, and likewise *sends* its own MEMORY
+                    traffic: 24 reads of the message block and chaining state,
+                    8 write-backs of the new state, per 64-row block (M4.4)
 ```
 
-Thirteen buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
+Fourteen buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
 `INPUT_READ` (M4.1, carried by the new `input` table), `MEMORY`, `ALU`,
 `RANGE8` and `POW2` (carried by the range table), `AND4`, `OR4`, `XOR4`
 (carried by the nibble table), `POSEIDON2` (carried by the poseidon2
-table), and `KECCAK` (M4.2, carried by the keccak table — and so declared but
+table), `KECCAK` (M4.2, carried by the keccak table — and so declared but
 **unprovided** in a proof that has no keccak table, which is exactly what
-makes a `SYS_KECCAK` cpu row unprovable there). Every one of these
+makes a `SYS_KECCAK` cpu row unprovable there) and `SHA256` (M4.4, carried by
+the sha256 table on exactly those terms). Every one of these
 except `MEMORY` is a `LookupBus` (a subset
 check: every value a consumer sends must appear, with enough multiplicity,
 in the provider's table). `MEMORY` is a `PermutationCheckBus` — both sides
@@ -71,7 +83,8 @@ are prover-supplied main-trace rows, and the argument proved is multiset
 equality, not a lookup into a fixed table. Since M4.2 the memory table is
 not the only *receiver* on it and the cpu table not the only sender: the
 keccak chip sends its own traffic, and `memory_trace` records it
-(`CycleEvent::keccak_accesses`) alongside the cpu's own.
+(`CycleEvent::keccak_accesses`) alongside the cpu's own — as it does M4.4's
+`CycleEvent::sha256_accesses`, the sha256 chip's own 32 per compression.
 
 ## `input` — main, `col::WIDTH = 4` (M4.1)
 
@@ -257,7 +270,13 @@ separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 exactly one traversal of the whole program for `hc`, regardless of how the
 program actually ran.
 
-## `cpu` — main, `col::WIDTH = 222`
+## `cpu` — main, `col::WIDTH = 224`
+
+(The heading read `222` from M4.1 until M4.4 corrected it: M4.2's `SYS_KECCAK`
+column took the table to 223 without the heading following, and M4.4's
+`SYS_SHA256` takes it to 224. Both are appended at the end of the column list
+so no pre-existing index moves — see the `SYS_KECCAK`/`SYS_SHA256` doc comments
+in `src/tables/cpu.rs` for why that matters to the vendoring node.)
 
 Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
 recomputed — `is_load`/`is_store` are *expressions* the AIR computes from
@@ -768,6 +787,50 @@ Note what is **not** here: the 50 input words, the 50 output words, and the
 100 memory messages that move them. Those belong to the `keccak` table, which
 is why a permutation costs one cpu row and four memory slots instead of 100.
 
+### M4.4: the `SHA256` ecall row
+
+The `KECCAK` row again, one column later and with a different chip on the other
+end of the bus. It adds exactly one column, `SYS_SHA256` (appended after
+`SYS_KECCAK`, so again no existing index moves), which joins the ecall one-hot
+(`SYS_HALT + SYS_WRITE + SYS_READ + SYS_HASH + SYS_KECCAK + SYS_SHA256`) and
+the padding-row `SELECTORS` gate.
+
+What the row constrains:
+
+- `A = SYS_SHA256`'s syscall number (5) and `HASH_PTR = B` — `a0`, read the
+  ordinary way through the register-2 slot, is the word address of the 24-word
+  buffer (message block in words `0..16`, chaining state in `16..24`). The row
+  reuses the `SYS_HASH` group's `HASH_PTR`/`HP0..3`/`HP3_HI` columns; the
+  "CRITICAL 1" limb decomposition is gated on `SYS_HASH + SYS_KECCAK +
+  SYS_SHA256`, all three mutually exclusive under the one-hot rule, so the
+  lookup count stays ≤ 1.
+- `HASH_N`, `HASH_LEFT`, `HASH_IDX` and `HS0..7` are pinned to zero, and the row
+  does not route: `continues` keys off `SYS_HASH` alone, so a sha256 row falls
+  through to the ordinary `NEXT_PC = PC + 4` rule and the M4.2-era hash-group
+  *entry* gates (CRITICAL 5) refuse any hash-shaped row after it.
+- **The cubic pointer rule**, for the third time:
+  `SYS_SHA256 · HP3_HI · (HP3_HI − 1) · (HP3_HI − 2) = 0`, tightening the
+  `AND4[HP3_HI, 0xC, 0]` lookup's `ptr < 2^30` to `ptr ≤ 0x2fff_ffff`, so the
+  chip's own `PTR + w` (`w < 24`) addressing stays inside the bounded range. The
+  emulator refuses everything past the marginally tighter
+  `SHA256_PTR_LIMIT = 0x3000_0000 − 24` (`ExecError::Sha256PtrOutOfRange`), so no
+  honest execution exists that this rule could not prove.
+- `bus::SHA256.lookup_key([CLK, HASH_PTR], count = SYS_SHA256)` — the whole
+  handshake, `CLK` being the same digest-prefix-shifted clock the chip's
+  `4·CLK`/`4·CLK + 1` timestamps are built from.
+
+What the row does **not** constrain, deliberately: `MEM_VAL`. Every ecall row
+reads `a1` through the memory slot (`count2`'s `IS_ECALL` term, `MEM_ADDR =
+ECALL_MEM_REG`), so `MEM_VAL` is bound to the register file on this row like any
+other — invariant 1 is satisfied by that send, not by a zero pin — and `SHA256`
+simply ignores the value. Pinning it to zero would reject an honest run whenever
+the guest happens to hold a non-zero `a1` at the call, which the ABI says nothing
+about (`ops::call_sha256` sets only `a7` and `a0`). The `SYS_KECCAK` row makes the
+same choice for the same reason.
+
+And, as for `KECCAK`: none of the 24 words read or the 8 written back appear
+here. They are the `sha256` table's own `MEMORY` sends.
+
 ## `memory` — main, `col::WIDTH = 12`
 
 Columns: `space addr ts value is_write is_real addr_changed diff_inv`, then
@@ -784,7 +847,12 @@ whole execution a distinct, orderable key. M4.2 adds one sender that is not
 the cpu table: a `KECCAK` row's 100 accesses (50 reads at slot 0, 50 writes
 at slot 1) are sent by the **keccak** chip off its own columns, and land here
 like any other — the slot numbering still separates them from the ecall row's
-own register reads, which live in `SPACE_REG`.
+own register reads, which live in `SPACE_REG`. M4.4 adds a second such sender:
+a `SHA256` row's 32 accesses (24 reads at slot 0 — one message word per row over
+rows 0..16 plus the eight state words on row 0 — and 8 writes at slot 1 on row
+63) come from the **sha256** chip. So the table's row count is
+`4·cycles + 100·n_keccak + 32·n_sha256` accesses plus a padding row, which is
+what `build_traces_salted` counts to pick `mem_log_height`.
 
 ### Height (M4.2, controller ruling 1)
 
@@ -1303,15 +1371,167 @@ bundle proof (~300 KB) would no longer fit the node's 1 MiB cap, and no amount
 of shrinking a 32-row padding block could have changed that. Keccak-free
 proofs are back to their pre-M4.2 sizes; only guests that call `KECCAK` pay.
 
+## `sha256` — main, `col::WIDTH = 466` + preprocessed, `pre::WIDTH = 10` (M4.4)
+
+SHA-256's compression function as a hand-written AIR, **one row per round**, in
+fixed 64-row blocks with **no idle rows** — the `keccak` chip's shape with the
+tail folded in, because SHA-256's final add (`H ← H + v`) is a function of the
+last four rows' own post-round variables and so needs no rows of its own. Height
+is `1 << Proof::sha256_log_height`, proof-declared exactly as keccak's: one
+64-row block per compression, floored at a single block, and ceilinged by
+`Tier::max_sha256_log_height`, which is `min(ℓ + 6, MAX_LOG_HEIGHT = 20)` — a
+compression costs one cpu row and therefore one cycle, so `2^ℓ` cycles bound the
+rows at `2^(ℓ+6)`. Unlike `max_keccak_log_height` that method folds the flat cap
+in rather than leaving it to the caller (M4.4: the same two bounds, for the same
+two distinct reasons M4.2's Task 5 review separated them, but in one place so a
+caller cannot apply one and forget the other). `check_declared_heights` still runs
+the flat range check first, so a declaration past both is
+`VerifyError::Sha256Height` and one that is flat-legal but past the tier is
+`Sha256HeightExceedsTier`.
+
+**The table is optional per proof**, the M4.2 Task 6 pattern applied verbatim and
+*independently* of keccak's: `sha256_log_height = 0` is not a height, it is the
+declaration "this proof has no sha256 table", and `machine::chips` then omits the
+instance. With no sha256 table in the batch the `SHA256` bus has **no provider**,
+so any cpu row with `SYS_SHA256 = 1` leaves it unbalanced and the proof cannot be
+built (`tests/cheating.rs::sha256_row_without_a_sha256_table_is_rejected`). The
+chip is appended after keccak's in `chips()`, so a batch carrying only the sha256
+table still has it at the ninth position with no other instance's index disturbed
+— `i == 1` (cpu) is still the public-values slot, `i == 2` still memory.
+
+**Preprocessed columns** (period 64, `pre::WIDTH = 10`): `IS_FIRST` (row 0),
+`IS_LAST` (row 63), `T_LT_16` (rows 0..16 — the rows whose `W` comes from memory
+rather than from the schedule), `K` (this round's constant `K[t]`), `ROUND_IDX`
+(`t`, the message word's offset from `PTR`), `TAIL + k` (a 4-wide one-hot over
+rows 60..63, the final add's rows) and `TAIL_COPY` (rows 60..62, where the
+assembled `HOUT` is carried down to row 63). All of it depends only on the
+height, hence the height-carrying `Sha256Air::preprocessed_trace_at` rather than
+the `BaseAir` trait method (`poseidon2`'s and `keccak`'s split).
+
+**Main columns** (`col::WIDTH = 466`):
+
+| columns | what |
+|---|---|
+| `IS_REAL`, `CLK`, `PTR` | 3 — block-constant; `PTR`'s `< 2^30` bound lives on the *cpu* side, the chip trusts the `SHA256` lookup |
+| `A_BITS`, `B_BITS`, `C_BITS`, `E_BITS`, `F_BITS`, `G_BITS` | 6 × 32 — the working variables `a, b, c, e, f, g` entering this round, bit by bit (what `Σ0`, `Σ1`, `Ch` and `Maj` need) |
+| `D`, `H` | 2 — `d` and `h` as whole words: neither feeds a bitwise function, both are only ever added |
+| `ANEW_BITS`, `ENEW_BITS` | 2 × 32 — `a' = (T1 + T2) mod 2^32` and `e' = (d + T1) mod 2^32` |
+| `A_CARRY`, `E_CARRY` | 2 × 3 bits — their carries (`≤ 6` and `≤ 5`) |
+| `WNEW`, `WNEW_BITS`, `WNEW_CARRY` | 1 + 32 + 2 — `W[t]`, its bits, and the schedule's carry (`≤ 3`) |
+| `PIPE` | 16 — a shift register: `col::pipe(k)` holds `W[t − k]` for `k = 1..=16` |
+| `WM2_BITS`, `WM15_BITS` | 2 × 32 — the bits of `W[t−2]` and `W[t−15]`, which `σ1`/`σ0` need and the pipeline cannot supply (an AIR sees only `local` and `next`) |
+| `S1`, `S0` | 2 — `σ1(W[t−2])` and `σ0(W[t−15])` as words |
+| `HIN` | 8 — the incoming state, block-constant |
+| `HOUT` | 8 — the outgoing state, assembled on rows 60..63 and written back from row 63 |
+| `HOUTA_BITS`, `HOUTE_BITS`, `HOUTA_CARRY`, `HOUTE_CARRY` | 2 × 32 + 2 — the two final-add sums a tail row computes |
+
+`3 + 192 + 2 + 64 + 6 + 35 + 16 + 64 + 2 + 8 + 8 + 66 = 466`, pinned by
+`tests/tables.rs::sha256_table_has_the_documented_width`.
+
+**The round arithmetic**, as rules 1–12 (the numbering in `eval`): 1 the
+block-constant columns (`IS_REAL`, `CLK`, `PTR`, `HIN`); 2 every bit column is
+boolean; 3 row 0's working variables are `HIN` (and row 0 borrows the idle
+`WM2_BITS`/`WM15_BITS` banks to bound `d = HIN[3]` and `h = HIN[7]` — see below);
+4 `W[t]` comes from memory on rows `t < 16`; 5 `Σ1`/`Ch`/`T1` and `Σ0`/`Maj`/`T2`,
+with `a'` and `e'` pinned to their own bit decompositions and 3-bit carries; 6 the
+shift-register transition (`b ← a`, `c ← b`, `d ← c`; `f ← e`, `g ← f`, `h ← g`,
+and the next row's `a`/`e` bits pinned to this row's `ANEW_BITS`/`ENEW_BITS`);
+7 the schedule `W[t] = W[t−16] + σ0(W[t−15]) + W[t−7] + σ1(W[t−2])` on rows
+`t ≥ 16`; 8 the `PIPE` shift; 9 `WM2_BITS`/`WM15_BITS` pinned to the pipeline's
+own words on those rows; 10 the final add, two of the eight sums per tail row plus
+`TAIL_COPY`'s carry-down; 11 the `SHA256` entry; 12 the chip's `MEMORY` traffic.
+
+**Why there are no `RANGE8` lookups here**, the same argument `keccak`'s section
+makes and for a sharper reason: Goldilocks has `p ≡ 1 (mod 2^32)`, so an
+unbounded intermediate in an additive rule is not merely ugly, it is a forgery —
+a witness value of `p − k` is congruent to `−k + 1` rather than `−k` modulo
+`2^32`, which would let a prover shift a sum's residue by one per wrap. So every
+value entering an additive rule is pinned to a bit decomposition of its own
+(`WNEW` to `WNEW_BITS`, `a'`/`e'` to `ANEW_BITS`/`ENEW_BITS`, each write-back to
+`HOUTA_BITS`/`HOUTE_BITS`) and every carry is spelled as bits: each rule is an
+identity between integers in `[0, 8 · 2^32)`, far below `p`, with no wraparound
+available. The two words row 0 does not otherwise decompose — `d = HIN[3]` and
+`h = HIN[7]` — are bounded by *reusing the schedule's idle bit banks* there
+(`compose(WM2_BITS) = HIN[3]`, `compose(WM15_BITS) = HIN[7]`), 64 free columns
+instead of 64 new ones. Like `keccak`, this chip contributes nothing to
+`RangeCounts`.
+
+**Row semantics.** Row `t` holds round `t`: the working variables *entering* the
+round as bits, the round's own `W[t]`, and the post-round `a'`/`e'`. Rows 60..63
+each additionally compute two of the final add's eight sums — row `60 + k` does
+`HOUT[3 − k]` from its `ANEW_BITS` and `HOUT[7 − k]` from its `ENEW_BITS`, which
+works out because the a- and e-chains are shift registers: on row 63 the
+post-round-63 variables are `(a', a, b, c, e', e, f, g)` and `a = a'(62)`,
+`b = a'(61)`, `c = a'(60)`, `e = e'(62)`, `f = e'(61)`, `g = e'(60)`. `TAIL_COPY`
+carries the assembled eight words down to row 63, where the write-backs are sent.
+
+**Bus.** On row 0, provides `[CLK, PTR]` on `SHA256` with count
+`IS_REAL · IS_FIRST`. There is **no `MULT` column**, and that is the point: the
+count *is* the realness of the block, so keccak's rule-11 forgery (a real but
+unpaid block that honestly permutes live guest RAM) has no witness to exploit
+here — a padding block flipped to `IS_REAL = 1` provides a `(CLK, PTR)` entry no
+cpu row looks up and the bus does not balance
+(`tests/cheating.rs::sha256_padding_block_with_a_count_is_rejected`), and a real
+block cannot be left unclaimed at all.
+
+The **`MEMORY` schedule** (M4.4 ruling 2): one message word per row on rows 0..16,
+`W[t]` at `PTR + t`, gated by `T_LT_16` and timestamped `ts = 4·CLK`; the eight
+state words on row 0 at `PTR + 16 + i`, gated by `IS_FIRST`, same timestamp; the
+eight write-backs on row 63 at the same addresses, gated by `IS_LAST` and
+timestamped `ts = 4·CLK + 1`. Reads sharing one timestamp at distinct addresses are
+fine — the memory table orders by `(key, ts)` — and spreading the message reads over
+16 rows rather than piling them on row 0 costs nothing, since `W[t]` is the value
+row `t`'s own rules pin anyway. Counted as the AIR writes them (which is what the
+packed-lookup budget and the permutation trace see), that is 17 `MEMORY`
+interactions on *every* row — 1 message-word slot + 8 state-read slots + 8
+write-back slots, each a separate send whose count is zero on rows carrying no such
+access — plus the single `SHA256` entry: **18 per row**. Each state word's read and
+write-back share an address on disjoint rows, so they *could* be folded into one
+selector-weighted send the way `keccak`'s rules 12/13 fold theirs; measured, that
+is a loss (18 → 10 interactions but 7 → 9 packed LogUp groups, since the packer
+folds degree-1 messages more aggressively than degree-2 ones), so they are kept
+separate.
+
+**Padding.** The round constants and row selectors are preprocessed and periodic,
+so every block in the trace — real or not — has to carry a genuine,
+self-consistent compression for the prover to satisfy them. `sha256_trace` fills
+every padding block with the honest compression of the all-zero state and the
+all-zero message block, marked only by `IS_REAL = 0` (AGENTS.md invariant 2: with
+`IS_REAL` zero every bus count on the row is zero too, so a padding block sends no
+memory traffic and provides no `SHA256` entry). `tests/sha256.rs` checks the
+filler's write-backs against `sha2`'s `compress256` on 1,000 random blocks and runs
+the chip alone under the real batch STARK with throwaway consumers on both of its
+buses.
+
+**What the table costs.** Measured the way M4.2 measured keccak's — the same guest
+(`guests::fib(10)`, which makes no `SHA256` call), the same tier, the same declared
+heights, differing only in whether the batch carries the instance, so the delta is
+the instance and nothing else
+(`tests/e2e.rs::a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile`
+and its `#[ignore]`d production-profile twin):
+
+| tier 10, `fib(10)` | sha256 table absent | one (padding) block | delta |
+|---|---|---|---|
+| `FriProfile::Test` | 278 670 bytes | 370 977 bytes | **+92 307 bytes** |
+| `FriProfile::Production` (80 queries) | 1 203 344 bytes | 1 603 907 bytes | **+400 563 bytes** |
+
+Prove time barely moves (6.13 s → 6.80 s at the production profile), which locates
+the cost exactly where keccak's was: not in committing a 64-row trace, but in
+*opening* a 476-column leaf at each of the profile's 80 FRI queries. The ratio to
+keccak's +1.91 MB is 0.21, close to the 476/2 711 column ratio — the arithmetic
+`docs/04-guests.md` asked this chip to plan against, confirmed. A whole
+`sha256_demo` proof (116 program words, 116 cycles, one compression) is 1 615 520
+bytes at the production profile.
+
 ## Constraint degree budget
 
 Measured (`p3_batch_stark::symbolic::get_max_constraint_degree`, pinned by
 `tests/tables.rs::alu_max_constraint_degree_is_pinned`) against the real,
 same-bus-packed lookup contexts (M4.1, `machine::chips()` order): `program`
 2, `cpu` 8, `memory` 4, `alu` 8, `range` 2, `nibble` 2, `poseidon2` 4,
-`input` 2, `keccak` 3 (M4.2; that last entry exists only in the nine-chip
-shape — the pin test asserts both, and that the other eight degrees are
-identical between them) — `alu`'s comes from the M2.6 `div`
+`input` 2, `keccak` 3 (M4.2) and `sha256` 4 (M4.4; the last two entries exist
+only when the proof declares those tables — the pin test asserts the eight-chip
+and ten-chip shapes and that the other eight degrees are identical between them) — `alu`'s comes from the M2.6 `div`
 sign-fix identity, `cpu`'s from its packed lookup fraction-pins rather than
 its own row logic (whose costliest single constraint is only degree 6),
 `poseidon2`'s from its S-box split (see that table's own section). M3.2's
@@ -1372,6 +1592,21 @@ count keep the packed fractions at 3 as well, and
 `tests/tables.rs::alu_max_constraint_degree_is_pinned` pins the measurement
 (`degrees[8] == 3`). The named fallback — spreading the sends over more rows
 if packing had cost a degree — was not needed.
+
+**M4.4's sha256 chip measures 4, of which its own rules account for 3.** The rules
+are cubic exactly where they must be — `xor3` inside `Σ0`/`Σ1` and `σ0`/`σ1`, and
+`Maj`'s `ab + bc + ca − 2abc` — and everything else is written to stay at or under
+that: the `σ` values get their own two columns (`S1`, `S0`) precisely so the
+*gated* schedule equation multiplies a preprocessed selector into a degree-2
+expression rather than a cubic one, and every carry is spelled as bits so no rule
+needs a range lookup. The fourth degree comes from the packing, and this is the
+chip where that question was live: 18 bus interactions per row, 17 of them on
+`MEMORY`, fold into 7 LogUp groups whose fraction-pins carry a degree-2
+`IS_REAL · selector` count. It costs nothing — the quotient is chunked by
+`log2_ceil(degree + is_zk − 1)`, which is 2 at either 3 or 4, against this
+config's ceiling of 8 — and both halves are pinned separately
+(`air_only == 3`, `degrees[9] == 4`, `common.lookups[9].len() == 7`), measured off
+the real `Chip::Sha256` instance rather than a test-local wrapper.
 
 Because no table here declares periodic columns, every one of these numbers
 is invariant to trace height: `get_max_constraint_degree` short-circuits on
