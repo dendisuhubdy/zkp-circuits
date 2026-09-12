@@ -37,7 +37,14 @@ fn main() {
     // well as the cycle budget (audit ZH1, 2026-09-12).
     let digest_rows = program.digest_rows() + rand_zkvm::hash::input_digest_row_count(inputs.len());
     let cycles = exec.cycles() + digest_rows;
-    let tier = Tier::for_workload(cycles, digest_rows).unwrap();
+    // The permutation count is digest rows *plus* the guest's own `POSEIDON2` absorb rows — the
+    // same sum `Machine::prove_salted` forms. `balance_check` makes no `POSEIDON2` call, so this
+    // term is zero for this demo; it is written out anyway because omitting it is exactly the
+    // mistake audit ZH1 fixed.
+    let absorb_rows = exec.events.iter()
+        .filter(|e| matches!(e.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. })))
+        .count();
+    let tier = Tier::for_workload(cycles, digest_rows + absorb_rows).unwrap();
     let traces = build_traces(&program, &inputs, &exec, tier).unwrap();
     println!("tier {} → cpu 2^{} rows (actual {cycles} cycles incl. {digest_rows} digest rows), padding hides the rest", tier.0, tier.0);
     println!("{:<10}{:>10}{:>8}   {}", "table", "rows", "cols", "role");
@@ -60,7 +67,8 @@ fn main() {
         // M4.2 (Task 6): the keccak table is optional per proof. This guest never calls KECCAK,
         // so the ninth instance is simply absent — and since the keccak chip is the widest table
         // in the batch by an order of magnitude, leaving it out is where this proof's bytes were
-        // won back (~705 KB at the production profile; `docs/03-privacy.md`).
+        // won back (~1.91 MB at the production profile's 80 queries, ~705 KB at the 27 M4.2
+        // measured; `docs/03-privacy.md`).
         None => println!("{:<10}{:>10}{:>8}   {}", "keccak", "—", "—", "absent: this guest makes no KECCAK call"),
     }
     println!("buses: PROGRAM PROGRAM_WORD MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 POSEIDON2 INPUT_DIGEST INPUT_READ KECCAK (LogUp, verified globally)");

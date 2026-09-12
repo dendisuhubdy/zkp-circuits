@@ -108,15 +108,25 @@ fn keccak_demo_proves_and_verifies_at_tier_10() {
 /// `guests::fib(10)` at `Tier(10)` and `FriProfile::Test`, three consecutive proofs:
 /// 274 156 / 275 916 / 276 684 bytes (the hiding PCS's fresh per-proof entropy moves the
 /// postcard encoding by a few hundred bytes run to run). This constant is the middle of that
-/// spread; the assertion's 5% band is wide enough to absorb the per-proof noise and far too
-/// narrow to absorb a 2 612-column table (which added +705 KB at the production profile and
-/// roughly +450 KB here).
+/// spread; `SIZE_BAND_PCT` is the tolerance around it.
 const PRE_M4_2_TIER_10_TEST_PROFILE_BYTES: usize = 275_916;
+
+/// Tolerance, in percent, on the size assertion in `a_keccak_free_proof_carries_no_keccak_table`.
+///
+/// Derived, not picked: the three measured proofs above span 274 156..276 684, i.e. ±0.5% around
+/// the constant, so 5% is ~10x the per-proof entropy noise — room for the odd extra
+/// declared-height byte or an upstream postcard tweak. The thing the assertion exists to detect
+/// is an order of magnitude beyond it: a 2 612-column keccak table adds roughly +450 KB at this
+/// profile (+1.91 MB at the production one), i.e. +160%, so the band would have to be ~32x wider
+/// before the regression could hide inside it. The load-bearing check is the
+/// `degree_bits.len() == 8` assertion; this one is the size corroboration.
+const SIZE_BAND_PCT: usize = 5;
 
 /// M4.2 (Task 6): the keccak table is **optional per proof**. A guest that never executes a
 /// `KECCAK` syscall declares `keccak_log_height = 0`, the batch has eight instances rather than
 /// nine, and the proof is back to its pre-M4.2 size — the padding block that used to cost every
-/// proof ~705 KB at the production profile is simply not there.
+/// proof ~1.91 MB at the production profile (~705 KB at the 27 queries M4.2 measured) is simply
+/// not there.
 ///
 /// The cpu table is unchanged by this: with no keccak table in the batch, the `KECCAK` bus has
 /// no provider at all, so a cpu row claiming `SYS_KECCAK = 1` leaves that bus unbalanced (see
@@ -131,11 +141,11 @@ fn a_keccak_free_proof_carries_no_keccak_table() {
     m.verify(&p.digest(), &proof).unwrap();
 
     let size = proof.to_bytes().len();
-    let lo = PRE_M4_2_TIER_10_TEST_PROFILE_BYTES * 95 / 100;
-    let hi = PRE_M4_2_TIER_10_TEST_PROFILE_BYTES * 105 / 100;
+    let lo = PRE_M4_2_TIER_10_TEST_PROFILE_BYTES * (100 - SIZE_BAND_PCT) / 100;
+    let hi = PRE_M4_2_TIER_10_TEST_PROFILE_BYTES * (100 + SIZE_BAND_PCT) / 100;
     assert!(
         (lo..=hi).contains(&size),
-        "keccak-free proof should be back within 5% of the pre-M4.2 size \
+        "keccak-free proof should be back within {SIZE_BAND_PCT}% of the pre-M4.2 size \
          ({PRE_M4_2_TIER_10_TEST_PROFILE_BYTES} bytes): got {size}"
     );
     eprintln!("keccak-free fib(10) at tier 10, Test profile: {size} bytes (pre-M4.2: {PRE_M4_2_TIER_10_TEST_PROFILE_BYTES})");
@@ -280,13 +290,13 @@ fn verifier_key_is_cached_after_first_verify() {
     // M4.2 (Task 6): `keccak_log_height` is part of the cache key, and `0` (no keccak table,
     // eight instances) is a *distinct* key from `5` (one block, nine instances) — they are
     // different chip sets, so they cannot share a `CommonData`. Everything else held equal
-    // (same tier, same declared program/input/memory heights), asking for both must miss the
+    // (same tier, same declared program/input heights), asking for both must miss the
     // cache separately and hand back two different keys.
     assert_eq!(proof.keccak_log_height, 0, "fib is keccak-free");
-    let (t, plh, ilh, mlh) = (proof.tier, proof.program_log_height, proof.input_log_height, proof.mem_log_height);
-    let keccak_free = m.verifier_key(t, plh, ilh, 0, mlh);
+    let (t, plh, ilh) = (proof.tier, proof.program_log_height, proof.input_log_height);
+    let keccak_free = m.verifier_key(t, plh, ilh, 0);
     assert_eq!(m.cached_keys(), 1, "the keccak-free key is the one `verify` already cached");
-    let with_keccak = m.verifier_key(t, plh, ilh, 5, mlh);
+    let with_keccak = m.verifier_key(t, plh, ilh, 5);
     assert_eq!(m.cached_keys(), 2, "`keccak_log_height = 5` is a different cache key from `0`");
     assert!(!std::sync::Arc::ptr_eq(&keccak_free, &with_keccak));
     assert_eq!(keccak_free.lookups.len(), 8, "eight instances");

@@ -336,7 +336,8 @@ where
 /// M4.2 (Task 6): **the keccak table is optional per proof.** `keccak_log_height == 0` means the
 /// proof declares no keccak table and this returns eight chips; any other value returns nine,
 /// with `Chip::Keccak` last. The keccak chip is 2 612 + 99 columns and every FRI query opens a
-/// leaf of that width, so carrying it unused cost ~705 KB per production proof — enough to push
+/// leaf of that width, so carrying it unused cost ~1.91 MB per production proof (80 queries; the
+/// same measurement was ~705 KB at the 27 queries in force when M4.2 took it) — enough to push
 /// a ~300 KB shielded bundle proof past the node's 1 MiB cap (`docs/03-privacy.md`'s M4.2
 /// measurement). Dropping it is safe because the `KECCAK` bus then has no provider at all: a cpu
 /// row with `SYS_KECCAK = 1` leaves the bus unbalanced and cannot be proved. Nothing about the
@@ -708,7 +709,8 @@ pub struct Proof {
     /// program rather than about its data (`docs/03-privacy.md`'s "What a proof leaks").
     /// The saving is large: the keccak chip is 2 612 + 99 columns, and every FRI query opens a
     /// leaf of that width whether the table has 32 rows or 32 768, so a padding-block-only table
-    /// cost ~705 KB of every production proof.
+    /// cost ~1.91 MB of every production proof (80 queries; ~705 KB at the 27 queries M4.2
+    /// measured — `docs/03-privacy.md`).
     pub keccak_log_height: u8,
     /// M4.2 (controller ruling 1): the memory table's height, declared by the prover as
     /// `max(t + 2, log2_ceil(accesses + 1))`. `verify` checks only
@@ -878,13 +880,17 @@ impl Machine {
     /// `KeyCache`. M4.2 (Task 6): `keccak_log_height = 0` is a perfectly ordinary key value —
     /// it selects the eight-chip batch, whose preprocessed commitment omits the keccak table's
     /// 99 periodic columns entirely, so it genuinely is a *different* key, not a missing one.
-    /// M4.2 (controller ruling 1): `mem_log_height` is a parameter but deliberately
-    /// *not* part of the cache key. The memory table declares no preprocessed columns, so it
+    /// M4.2 (controller ruling 1): **`mem_log_height` is not a parameter of this function**, and
+    /// that is not an omission. The memory table declares no preprocessed columns, so it
     /// contributes nothing to the global preprocessed commitment (`from_airs_and_degrees`
     /// pushes `None` for it regardless of its degree bits), and it declares no periodic columns
     /// either, so `get_max_constraint_degree` short-circuits before the only place a trace
     /// length can change a symbolic degree — its packed `Lookups` are therefore identical at
-    /// every `mem_log_height`. The same argument is why `tests/tables.rs::
+    /// every `mem_log_height`. Every valid declared memory height yields the *same*
+    /// `CommonData`, which is why the cache key never carried one; this function therefore feeds
+    /// `log_ext_degrees` the tier's own floor (`Tier::min_mem_log_height`) rather than taking a
+    /// height it would ignore. (Before the M4.2 review it took one, and a caller could be
+    /// forgiven for reading the cache as keyed on it.) The same argument is why `tests/tables.rs::
     /// alu_max_constraint_degree_is_pinned` can pin every table's degree at one arbitrary tier.
     /// The degree bits themselves are not taken from here: `verify` checks
     /// `proof.batch.degree_bits` against `log_ext_degrees` directly. M3.4:
@@ -895,11 +901,15 @@ impl Machine {
     /// and nibble tables' Merkle trees every time), which is the cost this cache exists to
     /// amortize across repeated `verify` calls at the same `(tier, program_log_height,
     /// input_log_height)`.
-    pub fn verifier_key(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, mem_log_height: u8) -> Arc<CommonData<Config>> {
+    pub fn verifier_key(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8) -> Arc<CommonData<Config>> {
         let key = (tier.0, program_log_height, input_log_height, keccak_log_height);
         if let Some(hit) = self.keys.lock().unwrap().get(&key) {
             return hit;
         }
+        // Any valid `mem_log_height` gives the same `CommonData` (see above); the tier's floor is
+        // the canonical one, and using it makes this function's result independent of which
+        // proof happened to miss the cache first.
+        let mem_log_height = tier.min_mem_log_height();
         let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier, keccak_log_height), &self.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, mem_log_height)).common);
         self.keys.lock().unwrap().insert(key, common.clone());
         common
@@ -1138,7 +1148,7 @@ impl Machine {
         let airs = chips(proof.tier, proof.keccak_log_height);
         let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
         let pvs: Vec<Vec<Val>> = (0..airs.len()).map(|i| if i == 1 { pv_vals.clone() } else { vec![] }).collect();
-        let common = self.verifier_key(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.mem_log_height);
+        let common = self.verifier_key(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height);
         verify_batch(&self.config, &airs, &proof.batch, &pvs, &common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
     }
 }
