@@ -68,6 +68,14 @@ pub mod domain {
     /// guest ever writes a nonzero `bad` word, which is exactly what makes a dishonest witness's
     /// digest fail to match any plaintext the ledger could reconstruct.
     pub const BUNDLE: u32 = 11;
+    /// M4.3: an EVM storage leaf, `[slot(8), value(8)]` (16 words). Canonical in the value: a
+    /// leaf whose value is zero is `H(STORAGE_LEAF, [0; 16])` whatever its slot, so an absent
+    /// slot, a never-written slot and a slot written back to zero are the same leaf and the
+    /// storage root is history-independent (`evm::leaf_hash`).
+    pub const STORAGE_LEAF: u32 = 12;
+    /// M4.3: the EVM guest's public-output digest,
+    /// `[codehash(8), pre_root(8), post_root(8), return_hash(8), logs_hash(8)]` (40 words).
+    pub const EVM_OUT: u32 = 13;
     pub const TEST: u32 = 0xff;
 }
 

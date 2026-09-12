@@ -33,12 +33,15 @@ postcard = { version = "1", features = ["alloc"] }
 ml-kem = "=0.3.2"
 chacha20poly1305 = "=0.11.0"
 rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
+# The EVM interpreter core (M4.3): a no_std library with its own workspace root, compiled into the
+# `evm` guest on riscv32im and run natively here. A normal dependency, not a dev-dependency, because
+# `src/evm.rs` (the host side of the storage tree: `HostRef`, `SparseTree`) is part of the library —
+# `tests/evm_*.rs` link `rand_zkvm` as an external crate, so a dev-dependency could not appear in its
+# public API.
+evm-core = { path = "../guests-compiled/evm-core" }
 
 [dev-dependencies]
 hex = "0.4"
-# The EVM interpreter core (M4.3): a no_std library with its own workspace root, compiled into the
-# `evm` guest on riscv32im and tested natively here.
-evm-core = { path = "../guests-compiled/evm-core" }
 # The oracle for `evm-core`'s 256-bit arithmetic — host tests only, never in a guest.
 num-bigint = "0.4"
 

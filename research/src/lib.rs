@@ -7,5 +7,6 @@ pub mod machine;
 pub mod hash;
 pub mod keccak;
 pub mod notes;
+pub mod evm;
 pub mod viewing;
 pub mod ledger;
