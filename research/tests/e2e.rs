@@ -282,3 +282,39 @@ fn compiled_fib_proves_and_verifies() {
     eprintln!("compiled fib(20): tier {:?}, {} cycles, proof {} bytes", proof.tier, exec.cycles(), proof.size());
     m.verify(&p.digest(), &proof).unwrap();
 }
+
+/// The M4.2 exit test: Keccak-256 of a 135-byte message (one byte shy of the 136-byte rate, so
+/// the `0x01`/`0x80` padding still fits the same block) computed by a *compiled* guest —
+/// `guest_sdk::keccak256`'s sponge over the `KECCAK` syscall, built by
+/// `guests-compiled/keccak256`'s Makefile — matches the host `keccak::keccak256`, in exactly one
+/// permutation, and the whole thing proves and verifies.
+#[test]
+fn compiled_keccak256_matches_the_host_in_one_permutation() {
+    use rand_zkvm::keccak;
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::compiled::keccak256();
+    let msg: Vec<u8> = (0..135u8).map(|i| i.wrapping_mul(31)).collect();
+    let mut inputs = vec![msg.len() as u32];
+    for c in msg.chunks(4) {
+        let mut w = [0u8; 4];
+        w[..c.len()].copy_from_slice(c);
+        inputs.push(u32::from_le_bytes(w));
+    }
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, Tier(12).max_cycles()).unwrap();
+    let want = keccak::keccak256(&msg);
+    for k in 0..8 {
+        assert_eq!(exec.outputs[k], u32::from_le_bytes(want[4 * k..4 * k + 4].try_into().unwrap()), "digest word {k}");
+    }
+    assert_eq!(exec.events.iter().filter(|e| e.keccak_row.is_some()).count(), 1, "one rate block, one permutation");
+    let t0 = std::time::Instant::now();
+    let (proof, _) = m.prove_salted(&p, &inputs, [5, 6, 7, 8], None).unwrap();
+    let prove_time = t0.elapsed();
+    assert_eq!(proof.keccak_log_height, 5, "one permutation fits the minimum block");
+    let t1 = std::time::Instant::now();
+    m.verify(&p.digest(), &proof).unwrap();
+    eprintln!(
+        "keccak256 guest: {} words, {} cycles, tier {}, keccak_log_height {}, mem_log_height {}, proof {} bytes, prove {:?}, verify {:?}",
+        p.words.len(), exec.cycles(), proof.tier.0, proof.keccak_log_height, proof.mem_log_height,
+        proof.to_bytes().len(), prove_time, t1.elapsed()
+    );
+}

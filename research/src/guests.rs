@@ -21,6 +21,18 @@ pub mod compiled {
         const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/fib.bin");
         Program::from_flat_binary(0x1000, BIN).expect("fib.bin is a committed, known-good build")
     }
+
+    /// M4.2's exit guest: Keccak-256 over the `KECCAK` syscall, compiled from
+    /// `guests-compiled/keccak256` (see that Makefile's header for the exact `rustc +1.98.1`
+    /// build) and committed as `guests-compiled/bin/keccak256.bin`. `input[0]` is the message's
+    /// byte length, `input[1..]` the message four bytes per word little-endian; the 32-byte
+    /// digest comes back in output slots 0..7 the same way. The sponge is `guest_sdk::keccak256`
+    /// — ordinary compiled guest code — so the only thing the chip proves is the permutation
+    /// itself, which is the whole point of the milestone.
+    pub fn keccak256() -> Program {
+        const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/keccak256.bin");
+        Program::from_flat_binary(0x1000, BIN).expect("keccak256.bin is a committed, known-good build")
+    }
 }
 
 /// out0 = fib(n) mod 2^32, computed with a counted loop.
