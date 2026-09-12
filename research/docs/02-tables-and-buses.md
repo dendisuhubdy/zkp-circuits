@@ -751,9 +751,11 @@ What the row constrains:
   `SYS_KECCAK · HP3_HI · (HP3_HI − 1) · (HP3_HI − 2) = 0`, hence
   `ptr ≤ 0x2fff_ffff` and `ptr + 49 < 2^30` with room to spare. Degree 4 on a
   selector-gated product of one column, well under this table's degree-8
-  ceiling. The emulator enforces the same bound as reference semantics
-  (`ExecError::KeccakPtrOutOfRange`, `KECCAK_PTR_LIMIT = 0x3000_0000 − 50`),
-  so no honest execution exists that this rule could not prove.
+  ceiling. The emulator enforces a marginally *tighter* bound as reference
+  semantics (`ExecError::KeccakPtrOutOfRange`, `KECCAK_PTR_LIMIT =
+  0x3000_0000 − 50`, which keeps the whole 50-word state under `2^30` and so
+  refuses the top 49 pointers this rule would admit), so no honest execution
+  exists that this rule could not prove.
   `tests/cheating.rs`'s `a_keccak_pointer_with_hp3_hi_equal_to_three_is_
   rejected` is the regression, with `a_relocated_keccak_pointer_inside_the_
   bound_still_proves` as its control.
@@ -1169,8 +1171,9 @@ is not a height: it is the declaration "this proof has no keccak table", and
 `machine::chips` then returns eight chips instead of nine. Through the first
 cut of M4.2 a keccak-free guest still carried one 32-row padding block, and
 because FRI openings scale with a batch's *column* count rather than its row
-count, that block cost ~705 KB of every production proof — more than a
-shielded bundle proof's entire budget (`docs/03-privacy.md`). Dropping the
+count, that block cost ~1.91 MB of every production proof at the restored
+80-query profile (~705 KB at the 27 queries the M4.2 table below was measured
+at) — more than a shielded bundle proof's entire budget (`docs/03-privacy.md`). Dropping the
 instance is safe without touching the cpu table or the keccak AIR: with no
 keccak table in the batch the `KECCAK` bus has **no provider**, so any cpu row
 with `SYS_KECCAK = 1` leaves it unbalanced and the proof cannot be built
@@ -1285,14 +1288,17 @@ with throwaway consumers on both of its buses.
 measure_production_profile_at_tier_10_and_12`, the same command
 `docs/03-privacy.md` records): carrying this table took a tier-10 proof from
 437 599 to 1 142 262 bytes and a tier-12 proof from 460 242 to 1 161 162 —
-about 705 KB either way, for a guest that never calls `KECCAK`. Prove time
+about 705 KB either way, for a guest that never calls `KECCAK` — at the 27
+queries in force when that measurement was taken; the same delta re-measured
+at the restored 80-query profile is +1.91 MB. Prove time
 barely moves (5.996 s → 6.154 s at tier 10; 23.40 s → 23.91 s at tier 12),
 which locates the cost: not in committing a 32-row trace, but in *opening* a
 2 612-wide main-trace leaf at each of the profile's 80 FRI queries (27 when
 that measurement was taken — see `docs/03-privacy.md`'s profile table). The
 table's width, not its height, is what a proof pays for — the one M4.2 number
 worth carrying into M4.3's own chip design. That number is why Task 6 made the
-instance optional rather than merely small: at 705 KB per proof a shielded
+instance optional rather than merely small: at 705 KB per proof (1.91 MB at
+the restored 80-query profile) a shielded
 bundle proof (~300 KB) would no longer fit the node's 1 MiB cap, and no amount
 of shrinking a 32-row padding block could have changed that. Keccak-free
 proofs are back to their pre-M4.2 sizes; only guests that call `KECCAK` pay.

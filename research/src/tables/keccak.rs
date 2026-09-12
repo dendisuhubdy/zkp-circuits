@@ -43,8 +43,10 @@
 //! genuinely must be switched off on idle rows (there `A` holds the output while the bits are
 //! zero), and it is — but as `is_round · A_limb = Σ …` rather than `is_round · (A_limb − Σ …)`,
 //! which is the same statement on round rows (`is_round = 1`) at degree 3 instead of 4. On idle
-//! rows the cheap form says `0 = Σ …`, one more (harmless) pin on columns no bus message and no
-//! transition constraint reads there.
+//! rows the cheap form says `0 = Σ 2^i · xor3(AP, C, CP)`, which is **not** a zero-pin on those
+//! bit columns: it pins `AP = C ⊕ CP` on the idle row (the honest filler satisfies it, since it
+//! carries all three as zero). That is one more (harmless) relation on columns no bus message
+//! and no transition constraint reads there — harmless, but a relation, not the absence of one.
 //!
 //! ## Padding
 //!
@@ -132,8 +134,9 @@ pub const MAX_LOG_HEIGHT: u8 = 20;
 ///
 /// M4.2 (Task 6): `0` is not a height, it is the marker for "this proof has no keccak table".
 /// Through Task 5 a permutation-free guest still carried one 32-row padding block, and a
-/// 2 612-column table costs ~705 KB of FRI leaf openings at the production profile no matter
-/// how few rows it has — so every proof on the chain, shielded bundle proofs included, paid for
+/// 2 612-column table costs ~1.91 MB of FRI leaf openings at the production profile no matter
+/// how few rows it has (80 queries; ~705 KB at the 27 queries M4.2 measured —
+/// `docs/03-privacy.md`) — so every proof on the chain, shielded bundle proofs included, paid for
 /// a table it never used. `machine::chips` reads this value: `0` builds an eight-chip batch with
 /// no keccak instance at all, anything else the nine-chip one. The `KECCAK` bus then has no
 /// provider, which is exactly what makes a cpu row claiming `SYS_KECCAK` unprovable

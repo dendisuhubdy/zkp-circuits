@@ -66,8 +66,9 @@ measured, not an estimate: 2 612 main columns (the design spec guessed
 ~2,650), max constraint degree 3, one `SYS_KECCAK` cpu row per permutation,
 and the chip sending its own 100 memory accesses. The one number the design
 did not anticipate is what a 2 612-column table costs in *proof size* — about
-705 KB at the production profile, whatever its row count, because FRI openings
-scale with a batch's column count (`docs/03-privacy.md`'s M4.2 measurement).
+1.91 MB at the production profile, whatever its row count, because FRI openings
+scale with a batch's column count (~705 KB at the 27 queries M4.2 measured, 80
+since the 2026-09-12 revert; `docs/03-privacy.md`'s M4.2 measurement).
 As first built, every proof paid that, since the table's height floored at one
 padding block; M4.2's Task 6 made the table **optional per proof**
 (`keccak_log_height = 0`, no keccak instance in the batch), so only a guest

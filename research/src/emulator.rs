@@ -95,13 +95,22 @@ pub enum ExecError {
     /// M4.2 (controller ruling 2): a `KECCAK` pointer past `KECCAK_PTR_LIMIT`. The cpu AIR
     /// bounds a `SYS_KECCAK` row's pointer to `ptr < 0x3000_0000` (`HP3_HI ∈ {0,1,2}`, the
     /// tightened top-nibble rule) so that the chip's own `PTR + w` address arithmetic can
-    /// neither wrap nor alias another `MEMORY` key; the emulator refuses the same pointers, so
-    /// there is no execution whose honest trace the AIR would be unable to prove.
+    /// neither wrap nor alias another `MEMORY` key; the emulator refuses at least those pointers
+    /// (`KECCAK_PTR_LIMIT` is 49 tighter still — see its doc), so there is no execution whose
+    /// honest trace the AIR would be unable to prove.
     KeccakPtrOutOfRange(u32),
 }
 
 /// The largest word address a `KECCAK` syscall may name: the state occupies `ptr ..
-/// ptr + KECCAK_WORDS`, and the AIR's own bound is `ptr < 0x3000_0000`.
+/// ptr + KECCAK_WORDS`, so this limit keeps the *whole* state below `0x3000_0000`.
+///
+/// This is **strictly inside** the AIR's bound, not equal to it: the cpu AIR only requires
+/// `ptr < 0x3000_0000` (`HP3_HI ∈ {0,1,2}`), which admits `ptr ≤ 0x2fff_ffff`, and `ptr + 49`
+/// cannot wrap for any of those either. The emulator therefore refuses the top
+/// `KECCAK_WORDS - 1 = 49` pointers the AIR would accept. That direction is the safe one — every
+/// execution the emulator admits has a provable honest trace, which is the property this module
+/// owes the AIR — and it keeps the whole state inside the sub-`2^30` region the memory table's
+/// key argument reasons about (`tables/memory.rs`).
 pub const KECCAK_PTR_LIMIT: u32 = 0x3000_0000 - KECCAK_WORDS;
 
 pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<Execution, ExecError> {
