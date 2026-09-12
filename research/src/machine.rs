@@ -159,6 +159,7 @@ use crate::emulator::{execute, ExecError, Execution};
 use crate::isa::Program;
 use crate::tables::alu::{alu_trace, AluAir};
 use crate::tables::cpu::{cpu_trace, public_values, CpuAir};
+use crate::tables::keccak::{keccak_trace, KeccakAir, KeccakEvent};
 use crate::tables::memory::{memory_trace, MemoryAir};
 use crate::tables::nibble::{nibble_trace, NibbleAir, NibbleCounts};
 use crate::tables::poseidon2::{poseidon2_trace, Poseidon2Air, Poseidon2Event};
@@ -183,7 +184,22 @@ impl Tier {
     pub fn for_cycles(cycles: usize) -> Option<Tier> { TIERS.iter().copied().map(Tier).find(|t| cycles <= t.max_cycles()) }
     pub fn cpu_height(self) -> usize { 1 << self.0 }
     pub fn alu_height(self) -> usize { 1 << (self.0 + 1) }
-    pub fn mem_height(self) -> usize { 1 << (self.0 + 2) }
+    /// M4.2 (controller ruling 1): the memory table's height is no longer `2^(t+2)` flat. That
+    /// bound assumed at most 4 memory accesses per cycle (the cpu row's four slots), which a
+    /// `KECCAK` row breaks by two orders of magnitude: it makes 100 (50 reads + 50 writes, all
+    /// sent by the *keccak* chip, all recorded here). So the height is a function of the tier
+    /// *and* the proof-declared keccak height — `log2_ceil(2^(t+2) + 100·2^(klh−5))`, where
+    /// `2^(klh−5)` is the number of 32-row keccak blocks and therefore the maximum number of
+    /// permutations the keccak table can hold. Both sides compute it identically:
+    /// `build_traces_salted` sizes the trace with it and `log_ext_degrees` declares it, so the
+    /// verifier's degree-bits check is against the same number without trusting the prover for
+    /// anything beyond `klh` itself (which `verify` range-checks).
+    pub fn mem_log_height(self, keccak_log_height: u8) -> u8 {
+        let blocks = 1usize << (keccak_log_height - crate::tables::keccak::MIN_LOG_HEIGHT);
+        let need = (1usize << (self.0 + 2)) + 2 * crate::keccak::WORDS * blocks;
+        need.next_power_of_two().trailing_zeros() as u8
+    }
+    pub fn mem_height(self, keccak_log_height: u8) -> usize { 1 << self.mem_log_height(keccak_log_height) }
     /// One padding row is always kept.
     pub fn max_cycles(self) -> usize { self.cpu_height() - 1 }
     /// `2^(t+2)`, i.e. `2^(t-3)` Poseidon2 permutation slots (each block is 32 rows) —
@@ -213,14 +229,14 @@ impl Tier {
 }
 
 #[derive(Clone)]
-pub enum Chip { Program(ProgramAir), Cpu(CpuAir), Memory(MemoryAir), Alu(AluAir), Range(RangeAir), Nibble(NibbleAir), Poseidon2(Poseidon2Air, usize), Input(crate::tables::input::InputAir) }
+pub enum Chip { Program(ProgramAir), Cpu(CpuAir), Memory(MemoryAir), Alu(AluAir), Range(RangeAir), Nibble(NibbleAir), Poseidon2(Poseidon2Air, usize), Input(crate::tables::input::InputAir), Keccak(KeccakAir, usize) }
 
 impl BaseAir<Val> for Chip {
     fn width(&self) -> usize {
-        match self { Chip::Program(a) => BaseAir::<Val>::width(a), Chip::Cpu(a) => BaseAir::<Val>::width(a), Chip::Memory(a) => BaseAir::<Val>::width(a), Chip::Alu(a) => BaseAir::<Val>::width(a), Chip::Range(a) => BaseAir::<Val>::width(a), Chip::Nibble(a) => BaseAir::<Val>::width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::width(a), Chip::Input(a) => BaseAir::<Val>::width(a) }
+        match self { Chip::Program(a) => BaseAir::<Val>::width(a), Chip::Cpu(a) => BaseAir::<Val>::width(a), Chip::Memory(a) => BaseAir::<Val>::width(a), Chip::Alu(a) => BaseAir::<Val>::width(a), Chip::Range(a) => BaseAir::<Val>::width(a), Chip::Nibble(a) => BaseAir::<Val>::width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::width(a), Chip::Input(a) => BaseAir::<Val>::width(a), Chip::Keccak(a, _) => BaseAir::<Val>::width(a) }
     }
     fn preprocessed_width(&self) -> usize {
-        match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Range(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Nibble(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::preprocessed_width(a), _ => 0 }
+        match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Range(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Nibble(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::preprocessed_width(a), Chip::Keccak(a, _) => BaseAir::<Val>::preprocessed_width(a), _ => 0 }
     }
     fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
         match self {
@@ -231,6 +247,9 @@ impl BaseAir<Val> for Chip {
             // preprocessed trace depends on the tier's height, which isn't available through
             // that trait method) — go through the height-carrying inherent method instead.
             Chip::Poseidon2(_, height) => Some(Poseidon2Air::preprocessed_trace_at(*height)),
+            // Same split, same reason: the keccak table's round/idle selectors and round
+            // constants are periodic with period 32 and depend only on the height.
+            Chip::Keccak(_, height) => Some(KeccakAir::preprocessed_trace_at(*height)),
             _ => None,
         }
     }
@@ -242,7 +261,7 @@ where
     AB: AirBuilder<F = Val> + PermutationAirBuilder + InteractionBuilder,
 {
     fn eval(&self, b: &mut AB) {
-        match self { Chip::Program(a) => a.eval(b), Chip::Cpu(a) => a.eval(b), Chip::Memory(a) => a.eval(b), Chip::Alu(a) => a.eval(b), Chip::Range(a) => a.eval(b), Chip::Nibble(a) => a.eval(b), Chip::Poseidon2(a, _) => a.eval(b), Chip::Input(a) => a.eval(b) }
+        match self { Chip::Program(a) => a.eval(b), Chip::Cpu(a) => a.eval(b), Chip::Memory(a) => a.eval(b), Chip::Alu(a) => a.eval(b), Chip::Range(a) => a.eval(b), Chip::Nibble(a) => a.eval(b), Chip::Poseidon2(a, _) => a.eval(b), Chip::Input(a) => a.eval(b), Chip::Keccak(a, _) => a.eval(b) }
     }
 }
 
@@ -251,7 +270,12 @@ where
 /// than disturbing that index. M3.4: no longer takes a `Program` — `ProgramAir` is shape-only
 /// now (like `CpuAir`), so the whole chip set is a pure function of `tier`, and `verifier_key`
 /// collapses to one entry per tier.
-pub fn chips(tier: Tier) -> Vec<Chip> {
+/// M4.2: `keccak_height` is the *proof-declared* keccak table height (`1 << keccak_log_height`),
+/// not a tier-derived one — the same treatment `program`'s and `input`'s heights get, and for
+/// the same reason (a guest's permutation count has nothing to do with its cycle budget). It
+/// reaches the chip set the way `poseidon2_height` does, as a field of the variant, because the
+/// keccak table has preprocessed columns whose height it needs.
+pub fn chips(tier: Tier, keccak_height: usize) -> Vec<Chip> {
     vec![
         Chip::Program(ProgramAir),
         Chip::Cpu(CpuAir),
@@ -261,6 +285,7 @@ pub fn chips(tier: Tier) -> Vec<Chip> {
         Chip::Nibble(NibbleAir),
         Chip::Poseidon2(Poseidon2Air, tier.poseidon2_height()),
         Chip::Input(crate::tables::input::InputAir),
+        Chip::Keccak(KeccakAir, keccak_height),
     ]
 }
 
@@ -277,10 +302,15 @@ pub struct Traces {
     /// M4.1: the input table's height, as a base-2 log — the `program_log_height` doc
     /// comment's rule, applied to `tables::input::input_log_height`.
     pub input_log_height: u8,
+    pub keccak: RowMajorMatrix<Val>,
+    /// M4.2: the keccak table's height, as a base-2 log — the same rule again, applied to
+    /// `tables::keccak::keccak_log_height` (one 32-row block per permutation, floored at one
+    /// block so the table exists even in a proof with no `KECCAK` call at all).
+    pub keccak_log_height: u8,
 }
 impl Traces {
-    pub fn as_slice(&self) -> [&RowMajorMatrix<Val>; 8] { [&self.program, &self.cpu, &self.memory, &self.alu, &self.range, &self.nibble, &self.poseidon2, &self.input] }
-    pub fn heights(&self) -> [usize; 8] { self.as_slice().map(|m| m.height()) }
+    pub fn as_slice(&self) -> [&RowMajorMatrix<Val>; 9] { [&self.program, &self.cpu, &self.memory, &self.alu, &self.range, &self.nibble, &self.poseidon2, &self.input, &self.keccak] }
+    pub fn heights(&self) -> [usize; 9] { self.as_slice().map(|m| m.height()) }
 }
 
 #[derive(Debug)]
@@ -294,6 +324,11 @@ pub enum ProveError {
     /// M4.1: the input table's own analogue of `ProgramTooLarge` — `inputs.len()`'s declared
     /// `tables::input::input_log_height` exceeds `tables::input::MAX_LOG_HEIGHT`.
     InputTooLarge { len: usize, log_height: u8 },
+    /// M4.2: the keccak table's analogue — more `KECCAK` calls than `tables::keccak::
+    /// MAX_LOG_HEIGHT`'s 32 768 permutation slots. Unreachable at any current tier (the cycle
+    /// budget runs out first), kept for the same reason the other two are: an error rather than
+    /// a panic on an absurd shift.
+    TooManyPermutations { perms: usize, log_height: u8 },
 }
 #[derive(Debug)]
 pub enum VerifyError {
@@ -306,6 +341,11 @@ pub enum VerifyError {
     /// M4.1: the input table's own analogue of `ProgramHeight` — `proof.input_log_height` is
     /// outside `[tables::input::MIN_LOG_HEIGHT, tables::input::MAX_LOG_HEIGHT]`.
     InputHeight,
+    /// M4.2: the keccak table's own analogue — `proof.keccak_log_height` is outside
+    /// `[tables::keccak::MIN_LOG_HEIGHT, tables::keccak::MAX_LOG_HEIGHT]`. Checked before the
+    /// declared height is used to size a table *or* the memory table's own height
+    /// (`Tier::mem_log_height`, which subtracts `MIN_LOG_HEIGHT` from it).
+    KeccakHeight,
 }
 
 /// Draws a fresh H_IN salt from OS entropy and delegates to [`build_traces_salted`] — the
@@ -338,8 +378,21 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], salt: [u32; 4], ex
     }
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
+    // M4.2: one `KeccakEvent` per `KECCAK` row, in execution order — the same order the cpu
+    // table's `SYS_KECCAK` rows claim them in. `clk` is the cpu table's own (digest-prefix
+    // shifted) clock, because that is what both sides of the `KECCAK` bus carry and what the
+    // chip's memory timestamps (`4·CLK`, `4·CLK + 1`) are built from.
+    let clk_offset = (program.digest_rows() + input_digest_rows) as u32;
+    let keccak_events: Vec<KeccakEvent> = exec.events.iter()
+        .filter_map(|e| e.keccak_row.as_ref().map(|r| KeccakEvent { clk: clk_offset + e.clk, ptr: r.ptr, input: r.input }))
+        .collect();
+    let keccak_log_height = crate::tables::keccak::keccak_log_height(keccak_events.len());
+    if keccak_log_height > crate::tables::keccak::MAX_LOG_HEIGHT {
+        return Err(ProveError::TooManyPermutations { perms: keccak_events.len(), log_height: keccak_log_height });
+    }
+    let keccak_t = keccak_trace(&keccak_events, 1usize << keccak_log_height);
     let cpu = cpu_trace(program, inputs, salt, &exec.events, tier.cpu_height(), &mut range, &mut nibble);
-    let memory = memory_trace(&exec.events, (program.digest_rows() + input_digest_rows) as u32, tier.mem_height(), &mut range);
+    let memory = memory_trace(&exec.events, clk_offset, tier.mem_height(keccak_log_height), &mut range);
     let alu = alu_trace(&exec.events, tier.alu_height(), &mut range, &mut nibble);
     let range_t = range_trace(&range);
     let nibble_t = nibble_trace(&nibble);
@@ -384,8 +437,9 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], salt: [u32; 4], ex
     let hin = crate::hash::input_digest(salt, inputs);
     Ok(Traces {
         program: program_t, cpu, memory, alu, range: range_t, nibble: nibble_t, poseidon2: poseidon2_t, input: input_t,
+        keccak: keccak_t,
         public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc, &hin),
-        program_log_height, input_log_height,
+        program_log_height, input_log_height, keccak_log_height,
     })
 }
 
@@ -399,6 +453,10 @@ pub struct Proof {
     /// M4.1: the input table's height, declared by the prover — see `tables::input::
     /// input_log_height`'s doc comment (mirrors `program_log_height`'s rule).
     pub input_log_height: u8,
+    /// M4.2: the keccak table's height, declared by the prover — the same rule once more
+    /// (`tables::keccak::keccak_log_height`). It also sizes the *memory* table
+    /// (`Tier::mem_log_height`), since a `KECCAK` row makes 100 memory accesses.
+    pub keccak_log_height: u8,
     pub public_values: Vec<u64>,
     pub batch: BatchProof<Config>,
 }
@@ -470,11 +528,12 @@ fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
 const KEY_CACHE_CAPACITY: usize = 64;
 
 /// A bounded, FIFO-evicted cache of `Machine::verifier_key` results, keyed by `(tier.0,
-/// program_log_height, input_log_height)` (M3.4 fix: the program table's height is
+/// program_log_height, input_log_height, keccak_log_height)` (M3.4 fix: the program table's height is
 /// proof-declared, not tier-derived — `tables::program::program_log_height`'s doc comment —
 /// so `CommonData`'s per-instance degree-bit bookkeeping depends on it too, even though the
 /// program table has no preprocessed *columns* of its own any more; M4.1 adds the input
-/// table's own height as a third, independent key component for the same reason). Bounded by
+/// table's own height as a third, independent key component for the same reason; M4.2 adds the
+/// keccak table's as a fourth, which also moves the *memory* table's declared height). Bounded by
 /// `TIERS.len() * (program::MAX_LOG_HEIGHT − program::MIN_LOG_HEIGHT + 1) *
 /// (input::MAX_LOG_HEIGHT − input::MIN_LOG_HEIGHT + 1)` distinct keys in the worst case —
 /// comfortably able to exceed `KEY_CACHE_CAPACITY` if a caller proves at many different
@@ -482,14 +541,14 @@ const KEY_CACHE_CAPACITY: usize = 64;
 /// a real policy again, not just defense in depth.
 #[derive(Default)]
 struct KeyCache {
-    map: HashMap<(usize, u8, u8), Arc<CommonData<Config>>>,
-    order: VecDeque<(usize, u8, u8)>,
+    map: HashMap<(usize, u8, u8, u8), Arc<CommonData<Config>>>,
+    order: VecDeque<(usize, u8, u8, u8)>,
 }
 impl KeyCache {
-    fn get(&self, key: &(usize, u8, u8)) -> Option<Arc<CommonData<Config>>> {
+    fn get(&self, key: &(usize, u8, u8, u8)) -> Option<Arc<CommonData<Config>>> {
         self.map.get(key).cloned()
     }
-    fn insert(&mut self, key: (usize, u8, u8), value: Arc<CommonData<Config>>) {
+    fn insert(&mut self, key: (usize, u8, u8, u8), value: Arc<CommonData<Config>>) {
         if self.map.contains_key(&key) {
             return;
         }
@@ -508,15 +567,19 @@ pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<Ke
 impl Machine {
     pub fn new(profile: FriProfile) -> Self { Self { config: make_config(profile), profile, keys: Mutex::new(KeyCache::default()) } }
 
-    fn log_ext_degrees(&self, tier: Tier, program_log_height: u8, input_log_height: u8) -> Vec<usize> {
+    fn log_ext_degrees(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8) -> Vec<usize> {
         let zk = self.config.is_zk();
-        // Order matches `chips()`: program, cpu, memory, alu, range, nibble, poseidon2, input.
+        // Order matches `chips()`: program, cpu, memory, alu, range, nibble, poseidon2, input,
+        // keccak. M4.2: the memory entry depends on `keccak_log_height` too — see
+        // `Tier::mem_log_height`. `build_traces_salted` sizes the memory *trace* with the very
+        // same call, so the two cannot drift.
         let mut v = vec![program_log_height as usize + zk];
         v.extend(
-            [tier.cpu_height(), tier.mem_height(), tier.alu_height(), crate::tables::range::HEIGHT, crate::tables::nibble::HEIGHT, tier.poseidon2_height()]
+            [tier.cpu_height(), tier.mem_height(keccak_log_height), tier.alu_height(), crate::tables::range::HEIGHT, crate::tables::nibble::HEIGHT, tier.poseidon2_height()]
                 .iter().map(|h| h.trailing_zeros() as usize + zk),
         );
         v.push(input_log_height as usize + zk);
+        v.push(keccak_log_height as usize + zk);
         v
     }
 
@@ -530,17 +593,18 @@ impl Machine {
     /// and nibble tables' Merkle trees every time), which is the cost this cache exists to
     /// amortize across repeated `verify` calls at the same `(tier, program_log_height,
     /// input_log_height)`.
-    pub fn verifier_key(&self, tier: Tier, program_log_height: u8, input_log_height: u8) -> Arc<CommonData<Config>> {
-        let key = (tier.0, program_log_height, input_log_height);
+    pub fn verifier_key(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8) -> Arc<CommonData<Config>> {
+        let key = (tier.0, program_log_height, input_log_height, keccak_log_height);
         if let Some(hit) = self.keys.lock().unwrap().get(&key) {
             return hit;
         }
-        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier), &self.log_ext_degrees(tier, program_log_height, input_log_height)).common);
+        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier, 1usize << keccak_log_height), &self.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height)).common);
         self.keys.lock().unwrap().insert(key, common.clone());
         common
     }
 
-    /// Number of `(tier, program_log_height, input_log_height)` verifier keys currently cached.
+    /// Number of `(tier, program_log_height, input_log_height, keccak_log_height)` verifier keys
+    /// currently cached.
     pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().map.len() }
 
     /// Draws a fresh per-proof salt from OS entropy and delegates to [`Self::prove_salted`] —
@@ -583,7 +647,7 @@ impl Machine {
     /// `public_values`) — kept in the signature for symmetry with `prove`/`prove_on`, which
     /// still need the program to execute it and build `traces` in the first place.
     pub fn prove_traces(&self, _program: &Program, traces: &Traces, tier: Tier) -> Proof {
-        let airs = chips(tier);
+        let airs = chips(tier, 1usize << traces.keccak_log_height);
         let mats = traces.as_slice();
         let instances: Vec<StarkInstance<'_, Config, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
@@ -606,9 +670,9 @@ impl Machine {
         // parameters, which `key_config` and `make_config` share via `build_config`); their
         // RNG state can differ freely.
         let key_cfg = key_config(self.profile);
-        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees(tier, traces.program_log_height, traces.input_log_height));
+        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height));
         let batch = prove_batch(&self.config, &instances, &prover_data);
-        Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }
+        Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, keccak_log_height: traces.keccak_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }
     }
 
     /// Prove on `backend`. `Backend::Cpu` is exactly `prove`; the other backends run the same
@@ -677,7 +741,7 @@ impl Machine {
             }
         };
         let traces = build_traces_salted(program, inputs, salt, &exec, tier)?;
-        let airs = chips(tier);
+        let airs = chips(tier, 1usize << traces.keccak_log_height);
         let mats = traces.as_slice();
         let instances: Vec<StarkInstance<'_, SC, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
@@ -686,14 +750,14 @@ impl Machine {
         // That is invariant, not a leak: every backend config (`reference_cfg`, `cuda_cfg`) is
         // built on `HidingFriPcs` just as `make_config` is, so `is_zk()` is `true` for all of
         // them and the degree bits agree with what `verify` recomputes.
-        let prover_data = ProverData::from_airs_and_degrees(key_cfg, &airs, &self.log_ext_degrees(tier, traces.program_log_height, traces.input_log_height));
+        let prover_data = ProverData::from_airs_and_degrees(key_cfg, &airs, &self.log_ext_degrees(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height));
         // The engines panic (rather than return) on a device failure — `CudaHashEngine::ok`
         // and friends — so a backend fault must not take the caller's process down with it.
         let batch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_batch(cfg, &instances, &prover_data)))
             .map_err(|p| ProveError::Backend(panic_message(p)))?;
         let bytes = postcard::to_allocvec(&batch).map_err(|e| ProveError::Backend(format!("proof serialise: {e}")))?;
         let batch: BatchProof<Config> = postcard::from_bytes(&bytes).map_err(|e| ProveError::Backend(format!("proof convert: {e}")))?;
-        Ok((Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }, exec))
+        Ok((Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, keccak_log_height: traces.keccak_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }, exec))
     }
 
     /// M3.4: takes `hc`, not the program — the verifier no longer holds the program at all
@@ -734,11 +798,17 @@ impl Machine {
         if !(crate::tables::input::MIN_LOG_HEIGHT..=crate::tables::input::MAX_LOG_HEIGHT).contains(&proof.input_log_height) {
             return Err(VerifyError::InputHeight);
         }
-        if proof.batch.degree_bits != self.log_ext_degrees(proof.tier, proof.program_log_height, proof.input_log_height) { return Err(VerifyError::Tier); }
-        let airs = chips(proof.tier);
+        // M4.2: `proof.keccak_log_height` is untrusted the same way — and it is doubly
+        // load-bearing here, since `Tier::mem_log_height` subtracts `MIN_LOG_HEIGHT` from it
+        // (an underflow panic on anything smaller) as well as sizing the keccak table itself.
+        if !(crate::tables::keccak::MIN_LOG_HEIGHT..=crate::tables::keccak::MAX_LOG_HEIGHT).contains(&proof.keccak_log_height) {
+            return Err(VerifyError::KeccakHeight);
+        }
+        if proof.batch.degree_bits != self.log_ext_degrees(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height) { return Err(VerifyError::Tier); }
+        let airs = chips(proof.tier, 1usize << proof.keccak_log_height);
         let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
         let pvs: Vec<Vec<Val>> = (0..airs.len()).map(|i| if i == 1 { pv_vals.clone() } else { vec![] }).collect();
-        let common = self.verifier_key(proof.tier, proof.program_log_height, proof.input_log_height);
+        let common = self.verifier_key(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height);
         verify_batch(&self.config, &airs, &proof.batch, &pvs, &common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
     }
 }
@@ -758,12 +828,12 @@ impl Machine {
 /// table's degree is pinned to a specific number there, with a comment on *why*; a change
 /// here should come with a matching update to those assertions and to
 /// `docs/02-tables-and-buses.md`.
-pub fn max_constraint_degrees(tier: Tier, program_log_height: u8, input_log_height: u8) -> Vec<usize> {
+pub fn max_constraint_degrees(tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8) -> Vec<usize> {
     let machine = Machine::new(FriProfile::Test);
     let key_cfg = key_config(machine.profile);
-    let airs = chips(tier);
+    let airs = chips(tier, 1usize << keccak_log_height);
     let is_zk = machine.config.is_zk();
-    let ext_degrees = machine.log_ext_degrees(tier, program_log_height, input_log_height);
+    let ext_degrees = machine.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height);
     let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &ext_degrees);
     let lookup_gadget = p3_lookup::LogUpGadget::new();
     airs.iter()

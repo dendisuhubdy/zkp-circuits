@@ -70,8 +70,10 @@ pub struct CycleEvent {
     pub keccak_row: Option<KeccakRow>,
     /// M4.2: the `KECCAK` permutation's own 100 RAM accesses — 50 reads at slot 0, then 50
     /// writes at slot 1 — kept apart from `accesses` because the *keccak* table, not the cpu
-    /// table, sends them on the `MEMORY` bus. `memory_trace` records both lists; every other
-    /// consumer of `accesses` is a cpu-side one and must keep ignoring these.
+    /// table, sends them on the `MEMORY` bus. `memory_trace` is the only consumer: it records
+    /// both lists, so that every access is on the receiving side of the bus whoever sends it.
+    /// The keccak table builds its own sends from its own columns (`PTR`, `CLK`, `IN`, `A`),
+    /// not from this list — which is why nothing else reads it.
     pub keccak_accesses: Vec<MemAccess>,
 }
 
@@ -80,7 +82,20 @@ pub struct Execution { pub events: Vec<CycleEvent>, pub outputs: [u32; NUM_OUTPU
 impl Execution { pub fn cycles(&self) -> usize { self.events.len() } }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExecError { OutOfCycles(usize), BadPc(u32), Misaligned(u32), BadSyscall(u32), OutputSlot(u32), DoubleWrite(u32), InputIndex(u32), Poseidon2WordCount(u32) }
+pub enum ExecError {
+    OutOfCycles(usize), BadPc(u32), Misaligned(u32), BadSyscall(u32), OutputSlot(u32), DoubleWrite(u32),
+    InputIndex(u32), Poseidon2WordCount(u32),
+    /// M4.2 (controller ruling 2): a `KECCAK` pointer past `KECCAK_PTR_LIMIT`. The cpu AIR
+    /// bounds a `SYS_KECCAK` row's pointer to `ptr < 0x3000_0000` (`HP3_HI ∈ {0,1,2}`, the
+    /// tightened top-nibble rule) so that the chip's own `PTR + w` address arithmetic can
+    /// neither wrap nor alias another `MEMORY` key; the emulator refuses the same pointers, so
+    /// there is no execution whose honest trace the AIR would be unable to prove.
+    KeccakPtrOutOfRange(u32),
+}
+
+/// The largest word address a `KECCAK` syscall may name: the state occupies `ptr ..
+/// ptr + KECCAK_WORDS`, and the AIR's own bound is `ptr < 0x3000_0000`.
+pub const KECCAK_PTR_LIMIT: u32 = 0x3000_0000 - KECCAK_WORDS;
 
 pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<Execution, ExecError> {
     let mut regs = [0u32; 32];
@@ -239,12 +254,18 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
                     // ordered and distinct from the ecall row's own register accesses (those are
                     // `SPACE_REG`). These go in `keccak_accesses`, not `accesses`: the memory
                     // table records them, but the *keccak* table is what sends them on the
-                    // `MEMORY` bus (M4.2 Task 4).
+                    // `MEMORY` bus.
                     let ptr = arg0;
+                    // Controller ruling 2: the cpu AIR bounds this pointer (`HP3_HI ∈ {0,1,2}`
+                    // on a `SYS_KECCAK` row, i.e. `ptr < 0x3000_0000`), so the emulator — the
+                    // reference semantics — must refuse anything past it rather than produce a
+                    // run whose honest trace cannot be proved. With the bound in hand, the
+                    // address arithmetic below is plain addition: `ptr + 49` cannot wrap.
+                    if ptr > KECCAK_PTR_LIMIT { return Err(ExecError::KeccakPtrOutOfRange(ptr)); }
                     let mut input = [0u32; crate::keccak::WORDS];
                     let mut kacc = Vec::with_capacity(2 * crate::keccak::WORDS);
                     for k in 0..KECCAK_WORDS {
-                        let addr = ptr.wrapping_add(k);
+                        let addr = ptr + k;
                         let w = *ram.get(&addr).unwrap_or(&0);
                         input[k as usize] = w;
                         kacc.push(MemAccess { space: SPACE_RAM, addr, slot: 0, value: w, is_write: false });
@@ -253,13 +274,17 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
                     crate::keccak::keccak_f(&mut st);
                     let output = crate::keccak::state_to_words(&st);
                     for k in 0..KECCAK_WORDS {
-                        let addr = ptr.wrapping_add(k);
+                        let addr = ptr + k;
                         ram.insert(addr, output[k as usize]);
                         kacc.push(MemAccess { space: SPACE_RAM, addr, slot: 1, value: output[k as usize], is_write: true });
                     }
+                    // `acc`/`alu` are moved, not cloned: unlike `POSEIDON2` (which pushes a
+                    // whole row group and needs them again on later rows), this is the call's
+                    // one and only row.
                     events.push(CycleEvent {
                         clk, pc, next_pc: pc.wrapping_add(4), instr, dec, a, b, c: 0, alu_out, tgt, mem_addr, mem_val,
-                        sys: Some(Syscall::Keccak { ptr }), accesses: acc.clone(), alu: alu.clone(), hash_row: None,
+                        sys: Some(Syscall::Keccak { ptr }), accesses: std::mem::take(&mut acc), alu: std::mem::take(&mut alu),
+                        hash_row: None,
                         keccak_row: Some(KeccakRow { ptr, input, output }), keccak_accesses: kacc,
                     });
                     clk += 1;

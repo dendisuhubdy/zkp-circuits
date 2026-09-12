@@ -587,7 +587,8 @@ fn div_family_lookup_counts_per_op() {
 /// what actually ships, not a hand-recount. No proving: `ProverData::from_airs_and_degrees`
 /// only commits the preprocessed columns and walks the symbolic constraint tree: sub-second.
 ///
-/// Chip order is `machine::chips()`'s: program, cpu, memory, alu, range, nibble, poseidon2.
+/// Chip order is `machine::chips()`'s: program, cpu, memory, alu, range, nibble, poseidon2,
+/// input, keccak.
 ///
 /// If any of these numbers moves, re-measure (this test will fail with the new number) and:
 /// - update the assertion and its comment below,
@@ -603,8 +604,13 @@ fn alu_max_constraint_degree_is_pinned() {
     // any declared program height give the same numbers. `Tier(10)`/`MIN_LOG_HEIGHT` (the
     // smallest of each) are used only because `max_constraint_degrees` needs concrete values
     // to size the tables.
-    let degrees = max_constraint_degrees(Tier(10), MIN_LOG_HEIGHT, rand_zkvm::tables::input::MIN_LOG_HEIGHT);
-    assert_eq!(degrees.len(), 8, "one degree per chip in machine::chips() order");
+    let degrees = max_constraint_degrees(
+        Tier(10),
+        MIN_LOG_HEIGHT,
+        rand_zkvm::tables::input::MIN_LOG_HEIGHT,
+        rand_zkvm::tables::keccak::MIN_LOG_HEIGHT,
+    );
+    assert_eq!(degrees.len(), 9, "one degree per chip in machine::chips() order");
 
     // program: M3.4's main-trace in-circuit decoder. Every one-hot flag pin
     // (`flag*(op-code)=0`) and field-consistency equation is at most degree 2 in the
@@ -650,6 +656,14 @@ fn alu_max_constraint_degree_is_pinned() {
     // `IS_REAL * MULT_READ` on `INPUT_READ` (degree 2) — no table here is anywhere close to
     // the degree-8 ceiling.
     assert_eq!(degrees[7], 2, "input table max constraint degree");
+
+    // keccak (M4.2): measured max is 3, exactly the module doc's own claim — the three cubic
+    // rules that must be cubic (`xor3`, the parity triple product, χ's `p ⊕ (¬q ∧ r)`), with
+    // every other rule written to stay at or below that (rule 5 deliberately spelled
+    // `is_round · A = Σ …` rather than `is_round · (A − Σ …)` to avoid a fourth degree). The
+    // chip's own packed `MEMORY`/`KECCAK` lookups — selector-weighted message columns times a
+    // degree-2 `IS_REAL · sel_sum` count — don't raise it either.
+    assert_eq!(degrees[8], 3, "keccak table max constraint degree");
 }
 
 mod poseidon2_tests {

@@ -331,3 +331,30 @@ fn sys_keccak_permutes_fifty_words_in_place_in_one_cycle() {
     assert!(ev.keccak_accesses[50..].iter().all(|m| m.is_write && m.slot == 1));
     assert_eq!(ev.next_pc, ev.pc + 4, "one cpu row per KECCAK call");
 }
+
+/// M4.2 (controller ruling 2): the AIR bounds a `SYS_KECCAK` row's `HASH_PTR` to
+/// `ptr < 0x3000_0000` (`HP3_HI ∈ {0,1,2}`), so the chip's own `PTR + w` address arithmetic
+/// cannot wrap or alias another `MEMORY` key. The emulator — the reference semantics — must
+/// refuse the same pointers rather than produce a trace no AIR can prove.
+#[test]
+fn a_keccak_pointer_past_the_provable_range_is_an_error() {
+    const T0: u32 = 5;
+    let program = |ptr: u32| {
+        let mut a = Assembler::new(0);
+        a.extend(li(REG_A7, SYS_KECCAK as i32));
+        a.extend(li(REG_A0, ptr as i32));
+        a.push(ecall());
+        a.extend(li(T0, 1));
+        a.extend(write_output(0, T0));
+        a.extend(halt());
+        a.assemble()
+    };
+    let limit = 0x3000_0000u32 - 50;
+    assert!(matches!(
+        execute(&program(limit + 1), &[], 1 << 16),
+        Err(ExecError::KeccakPtrOutOfRange(p)) if p == limit + 1
+    ));
+    // The largest still-permitted pointer runs (and permutes 50 words of untouched zeros).
+    let e = execute(&program(limit), &[], 1 << 16).unwrap();
+    assert_eq!(e.events.iter().filter(|ev| ev.keccak_row.is_some()).count(), 1);
+}
