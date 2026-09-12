@@ -740,8 +740,10 @@ fn alu_max_constraint_degree_is_pinned() {
         );
         // Split out so the pin says *where* the degree comes from, as the cpu comment above does:
         // the AIR's own rules are all degree ≤ 3 (the module doc's claim), and the packed
-        // `MEMORY`/`SHA256` fraction-pins — 10 interactions folded into 9 groups, each with a
-        // degree-2 `IS_REAL · selector` count — are what adds the fourth.
+        // `MEMORY`/`SHA256` fraction-pins — 18 interactions folded into 7 groups, each with a
+        // degree-2 `IS_REAL · selector` count — are what adds the fourth. (Folding each state
+        // word's read and write-back into one degree-2 send gives 10 interactions but *9* groups;
+        // `tables/sha256.rs`'s rule 12 records that measurement.)
         let air_only = get_max_constraint_degree::<F, Challenge, WithPre, _>(
             &air,
             AirLayout::from_air::<F>(&air),
@@ -749,6 +751,7 @@ fn alu_max_constraint_degree_is_pinned() {
             &[],
             &p3_lookup::LogUpGadget::new(),
         );
+        assert_eq!(pd.common.lookups[0].len(), 7, "sha256 packed lookup groups");
         assert_eq!(air_only, 3, "sha256 table max constraint degree, AIR rules alone");
         assert_eq!(degree, 4, "sha256 table max constraint degree");
     }
