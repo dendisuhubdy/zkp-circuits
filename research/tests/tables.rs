@@ -609,6 +609,7 @@ fn alu_max_constraint_degree_is_pinned() {
         MIN_LOG_HEIGHT,
         rand_zkvm::tables::input::MIN_LOG_HEIGHT,
         rand_zkvm::tables::keccak::MIN_LOG_HEIGHT,
+        Tier(10).min_mem_log_height(),
     );
     assert_eq!(degrees.len(), 9, "one degree per chip in machine::chips() order");
 
@@ -974,6 +975,10 @@ mod keccak_tests {
         assert_eq!(row(32), row(0));
         assert_eq!(row(63), row(31));
         assert_eq!(keccak::MIN_LOG_HEIGHT, 5);
-        assert_eq!(keccak::MAX_LOG_HEIGHT, 20);
+        // M4.2 (controller ruling 2): the upper bound is the tier's, not a flat constant of
+        // this module's — one permutation costs one cycle, so `klh <= t + 5`.
+        use rand_zkvm::machine::Tier;
+        assert_eq!(Tier(10).max_keccak_log_height(), 15);
+        assert_eq!(Tier(20).max_keccak_log_height(), 25);
     }
 }

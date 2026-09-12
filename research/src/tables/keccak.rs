@@ -100,9 +100,11 @@ pub const WRITES_PER_ROW: usize = 7;
 
 /// One block is the floor: a trace with no events at all still needs one padding block.
 pub const MIN_LOG_HEIGHT: u8 = 5; // 1 << 5 == BLOCK
-/// 2^20 rows is 32768 permutations — far past any guest this crate runs. Mirrors
-/// `tables::input::MAX_LOG_HEIGHT`'s role.
-pub const MAX_LOG_HEIGHT: u8 = 20;
+// M4.2 (controller ruling 2): there is deliberately no `MAX_LOG_HEIGHT` here, unlike
+// `tables::program` and `tables::input`. A permutation costs a cycle, so the tier already
+// bounds this table's honest height exactly — `machine::Tier::max_keccak_log_height`,
+// `klh <= t + 5` — and a second, flat, tier-independent ceiling would only be a looser or
+// tighter *disagreeing* bound (see that method's doc comment). One ceiling, not two.
 
 /// `max(5, log2_ceil(32 · n_perms))` — one 32-row block per permutation, rounded up to a power
 /// of two, floored at a single block.

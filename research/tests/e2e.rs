@@ -108,13 +108,32 @@ fn a_guest_without_keccak_declares_the_minimum_keccak_height() {
     m.verify(&p.digest(), &proof).unwrap();
 }
 
-/// M4.2 (controller ruling 1): a `KECCAK` row makes 100 memory accesses, but `Tier::mem_height`
-/// assumed at most 4 per cycle. The memory table's height is now a verifier-computable function
-/// of the tier *and* the declared keccak height — `log2_ceil(2^(t+2) + 100·2^(klh−5))`, the same
-/// expression `build_traces_salted` sizes the table with and `log_ext_degrees` declares — so a
-/// guest with several permutations still fits, and the degree-bits check still matches.
+/// M4.2 (controller ruling 1): the memory table's height is **proof-declared**, floored at the
+/// tier's own `2^(t+2)`. A keccak-free guest declares exactly that floor — the first cut of
+/// M4.2 sized the table `log2_ceil(2^(t+2) + 100·2^(klh−5))`, and since `klh` floors at 5 the
+/// `+100` term was never zero, so *every* proof in existence paid for a doubled memory table.
 #[test]
-fn several_keccak_permutations_pad_the_memory_table_to_the_declared_height() {
+fn a_keccak_free_proof_declares_the_tier_floor_memory_height() {
+    use rand_zkvm::machine::build_traces_salted;
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
+    assert!(accesses < 1 << 12, "fib(10) is nowhere near the tier-10 floor: {accesses} accesses");
+    let t = build_traces_salted(&p, &[], [0; 4], &exec, Tier(10)).unwrap();
+    assert_eq!(t.mem_log_height, 12, "exactly `t + 2`");
+    assert_eq!(t.memory.height(), 1 << 12);
+    let proof = m.prove_traces(&p, &t, Tier(10));
+    assert_eq!(proof.mem_log_height, 12);
+    m.verify(&p.digest(), &proof).unwrap();
+}
+
+/// Three permutations are 300 memory accesses — real traffic the table has to hold, but still
+/// two orders of magnitude below tier 10's 4 096-row floor, so the declared height does not
+/// move. This is the regression the ruling exists for: under the old tier-derived formula this
+/// same guest declared 13, doubling the table to buy 300 rows of room it already had.
+#[test]
+fn a_few_keccak_permutations_still_fit_under_the_tier_floor() {
     use rand_zkvm::machine::build_traces_salted;
     const BUF: i32 = 0x1000;
     let m = Machine::new(FriProfile::Test);
@@ -134,11 +153,43 @@ fn several_keccak_permutations_pad_the_memory_table_to_the_declared_height() {
     let t = build_traces_salted(&p, &[], [0; 4], &exec, Tier(10)).unwrap();
     // Three permutations need three 32-row blocks -> 128 rows -> 2^7.
     assert_eq!(t.keccak_log_height, 7);
-    // 2^12 (tier 10's old `mem_height`) + 100·2^2 = 4 496 -> 2^13.
-    assert_eq!(t.memory.height(), 1 << Tier(10).mem_log_height(7));
-    assert_eq!(Tier(10).mem_log_height(7), 13);
+    let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
+    assert!((300..1 << 12).contains(&accesses), "{accesses} accesses: real keccak traffic, still under the floor");
+    assert_eq!(t.mem_log_height, 12, "the tier floor still wins");
+    assert_eq!(t.memory.height(), 1 << 12);
     let proof = m.prove_traces(&p, &t, Tier(10));
     assert_eq!(proof.keccak_log_height, 7);
+    assert_eq!(proof.mem_log_height, 12);
+    m.verify(&p.digest(), &proof).unwrap();
+}
+
+/// And when the traffic genuinely outgrows the floor, the declaration follows it: 40
+/// permutations are 4 000 chip-sent accesses on their own, past tier 10's 4 096-row floor once
+/// the guest's own register traffic is added. The memory trace is sized by the declared value
+/// and the verifier's degree-bits check agrees with it.
+#[test]
+fn enough_keccak_permutations_raise_the_declared_memory_height_past_the_floor() {
+    use rand_zkvm::machine::build_traces_salted;
+    const BUF: i32 = 0x1000;
+    let m = Machine::new(FriProfile::Test);
+    let mut a = Assembler::new(0);
+    for _ in 0..40 {
+        a.extend(call_keccak(BUF / 4));
+    }
+    a.extend(halt());
+    let p = a.assemble();
+    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    assert_eq!(exec.events.iter().filter(|e| e.keccak_row.is_some()).count(), 40);
+    let t = build_traces_salted(&p, &[], [0; 4], &exec, Tier(10)).unwrap();
+    let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
+    assert!(((1 << 12)..1 << 13).contains(&accesses), "{accesses} accesses: past the floor, inside one more bit");
+    assert_eq!(t.mem_log_height, 13, "the access count now drives the height");
+    assert_eq!(t.memory.height(), 1 << 13);
+    // 40 permutations need 40 blocks -> 1 280 rows -> 2^11, comfortably inside tier 10's own
+    // ceiling of `t + 5 = 15`.
+    assert_eq!(t.keccak_log_height, 11);
+    let proof = m.prove_traces(&p, &t, Tier(10));
+    assert_eq!(proof.mem_log_height, 13);
     m.verify(&p.digest(), &proof).unwrap();
 }
 

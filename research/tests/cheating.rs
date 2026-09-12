@@ -1503,3 +1503,152 @@ fn a_keccak_call_whose_permutation_is_missing_is_rejected() {
     }
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
+
+// ── M4.2 controller ruling 2: the tier is the keccak table's one ceiling ──
+
+/// `proof.keccak_log_height` is prover-declared and untrusted, and it sizes both the keccak
+/// table's own AIR instance and (before it) the verifier key. A permutation costs a cycle, so a
+/// tier-10 proof can honestly need at most `t + 5 = 15`; anything past that is a request for a
+/// table with more permutation slots than the tier has cycles. The check runs before
+/// `log_ext_degrees` and before `verifier_key`, so the attacker's matching `degree_bits` edit
+/// (which is what they would have to do to get past the degree-bits equality check) buys them
+/// nothing — and the verifier never pays for a preprocessed-commitment recomputation, which
+/// `cached_keys() == 0` is the observable proof of.
+#[test]
+fn a_keccak_height_past_the_tiers_ceiling_is_rejected_before_any_verifier_key_is_built() {
+    use rand_zkvm::machine::VerifyError;
+    let prover = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    assert_eq!(proof.keccak_log_height, 5);
+    assert_eq!(Tier(10).max_keccak_log_height(), 15);
+    // `t + 6`, with `degree_bits` adjusted to match (the keccak instance is last in `chips()`
+    // order; `+ 1` is the hiding config's `is_zk`).
+    proof.keccak_log_height = 16;
+    let last = proof.batch.degree_bits.len() - 1;
+    proof.batch.degree_bits[last] = 16 + 1;
+    let verifier = Machine::new(FriProfile::Test);
+    assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::KeccakHeightExceedsTier)));
+    assert_eq!(verifier.cached_keys(), 0, "the range check must precede the verifier key");
+}
+
+/// The memory table's declared height (controller ruling 1) gets the same treatment on its own
+/// lower bound: a proof cannot declare less than the tier's `2^(t+2)` floor, which is what
+/// keeps the declaration from revealing a guest's memory-access count below the resolution the
+/// tier already publishes.
+#[test]
+fn a_memory_height_below_the_tier_floor_is_rejected_before_any_verifier_key_is_built() {
+    use rand_zkvm::machine::VerifyError;
+    let prover = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    assert_eq!(proof.mem_log_height, 12);
+    proof.mem_log_height = 11;
+    proof.batch.degree_bits[2] = 11 + 1; // memory is instance 2 in `chips()` order
+    let verifier = Machine::new(FriProfile::Test);
+    assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::MemoryHeight)));
+    assert_eq!(verifier.cached_keys(), 0);
+}
+
+// ── M4.2 controller ruling 3: the cubic pointer rule on a SYS_KECCAK cpu row ──
+//
+// `SYS_KECCAK · HP3_HI · (HP3_HI − 1) · (HP3_HI − 2) = 0` (`tables::cpu`'s eval) is the rule
+// that tightens the keccak pointer from the `AND4[HP3_HI, 0xC, 0]` lookup's `ptr < 2^30` to
+// `ptr < 0x3000_0000`, so that the chip's own `PTR + w` (`w < 50`) address arithmetic stays
+// inside the range the `AND4` bound covers. `HP3_HI = 3` is exactly the value the lookup admits
+// and the cubic must not.
+//
+// A `Traces` tamper cannot express it: `HASH_PTR` is pinned equal to `B` (the `a0` register
+// value the ecall row reads over `MEMORY`), so moving the pointer's top nibble means moving the
+// register value the guest actually held, and every limb, lookup receipt and memory message
+// that follows from it. And the emulator refuses the pointer outright
+// (`ExecError::KeccakPtrOutOfRange`, the reference-semantics half of the same bound), so no
+// `execute` call produces such a run either.
+//
+// So the witness is built directly instead — as the emulator *would* have built it without that
+// refusal. The guest takes its pointer from a private input rather than an immediate, which
+// makes the whole relocation a pure `Execution` edit: the program words, and therefore `hc`,
+// the program table and every `PROGRAM` message, are byte-identical between the two pointers,
+// and `build_traces_salted` then fills every table from the relocated events exactly as it
+// would for an honest run. `a_relocated_keccak_pointer_inside_the_bound_still_proves` is the
+// control that pins that: the same helper, the same program, a pointer whose top nibble is 2
+// instead of 3, and the proof verifies.
+
+/// `read_input(0) -> a0; KECCAK a0; halt` — the pointer is data, not an immediate.
+fn keccak_ptr_from_input() -> rand_zkvm::isa::Program {
+    let mut a = Assembler::new(0);
+    a.extend(read_input(0));
+    a.extend(li(rand_zkvm::isa::REG_A7, rand_zkvm::isa::SYS_KECCAK as i32));
+    a.push(ecall());
+    a.extend(halt());
+    a.assemble()
+}
+
+/// Rewrites an honest `Execution` of `keccak_ptr_from_input` with input `p0` into the execution
+/// the emulator would have produced for input `p1`: the input word itself (and the `a0` it is
+/// written to, and every later read of `a0`), the `KECCAK` syscall's pointer, and the 50
+/// read/50 write addresses the permutation makes. `p0` is chosen so that no other value in the
+/// run collides with it — every other register and memory value in this guest is 0, 2, 4 or a
+/// pc — which is what makes the value-equality matching below exact rather than approximate.
+fn relocate_keccak_ptr(exec: &mut rand_zkvm::emulator::Execution, p0: u32, p1: u32) {
+    use rand_zkvm::emulator::Syscall;
+    for e in &mut exec.events {
+        if e.b == p0 { e.b = p1; }
+        if e.c == p0 { e.c = p1; }
+        for acc in e.accesses.iter_mut().filter(|a| a.value == p0) { acc.value = p1; }
+        match &mut e.sys {
+            Some(Syscall::ReadInput { word, .. }) if *word == p0 => *word = p1,
+            Some(Syscall::Keccak { ptr }) if *ptr == p0 => *ptr = p1,
+            _ => {}
+        }
+        if let Some(k) = &mut e.keccak_row {
+            assert_eq!(k.ptr, p0);
+            k.ptr = p1;
+        }
+        for acc in &mut e.keccak_accesses {
+            assert!((p0..p0 + 50).contains(&acc.addr));
+            acc.addr = p1 + (acc.addr - p0);
+        }
+    }
+}
+
+/// Builds the relocated traces for pointer `p1`, checking on the way that the cpu row really
+/// does carry the intended `HP3_HI` with a consistent limb decomposition (so the test cannot
+/// silently degenerate into checking some other rule).
+fn keccak_ptr_traces(p1: u32) -> (Machine, rand_zkvm::isa::Program, Traces) {
+    const P0: u32 = 0x2000_0000;
+    let m = Machine::new(FriProfile::Test);
+    let p = keccak_ptr_from_input();
+    let mut e = execute(&p, &[P0], 10_000).unwrap();
+    relocate_keccak_ptr(&mut e, P0, p1);
+    let t = build_traces_salted(&p, &[p1], [0u32; 4], &e, Tier(10)).unwrap();
+    let w = cpu::col::WIDTH;
+    let row = keccak_row(&t);
+    // `HASH_PTR = B` (the `a0` the row read) and the four limbs recompose to it: the two
+    // premises the cubic rule is the only thing left checking.
+    assert_eq!(t.cpu.values[row * w + cpu::col::HASH_PTR], F::from_u32(p1));
+    assert_eq!(t.cpu.values[row * w + cpu::col::B], F::from_u32(p1));
+    let limbs_sum: u64 = (0..4)
+        .map(|i| t.cpu.values[row * w + cpu::col::HP0 + i].as_canonical_u64() << (8 * i))
+        .sum();
+    assert_eq!(limbs_sum, p1 as u64);
+    assert_eq!(t.cpu.values[row * w + cpu::col::HP3_HI], F::from_u32(p1 >> 28));
+    (m, p, t)
+}
+
+/// The control: top nibble 2, everything else identical. If the relocation helper produced a
+/// witness that were wrong in any *other* way, this would fail too — and the negative test
+/// below would be passing for the wrong reason.
+#[test]
+fn a_relocated_keccak_pointer_inside_the_bound_still_proves() {
+    let (m, p, t) = keccak_ptr_traces(0x2800_0000);
+    let proof = m.prove_traces(&p, &t, Tier(10));
+    m.verify(&p.digest(), &proof).unwrap();
+}
+
+/// And top nibble 3 — admitted by `AND4[HP3_HI, 0xC, 0]`, rejected by the cubic.
+#[test]
+fn a_keccak_pointer_with_hp3_hi_equal_to_three_is_rejected() {
+    let (m, p, t) = keccak_ptr_traces(0x3000_0000);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
