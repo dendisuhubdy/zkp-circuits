@@ -158,6 +158,16 @@ pub struct Buffers {
     memory: [u8; MAX_MEMORY_BYTES],
     /// Bit `i` is set iff `code[i]` is a `JUMPDEST` that is not inside a `PUSHn`'s immediate.
     jumpdests: [u32; MAX_CODE_BYTES / 32],
+    /// How many bytes of `memory`, and how many words of `jumpdests`, the *previous* run left
+    /// non-zero — so [`Interpreter::new`] can clear exactly those instead of all 68 KiB.
+    ///
+    /// This is a cycle-count matter, not a correctness one: zeroing the whole 64 KiB array cost
+    /// ~50 000 guest cycles a call (M4.3's measurement — most of a whole tier's budget) for a
+    /// guest whose `.bss` the machine already guarantees starts zeroed, and a *fresh* workspace's
+    /// `Buffers::ZERO` therefore needs no clearing at all. `memory`'s high-water mark is the
+    /// EVM's own `msize`, which every access bumps through [`Interpreter::mem`].
+    dirty_mem: usize,
+    dirty_jd: usize,
 }
 
 impl Buffers {
@@ -167,6 +177,8 @@ impl Buffers {
         stack: [U256::ZERO; STACK_LIMIT],
         memory: [0; MAX_MEMORY_BYTES],
         jumpdests: [0; MAX_CODE_BYTES / 32],
+        dirty_mem: 0,
+        dirty_jd: 0,
     };
 }
 
@@ -229,8 +241,12 @@ impl<'a, H: Host> Interpreter<'a, H> {
         // bitmap without a second branch.
         let code = &code[..min(code.len(), MAX_CODE_BYTES)];
         let calldata = &calldata[..min(calldata.len(), MAX_CALLDATA_BYTES)];
-        bufs.memory.fill(0);
-        bufs.jumpdests.fill(0);
+        // Only what a previous run dirtied, which on a fresh `Buffers::ZERO` (the guest's `.bss`,
+        // and the first call of any host test) is nothing at all.
+        bufs.memory[..bufs.dirty_mem].fill(0);
+        bufs.jumpdests[..bufs.dirty_jd].fill(0);
+        bufs.dirty_mem = 0;
+        bufs.dirty_jd = code.len().div_ceil(32);
         scan_jumpdests(code, &mut bufs.jumpdests);
         Interpreter {
             h,
@@ -281,6 +297,8 @@ impl<'a, H: Host> Interpreter<'a, H> {
             Halt::Stop | Halt::Return | Halt::Revert => self.gas,
             _ => 0,
         };
+        // What the next run has to clear: every byte this one could have written is below `msize`.
+        self.bufs.dirty_mem = self.msize;
         Outcome {
             halt,
             gas_used: self.env.gas_limit - left,
