@@ -12,15 +12,15 @@ are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (205 tests: 204 pass, 1 ignored).
-  Everything uses `FriProfile::Test`; measured in one run at the end of M4.2,
-  `tests/bundle.rs` takes ~212 s (six proofs: four guest-level, plus one
-  shared by every ledger-level test and one for the 1-real-1-dummy shape),
-  `tests/viewing.rs` ~204 s, `tests/e2e.rs` ~98 s, `tests/cheating.rs`
-  ~51 s, `tests/zk.rs` ~19 s, `tests/tables.rs` ~10 s and
-  `tests/keccak.rs` ~1 s (its chip-alone harness proves a 128-row table, so
-  it is cheap despite 2 612 columns). All green is the bar before any
-  commit. A proof that *does* call `KECCAK` is markedly larger than a
+- `cargo test` — the whole suite (223 tests: 222 pass, 1 ignored).
+  Everything uses `FriProfile::Test`; measured in one run at the end of the
+  2026-09-12 audit-port wave, `tests/bundle.rs` takes ~213 s (six proofs:
+  four guest-level, plus one shared by every ledger-level test and one for
+  the 1-real-1-dummy shape), `tests/viewing.rs` ~208 s, `tests/e2e.rs`
+  ~99 s, `tests/cheating.rs` ~47 s, `tests/zk.rs` ~18 s,
+  `tests/tables.rs` ~10 s and `tests/keccak.rs` ~1 s (its chip-alone
+  harness proves a 128-row table, so it is cheap despite 2 612 columns).
+  All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a
   keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with
   a batch's column count, so carrying it costs ~705 KB at the production
   profile (`docs/03-privacy.md`'s M4.2 measurement). That is a known cost of
@@ -47,7 +47,13 @@ first of all:
    in `src/tables/alu.rs`.
 3. **`lw`/`sw`/`addi` immediates are real 12-bit signed RISC-V I-type
    fields** (`Instr::encode`'s `i_type` masks to `imm & 0xfff`; `decode`
-   sign-extends it back via `sext(.., 12)`) — any hand-assembled guest's
+   sign-extends it back via `sext(.., 12)`). Since the 2026-09-12 audit
+   (ZM3) `encode` *asserts* every field width — an out-of-range I-/S-type
+   immediate, shift amount, branch or `jal` offset, or a `lui`/`auipc` with
+   low bits set, now panics at the choke point instead of being silently
+   truncated into wrong code. That catches the literal-constant case; it
+   does **not** catch the one below, which is about an offset that is in
+   range but applied to the wrong base: any hand-assembled guest's
    compile-time RAM offset outside `[-2048, 2047]` *from whatever value the
    base register holds* silently wraps, addressing the wrong cell, with no
    error at assembly, execution, or proving time (a wrapped write and its

@@ -12,13 +12,17 @@ use rand_zkvm::machine::{FriProfile, Machine, Tier};
 /// under the pre-fix code (`Tier::program_height() = cpu_height()`, since deleted).
 ///
 /// The tier this proves at is `Tier(14)`, not `Tier(10)` (whose `cpu_height` the program's
-/// length is checked against): the ~300 digest-row permutations this program's length costs
-/// need a `poseidon2_height` budget only `Tier(14)` (or higher) provides —
-/// `Tier::poseidon2_height`'s own scaling relative to `cpu_height` is a separate, pre-existing
-/// concern this fix does not touch (see the fix report). What this test isolates is exactly
-/// the bug this fix closes: the *program table's own height* — independently confirmed below
-/// via `traces.program.height()` — tracks the program's length, not the tier, so it is not the
-/// thing that would have forced a larger tier here.
+/// length is checked against): the program is 1 207 words, i.e. 302 digest-row permutations
+/// plus 1 indigest-row one — 303 permutation blocks, past `Tier(10).poseidon2_height()`'s 128
+/// (audit ZL4, 2026-09-12: the old wording's arithmetic was wrong; `Tier(12)`'s 512 would
+/// actually suffice, and 14 is chosen only for margin). `Tier::poseidon2_height`'s scaling
+/// relative to `cpu_height` is a separate concern — since the 2026-09-12 audit fix,
+/// `build_traces_salted` rejects a tier whose permutation budget the workload exceeds with a
+/// clean `ProveError::TooManyPoseidon2Permutations`, and the auto-tier pick
+/// (`Tier::for_workload`) climbs past it instead of hitting `poseidon2_trace`'s old capacity
+/// panic. What this test isolates is exactly the bug this fix closes: the *program table's own
+/// height* — independently confirmed below via `traces.program.height()` — tracks the program's
+/// length, not the tier, so it is not the thing that would have forced a larger tier here.
 #[test]
 fn a_program_much_longer_than_a_small_tiers_cpu_height_but_briefly_executed_proves() {
     use rand_zkvm::machine::build_traces_salted;
@@ -33,6 +37,7 @@ fn a_program_much_longer_than_a_small_tiers_cpu_height_but_briefly_executed_prov
         a.push(addi(0, 0, 0)); // a decodable no-op: x0 = x0 + 0
     }
     let p = a.assemble();
+    assert_eq!(p.len(), 1_207, "the permutation arithmetic in this test's doc comment");
     assert!(p.len() > Tier(10).cpu_height(), "program must exceed a small tier's cpu height to exercise the fix");
 
     let exec = rand_zkvm::emulator::execute(&p, &[], 1 << 20).unwrap();
@@ -360,4 +365,29 @@ fn compiled_keccak256_matches_the_host_in_one_permutation() {
         p.words.len(), exec.cycles(), proof.tier.0, proof.keccak_log_height, proof.mem_log_height,
         proof.to_bytes().len(), prove_time, t1.elapsed()
     );
+}
+
+/// Audit ZM2 (2026-09-12), a *completeness* regression: the memory table's host-side sort key
+/// packed `(space << 30) | addr` while the AIR recomputes `SPACE·2^30 + ADDR`. The two coincide
+/// only below `addr < 2^30` — and `POSEIDON2`'s derived addresses legitimately reach past it
+/// (`HASH_PTR < 2^30` is the AIR's bound, plus up to 4099 words). With `|`, an honest execution
+/// whose hash addresses straddle `2^30` sorted its rows into an order whose in-circuit keys
+/// *decrease* at the boundary, and the `dk` delta limbs then rejected the honest witness (and
+/// `(1, x)` / `(1, 2^30 + x)` collided into one key outright). Latent only because every
+/// current guest uses low memory; the hash syscall is exactly the feature that can reach there.
+///
+/// `ptr = 2^30 - 4` with `n = 4`: the absorb row reads `2^30-4 .. 2^30-1`, and the two
+/// write-back rows write `2^30-4 .. 2^30+3` — straddling the boundary in one honest call.
+#[test]
+fn a_hash_call_whose_addresses_straddle_2_to_the_30_proves() {
+    let m = Machine::new(FriProfile::Test);
+    let mut a = Assembler::new(0);
+    a.extend(call_poseidon2(((1u32 << 30) - 4) as i32, 4));
+    a.extend(li(5, 7));
+    a.extend(write_output(0, 5));
+    a.extend(halt());
+    let p = a.assemble();
+    let (proof, exec) = m.prove(&p, &[], None).unwrap();
+    assert_eq!(exec.outputs[0], 7);
+    m.verify(&p.digest(), &proof).unwrap();
 }

@@ -85,6 +85,13 @@ impl Execution { pub fn cycles(&self) -> usize { self.events.len() } }
 pub enum ExecError {
     OutOfCycles(usize), BadPc(u32), Misaligned(u32), BadSyscall(u32), OutputSlot(u32), DoubleWrite(u32),
     InputIndex(u32), Poseidon2WordCount(u32),
+    /// Audit ZM4 (2026-09-12): a `POSEIDON2` pointer at or above `2^30`. The cpu AIR bounds
+    /// `HASH_PTR < 2^30` (the ecall row's `HP0..3`/`HP3_HI` decomposition — `MEM_ADDR`'s own
+    /// `MA0..3`/`MA3_HI` bound, checked once and carried across the row-group). A pointer at or
+    /// above that emulates fine but can never satisfy the AIR, so by this module's own doctrine
+    /// (the emulator is the reference semantics) the *emulator* must reject it — the same
+    /// treatment `KeccakPtrOutOfRange` gives the keccak syscall's own tighter bound.
+    Poseidon2Ptr(u32),
     /// M4.2 (controller ruling 2): a `KECCAK` pointer past `KECCAK_PTR_LIMIT`. The cpu AIR
     /// bounds a `SYS_KECCAK` row's pointer to `ptr < 0x3000_0000` (`HP3_HI ∈ {0,1,2}`, the
     /// tightened top-nibble rule) so that the chip's own `PTR + w` address arithmetic can
@@ -177,6 +184,12 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
                 if num == SYS_POSEIDON2 {
                     let (ptr, n) = (arg0, arg1);
                     if n > POSEIDON2_MAX_WORDS { return Err(ExecError::Poseidon2WordCount(n)); }
+                    // Audit ZM4 (2026-09-12): the AIR's `HASH_PTR < 2^30` bound, enforced here
+                    // too (see `ExecError::Poseidon2Ptr`). With `n <= POSEIDON2_MAX_WORDS` every
+                    // derived address (`ptr + 4·idx + k`, `ptr + k + 4`) then stays
+                    // `< 2^30 + 4099`, so the address arithmetic below never wraps and the
+                    // memory table's `(space << 30) + addr` key stays injective.
+                    if ptr >= 1 << 30 { return Err(ExecError::Poseidon2Ptr(ptr)); }
                     // ecall row: HASH_LEFT = n, HASH_IDX = 0, HS0..7 = 0 — all pinned by the AIR
                     // directly from HASH_N/the zero sentinel, so `cpu_trace` only needs `ptr`/`n`.
                     events.push(CycleEvent {

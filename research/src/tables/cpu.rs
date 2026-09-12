@@ -91,7 +91,12 @@ pub mod col {
     /// active on a real absorb row).
     pub const ACT0: usize = HV0 + 4;                                 // 96..99
     /// 2: byte limbs of this row's `HASH_LEFT` (absorb rows only) — bounds it to 16 bits,
-    /// comfortably more than `POSEIDON2_MAX_WORDS = 4096` needs.
+    /// comfortably more than `POSEIDON2_MAX_WORDS = 4096` needs. Note this is also the
+    /// effective cap on a provable *program* (and private-input vector): the first digest row's
+    /// `HASH_LEFT` is the program's word count, so a `len` (likewise `n_in`) over 65535 can
+    /// never satisfy the AIR — rejected host-side (audit ZH2, 2026-09-12:
+    /// `machine::ProveError::ProgramTooLong`/`InputTooLong`; `Program::from_flat_binary` caps at
+    /// the same bound).
     pub const LEFT0: usize = ACT0 + 4;                               // 100,101
     /// 2: byte limbs of this row's `HASH_IDX` (absorb rows only).
     pub const IDX0: usize = LEFT0 + 2;                               // 102,103
@@ -207,7 +212,17 @@ pub mod col {
     ];
 }
 pub mod pv {
-    pub const PC_ENTRY: usize = 0; pub const TIER: usize = 1; pub const OUT0: usize = 2;
+    pub const PC_ENTRY: usize = 0;
+    /// Audit ZL1 (2026-09-12), **known and not fixed**: `TIER` is never constrained by the AIR.
+    /// Not exploitable — `Proof::tier` is independently checked against `TIERS` and against the
+    /// batch's `degree_bits` (`machine::check_declared_heights`, `Machine::verify`), and
+    /// `Machine::verify` also checks this public value against `proof.tier` — but it is a dead
+    /// public value as far as the *circuit* is concerned, and any future consumer assuming the
+    /// circuit binds it would be mistaken. Left as-is: removing it shifts the whole `pv` layout,
+    /// a breaking change for the vendoring node, so it is flagged for the next constraint-set
+    /// bump rather than taken here.
+    pub const TIER: usize = 1;
+    pub const OUT0: usize = 2;
     /// M3.4: the in-circuit program digest, pinned by the last digest row. Replaces the
     /// verifier-held `Program` — `Machine::verify` now checks `pv[HC0..HC7] == hc` instead.
     pub const HC0: usize = OUT0 + crate::isa::NUM_OUTPUTS;

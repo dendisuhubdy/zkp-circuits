@@ -32,9 +32,14 @@ fn main() {
     println!("inputs {:?} → outputs {:?} in {} cycles ({:?})", inputs, &exec.outputs[..2], exec.cycles(), t.elapsed());
 
     hr("Part 4 · Arithmetize: eight tables on thirteen buses (nine with a keccak table)");
-    let tier = Tier::for_cycles(exec.cycles()).unwrap();
+    // M3.4/M4.1: the cpu table's two digest-row prefixes (program `hc` and the salted `H_IN`)
+    // count as cycles too — and the auto-tier pick fits the Poseidon2 permutation budget as
+    // well as the cycle budget (audit ZH1, 2026-09-12).
+    let digest_rows = program.digest_rows() + rand_zkvm::hash::input_digest_row_count(inputs.len());
+    let cycles = exec.cycles() + digest_rows;
+    let tier = Tier::for_workload(cycles, digest_rows).unwrap();
     let traces = build_traces(&program, &inputs, &exec, tier).unwrap();
-    println!("tier {} → cpu 2^{} rows (actual {} cycles), padding hides the rest", tier.0, tier.0, exec.cycles());
+    println!("tier {} → cpu 2^{} rows (actual {cycles} cycles incl. {digest_rows} digest rows), padding hides the rest", tier.0, tier.0);
     println!("{:<10}{:>10}{:>8}   {}", "table", "rows", "cols", "role");
     for (name, h, w, role) in [
         ("program", traces.program.height(), program::col::WIDTH, "witness ROM + in-circuit decoder; hc is proved, not preprocessed"),
@@ -88,7 +93,14 @@ fn main() {
     hr("Part 7 · Zero knowledge and tier padding");
     let (p1, _) = m.prove(&program, &inputs, None).unwrap();
     let (p2, _) = m.prove(&program, &[1000, 0, 0, 0], None).unwrap();
-    println!("same output, different private inputs: public values equal = {}, proof bytes equal = {}", p1.public_values == p2.public_values, p1.to_bytes() == p2.to_bytes());
+    println!("same output, different private inputs: public values differ only in the salted H_IN = {}, proof bytes equal = {}", {
+        // M4.1: `pv::IN0..7` is a *salted*, hiding commitment (fresh OS entropy per proof), so
+        // the two vectors are no longer equal — the ZK story is that the only words that may
+        // differ are exactly the eight H_IN words (and these two input vectors genuinely
+        // produce different H_INs).
+        let diff: Vec<usize> = (0..p1.public_values.len()).filter(|&i| p1.public_values[i] != p2.public_values[i]).collect();
+        diff == (cpu::pv::IN0..cpu::pv::IN0 + 8).collect::<Vec<_>>()
+    }, p1.to_bytes() == p2.to_bytes());
     let (p3, _) = m.prove(&program, &inputs, Some(Tier(12))).unwrap();
     println!("same run at tier 12: {} bytes (tier 10: {} bytes) — size reveals the tier, never the cycle count", p3.size(), p1.size());
 

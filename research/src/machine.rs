@@ -200,6 +200,21 @@ pub const MAX_MEM_LOG_HEIGHT: u8 = 24;
 pub struct Tier(pub usize);
 impl Tier {
     pub fn for_cycles(cycles: usize) -> Option<Tier> { TIERS.iter().copied().map(Tier).find(|t| cycles <= t.max_cycles()) }
+    /// Audit ZH1 (2026-09-12): the auto-tier pick must fit the *Poseidon2 permutation* budget
+    /// too, not just the cycle budget. Since M3.4/M4.1 every digest, indigest and absorb row is
+    /// one cycle *and* one permutation, so up to ~`2^t` permutations fit the `2^t - 1` cycle
+    /// budget while the poseidon2 table holds only `2^(t+2) / BLOCK = 2^(t-3)` blocks — a
+    /// cycles-only pick walked workloads in that band (e.g. a ~600-word barely-executed program
+    /// at tier 10: 151 permutations against 128 blocks) straight into `poseidon2_trace`'s
+    /// capacity `assert!` instead of climbing to the next tier. `build_traces_salted` re-checks
+    /// both budgets regardless of how the tier was chosen.
+    ///
+    /// The keccak table needs no term here: one permutation is one `SYS_KECCAK` *cycle*, so the
+    /// cycle budget already bounds it (`Tier::max_keccak_log_height`'s own argument).
+    pub fn for_workload(cycles: usize, permutations: usize) -> Option<Tier> {
+        TIERS.iter().copied().map(Tier)
+            .find(|t| cycles <= t.max_cycles() && permutations * crate::tables::poseidon2::BLOCK <= t.poseidon2_height())
+    }
     pub fn cpu_height(self) -> usize { 1 << self.0 }
     pub fn alu_height(self) -> usize { 1 << (self.0 + 1) }
     /// The memory table's *floor*, `2^(t+2)`: four accesses per cycle (the cpu row's four
@@ -404,6 +419,29 @@ pub enum ProveError {
     /// `MAX_MEM_LOG_HEIGHT` for the arithmetic). It is still an honest execution the prover
     /// declines, not an unsound one it accepts.
     TooManyMemoryAccesses { accesses: usize, log_height: u8 },
+    /// Audit ZH1 (2026-09-12): the *Poseidon2* table's analogue — this workload's permutation
+    /// count (program-digest rows + input-digest rows + hash absorb rows; each is one cycle
+    /// *and* one permutation) exceeds the tier's `2^(t-3)` blocks, which the cycle budget alone
+    /// (`2^t - 1`) does not bound. An error, not `poseidon2_trace`'s capacity `assert!` panic.
+    ///
+    /// Named apart from `TooManyPermutations` deliberately: that variant is M4.2's, and means
+    /// *keccak* permutations against the declared keccak height. Two different tables, two
+    /// different budgets, two different variants.
+    TooManyPoseidon2Permutations { perms: usize, tier: Tier },
+    /// Audit ZH2 (2026-09-12): the program-digest rows' `HASH_LEFT` is a 16-bit value in the
+    /// AIR (`tables::cpu`'s `LEFT0..1` byte limbs), so a program longer than 65535 words can
+    /// never satisfy it at any tier — reject here instead of failing deep inside `prove_batch`
+    /// (a debug `CONSTRAINT_PANIC`, or an unverifiable proof in release). Distinct from
+    /// `ProgramTooLarge`, which is about the program *table*'s declared shape.
+    ProgramTooLong { len: usize },
+    /// Audit ZH2 (2026-09-12): the same 16-bit `HASH_LEFT` bound caps the private-input vector
+    /// (H_IN's indigest rows) at 65535 words.
+    InputTooLong { len: usize },
+    /// Audit ZH3 (2026-09-12): an explicit `Some(tier)` outside `TIERS` — rejected before
+    /// `Tier::cpu_height`/`alu_height`/`mem_height` shift by it (a shift-overflow panic in debug
+    /// builds, a masked shift plus an abort-scale allocation in release). The prove-side mirror
+    /// of `check_declared_heights`' own `TIERS.contains` guard on the untrusted-proof side.
+    BadTier(usize),
 }
 #[derive(Debug)]
 pub enum VerifyError {
@@ -526,6 +564,23 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], salt: [u32; 4], ex
     let input_digest_rows = crate::hash::input_digest_row_count(inputs.len());
     let cycles = exec.cycles() + program.digest_rows() + input_digest_rows;
     if cycles > tier.max_cycles() { return Err(ProveError::TooManyCycles { cycles, tier }); }
+    // Audit fixes (2026-09-12): reject workloads the AIR can never satisfy *here*, where a clean
+    // error is still possible, rather than deep inside `prove_batch`.
+    //
+    // ZH2: `HASH_LEFT` is a 16-bit value on every digest/indigest row (`tables::cpu`'s
+    // `LEFT0..1` byte limbs) and the *first* such row carries the program's word count (resp.
+    // `n_in`), so a program or input vector longer than 65535 words is unprovable at any tier.
+    if program.len() > u16::MAX as usize { return Err(ProveError::ProgramTooLong { len: program.len() }); }
+    if inputs.len() > u16::MAX as usize { return Err(ProveError::InputTooLong { len: inputs.len() }); }
+    // ZH1: the poseidon2 table holds `2^(t-3)` permutation blocks against up to ~`2^t`
+    // permutation-emitting rows under the cycle budget alone, so cycles fitting says nothing
+    // about permutations fitting. Counted the same way the trace builder below counts them:
+    // one per digest row, one per indigest row, one per absorb row.
+    let absorb_rows = exec.events.iter().filter(|e| matches!(e.hash_row, Some(crate::emulator::HashRow::Absorb { .. }))).count();
+    let permutations = program.digest_rows() + input_digest_rows + absorb_rows;
+    if permutations * crate::tables::poseidon2::BLOCK > tier.poseidon2_height() {
+        return Err(ProveError::TooManyPoseidon2Permutations { perms: permutations, tier });
+    }
     // M3.4 (fix): the program table's height is proof-declared, not tier-derived — see
     // `tables::program::program_log_height`'s doc comment.
     let program_log_height = program::program_log_height(program.len());
@@ -866,10 +921,21 @@ impl Machine {
         // can never be proved, so `OutOfCycles` and `TooManyCycles` agree on the limit.
         let exec = execute(program, inputs, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
         let tier = match tier {
-            Some(t) => t,
+            // Audit ZH3 (2026-09-12): an out-of-`TIERS` tier is an error here, not a
+            // shift-overflow panic (debug) or a masked shift plus an abort-scale allocation
+            // (release) inside `Tier::cpu_height` — the mirror of `check_declared_heights`' own
+            // `TIERS.contains` guard on the untrusted-proof side.
+            Some(t) if TIERS.contains(&t.0) => t,
+            Some(t) => return Err(ProveError::BadTier(t.0)),
             None => {
                 let cycles = exec.cycles() + program.digest_rows() + crate::hash::input_digest_row_count(inputs.len());
-                Tier::for_cycles(cycles).ok_or(ProveError::NoTier(cycles))?
+                // Audit ZH1 (2026-09-12): fit the Poseidon2 permutation budget too — the cycle
+                // budget alone does not imply it (`2^(t-3)` blocks against up to ~`2^t`
+                // permutation-emitting rows), so the old cycles-only pick could walk straight
+                // into `poseidon2_trace`'s capacity assert.
+                let absorb_rows = exec.events.iter().filter(|e| matches!(e.hash_row, Some(crate::emulator::HashRow::Absorb { .. }))).count();
+                let permutations = program.digest_rows() + crate::hash::input_digest_row_count(inputs.len()) + absorb_rows;
+                Tier::for_workload(cycles, permutations).ok_or(ProveError::NoTier(cycles))?
             }
         };
         let traces = build_traces_salted(program, inputs, salt, &exec, tier)?;
@@ -978,10 +1044,21 @@ impl Machine {
         let salt: [u32; 4] = rand::rng().random();
         let exec = execute(program, inputs, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
         let tier = match tier {
-            Some(t) => t,
+            // Audit ZH3 (2026-09-12): an out-of-`TIERS` tier is an error here, not a
+            // shift-overflow panic (debug) or a masked shift plus an abort-scale allocation
+            // (release) inside `Tier::cpu_height` — the mirror of `check_declared_heights`' own
+            // `TIERS.contains` guard on the untrusted-proof side.
+            Some(t) if TIERS.contains(&t.0) => t,
+            Some(t) => return Err(ProveError::BadTier(t.0)),
             None => {
                 let cycles = exec.cycles() + program.digest_rows() + crate::hash::input_digest_row_count(inputs.len());
-                Tier::for_cycles(cycles).ok_or(ProveError::NoTier(cycles))?
+                // Audit ZH1 (2026-09-12): fit the Poseidon2 permutation budget too — the cycle
+                // budget alone does not imply it (`2^(t-3)` blocks against up to ~`2^t`
+                // permutation-emitting rows), so the old cycles-only pick could walk straight
+                // into `poseidon2_trace`'s capacity assert.
+                let absorb_rows = exec.events.iter().filter(|e| matches!(e.hash_row, Some(crate::emulator::HashRow::Absorb { .. }))).count();
+                let permutations = program.digest_rows() + crate::hash::input_digest_row_count(inputs.len()) + absorb_rows;
+                Tier::for_workload(cycles, permutations).ok_or(ProveError::NoTier(cycles))?
             }
         };
         let traces = build_traces_salted(program, inputs, salt, &exec, tier)?;

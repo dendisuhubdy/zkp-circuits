@@ -68,7 +68,8 @@ where
     }
 }
 
-/// M3.4: `clk_offset` is `Program::digest_rows()` — the cpu table's digest-row prefix shifts
+/// M3.4: `clk_offset` is `Program::digest_rows() + input_digest_rows` (M4.1: the cpu table's
+/// *two* digest-row prefixes) — the cpu table's digest-row prefixes shift
 /// every ordinary event's own `CLK` forward by that many rows (`tables::cpu::cpu_trace`), and
 /// the `MEMORY` bus timestamps (`ts = 4*CLK + slot`) this table sends must use that same
 /// shifted `CLK` or the two sides' `(space, addr, ts, value, is_write)` tuples stop matching.
@@ -81,7 +82,20 @@ pub fn memory_trace(events: &[CycleEvent], clk_offset: u32, height: usize, count
         // this table records *every* access, whoever sends it, or the two sides of the `MEMORY`
         // bus stop balancing and a permuted word could be read back as something else.
         for a in e.accesses.iter().chain(e.keccak_accesses.iter()) {
-            rows.push((((a.space as u64) << KEY_SHIFT) | a.addr as u64, a.ts(clk_offset + e.clk) as u64, a.space, a.addr, a.value, a.is_write));
+            // Audit ZM2 (2026-09-12): the sort key must be computed exactly the way the AIR
+            // recomputes it — `SPACE·2^30 + ADDR` (`eval`'s `key_l`/`key_n`), i.e. `+`, not
+            // `|`. With `|`, any RAM address `>= 2^30` (reachable through `POSEIDON2`
+            // absorb/write-back addresses — `HASH_PTR < 2^30` is the AIR's bound, plus at most
+            // 4099 derived words — and through a `KECCAK` state at `ptr <= KECCAK_PTR_LIMIT`
+            // plus 49) aliases the address with its bit 30 cleared: rows sort into an order
+            // whose in-circuit keys *decrease* across the boundary (the `dk` delta limbs then
+            // reject an honest trace), and `(1, x)` / `(1, 2^30 + x)` collide into one key
+            // entirely. A completeness bug, latent only because every current guest uses low
+            // memory. `+` is injective and monotone over every provable trace: register
+            // addresses are `< 32` and RAM addresses stay `< 2^31` (ordinary word addresses are
+            // `alu_out >> 2 < 2^30`; hash-derived ones `< 2^30 + 4099`; keccak-derived ones
+            // `< 0x3000_0000 + 50`).
+            rows.push((((a.space as u64) << KEY_SHIFT) + a.addr as u64, a.ts(clk_offset + e.clk) as u64, a.space, a.addr, a.value, a.is_write));
         }
     }
     rows.sort_by_key(|r| (r.0, r.1));

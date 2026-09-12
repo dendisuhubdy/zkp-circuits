@@ -2061,3 +2061,109 @@ fn a_keccak_pointer_with_hp3_hi_equal_to_three_is_rejected() {
     let (m, p, t) = keccak_ptr_traces(0x3000_0000);
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
+
+// ---------------------------------------------------------------------------
+// Audit (2026-09-12) prove-side guards and coverage gaps: ZH1, ZH2, ZH3, and the input
+// table's own AIR invariants.
+
+/// Audit ZH3: the prove-side mirror of `out_of_range_tier_is_an_error_not_a_panic` — an
+/// explicit tier outside `TIERS` used to reach `Tier::cpu_height`'s `1 << tier` with no guard
+/// (a shift-overflow panic in debug, a masked shift plus an abort-scale allocation in release).
+/// Now a clean `ProveError::BadTier` before any shift happens.
+#[test]
+fn an_out_of_tiers_tier_is_an_error_on_the_prove_side_too() {
+    use rand_zkvm::machine::ProveError;
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    assert!(matches!(m.prove(&p, &[], Some(Tier(99))), Err(ProveError::BadTier(99))));
+    assert!(matches!(m.prove(&p, &[], Some(Tier(11))), Err(ProveError::BadTier(11))));
+}
+
+/// Audit ZH1: the poseidon2 table holds `2^(t-3)` permutation blocks against up to ~`2^t`
+/// permutation-emitting rows under the cycle budget alone — so a workload can fit the cycle
+/// budget while overflowing the permutation budget (which used to be `poseidon2_trace`'s
+/// `assert!` panic, with the auto-tier pick walking straight into it). Now a clean
+/// `ProveError::TooManyPoseidon2Permutations`, and `Tier::for_workload` climbs to a tier whose
+/// permutation budget fits.
+#[test]
+fn a_workload_exceeding_the_poseidon2_budget_is_a_clean_error() {
+    use rand_zkvm::machine::ProveError;
+    let m = Machine::new(FriProfile::Test);
+    let mut a = Assembler::new(0);
+    a.extend(li(5, 1));
+    a.extend(write_output(0, 5));
+    a.extend(halt());
+    for _ in 0..592 { a.push(addi(0, 0, 0)); }
+    let p = a.assemble(); // 599 words -> 150 digest-row permutations + 1 indigest > tier 10's 128 blocks
+    assert_eq!(p.len(), 599);
+    let exec = execute(&p, &[], 10_000).unwrap();
+    assert!(exec.cycles() < 20, "only the leading few instructions ever execute");
+    assert!(
+        matches!(build_traces_salted(&p, &[], [0u32; 4], &exec, Tier(10)), Err(ProveError::TooManyPoseidon2Permutations { .. })),
+        "151 permutations cannot fit tier 10's 128 poseidon2 blocks"
+    );
+    let (proof, _) = m.prove(&p, &[], None).expect("auto-tier must climb past the permutation wall, not panic");
+    assert_eq!(proof.tier, Tier(12));
+    m.verify(&p.digest(), &proof).unwrap();
+}
+
+/// Audit ZH2: the digest rows' 16-bit `HASH_LEFT` (`LEFT0..1`) caps a provable program (and
+/// private-input vector) at 65535 words — enforced host-side now, not as an opaque constraint
+/// failure deep inside `prove_batch`.
+#[test]
+fn a_program_or_input_longer_than_the_16_bit_hash_left_cap_is_a_clean_error() {
+    use rand_zkvm::machine::ProveError;
+    let m = Machine::new(FriProfile::Test);
+    let mut a = Assembler::new(0);
+    a.extend(halt());
+    let mut words = a.assemble().words;
+    words.resize(u16::MAX as usize + 1, 0x0000_0013); // trailing `addi x0, x0, 0`s, never executed
+    let p = rand_zkvm::isa::Program::new(0, words);
+    assert!(matches!(m.prove(&p, &[], None), Err(ProveError::ProgramTooLong { .. })));
+    let small = guests::fib(10);
+    let inputs = vec![0u32; u16::MAX as usize + 1];
+    assert!(matches!(m.prove(&small, &inputs, None), Err(ProveError::InputTooLong { .. })));
+}
+
+/// Audit coverage: the verify-side declared-height guards for the program and input tables
+/// (`VerifyError::ProgramHeight`/`InputHeight`) — the twins of
+/// `out_of_range_tier_is_an_error_not_a_panic`, rejected before they can size a table
+/// (`1 << log_height`). The keccak and memory heights already have their own tests above.
+#[test]
+fn out_of_range_declared_program_and_input_heights_are_errors_not_panics() {
+    use rand_zkvm::machine::VerifyError;
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    proof.program_log_height = program::MAX_LOG_HEIGHT + 1;
+    assert!(matches!(m.verify(&p.digest(), &proof), Err(VerifyError::ProgramHeight)));
+    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    proof.input_log_height = rand_zkvm::tables::input::MAX_LOG_HEIGHT + 1;
+    assert!(matches!(m.verify(&p.digest(), &proof), Err(VerifyError::InputHeight)));
+}
+
+/// Audit coverage: the input table's own AIR invariants. A hole in the real-row prefix (a row
+/// drops `IS_REAL` while a later row stays real) trips the `(1 − IS_REAL)·n(IS_REAL) = 0`
+/// prefix rule directly — and, independently, the `INPUT_DIGEST` set-equality it backstops
+/// (the "hole" index's supply vanishes while the digest still demands it).
+#[test]
+fn a_hole_in_the_input_tables_real_prefix_is_rejected() {
+    use rand_zkvm::tables::input;
+    let (m, p, mut t) = setup_with_inputs(&[400, 250, 300, 75]);
+    let iw = input::col::WIDTH;
+    assert_eq!(t.input.values[2 * iw + input::col::IS_REAL], F::ONE, "row 2 is real, so clearing row 1 leaves a hole");
+    t.input.values[iw + input::col::IS_REAL] = F::ZERO;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// Audit coverage: `IDX` is the arithmetic sequence 0, 1, 2, … — bumping one row's claimed
+/// index trips the `n(IDX) − v(IDX) − 1 = 0` chain directly (and would otherwise mis-key every
+/// `INPUT_DIGEST`/`INPUT_READ` message at that row).
+#[test]
+fn a_skipped_input_table_index_is_rejected() {
+    use rand_zkvm::tables::input;
+    let (m, p, mut t) = setup_with_inputs(&[400, 250, 300, 75]);
+    let iw = input::col::WIDTH;
+    t.input.values[iw + input::col::IDX] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
