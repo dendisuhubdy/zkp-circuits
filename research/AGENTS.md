@@ -12,12 +12,12 @@ are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (202 tests: 201 pass, 1 ignored).
-  Everything uses `FriProfile::Test`; measured on the M4.2 branch,
-  `tests/bundle.rs` takes ~236 s (six proofs: four guest-level, plus one
+- `cargo test` — the whole suite (205 tests: 204 pass, 1 ignored).
+  Everything uses `FriProfile::Test`; measured in one run at the end of M4.2,
+  `tests/bundle.rs` takes ~212 s (six proofs: four guest-level, plus one
   shared by every ledger-level test and one for the 1-real-1-dummy shape),
-  `tests/viewing.rs` ~202 s, `tests/e2e.rs` ~98 s, `tests/cheating.rs`
-  ~43 s, `tests/zk.rs` ~18 s, `tests/tables.rs` ~10 s and
+  `tests/viewing.rs` ~204 s, `tests/e2e.rs` ~98 s, `tests/cheating.rs`
+  ~51 s, `tests/zk.rs` ~19 s, `tests/tables.rs` ~10 s and
   `tests/keccak.rs` ~1 s (its chip-alone harness proves a 128-row table, so
   it is cheap despite 2 612 columns). All green is the bar before any
   commit. A proof that *does* call `KECCAK` is markedly larger than a

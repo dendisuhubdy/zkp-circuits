@@ -1620,6 +1620,89 @@ fn a_memory_height_below_the_tier_floor_is_rejected_before_any_verifier_key_is_b
     assert_eq!(verifier.cached_keys(), 0);
 }
 
+/// M4.2 (Task 5 review): the tier bound is not the *only* keccak ceiling, because it is not a
+/// cheap one at the top tier. `Tier(20).max_keccak_log_height()` is 25, so a tier-20 header
+/// declaring `klh = 25` passes that relation and would have the verifier build a 2^25-row,
+/// 99-column preprocessed keccak trace before any later check could reject the proof. The flat
+/// `tables::keccak::MAX_LOG_HEIGHT = 20` is what refuses it, as `VerifyError::KeccakHeight`.
+///
+/// Checked through `machine::check_declared_heights` rather than a real proof on purpose: the
+/// forgery only *bites* at tier 20, and a tier-20 proof is 2^20 cpu rows — far outside what this
+/// suite can afford to prove — while the declared shape is exactly what the check reads. The
+/// test below pairs this with the `cached_keys() == 0` evidence on a proof the suite can afford.
+#[test]
+fn a_keccak_height_past_the_absolute_cap_is_rejected_where_the_tier_bound_would_admit_it() {
+    use rand_zkvm::machine::{check_declared_heights, VerifyError};
+    let (plh, ilh) = (program::MIN_LOG_HEIGHT, rand_zkvm::tables::input::MIN_LOG_HEIGHT);
+    let mlh = Tier(20).min_mem_log_height();
+    // The tier relation alone admits everything up to 25 here.
+    assert_eq!(Tier(20).max_keccak_log_height(), 25);
+    assert_eq!(keccak::MAX_LOG_HEIGHT, 20);
+    for klh in [21, 24, 25, u8::MAX] {
+        assert!(
+            matches!(check_declared_heights(Tier(20), plh, ilh, klh, mlh), Err(VerifyError::KeccakHeight)),
+            "klh = {klh} is past the absolute cap and must be refused by the range check",
+        );
+    }
+    // The cap itself, and everything under it, still passes the declared-shape checks at a tier
+    // whose own bound is looser — this is a ceiling, not a narrowing of what tier 20 may declare.
+    for klh in [0, keccak::MIN_LOG_HEIGHT, 19, keccak::MAX_LOG_HEIGHT] {
+        assert!(check_declared_heights(Tier(20), plh, ilh, klh, mlh).is_ok(), "klh = {klh} is legal at tier 20");
+    }
+    // And where the tier is the tighter of the two, the tier variant is still what a forgery
+    // earns: at tier 10 anything in `16..=20` is flat-legal but past `t + 5`.
+    assert!(matches!(
+        check_declared_heights(Tier(10), plh, ilh, 16, Tier(10).min_mem_log_height()),
+        Err(VerifyError::KeccakHeightExceedsTier)
+    ));
+    assert!(matches!(
+        check_declared_heights(Tier(10), plh, ilh, 21, Tier(10).min_mem_log_height()),
+        Err(VerifyError::KeccakHeight),
+    ), "past both bounds is reported by the range check, which runs first");
+}
+
+/// The same cap on a real proof, for the half `check_declared_heights` alone cannot show: that it
+/// runs before the verifier key is built. A tier-10 proof forged to `klh = 25` (`degree_bits`
+/// edited to match, which is what the attacker would have to do to reach the equality check)
+/// is refused for a comparison's worth of work, not a preprocessed-commitment recomputation.
+#[test]
+fn a_keccak_height_past_the_absolute_cap_is_rejected_before_any_verifier_key_is_built() {
+    use rand_zkvm::machine::VerifyError;
+    let prover = Machine::new(FriProfile::Test);
+    let p = guests::keccak_demo(b"hi");
+    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    assert_eq!(proof.keccak_log_height, 5);
+    proof.keccak_log_height = 25;
+    let last = proof.batch.degree_bits.len() - 1;
+    proof.batch.degree_bits[last] = 25 + 1;
+    let verifier = Machine::new(FriProfile::Test);
+    assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::KeccakHeight)));
+    assert_eq!(verifier.cached_keys(), 0, "the range check must precede the verifier key");
+}
+
+/// The memory table's upper bound (controller ruling 1), the half the lower-bound test above
+/// does not cover: `MAX_MEM_LOG_HEIGHT` is the defensive ceiling on an untrusted shift amount,
+/// and a declaration past it is refused before anything is sized from it.
+#[test]
+fn a_memory_height_past_the_ceiling_is_rejected_before_any_verifier_key_is_built() {
+    use rand_zkvm::machine::{check_declared_heights, VerifyError, MAX_MEM_LOG_HEIGHT};
+    let prover = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    assert_eq!(proof.mem_log_height, 12);
+    assert_eq!(MAX_MEM_LOG_HEIGHT, 24);
+    proof.mem_log_height = 25;
+    proof.batch.degree_bits[2] = 25 + 1; // memory is instance 2 in `chips()` order
+    let verifier = Machine::new(FriProfile::Test);
+    assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::MemoryHeight)));
+    assert_eq!(verifier.cached_keys(), 0, "the range check must precede the verifier key");
+    // The same bound at a tier where it is reachable in principle (tier 20's floor is 22), so
+    // the ceiling is doing its own work rather than standing behind the tier floor.
+    let (plh, ilh, klh) = (program::MIN_LOG_HEIGHT, rand_zkvm::tables::input::MIN_LOG_HEIGHT, 0);
+    assert!(check_declared_heights(Tier(20), plh, ilh, klh, 24).is_ok());
+    assert!(matches!(check_declared_heights(Tier(20), plh, ilh, klh, 25), Err(VerifyError::MemoryHeight)));
+}
+
 // ── M4.2 controller ruling 3: the cubic pointer rule on a SYS_KECCAK cpu row ──
 //
 // `SYS_KECCAK · HP3_HI · (HP3_HI − 1) · (HP3_HI − 2) = 0` (`tables::cpu`'s eval) is the rule

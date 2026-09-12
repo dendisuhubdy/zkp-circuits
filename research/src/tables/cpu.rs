@@ -649,12 +649,12 @@ where
             b.assert_zero(v(SYS_KECCAK) * v(HASH_LEFT));
             b.assert_zero(v(SYS_KECCAK) * v(HASH_IDX));
             for i in 0..8 { b.assert_zero(v(SYS_KECCAK) * v(HS0 + i)); }
-            // Controller ruling 2: the `AND4[HP3_HI, 0xC, 0]` lookup above already forces
-            // `HP3_HI < 4`, i.e. `ptr < 2^30`. A keccak row needs `ptr + 49 < 2^30` (the chip
-            // addresses `PTR .. PTR+49`), so tighten the top nibble to `{0, 1, 2}`: then
-            // `ptr <= 0x2fff_ffff` and `ptr + 49 < 2^30` with room to spare. Degree 4 on a
-            // selector-gated product of one column — well under this table's degree-8 ceiling,
-            // which comes from the packed lookups, not from row logic.
+            // Controller ruling 3 (the cubic pointer rule): the `AND4[HP3_HI, 0xC, 0]` lookup
+            // above already forces `HP3_HI < 4`, i.e. `ptr < 2^30`. A keccak row needs
+            // `ptr + 49 < 2^30` (the chip addresses `PTR .. PTR+49`), so tighten the top
+            // nibble to `{0, 1, 2}`: then `ptr <= 0x2fff_ffff` and `ptr + 49 < 2^30` with room
+            // to spare. Degree 4 on a selector-gated product of one column — well under this
+            // table's degree-8 ceiling, which comes from the packed lookups, not row logic.
             let hi = v(HP3_HI);
             b.assert_zero(
                 v(SYS_KECCAK) * hi.clone() * (hi.clone() - one.clone()) * (hi - AB::Expr::TWO),

@@ -221,13 +221,19 @@ impl Tier {
     /// M4.2 (controller ruling 2): the largest `keccak_log_height` this tier can honestly
     /// need. One permutation is one `SYS_KECCAK` cpu row, i.e. one cycle, and a tier holds at
     /// most `2^t` cycles; one permutation occupies one `BLOCK` (`2^MIN_LOG_HEIGHT`) keccak
-    /// rows. So `32 · n_perms ≤ 2^(t+5)` and `klh ≤ t + 5` — the single ceiling both
-    /// `build_traces_salted` (as `ProveError::TooManyPermutations`) and `verify` (as
-    /// `VerifyError::KeccakHeightExceedsTier`) enforce. It replaces the flat
-    /// `tables::keccak::MAX_LOG_HEIGHT` the first cut carried: a tier-independent sanity
-    /// ceiling is both looser than this one at small tiers (it let a tier-10 proof declare a
-    /// 2^20-row keccak table, 32 768 permutation slots for at most 1 023 possible calls) and
-    /// tighter at large ones, i.e. two ceilings that disagree about which is the real bound.
+    /// rows. So `32 · n_perms ≤ 2^(t+5)` and `klh ≤ t + 5` — the *honest-shape* ceiling
+    /// `build_traces_salted` (as `ProveError::TooManyPermutations`) and
+    /// `check_declared_heights` (as `VerifyError::KeccakHeightExceedsTier`) enforce. It is the
+    /// tighter of the two bounds at every tier but the largest: at tier 10 it admits 15 where
+    /// the flat `tables::keccak::MAX_LOG_HEIGHT` admits 20 (32 768 permutation slots for at
+    /// most 1 023 possible calls).
+    ///
+    /// M4.2 (Task 5 review): it is *not* the only ceiling. At tier 20 this permits `klh = 25`,
+    /// a 2^25-row preprocessed keccak trace the verifier would build before any later check
+    /// could reject the proof, so the flat `tables::keccak::MAX_LOG_HEIGHT = 20` is enforced
+    /// alongside it and the effective bound is `min(t + 5, MAX_LOG_HEIGHT)`. The two are not
+    /// rival answers to one question: this one says what a tier can honestly *need*, the flat
+    /// one what an untrusted `u8` may ever *cost* — see `tables::keccak::MAX_LOG_HEIGHT`.
     pub fn max_keccak_log_height(self) -> u8 { (self.0 + crate::tables::keccak::MIN_LOG_HEIGHT as usize) as u8 }
     /// One padding row is always kept.
     pub fn max_cycles(self) -> usize { self.cpu_height() - 1 }
@@ -385,8 +391,9 @@ pub enum ProveError {
     /// M4.1: the input table's own analogue of `ProgramTooLarge` — `inputs.len()`'s declared
     /// `tables::input::input_log_height` exceeds `tables::input::MAX_LOG_HEIGHT`.
     InputTooLarge { len: usize, log_height: u8 },
-    /// M4.2: the keccak table's analogue — more `KECCAK` calls than the tier's own ceiling
-    /// (`Tier::max_keccak_log_height`, `klh ≤ t + 5`) allows. Unreachable from an `Execution`
+    /// M4.2: the keccak table's analogue — more `KECCAK` calls than the enforced ceiling
+    /// `min(Tier::max_keccak_log_height(), tables::keccak::MAX_LOG_HEIGHT)` (`t + 5` capped at
+    /// 20, the same bound `check_declared_heights` applies) allows. Unreachable from an `Execution`
     /// that passed the cycle check above (a permutation costs a cycle, so `n_perms ≤ 2^t`),
     /// kept for the same reason the other two are: an error rather than a panic on an absurd
     /// shift, for a direct caller who hand-builds an `Execution`.
@@ -409,21 +416,97 @@ pub enum VerifyError {
     /// M4.1: the input table's own analogue of `ProgramHeight` — `proof.input_log_height` is
     /// outside `[tables::input::MIN_LOG_HEIGHT, tables::input::MAX_LOG_HEIGHT]`.
     InputHeight,
-    /// M4.2: the keccak table's own analogue — `proof.keccak_log_height` is non-zero and below
-    /// `tables::keccak::MIN_LOG_HEIGHT` (the one-block floor a table that exists at all
-    /// carries). Checked before the declared height is used to size a table. M4.2 (Task 6):
-    /// `0` is exempt, and means the proof declares no keccak table at all.
+    /// M4.2: the keccak table's own analogue of `ProgramHeight`/`InputHeight` —
+    /// `proof.keccak_log_height` is non-zero and outside `[tables::keccak::MIN_LOG_HEIGHT,
+    /// tables::keccak::MAX_LOG_HEIGHT]`. Checked before the declared height is used to size a
+    /// table. M4.2 (Task 6): `0` is exempt, and means the proof declares no keccak table at
+    /// all. M4.2 (Task 5 review): the upper half of the range is this variant's too — the flat
+    /// cap was reintroduced because the tier bound alone lets a tier-20 header ask for a
+    /// 2^25-row preprocessed trace (see `tables::keccak::MAX_LOG_HEIGHT`).
     KeccakHeight,
-    /// M4.2 (controller ruling 2): `proof.keccak_log_height` exceeds what the declared tier
-    /// could possibly need — `Tier::max_keccak_log_height`, `t + 5`, since a permutation costs
-    /// a cycle. Separate from `KeccakHeight` because it is a *relation* between two declared
-    /// values rather than a range check on one, and because the test that pins it
-    /// (`tests/cheating.rs`) asserts on the exact variant.
+    /// M4.2 (controller ruling 2): `proof.keccak_log_height` is inside the flat range above but
+    /// exceeds what the declared *tier* could possibly need — `Tier::max_keccak_log_height`,
+    /// `t + 5`, since a permutation costs a cycle. Separate from `KeccakHeight` because it is a
+    /// *relation* between two declared values rather than a range check on one, and because the
+    /// test that pins it (`tests/cheating.rs`) asserts on the exact variant. The two together
+    /// enforce `klh ≤ min(t + 5, MAX_LOG_HEIGHT)`; which variant a given forgery earns is
+    /// decided by the order `check_declared_heights` runs them in (range first).
     KeccakHeightExceedsTier,
     /// M4.2 (controller ruling 1): `proof.mem_log_height` is outside `[tier.min_mem_log_height(),
     /// MAX_MEM_LOG_HEIGHT]`. The lower bound is the load-bearing half — see
     /// `Proof::mem_log_height`.
     MemoryHeight,
+}
+
+/// Every range check `verify` runs on a proof's *declared shape* — the tier and the four
+/// declared table heights — before a single byte of that shape is used to size anything.
+///
+/// M4.2 (Task 5 review): extracted from `verify` for two reasons. It is the whole of the
+/// verifier's defence against a header that asks it to do absurd work (the checks all precede
+/// `log_ext_degrees`, `verifier_key` and `chips`, so a bogus declaration costs a handful of
+/// comparisons rather than a preprocessed-commitment recomputation), and as a free function
+/// over the declared values it is testable at tiers and heights no test could afford to
+/// actually *prove* at — a tier-20 header is a `check_declared_heights(Tier(20), …)` call here,
+/// not a multi-minute proof.
+///
+/// The order is load-bearing where two checks overlap: `keccak_log_height`'s flat range comes
+/// before its tier relation, so a declaration past both (tier 10, `klh = 25`) is reported as
+/// `KeccakHeight`, and `KeccakHeightExceedsTier` names exactly the case of a flat-legal height
+/// the tier cannot need.
+pub fn check_declared_heights(
+    tier: Tier,
+    program_log_height: u8,
+    input_log_height: u8,
+    keccak_log_height: u8,
+    mem_log_height: u8,
+) -> Result<(), VerifyError> {
+    // `tier` is deserialized from untrusted bytes: an attacker-supplied out-of-range tier
+    // (anything not in TIERS) must be rejected first of all, since every check below it — and
+    // `log_ext_degrees` after them — calls `Tier::cpu_height`/`alu_height`/`min_mem_log_height`,
+    // which shift by `self.0` and panic in debug builds for a large enough tier (`1usize << 99`).
+    if !TIERS.contains(&tier.0) { return Err(VerifyError::Tier); }
+    // M3.4 (fix): `program_log_height` is untrusted the same way — reject anything outside the
+    // sane range before it sizes a table (`1usize << log_height` inside
+    // `log_ext_degrees`/`verifier_key`) and panics on an absurd shift.
+    if !(program::MIN_LOG_HEIGHT..=program::MAX_LOG_HEIGHT).contains(&program_log_height) {
+        return Err(VerifyError::ProgramHeight);
+    }
+    // M4.1: the input table's height, same treatment.
+    if !(crate::tables::input::MIN_LOG_HEIGHT..=crate::tables::input::MAX_LOG_HEIGHT).contains(&input_log_height) {
+        return Err(VerifyError::InputHeight);
+    }
+    // M4.2 (Task 6): `keccak_log_height == 0` declares *no* keccak table — the batch has eight
+    // instances, the `KECCAK` bus has no provider, and there is no height to range-check.
+    // Nothing about that needs the verifier's trust: `chips` and `log_ext_degrees` both read the
+    // same declared `0`, so `verify`'s degree-bits equality check pins the instance count, and a
+    // cpu row claiming `SYS_KECCAK` on an unprovided bus cannot balance
+    // (`tests/cheating.rs::a_keccak_syscall_without_a_keccak_table_is_rejected`). A non-zero
+    // declaration gets both ceilings.
+    if keccak_log_height != 0 {
+        // M4.2 (Task 5 review): the flat range first — `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]`. The
+        // lower end rejects a table too short to hold the permutation it claims; the upper end
+        // is the cap that keeps a declared `u8` from sizing a preprocessed trace the verifier
+        // would spend minutes building, which the tier bound below does *not* do on its own (at
+        // tier 20 it admits `klh = 25`, a 2^25-row, 99-column preprocessed keccak trace).
+        if !(crate::tables::keccak::MIN_LOG_HEIGHT..=crate::tables::keccak::MAX_LOG_HEIGHT).contains(&keccak_log_height) {
+            return Err(VerifyError::KeccakHeight);
+        }
+        // M4.2 (controller ruling 2): and then the tier, which is already known good —
+        // `klh ≤ t + 5`, since a permutation costs a cycle. This is the check that stops a proof
+        // from asking a tier-10 verifier to build (and a tier-10 prover to commit to) a keccak
+        // table with more permutation slots than the tier has cycles.
+        if keccak_log_height > tier.max_keccak_log_height() {
+            return Err(VerifyError::KeccakHeightExceedsTier);
+        }
+    }
+    // M4.2 (controller ruling 1): `mem_log_height` is untrusted the same way. The floor is the
+    // tier's own `2^(t+2)` (so the declaration reveals nothing the tier did not already), the
+    // ceiling the usual defensive one — see `Proof::mem_log_height` for why the verifier needs no
+    // tighter bound than this.
+    if !(tier.min_mem_log_height()..=MAX_MEM_LOG_HEIGHT).contains(&mem_log_height) {
+        return Err(VerifyError::MemoryHeight);
+    }
+    Ok(())
 }
 
 /// Draws a fresh H_IN salt from OS entropy and delegates to [`build_traces_salted`] — the
@@ -465,9 +548,12 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], salt: [u32; 4], ex
         .filter_map(|e| e.keccak_row.as_ref().map(|r| KeccakEvent { clk: clk_offset + e.clk, ptr: r.ptr, input: r.input }))
         .collect();
     let keccak_log_height = crate::tables::keccak::keccak_log_height(keccak_events.len());
-    // M4.2 (controller ruling 2): the tier is the single ceiling — `klh ≤ t + 5`, the exact
-    // bound `verify` re-checks against the declared tier. See `Tier::max_keccak_log_height`.
-    if keccak_log_height > tier.max_keccak_log_height() {
+    // M4.2 (controller ruling 2, tightened by the Task 5 review): two ceilings, both of which
+    // `check_declared_heights` re-checks on the verifier's side — the tier's honest-shape bound
+    // `klh ≤ t + 5` (`Tier::max_keccak_log_height`) and the flat defensive cap
+    // `tables::keccak::MAX_LOG_HEIGHT`. The prover enforces the same `min` the verifier does, so
+    // no honest proof is built that the verifier would then refuse to look at.
+    if keccak_log_height > tier.max_keccak_log_height().min(crate::tables::keccak::MAX_LOG_HEIGHT) {
         return Err(ProveError::TooManyPermutations { perms: keccak_events.len(), log_height: keccak_log_height });
     }
     // M4.2 (Task 6): no permutations, no table. `keccak_log_height == 0` and `keccak == None`
@@ -550,7 +636,8 @@ pub struct Proof {
     pub input_log_height: u8,
     /// M4.2: the keccak table's height, declared by the prover — the same rule once more
     /// (`tables::keccak::keccak_log_height`), bounded above by the declared tier
-    /// (`Tier::max_keccak_log_height`).
+    /// (`Tier::max_keccak_log_height`) *and* by the flat `tables::keccak::MAX_LOG_HEIGHT`,
+    /// whichever is smaller (M4.2, Task 5 review).
     ///
     /// M4.2 (Task 6): **`0` means the batch carries no keccak table**, and is the value every
     /// proof whose guest never executes a `KECCAK` gets. It is public, and it says exactly one
@@ -663,8 +750,8 @@ const KEY_CACHE_CAPACITY: usize = 64;
 /// `CommonData` this caches is invariant to it. Bounded by
 /// `TIERS.len() * (program::MAX_LOG_HEIGHT − program::MIN_LOG_HEIGHT + 1) *
 /// (input::MAX_LOG_HEIGHT − input::MIN_LOG_HEIGHT + 1) *
-/// (max tier's keccak range, `t + 5 − keccak::MIN_LOG_HEIGHT + 2` = 22 at tier 20, the `+ 2`
-/// counting M4.2 Task 6's `klh = 0`, "no keccak table", as its own value)` distinct
+/// (keccak range, `min(t + 5, keccak::MAX_LOG_HEIGHT) − keccak::MIN_LOG_HEIGHT + 2` = 17 at
+/// tier 20, the `+ 2` counting M4.2 Task 6's `klh = 0`, "no keccak table", as its own value)` distinct
 /// keys in the worst case —
 /// comfortably able to exceed `KEY_CACHE_CAPACITY` if a caller proves at many different
 /// program/input sizes, unlike the tier-only cache this replaces, so the FIFO eviction here is
@@ -943,53 +1030,21 @@ impl Machine {
             if proof.public_values[pv::HC0 + i] != hc[i] as u64 { return Err(VerifyError::PublicValues); }
         }
         if proof.public_values[pv::TIER] != proof.tier.0 as u64 { return Err(VerifyError::Tier); }
-        // `proof.tier` is deserialized from untrusted bytes: an attacker-supplied out-of-range
-        // tier (anything not in TIERS) must be rejected here, before `log_ext_degrees` calls
-        // `Tier::cpu_height`/`alu_height`/`min_mem_log_height`, which shift by `self.0` and panic in
-        // debug builds for a large enough tier (e.g. `1usize << 99`).
-        if !TIERS.contains(&proof.tier.0) { return Err(VerifyError::Tier); }
-        // M3.4 (fix): `proof.program_log_height` is untrusted the same way `proof.tier` is —
-        // reject anything outside the sane range before it sizes a table (`1usize <<
-        // log_height` inside `log_ext_degrees`/`verifier_key`) and panics on an absurd shift.
-        if !(program::MIN_LOG_HEIGHT..=program::MAX_LOG_HEIGHT).contains(&proof.program_log_height) {
-            return Err(VerifyError::ProgramHeight);
-        }
-        // M4.1: `proof.input_log_height` is untrusted the same way — reject anything outside
-        // the sane range before it sizes the input table and panics on an absurd shift.
-        if !(crate::tables::input::MIN_LOG_HEIGHT..=crate::tables::input::MAX_LOG_HEIGHT).contains(&proof.input_log_height) {
-            return Err(VerifyError::InputHeight);
-        }
-        // M4.2 (Task 6): `keccak_log_height == 0` declares *no* keccak table — the batch has
-        // eight instances, the `KECCAK` bus has no provider, and there is no height to range-
-        // check. Nothing about that needs the verifier's trust: `chips` and `log_ext_degrees`
-        // both read the same declared `0`, so the degree-bits equality check below pins the
-        // instance count, and a cpu row claiming `SYS_KECCAK` on an unprovided bus cannot
-        // balance (`tests/cheating.rs::a_keccak_syscall_without_a_keccak_table_is_rejected`).
-        // A non-zero declaration gets exactly the checks it always did.
-        if proof.keccak_log_height != 0 {
-            // M4.2: `proof.keccak_log_height` is untrusted the same way — rejected before it
-            // sizes the keccak table (`1usize << keccak_log_height`, an absurd shift otherwise).
-            if proof.keccak_log_height < crate::tables::keccak::MIN_LOG_HEIGHT {
-                return Err(VerifyError::KeccakHeight);
-            }
-            // M4.2 (controller ruling 2): and bounded above by the tier, which is already known
-            // good — `klh ≤ t + 5`, since a permutation costs a cycle. This is the check that
-            // stops a proof from asking a tier-10 verifier to build (and a tier-10 prover to
-            // commit to) a keccak table with more permutation slots than the tier has cycles; it
-            // runs *before* `log_ext_degrees` and `verifier_key`, so a bogus declaration costs
-            // the verifier a comparison, not a multi-second preprocessed-commitment
-            // recomputation.
-            if proof.keccak_log_height > proof.tier.max_keccak_log_height() {
-                return Err(VerifyError::KeccakHeightExceedsTier);
-            }
-        }
-        // M4.2 (controller ruling 1): `proof.mem_log_height` is untrusted the same way. The
-        // floor is the tier's own `2^(t+2)` (so the declaration reveals nothing the tier did
-        // not already), the ceiling the usual defensive one — see `Proof::mem_log_height` for
-        // why the verifier needs no tighter bound than this.
-        if !(proof.tier.min_mem_log_height()..=MAX_MEM_LOG_HEIGHT).contains(&proof.mem_log_height) {
-            return Err(VerifyError::MemoryHeight);
-        }
+        // M4.2 (Task 5 review): every range check on the proof's declared shape, in one place
+        // and before anything is sized from it — `check_declared_heights`' doc comment has the
+        // reasoning and the order. It runs *before* `log_ext_degrees`, `verifier_key` and
+        // `chips`, so a forged header (with `degree_bits` edited to match, which is what an
+        // attacker would have to do to reach the equality check below) costs the verifier a
+        // handful of comparisons rather than a multi-second — at an absurd declared height,
+        // multi-minute — preprocessed-commitment recomputation. `tests/cheating.rs` observes
+        // exactly that as `cached_keys() == 0` after a rejection.
+        check_declared_heights(
+            proof.tier,
+            proof.program_log_height,
+            proof.input_log_height,
+            proof.keccak_log_height,
+            proof.mem_log_height,
+        )?;
         // M4.2 (Task 6): a `Vec` comparison, so this is simultaneously the check that
         // `degree_bits.len()` equals the batch's chip count — eight without a keccak table, nine
         // with one — and the check that every declared height matches. A proof that claims

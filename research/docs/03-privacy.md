@@ -49,6 +49,14 @@ of the same proof runs under 40% of that, per
 | prove time | 21.61 s → 20.88 s → 3.11 s | 29.69 s → 29.45 s → 11.44 s |
 | verify time (first, uncached) | 2.166 s → 2.148 s → 16.0 ms | 2.178 s → 2.141 s → 18.0 ms |
 
+Those are **M2.3-era** numbers, kept for the M2.1 → M2.3 shape of the
+improvement rather than as a current baseline: the M4.2 table below starts from
+437 599 bytes at tier 10, not 268 288, because M3.4 (the in-circuit program
+digest — digest rows in the cpu table, a proof-declared program-table height)
+and M4.1 (the input table, the `INPUT_DIGEST`/`INPUT_READ` buses, the salted
+H_IN) each grew every proof in between. `b1d01d9`, this branch's base, is where
+that growth had landed when M4.2 began.
+
 **M4.2's own measurement, same command, same guest.** A 2 612-column table is
 expensive in *proof size* regardless of how few rows it holds, because every
 FRI query opens a main-trace leaf of the batch's full width. The first cut of
@@ -61,7 +69,7 @@ pre-M4.2 size. Measured on `guests::fib`:
 
 | | tier 10 | tier 12 |
 | --- | --- | --- |
-| before the keccak table (branch base `b1d01d9`) | 437 599 bytes | 460 242 bytes |
+| before the keccak table (branch base `b1d01d9`, i.e. M4.1 as shipped) | 437 599 bytes | 460 242 bytes |
 | with the padding block every proof carried (Task 5) | 1 142 262 bytes | 1 161 162 bytes |
 | keccak-free, the table now optional (Task 6) | **439 816 / 440 456 bytes** | **464 891 / 460 924 bytes** |
 | what a guest that *does* call `KECCAK` still pays | +~705 KB | +~701 KB |
@@ -264,7 +272,10 @@ caller-supplied `hc`, word for word (`public_values[IN0..IN7]`, `H_IN`, is
 *not* checked here — it has no caller-supplied counterpart to check
 against, unlike `hc`; see "Private inputs are bound to `H_IN`", above);
 `public_values[TIER]` equals
-`proof.tier`; `proof.tier` is one of the six values in `TIERS` (an
+`proof.tier`; and then — all of it in `machine::check_declared_heights`, which
+`verify` calls before it sizes anything, and which is a free function over the
+declared values precisely so these bounds can be tested at tiers no test could
+afford to prove at — `proof.tier` is one of the six values in `TIERS` (an
 attacker-chosen out-of-range tier is rejected here, before it can be used to
 compute a table height and panic); `proof.program_log_height` is within
 `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` (review fix — the same defensive pattern,
@@ -273,16 +284,21 @@ compute a table height and panic); `proof.program_log_height` is within
 MAX_LOG_HEIGHT]` (M4.1, the `input` table's exact analogue of the same
 check); `proof.keccak_log_height` is either `0` — M4.2 Task 6's "this proof has no
 keccak table", exempt from the range check because there is no height to
-check — or at least `tables::keccak::
-MIN_LOG_HEIGHT` and at most what the declared tier could possibly need
-(M4.2, `VerifyError::KeccakHeight` / `KeccakHeightExceedsTier` — a
-permutation costs a cycle, so `klh <= tier + 5`, and this is checked before
-any table is sized or any verifier key built, which
+check — or within `[tables::keccak::MIN_LOG_HEIGHT,
+tables::keccak::MAX_LOG_HEIGHT]` *and* no larger than what the declared tier
+could possibly need (M4.2, `VerifyError::KeccakHeight` /
+`KeccakHeightExceedsTier` — a permutation costs a cycle, so `klh <= tier + 5`,
+capped absolutely at 20; the tier half alone would let a tier-20 header ask for
+a 2^25-row preprocessed keccak trace, which is why the Task 5 review put the
+flat cap back. Both are checked before any table is sized or any verifier key
+built, which
 `tests/cheating.rs::a_keccak_height_past_the_tiers_ceiling_is_rejected_
-before_any_verifier_key_is_built` asserts by observing `cached_keys() == 0`
-after the rejection); `proof.mem_log_height` is within
+before_any_verifier_key_is_built` and its `..._past_the_absolute_cap_...`
+sibling assert by observing `cached_keys() == 0` after the rejection);
+`proof.mem_log_height` is within
 `[tier + 2, MAX_MEM_LOG_HEIGHT]` (M4.2 — the memory table's height is
-proof-declared now, see "Tiers: what padding hides" below); the
+proof-declared now, see "Tiers: what padding hides" below; both ends are
+pinned by `tests/cheating.rs`, the ceiling since the Task 5 review); the
 proof's degree bits match the heights that tier (and the four declared
 heights) imply for all eight tables — nine when `keccak_log_height != 0`, and
 since that comparison is of whole lists it is simultaneously the check that

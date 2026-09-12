@@ -103,11 +103,29 @@ pub const WRITES_PER_ROW: usize = 7;
 /// keccak table, declaring `keccak_log_height = 0` instead — see `keccak_log_height` below and
 /// `machine::chips`.
 pub const MIN_LOG_HEIGHT: u8 = 5; // 1 << 5 == BLOCK
-// M4.2 (controller ruling 2): there is deliberately no `MAX_LOG_HEIGHT` here, unlike
-// `tables::program` and `tables::input`. A permutation costs a cycle, so the tier already
-// bounds this table's honest height exactly — `machine::Tier::max_keccak_log_height`,
-// `klh <= t + 5` — and a second, flat, tier-independent ceiling would only be a looser or
-// tighter *disagreeing* bound (see that method's doc comment). One ceiling, not two.
+/// The absolute ceiling on a declared `keccak_log_height`, the analogue of
+/// `tables::program::MAX_LOG_HEIGHT` and `tables::input::MAX_LOG_HEIGHT` — 2^20 rows, i.e.
+/// 32 768 permutation slots.
+///
+/// M4.2 (controller ruling 2) made the *tier* the keccak table's ceiling
+/// (`machine::Tier::max_keccak_log_height`, `klh <= t + 5`), and for a while that was the only
+/// one. It is the tighter bound at every tier but the largest, and it is the one that carries
+/// the honest-shape argument (a permutation costs a cycle) — but it is not by itself a *cheap*
+/// bound: at tier 20 it permits `klh = 25`, and a forged header declaring that (with
+/// `degree_bits` edited to match) makes the verifier build a 2^25-row preprocessed keccak
+/// trace — 99 columns of it, minutes of work — before anything else can reject the proof.
+/// The two bounds are therefore not rival ceilings but different jobs: this one is the flat
+/// defensive cap that keeps an untrusted `u8` from sizing an absurd allocation, the tier one
+/// is the honest-shape relation. The enforced bound is `min(t + 5, MAX_LOG_HEIGHT)`, on both
+/// sides — `machine::build_traces_salted` (as `ProveError::TooManyPermutations`) and
+/// `machine::check_declared_heights` (as `VerifyError::KeccakHeight` for this cap,
+/// `VerifyError::KeccakHeightExceedsTier` for the tier's).
+///
+/// 20 rather than something larger: 32 768 permutations is 4.2 MB of keccak input at 128 bytes
+/// each, far past anything this crate proves (the largest tier the suite exercises is 12, whose
+/// own ceiling is 17), and a 2^20-row 2 612-column trace is already ~22 GB of witness — the cap
+/// only has to be unreachable-but-finite, and this is comfortably both.
+pub const MAX_LOG_HEIGHT: u8 = 20;
 
 /// `max(5, log2_ceil(32 · n_perms))` — one 32-row block per permutation, rounded up to a power
 /// of two, floored at a single block — **except** for `n_perms == 0`, which is `0`.

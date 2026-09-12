@@ -127,13 +127,15 @@ a genuine backward branch to satisfy `-> !` without needing to synthesize
 word is never actually executed (the preceding `ecall` halts first), it
 only needs to be *decodable*, which it now is.
 
-Measured numbers, `FriProfile::Test`, re-measured on the M4.2 branch (every
-proof carries the keccak table now, so the earlier figures are not
-comparable — `fib`'s 271,600–275,889 bytes was measured before it existed):
+Measured numbers, `FriProfile::Test`, re-measured on the M4.2 branch. `fib`
+makes no `KECCAK` call, so since Task 6 made the keccak table optional its
+proof is back where it was before M4.2 (271,600–275,889 bytes then, 271,987
+now); the mid-milestone figure, when every proof carried the table, was
+729,254 bytes. `keccak256` does call it, and pays for it:
 
 | Guest | Source | Words | Tier | Cycles | Proof size |
 |---|---|---|---|---|---|
-| `fib(20)`, compiled (`guests::compiled::fib`) | `guests-compiled/fib` | — | `Tier(10)` | 136 | 729,254 bytes |
+| `fib(20)`, compiled (`guests::compiled::fib`) | `guests-compiled/fib` | 26 | `Tier(10)` | 136 | 271,987 bytes |
 | `keccak256(135 bytes)`, compiled (`guests::compiled::keccak256`) | `guests-compiled/keccak256` | 461 | `Tier(12)` | 2,848 | 745,151 bytes |
 
 `fib` is measured by `research/tests/e2e.rs`'s

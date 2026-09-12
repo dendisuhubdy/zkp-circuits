@@ -1101,12 +1101,15 @@ Plonky3's own `keccak-air` *column layout* (the vendored 0.7 set ships
 itself is written here; `docs/04-guests.md` has that correction). Height is
 `1 << Proof::keccak_log_height`, proof-declared like `program`'s and
 `input`'s: one block per permutation, floored at a single block, and
-ceilinged by the *tier* — `klh ≤ ℓ + 5`, since a permutation costs a cpu row
-and therefore a cycle (`machine::Tier::max_keccak_log_height`). That tier
-relation is the table's only upper bound; an earlier flat `MAX_LOG_HEIGHT =
-20` was removed because it disagreed with it in both directions (at tier 10
-it would have admitted 32 768 permutation slots for at most 1 023 possible
-calls).
+ceilinged twice — by the *tier*, `klh ≤ ℓ + 5`, since a permutation costs a cpu
+row and therefore a cycle (`machine::Tier::max_keccak_log_height`), and by the
+flat `MAX_LOG_HEIGHT = 20`. The tier relation is the tighter of the two at
+every tier but the largest (at tier 10 the flat cap would admit 32 768
+permutation slots for at most 1 023 possible calls), and it is the one that
+says what a proof can honestly *need* — but it is not a cheap bound at the top
+tier, where it admits `klh = 25` and therefore a 2^25-row, 99-column
+preprocessed trace built before anything else could reject the proof. So both
+are enforced, on both sides, as `min(ℓ + 5, 20)` (M4.2, Task 5 review).
 
 **The table is optional per proof** (M4.2, Task 6). `keccak_log_height = 0`
 is not a height: it is the declaration "this proof has no keccak table", and
@@ -1123,7 +1126,9 @@ The keccak chip is appended last in `chips()` exactly so that removing it
 disturbs no other instance's index — `i == 1` (cpu) is still the
 public-values slot, `i == 2` still memory. `Machine::verify` range-checks
 `keccak_log_height` only when it is non-zero (`0` is exempt; any *other*
-value below one block is still `VerifyError::KeccakHeight`), and the
+value outside `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` is still
+`VerifyError::KeccakHeight`, and one inside it but past `ℓ + 5` is
+`VerifyError::KeccakHeightExceedsTier`), and the
 `degree_bits` equality check pins the instance count in both shapes, since
 `log_ext_degrees` emits the keccak entry only when the table is present.
 
