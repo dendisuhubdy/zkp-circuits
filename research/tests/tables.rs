@@ -902,3 +902,64 @@ mod poseidon2_tests {
         verify_batch(&config, &airs, &proof, &[vec![], vec![]], &pd.common).unwrap();
     }
 }
+
+mod keccak_tests {
+    use super::*;
+    use rand_zkvm::keccak::RC;
+    use rand_zkvm::tables::keccak::{self, col, pre, KeccakAir, BLOCK, ROUNDS};
+
+    /// M4.2 Task 3, Step 4 — the preprocessed trace's one-hot pattern and round-constant bits,
+    /// and the pinned main width (`4 + 100 + 100 + 320 + 320 + 1600 + 100 + 64 + 4`).
+    #[test]
+    fn keccak_preprocessed_trace_has_the_right_shape() {
+        assert_eq!(col::WIDTH, 2612, "keccak main width");
+        assert_eq!(pre::WIDTH, 24 + 3 + 8 + 64, "keccak preprocessed width");
+
+        let height = BLOCK * 2;
+        let p: RowMajorMatrix<F> = KeccakAir::preprocessed_trace_at(height);
+        assert_eq!(p.height(), height);
+        assert_eq!(p.width(), pre::WIDTH);
+        let row = |r: usize| -> &[F] { &p.values[r * pre::WIDTH..(r + 1) * pre::WIDTH] };
+
+        for r in 0..height {
+            let want_first = r % BLOCK == 0;
+            let want_last = r % BLOCK == ROUNDS - 1;
+            let want_idle = r % BLOCK >= ROUNDS;
+            assert_eq!(row(r)[pre::IS_FIRST], F::from_bool(want_first), "IS_FIRST row {r}");
+            assert_eq!(row(r)[pre::IS_LAST_ROUND], F::from_bool(want_last), "IS_LAST_ROUND row {r}");
+            assert_eq!(row(r)[pre::IS_IDLE], F::from_bool(want_idle), "IS_IDLE row {r}");
+            // Exactly one of the 24 round selectors on a round row, none on an idle row; and
+            // exactly one of the 8 idle selectors on an idle row, none on a round row.
+            let n_round: usize = (0..ROUNDS).filter(|&i| row(r)[pre::IS_ROUND0 + i] == F::ONE).count();
+            let n_idle: usize = (0..8).filter(|&i| row(r)[pre::IS_IDLE0 + i] == F::ONE).count();
+            assert_eq!(n_round, usize::from(!want_idle), "round one-hot row {r}");
+            assert_eq!(n_idle, usize::from(want_idle), "idle one-hot row {r}");
+            if !want_idle {
+                assert_eq!(row(r)[pre::IS_ROUND0 + r % BLOCK], F::ONE, "round selector row {r}");
+            } else {
+                assert_eq!(row(r)[pre::IS_IDLE0 + (r % BLOCK - ROUNDS)], F::ONE, "idle selector row {r}");
+            }
+        }
+        // IS_FIRST at rows 0 and 32 only, IS_LAST_ROUND at 23 and 55, IS_IDLE on 24..31, 56..63
+        // — spelled out, as the brief asks, on top of the generic sweep above.
+        for r in [0usize, 32] { assert_eq!(row(r)[pre::IS_FIRST], F::ONE); }
+        for r in [23usize, 55] { assert_eq!(row(r)[pre::IS_LAST_ROUND], F::ONE); }
+        for r in (24..32).chain(56..64) { assert_eq!(row(r)[pre::IS_IDLE], F::ONE, "row {r}"); }
+
+        // RC bits: row 0 is RC[0] == 1, row 23 is RC[23], and every idle row is all zero.
+        for (r, want) in [(0usize, RC[0]), (23, RC[23]), (7, RC[7]), (32, RC[0]), (55, RC[23])] {
+            for z in 0..64 {
+                let bit = F::from_bool((want >> z) & 1 == 1);
+                assert_eq!(row(r)[pre::RC0 + z], bit, "RC bit {z} of row {r}");
+            }
+        }
+        for r in 24..32 {
+            for z in 0..64 { assert_eq!(row(r)[pre::RC0 + z], F::ZERO, "RC bit {z} of idle row {r}"); }
+        }
+        // The pattern repeats identically block to block.
+        assert_eq!(row(32), row(0));
+        assert_eq!(row(63), row(31));
+        assert_eq!(keccak::MIN_LOG_HEIGHT, 5);
+        assert_eq!(keccak::MAX_LOG_HEIGHT, 20);
+    }
+}

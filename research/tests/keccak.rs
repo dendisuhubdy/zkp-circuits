@@ -1,5 +1,7 @@
 use rand_zkvm::keccak::{keccak256, keccak_f, state_to_words, words_to_state, RC, ROT};
 
+mod common;
+
 #[test]
 fn keccak256_matches_known_vectors() {
     assert_eq!(hex::encode(keccak256(b"")), "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
@@ -67,5 +69,278 @@ fn the_guest_sdk_sponge_matches_the_host_keccak256() {
     for len in [0usize, 1, 135, 136, 137, 272] {
         let msg: Vec<u8> = (0..len).map(|i| (7 * i + 1) as u8).collect();
         assert_eq!(sdk_keccak256(&msg), keccak256(&msg), "len {len}");
+    }
+}
+
+mod chip {
+    use p3_matrix::Matrix;
+    use rand_zkvm::keccak::{keccak_f, state_to_words, words_to_state};
+    use rand_zkvm::tables::keccak::{self, col, keccak_trace, KeccakEvent, BLOCK, ROUNDS};
+    use rand_zkvm::tables::F;
+    use p3_field::PrimeCharacteristicRing;
+    use p3_field::PrimeField64;
+
+    fn random_words(seed: u64) -> [u32; 50] {
+        let mut x = seed | 1;
+        std::array::from_fn(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x as u32 })
+    }
+
+    fn limbs_to_words(row: &[F], base: usize) -> [u32; 50] {
+        std::array::from_fn(|w| {
+            let lane = w / 2;
+            let lo = row[base + 4 * lane + 2 * (w % 2)].as_canonical_u64() as u32;
+            let hi = row[base + 4 * lane + 2 * (w % 2) + 1].as_canonical_u64() as u32;
+            lo | (hi << 16)
+        })
+    }
+
+    #[test]
+    fn keccak_trace_output_matches_p3_keccak_on_a_thousand_states() {
+        for seed in 0..1000u64 {
+            let input = random_words(seed);
+            let t = keccak_trace(&[KeccakEvent { clk: 7, ptr: 0x100, input }], BLOCK);
+            let idle = t.row_slice(ROUNDS).unwrap();  // first idle row carries the output in A
+            let out = limbs_to_words(&idle, col::A0);
+            let mut st = words_to_state(&input);
+            keccak_f(&mut st);
+            assert_eq!(out, state_to_words(&st), "seed {seed}");
+            let first = t.row_slice(0).unwrap();
+            assert_eq!(limbs_to_words(&first, col::IN0), input);
+            assert_eq!(limbs_to_words(&first, col::A0), input);
+        }
+    }
+
+    #[test]
+    fn padding_blocks_are_honest_zero_permutations_with_zero_counts() {
+        let t = keccak_trace(&[], 2 * BLOCK);
+        assert_eq!(t.height(), 64);
+        for r in 0..64 {
+            let row = t.row_slice(r).unwrap();
+            assert_eq!(row[col::IS_REAL], F::ZERO);
+            assert_eq!(row[col::MULT], F::ZERO);
+        }
+        let mut zero = [0u64; 25];
+        keccak_f(&mut zero);
+        assert_eq!(limbs_to_words(&t.row_slice(ROUNDS).unwrap(), col::A0), state_to_words(&zero));
+    }
+
+    #[test]
+    fn keccak_log_height_floors_at_one_block() {
+        assert_eq!(keccak::keccak_log_height(0), 5);
+        assert_eq!(keccak::keccak_log_height(1), 5);
+        assert_eq!(keccak::keccak_log_height(2), 6);
+        assert_eq!(keccak::keccak_log_height(3), 7);
+    }
+}
+
+/// M4.2 Task 3, Step 5 — the keccak chip alone under the real batch STARK, with a throwaway
+/// consumer on each of its two buses: a `KeccakAsker` that looks up `(CLK, PTR)` on `KECCAK`,
+/// and a `MemoryTwin` that receives the 100 `MEMORY` messages the chip sends for a real event.
+/// This is the constraint-level counterpart to the trace tests above: those check the
+/// arithmetic the filler computes, this checks the AIR the prover and verifier actually run
+/// (and, in a debug build, `p3-batch-stark`'s per-row constraint checker walks every one of the
+/// ~3,900 constraints on every row).
+mod harness {
+    use super::common::rejects;
+    use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder, WindowAccess};
+    use p3_batch_stark::{prove_batch, verify_batch, ProverData, StarkInstance};
+    use p3_field::{Field, PrimeCharacteristicRing};
+    use p3_lookup::{Count, InteractionBuilder};
+    use p3_matrix::dense::RowMajorMatrix;
+    use rand_zkvm::emulator::SPACE_RAM;
+    use rand_zkvm::keccak::{keccak_f, state_to_words, words_to_state};
+    use rand_zkvm::machine::{make_config, FriProfile, VerifyError};
+    use rand_zkvm::tables::keccak::{col, keccak_trace, KeccakAir, KeccakEvent, BLOCK};
+    use rand_zkvm::tables::{bus, F};
+
+    /// main = `[gate, clk, ptr]`: one weighted `KECCAK` lookup per row.
+    #[derive(Clone)]
+    struct KeccakAsker;
+    impl<Fld> BaseAir<Fld> for KeccakAsker {
+        fn width(&self) -> usize { 3 }
+    }
+    impl<AB: AirBuilder + InteractionBuilder> Air<AB> for KeccakAsker
+    where
+        AB::F: Field,
+    {
+        fn eval(&self, b: &mut AB) {
+            let m = b.main();
+            let v = |i: usize| -> AB::Expr { m.current(i).unwrap().into() };
+            let gate = v(0);
+            b.assert_bool(gate.clone());
+            bus::KECCAK.lookup_key(b, [v(1), v(2)], Count::bounded(gate, 1));
+        }
+    }
+
+    /// main = `[count, space, addr, ts, value, is_write]`: stands in for the memory table,
+    /// receiving one `MEMORY` message per row. Enough to make the chip's 100 sends balance.
+    #[derive(Clone)]
+    struct MemoryTwin;
+    impl<Fld> BaseAir<Fld> for MemoryTwin {
+        fn width(&self) -> usize { 6 }
+    }
+    impl<AB: AirBuilder + InteractionBuilder> Air<AB> for MemoryTwin
+    where
+        AB::F: Field,
+    {
+        fn eval(&self, b: &mut AB) {
+            let m = b.main();
+            let v = |i: usize| -> AB::Expr { m.current(i).unwrap().into() };
+            let count = v(0);
+            b.assert_bool(count.clone());
+            bus::MEMORY.receive(b, [v(1), v(2), v(3), v(4), v(5)], Count::bounded(count, 1));
+        }
+    }
+
+    #[derive(Clone)]
+    enum T {
+        K(KeccakAir, usize),
+        A(KeccakAsker),
+        M(MemoryTwin),
+    }
+    impl<Fld: Field> BaseAir<Fld> for T {
+        fn width(&self) -> usize {
+            match self {
+                T::K(a, _) => <KeccakAir as BaseAir<Fld>>::width(a),
+                T::A(a) => <KeccakAsker as BaseAir<Fld>>::width(a),
+                T::M(a) => <MemoryTwin as BaseAir<Fld>>::width(a),
+            }
+        }
+        fn preprocessed_width(&self) -> usize {
+            match self {
+                T::K(a, _) => <KeccakAir as BaseAir<Fld>>::preprocessed_width(a),
+                _ => 0,
+            }
+        }
+        fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Fld>> {
+            match self {
+                T::K(_, h) => Some(KeccakAir::preprocessed_trace_at(*h)),
+                _ => None,
+            }
+        }
+    }
+    impl<AB: AirBuilder + PermutationAirBuilder + InteractionBuilder> Air<AB> for T
+    where
+        AB::F: Field,
+    {
+        fn eval(&self, b: &mut AB) {
+            match self {
+                T::K(a, _) => a.eval(b),
+                T::A(a) => a.eval(b),
+                T::M(a) => a.eval(b),
+            }
+        }
+    }
+
+    /// The 100 `(space, addr, ts, value, is_write)` accesses one real permutation makes: 50
+    /// reads of the input at `ts = 4·clk`, then 50 writes of the output at `ts = 4·clk + 1` —
+    /// the same tuples `emulator::CycleEvent::keccak_accesses` records.
+    fn twin_trace(ev: &KeccakEvent, height: usize) -> RowMajorMatrix<F> {
+        let mut st = words_to_state(&ev.input);
+        keccak_f(&mut st);
+        let out = state_to_words(&st);
+        let mut v = F::zero_vec(height * 6);
+        let mut put = |i: usize, addr: u32, ts: u32, value: u32, is_write: bool| {
+            let r = &mut v[i * 6..(i + 1) * 6];
+            r[0] = F::ONE;
+            r[1] = F::from_u32(SPACE_RAM);
+            r[2] = F::from_u32(addr);
+            r[3] = F::from_u32(ts);
+            r[4] = F::from_u32(value);
+            r[5] = F::from_bool(is_write);
+        };
+        for w in 0..50 {
+            put(w, ev.ptr + w as u32, 4 * ev.clk, ev.input[w], false);
+            put(50 + w, ev.ptr + w as u32, 4 * ev.clk + 1, out[w], true);
+        }
+        RowMajorMatrix::new(v, 6)
+    }
+
+    pub fn run(trace: &RowMajorMatrix<F>, ev: &KeccakEvent, height: usize) -> Result<(), VerifyError> {
+        let mut asker = F::zero_vec(4 * 3);
+        asker[0] = F::ONE;
+        asker[1] = F::from_u32(ev.clk);
+        asker[2] = F::from_u32(ev.ptr);
+        let asker_trace = RowMajorMatrix::new(asker, 3);
+        let twin = twin_trace(ev, 128);
+
+        let airs = vec![T::K(KeccakAir, height), T::A(KeccakAsker), T::M(MemoryTwin)];
+        let instances = vec![
+            StarkInstance { air: &airs[0], trace, public_values: vec![] },
+            StarkInstance { air: &airs[1], trace: &asker_trace, public_values: vec![] },
+            StarkInstance { air: &airs[2], trace: &twin, public_values: vec![] },
+        ];
+        let config = make_config(FriProfile::Test);
+        let pd = ProverData::from_instances(&config, &instances);
+        let proof = prove_batch(&config, &instances, &pd);
+        verify_batch(&config, &airs, &proof, &[vec![], vec![], vec![]], &pd.common)
+            .map_err(|e| VerifyError::Batch(format!("{e:?}")))
+    }
+
+    pub fn event() -> KeccakEvent {
+        let mut x = 0x243f_6a88_85a3_08d3u64;
+        let input = std::array::from_fn(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u32
+        });
+        KeccakEvent { clk: 11, ptr: 0x2000, input }
+    }
+
+    #[test]
+    fn keccak_table_answers_lookups_and_memory_under_a_constraint_check() {
+        let ev = event();
+        let height = BLOCK * 4; // one real block, three padding blocks
+        let trace = keccak_trace(&[ev], height);
+        run(&trace, &ev, height).unwrap();
+    }
+
+    #[test]
+    fn a_tampered_theta_bit_is_rejected() {
+        let ev = event();
+        let height = BLOCK * 4;
+        let mut trace = keccak_trace(&[ev], height);
+        // Flip one A' bit on round row 3: A' is pinned three ways at once — rule 5 recomputes
+        // the row's own `A` limb from it, rule 6 checks the column parity, rule 7 feeds it to χ.
+        let cell = 3 * col::WIDTH + col::AP0 + 17;
+        trace.values[cell] = F::ONE - trace.values[cell];
+        assert!(rejects(|| run(&trace, &ev, height)));
+    }
+}
+
+/// The one place this chip's AIR is deliberately stricter than `poseidon2`'s: a real block must
+/// be *claimed* on the `KECCAK` bus, not merely permitted to be. Because the chip sends its own
+/// memory traffic on `IS_REAL` alone, a real block with `MULT = 0` would be a free Keccak-f
+/// applied to guest RAM at a timestamp of the prover's choosing — so `MULT = IS_REAL` is
+/// constrained on the last round row, and dropping the count here must be rejected.
+mod unpaid {
+    use super::common::rejects;
+    use super::harness::{event, run};
+    use rand_zkvm::tables::keccak::{col, keccak_trace, BLOCK, ROUNDS};
+    use rand_zkvm::tables::F;
+    use p3_field::PrimeCharacteristicRing;
+
+    #[test]
+    fn a_real_block_that_provides_no_keccak_entry_is_rejected() {
+        let ev = event();
+        let height = BLOCK * 4;
+        let mut trace = keccak_trace(&[ev], height);
+        trace.values[(ROUNDS - 1) * col::WIDTH + col::MULT] = F::ZERO;
+        assert!(rejects(|| run(&trace, &ev, height)));
+    }
+
+    /// The mirror image: a padding block flipped to `IS_REAL = 1` (still `MULT = 0`) is the
+    /// forgery the constraint above actually exists to stop — it would otherwise permute
+    /// whatever sits at `PTR` and write the result back into RAM with no syscall behind it.
+    #[test]
+    fn a_padding_block_flipped_to_real_is_rejected() {
+        let ev = event();
+        let height = BLOCK * 4;
+        let mut trace = keccak_trace(&[ev], height);
+        for r in BLOCK..2 * BLOCK {
+            trace.values[r * col::WIDTH + col::IS_REAL] = F::ONE;
+        }
+        assert!(rejects(|| run(&trace, &ev, height)));
     }
 }
