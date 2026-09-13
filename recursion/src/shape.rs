@@ -25,7 +25,7 @@ use p3_lookup::LogUpGadget;
 use p3_symmetric::{CryptographicHasher, PaddingFreeSponge};
 use p3_uni_stark::StarkGenericConfig;
 use rand_zkvm::machine::{
-    chips, Challenge, Config, FriProfile, Machine, Perm, Proof, Tier, Val,
+    chips, Challenge, Chip, Config, FriProfile, Machine, Perm, Proof, Tier, Val,
 };
 
 /// `log_blowup`, from `research`'s `generic_config` (`research/src/machine.rs`). A literal there and
@@ -222,31 +222,9 @@ impl InnerShape {
         }
 
         let lookup_gadget = LogUpGadget::new();
-        let log_num_quotient_chunks: Vec<usize> = airs
-            .iter()
-            .enumerate()
-            .map(|(i, air)| {
-                let layout = AirLayout {
-                    preprocessed_width: preprocessed_widths[i],
-                    main_width: widths[i],
-                    num_public_values: num_public_values[i],
-                    num_periodic_columns: BaseAir::<Val>::num_periodic_columns(air),
-                    ..Default::default()
-                };
-                p3_batch_stark::symbolic::get_log_num_quotient_chunks::<Val, Challenge, _, _>(
-                    air,
-                    layout,
-                    1usize << (degree_bits[i] - is_zk),
-                    &common.lookups[i],
-                    is_zk,
-                    &lookup_gadget,
-                )
-            })
-            .collect();
-
         let log_arities = fri_schedule(&degree_bits)?;
 
-        Ok(InnerShape {
+        let mut shape = InnerShape {
             tier: tier.0,
             program_log_height,
             input_log_height,
@@ -258,19 +236,86 @@ impl InnerShape {
             degree_bits,
             widths,
             preprocessed_widths,
-            log_num_quotient_chunks,
             num_lookups,
             num_public_values,
             main_next,
             pre_next,
             preprocessed_matrix_to_instance,
             log_arities,
-        })
+            // Filled in immediately below. `air_layout` reads three of the fields above, so the
+            // shape has to exist before the layouts can be built from it — and building them from
+            // the locals instead would be a second copy of `air_layout`'s body, which is exactly
+            // what that method exists to prevent.
+            log_num_quotient_chunks: Vec::new(),
+        };
+        shape.log_num_quotient_chunks = airs
+            .iter()
+            .enumerate()
+            .map(|(i, air)| {
+                p3_batch_stark::symbolic::get_log_num_quotient_chunks::<Val, Challenge, _, _>(
+                    air,
+                    shape.air_layout(i, air),
+                    1usize << (shape.degree_bits[i] - is_zk),
+                    &common.lookups[i],
+                    is_zk,
+                    &lookup_gadget,
+                )
+            })
+            .collect();
+        Ok(shape)
     }
 
     /// The number of batch instances.
     pub fn instances(&self) -> usize {
         self.degree_bits.len()
+    }
+
+    /// The FRI profile this shape was built for.
+    ///
+    /// Recovered from `(num_queries, query_pow_bits)` rather than stored, because those two numbers
+    /// *are* the profile — `FriProfile` has exactly two variants and they agree on neither. The only
+    /// constructor is [`InnerShape::try_of`], which sets both from a profile, so the lookup is total
+    /// for every shape that exists.
+    ///
+    /// It is needed because a `Machine` is the only way to reach `CommonData` (below), and the
+    /// program builder is handed a shape, not a profile.
+    pub fn profile(&self) -> FriProfile {
+        [FriProfile::Test, FriProfile::Production]
+            .into_iter()
+            .find(|p| p.num_queries() == self.num_queries && p.pow_bits() == self.query_pow_bits)
+            .expect("a shape's query count and PoW bits come from one of the two profiles")
+    }
+
+    /// The `AirLayout` `verify_batch`'s precompute loop builds for instance `i`: the widths the
+    /// symbolic builder lays its variables out from.
+    ///
+    /// The permutation fields are deliberately left at `Default`: `get_symbolic_constraints` and
+    /// `get_log_num_quotient_chunks` both overwrite them from the instance's own lookup contexts, so
+    /// filling them here would be a second, divergeable source for the same three numbers.
+    pub fn air_layout(&self, i: usize, air: &Chip) -> AirLayout {
+        AirLayout {
+            preprocessed_width: self.preprocessed_widths[i],
+            main_width: self.widths[i],
+            num_public_values: self.num_public_values[i],
+            num_periodic_columns: BaseAir::<Val>::num_periodic_columns(air),
+            ..Default::default()
+        }
+    }
+
+    /// The batch's `CommonData`: the preprocessed commitment and, the reason the constraint emitter
+    /// wants it, every instance's lookup contexts.
+    ///
+    /// A pure function of the tier, the declared heights and the profile — `Machine::verifier_key`
+    /// is seeded from a fixed constant precisely so that it is — and cached inside the shared
+    /// [`machine`], so calling it per instance costs one hash-map lookup.
+    pub(crate) fn common_data(&self) -> std::sync::Arc<p3_batch_stark::CommonData<Config>> {
+        machine(self.profile()).verifier_key(
+            Tier(self.tier),
+            self.program_log_height,
+            self.input_log_height,
+            self.keccak_log_height,
+            self.sha256_log_height,
+        )
     }
 
     /// `max(degree_bits) + LOG_BLOWUP`, the height every query index is sampled from — and, by the

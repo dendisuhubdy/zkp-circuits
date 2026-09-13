@@ -73,6 +73,11 @@ pub struct InputRound {
 pub struct Replay {
     pub lookup_alpha: EF,
     pub lookup_beta: EF,
+    /// Per instance, `BatchTranscript::sample_perm_challenges`' own layout: one
+    /// `(bus_prefix, beta)` pair per declared lookup, flattened. Reported because the program has to
+    /// re-derive the bus assignment from the shape's lookup contexts — `sample_perm_challenges`
+    /// returns the values and not the map — and that derivation is checked against *these*.
+    pub challenges: Vec<Vec<EF>>,
     pub alpha: EF,
     pub zeta: EF,
     pub fri_alpha: EF,
@@ -568,6 +573,7 @@ pub fn replay(
     Ok(Replay {
         lookup_alpha,
         lookup_beta,
+        challenges: challenges_per_instance,
         alpha,
         zeta,
         fri_alpha,

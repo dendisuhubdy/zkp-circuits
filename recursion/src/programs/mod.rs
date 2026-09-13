@@ -10,11 +10,13 @@
 //! the same order, which is what lets [`checkpoint_values`] read the `On` build's public values back
 //! as a name-keyed map.
 
+pub mod constraints;
 mod rv32;
 
 pub use rv32::verify_rv32;
 
 use crate::dsl::{Checkpoints, Stats};
+use constraints::Phase5Cost;
 use crate::emulator::Execution;
 use crate::isa::{Program, EF, F};
 use crate::shape::{InnerKey, InnerShape};
@@ -29,6 +31,11 @@ pub struct VerifierProgram {
     pub key: InnerKey,
     pub checkpoints: Checkpoints,
     pub stats: Stats,
+    /// Per instance, what its phase-5 constraint block cost — the DAG-sharing statistics and the
+    /// instruction count spec §4.3's generated evaluation comes to. Recorded here because the
+    /// milestone's exit is a *measured* number: it is a byproduct of building the program, not an
+    /// estimate made about it.
+    pub phase5: Vec<Phase5Cost>,
     /// The checkpoint names in emission order — the same list under `Off` and `On`, which is what
     /// makes the two builds comparable. Needed because `Builder::checkpoint_names` does not survive
     /// `Builder::finish`, and [`checkpoint_values`] is nothing without it.

@@ -508,6 +508,23 @@ impl Builder {
         self.assert_eq(a1, b1, &format!("{what} (c1)"));
     }
 
+    /// `a != 0` **and** `a⁻¹`, in one row.
+    ///
+    /// The extension analogue of [`Builder::assert_nonzero`], except that it hands back the inverse
+    /// instead of discarding it, because its caller wants both: the verifier's `inv_vanishing` *is*
+    /// `1/Z_H(zeta)`, and `Z_H(zeta) != 0` is `p3-batch-stark`'s `OodPointInDomain` check. `EINV` of
+    /// zero is exactly the trap, so one `EINV` is the value and the assertion at once — the named
+    /// checkpoint sits on that instruction's own `pc`.
+    pub fn ext_inv_checked(&mut self, a: Ext, what: &str) -> Ext {
+        self.begin();
+        let ra = self.materialise(a.0);
+        let (id, rd) = self.new_handle(2, &[ra, ra + 1]);
+        let at = self.instrs.len() as u32;
+        self.emit(Op::Einv, rd, ra, F::ZERO);
+        self.checkpoints.push((at, what.to_string()));
+        Ext(id)
+    }
+
     /// `a != 0`, in one row: `INV` of zero is exactly the trap, so the inverse *is* the assertion.
     pub fn assert_nonzero(&mut self, a: Felt, what: &str) {
         self.begin();

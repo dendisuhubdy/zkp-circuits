@@ -108,11 +108,11 @@ fn the_program_reproduces_the_lookup_challenges_alpha_and_zeta() {
     assert_eq!(cp["lookup_beta"], r.lookup_beta);
     assert_eq!(cp["alpha"], r.alpha);
     assert_eq!(cp["zeta"], r.zeta);
-    // Phases 0–4 consume exactly the first four segments and stop — which is the invariant that
+    // Phases 0–5 consume exactly the first five segments and stop — which is the invariant that
     // makes the tape's segment boundaries real rather than decorative. Task 6's measurement asserts
     // the finished program consumes *all* of it; this is the same claim at this task's boundary.
-    let consumed: usize = tape.segments[..4].iter().map(|(_, _, len)| len).sum();
-    assert_eq!(exec.hints_read, consumed, "phases 0–4 read Header..LookupTerminals, no more");
+    let consumed: usize = tape.segments[..5].iter().map(|(_, _, len)| len).sum();
+    assert_eq!(exec.hints_read, consumed, "phases 0–5 read Header..OpenedValues, no more");
 }
 
 /// The one assertion phases 0–4 make beyond the declared shape: `LogUpGadget::verify_terminal_sum`.
@@ -520,3 +520,221 @@ fn a_tampered_main_commitment_diverges_at_the_zeta_checkpoint() {
     }
 }
 
+
+/// Phase 5, against the very folder `p3-batch-stark` runs: the emitted DAG must fold to the *same*
+/// accumulator, not merely to something that satisfies the same identity.
+///
+/// This is the strongest form the claim has. Comparing only acceptance would pass with the
+/// constraints folded in the wrong order, with a shared sub-expression emitted twice with different
+/// operands, or with `alpha` applied one step out of phase — every one of which is a program that
+/// accepts this proof and rejects the next. So the checkpoints are the accumulator itself, the
+/// recomposed quotient, and all four Lagrange selectors, per instance.
+#[test]
+fn the_emitted_constraint_evaluation_equals_the_native_folded_accumulator_on_every_instance() {
+    let (p, shape, key) = one_test_proof();
+    let r = replay(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let vp = verify_rv32(&shape, &key, Checkpoints::On);
+    let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let exec = execute(&vp.program, &tape.words, 200_000_000).unwrap();
+    let cp = recursion::programs::checkpoint_values(&vp, &exec);
+    for i in 0..shape.degree_bits.len() {
+        assert_eq!(
+            cp[&format!("accumulator[{i}]")], r.accumulators[i],
+            "instance {i}: the emitted DAG must fold exactly as p3-batch-stark folds"
+        );
+        assert_eq!(cp[&format!("quotient[{i}]")], r.quotients[i], "instance {i}: quotient(zeta)");
+        assert_eq!(
+            cp[&format!("selectors[{i}].is_first_row")], r.selectors[i].is_first_row,
+            "instance {i}: is_first_row"
+        );
+        assert_eq!(
+            cp[&format!("selectors[{i}].is_last_row")], r.selectors[i].is_last_row,
+            "instance {i}: is_last_row"
+        );
+        assert_eq!(
+            cp[&format!("selectors[{i}].is_transition")], r.selectors[i].is_transition,
+            "instance {i}: is_transition"
+        );
+        assert_eq!(
+            cp[&format!("selectors[{i}].inv_vanishing")], r.selectors[i].inv_vanishing,
+            "instance {i}: 1/Z_H(zeta)"
+        );
+    }
+}
+
+/// The per-lookup challenge pairs the program derives from the two sampled elements must be
+/// `BatchTranscript::sample_perm_challenges`' own layout — `[prefix[bus_0], beta, prefix[bus_1],
+/// beta, …]` per instance, with the bus ids assigned as that function assigns them.
+///
+/// The emitter has to reproduce the bus assignment host-side, because `sample_perm_challenges`
+/// returns the challenge *values* and not the map. That makes it the one place in this file where a
+/// second implementation of p3 logic exists — so it is compared against the real function's output,
+/// element for element, rather than against a restatement of the rule.
+#[test]
+fn the_emitted_lookup_challenges_are_sample_perm_challenges_own_layout() {
+    let (p, shape, key) = one_test_proof();
+    let r = replay(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let vp = verify_rv32(&shape, &key, Checkpoints::On);
+    let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let exec = execute(&vp.program, &tape.words, 200_000_000).unwrap();
+    let cp = recursion::programs::checkpoint_values(&vp, &exec);
+    assert!(
+        r.challenges.iter().any(|c| !c.is_empty()),
+        "p3 squeezes the lookup pair only when some instance has lookups"
+    );
+    for (i, want) in r.challenges.iter().enumerate() {
+        assert_eq!(want.len(), 2 * shape.num_lookups[i], "instance {i}: one pair per lookup");
+        for (k, w) in want.iter().enumerate() {
+            assert_eq!(cp[&format!("challenges[{i}][{k}]")], *w, "instance {i} challenge {k}");
+        }
+    }
+}
+
+/// The identity itself, in the shipped (`Checkpoints::Off`) build: reaching `HALT` on a real proof
+/// *is* the claim, because every instance's `accumulator · inv_vanishing == quotient` is asserted
+/// along the way and a failure is a trap.
+#[test]
+fn the_quotient_identity_holds_in_the_program_for_a_real_proof() {
+    let (p, shape, key) = one_test_proof();
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let exec = execute(&vp.program, &tape.words, 200_000_000).expect("accepts a real proof");
+    // The brief expects `4 + 1 + 26` here — spec §4.4's own list. That is phase 8, which is Task 6:
+    // the `Off` build of *this* program publishes nothing at all yet, and asserting the final layout
+    // now would be asserting a step that does not exist. Task 6 restores the `4 + 1 + 26`.
+    assert!(exec.public.is_empty(), "phase 8 (spec §4.4's public values) is Task 6");
+    // And it got there by *reading the openings*, not by stopping short of them: the run consumes the
+    // whole `Header..OpenedValues` prefix of the tape. Without that this test would pass on a program
+    // with no phase 5 at all.
+    let consumed: usize = tape.segments[..5].iter().map(|(_, _, len)| len).sum();
+    assert_eq!(exec.hints_read, consumed);
+}
+
+/// One word of one opened value moved, and the quotient identity of *that instance* fails — at the
+/// checkpoint named for it, not somewhere downstream.
+#[test]
+fn a_tampered_opened_value_fails_the_quotient_identity_at_the_named_checkpoint() {
+    let (p, shape, key) = one_test_proof();
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let mut tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let (_, start, _) = *tape
+        .segments
+        .iter()
+        .find(|(s, _, _)| *s == recursion::witness::Segment::OpenedValues)
+        .unwrap();
+    tape.words[start] += F::ONE; // instance 0's first opened trace value
+    match execute(&vp.program, &tape.words, 200_000_000) {
+        Err(ExecError::InverseOfZero { pc }) => {
+            assert_eq!(vp.program.checkpoint_at(pc), Some("quotient identity[0]"));
+        }
+        other => panic!("expected the quotient identity to fail, got {other:?}"),
+    }
+}
+
+/// The milestone's exit is a *measured* number, so phase 5's cost is pinned rather than described:
+/// the per-instance instruction counts the build reports, and the whole program's cpu rows and
+/// Poseidon2 permutations from the emulator's own event log.
+///
+/// The bound is the one the plan's decision point is written against — `2^19 = 524 288` cpu rows for
+/// the *whole* inner proof, phases 6–8 included — so phase 5 crossing a fifth of it would be the
+/// signal that Task 7's precompiles are needed. It is asserted, not merely printed, because a
+/// constraint-set change that doubles the cpu table's DAG has to show up as a red test and not as a
+/// number nobody read.
+#[test]
+fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
+    let (p, shape, key) = one_test_proof();
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let exec = execute(&vp.program, &tape.words, 200_000_000).expect("the program accepts");
+
+    let mut table = String::from(
+        "phase 5, per instance: width  lookups  base+ext constraints  nodes(+hits)  \
+         leaves(+hits)  instrs  spills/reloads\n",
+    );
+    for (i, c) in vp.phase5.iter().enumerate() {
+        table += &format!(
+            "  [{i}] w={:<4} l={:<3} {:>5}+{:<4} {:>6}(+{:<6}) {:>5}(+{:<6}) {:>7}  {}/{}\n",
+            shape.widths[i],
+            shape.num_lookups[i],
+            c.base_constraints,
+            c.ext_constraints,
+            c.nodes,
+            c.node_hits,
+            c.leaves,
+            c.leaf_hits,
+            c.instrs,
+            c.spills,
+            c.reloads
+        );
+    }
+    let sum = |f: fn(&recursion::programs::constraints::Phase5Cost) -> usize| -> usize {
+        vp.phase5.iter().map(f).sum()
+    };
+    let phase5_instrs = sum(|c| c.instrs);
+    table += &format!(
+        "  total: {} constraints, {} nodes (+{} shared), {} leaves (+{} shared), {} instrs\n",
+        sum(|c| c.base_constraints) + sum(|c| c.ext_constraints),
+        sum(|c| c.nodes),
+        sum(|c| c.node_hits),
+        sum(|c| c.leaves),
+        sum(|c| c.leaf_hits),
+        phase5_instrs,
+    );
+    table += &format!(
+        "  program: {} instrs, {} cpu rows, {} permutations, {} memory accesses, {} tape words read\n",
+        vp.stats.instrs,
+        exec.cpu_rows(),
+        exec.permutations(),
+        exec.mem_accesses(),
+        exec.hints_read,
+    );
+    println!("{table}");
+
+    // The program is straight-line — nothing in phases 0–5 is a `counted_loop` — so every
+    // instruction runs at most once, and the ones that do not are exactly the assertion traps their
+    // own `JEQ` jumped over.
+    assert!(
+        exec.cpu_rows() <= vp.stats.instrs,
+        "a straight-line program cannot run more rows than it has instructions"
+    );
+    assert!(
+        phase5_instrs < 100_000,
+        "phase 5 costs {phase5_instrs} rows per inner proof, past the 100 000 the milestone's \
+         budget allots it out of 2^19"
+    );
+    // No hashing happens in phases 0–5 beyond the challenger's own duplexing.
+    assert_eq!(exec.permutations(), 51, "phases 0–4's 51 challenger duplexes, and phase 5 hashes nothing");
+}
+
+/// Every assertion phase 5 makes is a *named* checkpoint, and the names are the interface Task 6's
+/// tamper table indexes by — so they are pinned here rather than left to whatever the code happens to
+/// spell.
+///
+/// The `OodPointInDomain` check (`Z_H(zeta) != 0`) is the reason this test exists at all. It cannot
+/// be reached by tampering — `zeta` comes out of the transcript, and no tape word puts it inside a
+/// trace domain — so nothing else in this file would notice if its name were dropped and the check
+/// became an anonymous `EINV`. Dropping the quotient identity's own assertions fails here too.
+#[test]
+fn phase_5s_assertions_are_all_named() {
+    let (_, shape, key) = one_test_proof();
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let names: std::collections::BTreeSet<&str> =
+        vp.program.checkpoints.iter().map(|(_, n)| n.as_str()).collect();
+    for i in 0..shape.instances() {
+        assert!(
+            names.contains(format!("quotient identity[{i}]").as_str()),
+            "instance {i}'s quotient identity is unnamed"
+        );
+        assert!(
+            names.contains(format!("zeta is inside instance {i}'s trace domain").as_str()),
+            "instance {i}'s OodPointInDomain check is unnamed"
+        );
+    }
+    // The `Off` build records the same checkpoint *names* as the `On` build, which is what makes the
+    // two comparable — and what `checkpoint_values` reads the `On` build's public values back with.
+    let on = verify_rv32(&shape, &key, Checkpoints::On);
+    assert_eq!(vp.checkpoint_names, on.checkpoint_names);
+    assert!(vp.checkpoint_names.contains(&format!("accumulator[{}]", shape.instances() - 1)));
+    // And the trap table stays pc-sorted, which is what `checkpoint_at`'s binary search needs.
+    assert!(vp.program.checkpoints.windows(2).all(|w| w[0].0 < w[1].0));
+}

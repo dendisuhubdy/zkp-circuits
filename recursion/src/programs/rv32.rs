@@ -1,10 +1,11 @@
 //! The RV32-machine verifier, as an rVM program.
 //!
-//! Phases 0–4 — the declared shape, the batch transcript's eight observe/sample steps, and the
-//! cross-AIR lookup terminal sum. Phase 5 (the per-instance constraint evaluation at `zeta`) and
-//! phases 6–8 (the FRI query phase, the acceptance and spec §4.4's public values) are the following
-//! two tasks; nothing half-built is called from here, so the program this file produces today is a
-//! complete, self-consistent program that happens to stop after `zeta`.
+//! Phases 0–5 — the declared shape, the batch transcript's eight observe/sample steps, the cross-AIR
+//! lookup terminal sum, and the per-instance constraint evaluation at `zeta` with its quotient
+//! identity. Phases 6–8 (the FRI query phase, the acceptance and spec §4.4's public values) are the
+//! next task; nothing half-built is called from here, so the program this file produces today is a
+//! complete, self-consistent program that happens to stop once every instance's constraints have
+//! been checked.
 //!
 //! **The transcript order is `verify_batch`'s, the *read* order is the tape's, and the two are not
 //! the same thing.** `p3-batch-stark`'s transcript observes the main cap before the public values,
@@ -21,6 +22,9 @@ use crate::isa::EF;
 use crate::shape::{InnerKey, InnerShape, PV_INSTANCE};
 use p3_field::PrimeCharacteristicRing;
 
+use super::constraints::{
+    emit_instance, emit_lookup_challenges, read_openings, shape_airs, Batch, Phase5Cost,
+};
 use super::VerifierProgram;
 
 /// The cap size, in words: four digests of four elements (`cap_height = 2`).
@@ -137,12 +141,35 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     b.assert_eq(c0, zero, "lookup terminal sum");
     b.assert_eq(c1, zero, "lookup terminal sum");
 
-    // Phase 5 is Task 5 and phases 6–8 are Task 6. They append to this function; the values they
-    // need are exactly the ones in scope here (`pvs`, `zeta`, `alpha`, the lookup pair, `terminals`,
-    // and the four caps for the query phase's root comparisons), which is why they are bound to
-    // names rather than consumed in place.
-    let _ = (lookup_beta, main_cap, perm_cap, q_cap, r_cap);
+    // ── phase 5: the generated constraint evaluation at `zeta` (spec §4.3).
+    //
+    // The per-lookup challenge pairs come first, because they are the `ExtEntry::Challenge` leaves of
+    // every lookup constraint below — `sample_perm_challenges` derives the whole layout from the pair
+    // drawn in phase 3, and so does this.
+    let challenges = emit_lookup_challenges(&mut b, shape, lookup_alpha, lookup_beta);
+    // `Segment::OpenedValues`, read once in tape order. The query phase re-observes every one of
+    // these as a claimed evaluation, which is why `openings` keeps the raw runs too.
+    let openings = read_openings(&mut b, shape, pvs, &terminals, &challenges, zeta);
+    let airs = shape_airs(shape);
+    let common = shape.common_data();
+    let lookups: Vec<&[_]> = common.lookups.iter().map(|l| l.as_ref()).collect();
+    let batch = Batch { shape, airs: &airs, lookups: &lookups, alpha, zeta };
+    let mut phase5 = Vec::with_capacity(n);
+    for i in 0..n {
+        let before = b.stats();
+        let mut cost = Phase5Cost::default();
+        emit_instance(&mut b, &batch, &openings, i, &mut cost);
+        let after = b.stats();
+        cost.instrs = after.instrs - before.instrs;
+        cost.spills = after.spills - before.spills;
+        cost.reloads = after.reloads - before.reloads;
+        phase5.push(cost);
+    }
 
+    // Phases 6–8 are the next task. Everything they need is already a live binding here — the four
+    // caps, which the query phase compares its restored roots against, and `openings`, whose claimed
+    // evaluations `TwoAdicFriPcs::verify` observes before it draws `fri_alpha` — so no value is
+    // consumed in place and nothing has to be silenced to keep the build warning-free.
     let stats = b.stats();
     let checkpoint_names = b.checkpoint_names().to_vec();
     VerifierProgram {
@@ -151,6 +178,7 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
         key: key.clone(),
         checkpoints: cp,
         stats,
+        phase5,
         checkpoint_names,
     }
 }

@@ -270,6 +270,36 @@ fn the_assertion_forms_name_their_own_checkpoints() {
     }
 }
 
+/// `ext_inv_checked` is both an inverse and an assertion in one row: it hands back `a⁻¹` and names
+/// the `EINV` that computes it, so a zero operand traps at that name. The verifier program's
+/// `inv_vanishing` *is* its `Z_H(zeta) != 0` check, which is why the two are one instruction.
+#[test]
+fn ext_inv_checked_is_the_inverse_and_the_assertion_at_once() {
+    // A non-zero operand: the inverse comes back, and nothing traps.
+    let mut b = Builder::new(Checkpoints::Off);
+    // A genuinely non-base element: `7 + 3·X`.
+    let v = EF::from_basis_coefficients_slice(&[F::from_u64(7), F::from_u64(3)]).unwrap();
+    let x = b.ext_constant(v);
+    let inv = b.ext_inv_checked(x, "x is zero");
+    let prod = b.ext_mul(x, inv);
+    b.public_ext(prod);
+    let p = b.finish();
+    assert_eq!(p.checkpoints.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(), ["x is zero"]);
+    assert_eq!(execute(&p, &[], 1_000).unwrap().public, vec![F::ONE, F::ZERO]);
+
+    // A zero operand: the same instruction is the trap, and it resolves to the name.
+    let mut b = Builder::new(Checkpoints::Off);
+    let z = b.ext_constant(EF::ZERO);
+    let _ = b.ext_inv_checked(z, "the zero we planted");
+    let p = b.finish();
+    match execute(&p, &[], 1_000) {
+        Err(ExecError::InverseOfZero { pc }) => {
+            assert_eq!(p.checkpoint_at(pc), Some("the zero we planted"));
+        }
+        other => panic!("expected a trap, got {other:?}"),
+    }
+}
+
 #[test]
 fn checkpoints_publish_only_when_they_are_on_and_record_their_names_either_way() {
     fn build(mode: Checkpoints) -> (Vec<String>, recursion::isa::Program) {
