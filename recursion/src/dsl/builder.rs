@@ -27,7 +27,15 @@ use super::{Array, Ext, Felt, Ptr};
 use crate::isa::{Instr, Op, Program, EF, F, MEM_LIMIT, NUM_REGS};
 
 /// The first cell a user allocation can use. Cells `0..MEM_BASE` are the spill arena.
-pub const MEM_BASE: u64 = 1 << 12;
+///
+/// `2^20`, a sixteenth of the `2^24`-cell address space. A spilled handle keeps its cell for the
+/// rest of the program (there is no liveness analysis and no promotion back into a register), so the
+/// arena has to hold *every handle the program ever spills* — and the verifier program spills on the
+/// order of `10^5` of them. Cells cost nothing on their own: the rVM's memory is addressed, not
+/// materialised, so an unused cell is neither a row nor a trace entry. Raising this number moves
+/// every user allocation and therefore **changes every program digest**, which is why it is set
+/// once, generously, here rather than nudged upwards later.
+pub const MEM_BASE: u64 = 1 << 20;
 
 /// The registers handles are allocated from, in allocation-preference order.
 const ALLOCATABLE: [u8; 27] = [
@@ -71,6 +79,11 @@ enum Place {
 struct Slot {
     width: u8,
     place: Place,
+    /// The value, when it is a compile-time constant ([`Builder::constant`], [`Builder::zero`]).
+    /// Only [`Builder::counted_loop`] reads it, to reject a statically-zero iteration count; it is
+    /// deliberately *not* propagated through arithmetic, because a builder that constant-folded
+    /// would emit a different program than the one it was asked for.
+    konst: Option<F>,
 }
 
 /// A pointer: a value slot holding a base address, plus a compile-time cell delta that is folded
@@ -148,6 +161,7 @@ impl Builder {
         self.begin();
         let (id, rd) = self.new_handle(1, &[]);
         self.emit(Op::Faddi, rd, 0, v);
+        self.slots[id as usize].konst = Some(v);
         Felt(id)
     }
 
@@ -157,7 +171,7 @@ impl Builder {
             return z;
         }
         let id = self.slots.len() as u32;
-        self.slots.push(Slot { width: 1, place: Place::Reg(0) });
+        self.slots.push(Slot { width: 1, place: Place::Reg(0), konst: Some(F::ZERO) });
         let z = Felt(id);
         self.zero = Some(z);
         z
@@ -437,9 +451,13 @@ impl Builder {
     /// `body` emitted **once** and executed `n` times, with a down-counter (`n, n-1, …, 1`) as its
     /// index.
     ///
-    /// The counter is tested *after* the body, so this is a do-while: `n` must be at least one.
-    /// `n = 0` runs the body and then counts down from `-1`, i.e. for the whole field — a caller
-    /// with a possibly-empty count has to branch around the loop itself.
+    /// **Precondition: `n >= 1`.** The counter is tested *after* the body, so this is a do-while:
+    /// `n = 0` runs the body once and then counts down from `-1`, i.e. `2^64 - 2^32` more times —
+    /// not an empty loop but an unbounded one. A caller whose count can be zero has to branch around
+    /// the loop itself; nothing in the emitted code can recover from a zero reaching the `MOV`.
+    /// When `n` is a compile-time constant ([`Builder::constant`] or [`Builder::zero`]) the builder
+    /// checks the precondition and panics on a zero; when it is a runtime value — a round or query
+    /// count read off the witness tape, say — the precondition is the caller's to establish.
     ///
     /// Because the body is emitted once, the registers it reads on the second iteration are whatever
     /// the first left behind — so the body must not move any handle that existed before the loop,
@@ -448,6 +466,12 @@ impl Builder {
     /// through memory instead. Handles the body *creates* are unconstrained: they are rewritten by
     /// their own instructions every iteration.
     pub fn counted_loop(&mut self, n: Felt, mut body: impl FnMut(&mut Self, Felt)) {
+        assert!(
+            self.slots[n.0 as usize].konst != Some(F::ZERO),
+            "counted_loop: the iteration count is a compile-time zero. The counter is tested after \
+             the body, so this would run the body once and then 2^64 - 2^32 more times, not zero \
+             times — n >= 1 is the precondition. Branch around the loop instead."
+        );
         self.begin();
         let rn = self.materialise(n.0);
         let (ctr, rc) = self.new_handle(1, &[rn]);
@@ -586,7 +610,7 @@ impl Builder {
     fn new_handle(&mut self, width: u8, pinned: &[u8]) -> (u32, u8) {
         let reg = self.claim(width, pinned);
         let id = self.slots.len() as u32;
-        self.slots.push(Slot { width, place: Place::Reg(reg) });
+        self.slots.push(Slot { width, place: Place::Reg(reg), konst: None });
         self.regs[reg as usize] = Some(id);
         if width == 2 {
             self.regs[reg as usize + 1] = Some(id);

@@ -233,6 +233,18 @@ fn a_loop_body_that_evicts_a_pre_existing_handle_is_refused() {
 }
 
 #[test]
+#[should_panic(expected = "the iteration count is a compile-time zero")]
+fn a_counted_loop_with_a_statically_zero_count_is_refused() {
+    // A do-while over a zero counter is not an empty loop, it is a 2^64-iteration one. A count the
+    // builder can see is zero is a build-time error rather than a program that never halts.
+    let mut b = Builder::new(Checkpoints::Off);
+    let n = b.zero();
+    b.counted_loop(n, |b, _i| {
+        b.constant(F::ONE);
+    });
+}
+
+#[test]
 fn the_assertion_forms_name_their_own_checkpoints() {
     let mut b = Builder::new(Checkpoints::Off);
     let one = b.constant(F::ONE);
