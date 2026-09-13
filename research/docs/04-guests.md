@@ -188,6 +188,145 @@ guest's byte-at-a-time input unpacking (one `READ_INPUT` per four bytes plus
 a per-byte shift/store loop), not by the hash: the permutation itself is a
 single cpu row.
 
+### The `sbpf` guest — M4.4's exit test, and the one number that did not hold
+
+`guests-compiled/sbpf` is an **sBPF interpreter** compiled to RV32IM: 91 v1
+opcodes, the four memory regions, twelve syscalls, an ELF64 loader that applies
+relocations in place, and the ABI that binds a run — all of it `sbpf-core`, a
+`no_std` `#![forbid(unsafe_code)]` library unit-tested natively and
+differentially tested against `solana-sbpf` 0.11.1 (M4.4 Task 5). `src/main.rs`
+is forty lines: a `Host` whose `sha256_compress` is `SYS_SHA256` and whose
+`poseidon2` is `SYS_POSEIDON2`, one `static mut Workspace` in `.bss`, and
+`abi::run_call`.
+
+The program it runs is the real thing: `guests-compiled/sbpf/programs/spl_token.so`,
+108 600 bytes fetched once from mainnet-beta's program-data account and committed
+with its sha256 (`programs/SPL_TOKEN.md` has the RPC calls, the slot, and what the
+fetch actually found — the account is owned by the **upgradeable** loader, not the
+`BPFLoader2` the plan expected, so the ELF sits behind a 45-byte header on a second
+account). `research/tests/sbpf_elf.rs::spl_token_elf_loads_with_relocations_applied`
+loads it and compares the **relocated bytes** against `solana-sbpf`'s own relocated
+image: the 2 848 bytes of read-only data past the text match byte for byte, and of
+the 12 826 text slots the only ones that differ are the 141 bpf-to-bpf calls, at each
+of which the reference's registry key is checked to be the one derived from this
+crate's slot-relative immediate. The loader touched exactly the 219 slots the file's
+own relocation and call tables name and nothing else.
+
+**Measured** (`cargo +1.98.1 test --release --test e2e compiled_sbpf -- --nocapture`),
+an SPL Token `Transfer` of 250 tokens between two accounts owned by one signer, with
+the mint as a fourth read-only account:
+
+| | |
+|---|---|
+| program words | 7 715 (6 427 text + a 1 288-word data prologue for 1 856 bytes of `.rodata`) |
+| input words | 37 609 (27 151 ELF + 10 458 instruction region) |
+| cycles | **1 753 945** |
+| sBPF instructions executed | 143 |
+| frame-depth high-water mark | **0** |
+| SHA-256 compressions | 2 368 |
+| `sha256_log_height` | 18 (2 368 blocks × 64 rows = 151 552) |
+| `mem_log_height` | not measurable — it is computed inside `build_traces_salted`, which no tier reaches |
+| tier, proof size | **none — above `Tier(20)`'s 1 048 575-cycle budget** |
+
+Two of those numbers are the milestone's real findings.
+
+**The frame-depth high-water mark is 0, and 512-byte frames were never viable.**
+The plan allocated 64 × 512 bytes on the reasoning that `process_transfer` "uses
+well under that". It does not use more *frames* — it uses **no** nested call at
+all, because the release build inlines `entrypoint::deserialize`,
+`Processor::process` and `process_transfer` into one function — but that one
+function's frame is around 2 KiB, and with 512-byte frames the program faults on
+its first instruction at `0x1_ffff_f9e8`, 1 560 bytes below the stack region.
+A frame size is not a budget the host may choose: it is part of the ABI the
+program was compiled against. `sbpf-core` now uses Solana's own 4 KiB frames and
+**8** of them: the plan's 32 KiB stack is kept, and what gives way is depth rather
+than frame width — eight frames of headroom against a workload that uses one.
+
+**The exit test does not prove, and `program_hash` is why.** 1 753 945 cycles is
+not a tuning problem; it is 6.7× the plan's tier-18 budget and 1.7× the largest
+tier this machine has. The breakdown, by pc histogram over the guest's symbols
+(`sbpf_cycle_breakdown_by_pc`):
+
+| what | cycles | share |
+|---|---|---|
+| `Sha256::update`/`compress` — 2 368 compressions at ~451 cycles each | 1 066 950 | 60.8 % |
+| `run_call_with` inlined into `main`: the input tape, the interpreter, the fills | 600 725 | 34.2 % |
+| `memset` (zeroing the 32 KiB stack and 32 KiB heap) | 51 535 | 2.9 % |
+| `elf::load` (section walk, call-marker pass, 107 relocations) | ~22 000 | 1.3 % |
+
+and the 2 368 compressions decompose exactly: **1 698 for `program_hash`** over the
+108 600-byte ELF, 654 for `input_hash` over the 41 825-byte instruction region, and
+8 + 8 for the pre- and post-state account walks. So the ELF — carried on the input
+tape (27 151 of the 37 609 words, 72 %) and then hashed (72 % of the compressions) —
+costs about **1.20 M of the 1.75 M cycles**, to bind a program of which the run
+actually executes 143 instructions.
+
+The plan foresaw the shape of this ("the ELF's ~1 600 compressions dominate the row
+count; a follow-up may bind the program by a cached digest instead") while also
+making tier ≤ 18 an exit criterion. For a 108 KB program those two cannot both hold,
+and no amount of guest-side care closes a 6.7× gap: the *floor* for reading 27 151
+words off the tape and compressing 1 698 blocks is several hundred thousand cycles
+even with one cycle per word and per byte. Two ruling changes would:
+
+1. **Do not recompute `program_hash` in the guest.** It is a digest of a value the
+   verifier already has committed — `hc` binds the guest's own program, and the
+   ELF arrives through `H_IN`, so a *declared* `program_hash` checked against the
+   input commitment costs nothing in-circuit. Saves ~1.20 M cycles.
+2. **Hash a canonical instruction encoding, not the aligned region.** 40 960 of the
+   region's 41 825 bytes are `MAX_PERMITTED_DATA_INCREASE` realloc padding — 98 %
+   zeros — so 640 of `input_hash`'s 654 compressions hash nothing at all. Hashing
+   the accounts' real fields instead (which is what `output_hash` already does)
+   leaves ~14 blocks. Saves ~290 K cycles.
+
+With both, the remaining work is ~250 K cycles: tier 18, as the plan asked. Neither
+is Task 6's to decide — both change the plan's "Public output" ruling — so
+`compiled_sbpf_spl_token_transfer_proves_and_verifies` is committed in full and
+`#[ignore]`d with the measurement in its ignore message, and the executor-level
+half of the exit test (which passes, and which checks the guest's eight output
+words against the native run byte for byte) is what pins the behaviour meanwhile.
+
+Two smaller things the measurement bought, both fixed in `sbpf-core` and both worth
+knowing for any future guest on this target:
+
+* **`copy_from_slice` with a run-time length is a `compiler_builtins::mem::memcpy`
+  call, and its byte-at-a-time loop costs ~9.5 cycles per byte.** It was 1 448 018
+  cycles — 38 % of the first measurement's 3 853 588 — inside `Sha256::update`
+  copying each 64-byte block into a scratch buffer that is then read once. Hashing
+  whole blocks straight out of the caller's slice, and splitting `InputCursor::bytes`
+  into a constant-width-4 bulk loop and a 1–3 byte tail, took the run from 3 853 588
+  to 1 753 945 cycles.
+* **Read two bytes, not eight, when two will do.** `elf::load`'s call-marker pass
+  wants an opcode and a register nibble; decoding the whole `u64` cost 430 570 cycles
+  across 12 826 slots.
+
+### Syscalls: what traps, and why
+
+`sbpf-core` implements `abort`, `sol_panic_`, `sol_log_`, `sol_log_64_`,
+`sol_log_compute_units_`, `sol_log_pubkey`, `sol_memcpy_`, `sol_memmove_`,
+`sol_memset_`, `sol_memcmp_`, `sol_alloc_free_` and `sol_sha256` — the last through
+the M4.4 chip. Everything else is `Halt::UnknownSyscall`, which is status 2 over the
+pre-state: nothing happened. The committed SPL Token ELF names seven syscalls, five
+of them implemented; the two that trap are
+
+* `sol_set_return_data` — `GetAccountDataSize`, `AmountToUiAmount`, `UiAmountToAmount`;
+* `sol_get_sysvar` — the rent read `InitializeAccount` does.
+
+Neither is on the `Transfer` path, so this is a scope boundary rather than dead code:
+those instructions are out of scope, not broken. The out-of-scope list the design spec
+names is unchanged and unreached here — `sol_ed25519_verify`, `sol_secp256k1_recover`,
+`sol_keccak256`, `sol_invoke_signed_*`, `sol_get_*_sysvar`, and the two PDA
+derivations (`sol_create_program_address`, `sol_try_find_program_address`), which need
+`sol_sha256` with the `"ProgramDerivedAddress"` marker *and* an Ed25519 curve check —
+the curve check being the Ed25519 work this path does not have. Compute-unit costs are
+not modelled at all; the only meter is `MAX_INSTRUCTIONS = 200 000`.
+
+Two more caps are measured rather than assumed. `MAX_INPUT_BYTES` is **49 152**, not
+the plan's 16 384: the aligned format the entrypoint deserializes skips 10 240 bytes
+of realloc headroom after *every* account unconditionally, so a three-account
+`Transfer` is 31 401 bytes and the plan's cap could never have held its own exit test.
+`MAX_ACCOUNTS = 64` (Solana's per-transaction limit) still bounds `output_hash`'s
+duplicate-resolution table; a region claiming more is walked only that far.
+
 ## Hand-written note-layer guests (not this milestone's pipeline)
 
 `guests::transfer` (M3.3) and `guests::bundle` (shielded pool phase Z Task 3)

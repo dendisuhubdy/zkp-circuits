@@ -15,20 +15,29 @@ are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (304 tests: 301 pass, 3 ignored).
-  Everything uses `FriProfile::Test`; measured in one run at the end of M4.4's
-  chip tasks, `tests/bundle.rs` takes ~230 s (six proofs:
+- `cargo test` — the whole suite (316 tests: 312 pass, 4 ignored).
+  Everything uses `FriProfile::Test`; measured in one run at the end of M4.4,
+  `tests/bundle.rs` takes ~206 s (six proofs:
   four guest-level, plus one shared by every ledger-level test and one for
   the 1-real-1-dummy shape), `tests/viewing.rs` ~212 s, `tests/e2e.rs`
-  ~108 s, `tests/cheating.rs` ~43 s, `tests/zk.rs` ~19 s,
-  `tests/tables.rs` ~11 s, `tests/keccak.rs` ~1 s (its chip-alone
-  harness proves a 128-row table, so it is cheap despite 2 612 columns) and
-  `tests/sha256.rs` ~1 s (same trick, a 64-row block). M4.4's four sBPF test
-  files (`tests/sbpf_isa.rs`, `sbpf_interp.rs`, `sbpf_elf.rs`, `sbpf_abi.rs`,
-  49 tests, one `#[ignore]`d until the SPL Token ELF is committed) prove
+  ~101 s, `tests/cheating.rs` ~58 s, `tests/zk.rs` ~19 s,
+  `tests/tables.rs` ~10 s, `tests/isa.rs` ~6 s (M4.3's image-container tests
+  prove a guest that reads its own data segment back), `tests/keccak.rs` ~1 s
+  (its chip-alone harness proves a 128-row table, so it is cheap despite 2 612
+  columns) and `tests/sha256.rs` ~0.4 s (same trick, a 64-row block). M4.4's
+  four sBPF test files (`tests/sbpf_isa.rs`, `sbpf_interp.rs`, `sbpf_elf.rs`,
+  `sbpf_abi.rs`, 52 tests) prove
   nothing and so cost well under a second between them — the interpreter is
   checked against `solana-sbpf` 0.11.1 natively, before anything reaches the
-  machine.
+  machine, and that includes loading the committed SPL Token ELF and running a
+  real `Transfer` through it.
+  Of the four `#[ignore]`d tests, two are production-profile proof-size
+  measurements, one is the sBPF cycle-breakdown measurement, and one —
+  `tests/e2e.rs::compiled_sbpf_spl_token_transfer_proves_and_verifies` — is
+  M4.4's exit test, which **does not pass**: the guest is correct but takes
+  1 753 945 cycles against `Tier(20)`'s 1 048 575 budget. Its ignore message
+  carries the measurement and `docs/04-guests.md` the breakdown; do not treat
+  it as a flake to retry.
   All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a
   keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with
   a batch's column count, so carrying it costs ~1.91 MB at the production

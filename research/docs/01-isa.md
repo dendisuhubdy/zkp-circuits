@@ -227,9 +227,10 @@ Three properties make this the whole feature:
   and control falls through into the guest's own `_start` with no jump, so
   every `lui`-based absolute reference to `.bss` and every jump-table entry
   still points where the linker put it. A guest with data therefore needs
-  program space below its text: `guests-compiled/evm/evm.ld` is
-  `guest-sdk/guest.ld` with `ORIGIN` raised to `0x10000`, and
-  `LoadError::PrologueRoom` is the check that it was raised enough.
+  program space below its text: `guests-compiled/evm/evm.ld` and
+  `guests-compiled/sbpf/sbpf.ld` are `guest-sdk/guest.ld` with `ORIGIN` raised
+  to `0x10000`, and `LoadError::PrologueRoom` is the check that it was raised
+  enough.
 - **A guest with no data is unchanged.** `n_data = 0` gives an empty prologue,
   `base_pc = text_base`, and word-for-word the `Program`
   `from_flat_binary` builds — same `hc`
@@ -243,6 +244,15 @@ contiguous data segment, `.bss` excluded because it is `NOBITS`), and the
 guest Makefile calls it instead of `llvm-objcopy -O binary`. `LoadError` gains
 `Magic`, `Version`, `Segments`, `Base` and `PrologueRoom` for a container that
 is not one.
+
+Two committed guests take this path. M4.3's `evm` is 2 428 bytes of `.rodata`
+(jump tables, panic locations, materialised constants) costing 1 630 prologue
+instructions, and M4.4's `sbpf` — the sBPF interpreter — is 1 856 bytes costing
+1 288, so the SPL Token exit guest is 7 715 program words of which the prologue
+is 17 % (`docs/04-guests.md`'s "The `sbpf` guest"). Both are well inside the
+`0xf000` bytes `ORIGIN = 0x10000` reserves. Task 5's report predicted the need:
+a real compiler output always has read-only data, and `sbpf-core`'s is the
+`Halt::Trap(&'static str)` literals before anything else.
 
 **Unsupported instructions.** `FENCE`, `EBREAK`, CSR instructions, and the
 A/C extensions are never emitted by `Instr::decode`'s recognized encodings,

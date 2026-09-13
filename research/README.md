@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~6-7 minutes wall time (thirteen proofs — M4.4's sha256_demo is the newest guest in the closing sweep — one of them the narrated production-profile one)
-cargo test              # 304 tests (301 pass, 3 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, sha256, sBPF interpreter, viewing keys, shielded-pool bundles
+cargo test              # 316 tests (312 pass, 4 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, sha256, sBPF interpreter + the real SPL Token program, viewing keys, shielded-pool bundles
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -193,11 +193,18 @@ running under the same relation, not separate circuits:
 |---|---|---|
 | RISC-V | native | none |
 | Solidity | `solc` → EVM bytecode → a `no_std` EVM interpreter compiled to RV32IM, bytecode as private input | Keccak-256, 256-bit `ADDMOD`/`MULMOD`/`EXP`, `ECRECOVER` (secp256k1), Merkle-witness syscalls for `SLOAD`/`SSTORE` |
-| Solana / SVM | sBPF ELF → an sBPF interpreter compiled to RV32IM | SHA-256 (**done, M4.4** — the `sha256` chip behind `SYS_SHA256`), Ed25519 verify, 64-bit multiply; a direct sBPF→RV32 translator is a natural later optimisation |
+| Solana / SVM | sBPF ELF → an sBPF interpreter compiled to RV32IM — **built, M4.4** (`guests-compiled/sbpf-core` + `guests-compiled/sbpf`, differentially tested against `solana-sbpf` 0.11.1; it runs the real SPL Token program, fetched from mainnet and committed) | SHA-256 (**done, M4.4** — the `sha256` chip behind `SYS_SHA256`), Ed25519 verify, 64-bit multiply; a direct sBPF→RV32 translator is a natural later optimisation |
 
 Publishing a contract under this model means registering a hash, never
 generating a bespoke circuit. Details, cycle-cost estimates, and what
 milestone 4 builds first: `docs/04-guests.md`.
+
+The Solana interpreter **runs** an SPL Token `Transfer` correctly in the
+machine's executor but does not yet **prove** it: 1 753 945 cycles against the
+largest tier's 1 048 575, 72 % of it spent hashing the 108 600-byte ELF
+in-circuit to produce `program_hash`. The fix is a ruling change, not
+optimisation — `docs/04-guests.md`'s "The `sbpf` guest" has the measured
+breakdown, and the design spec's §5.1 has the proposal.
 
 ## What leaks and what does not
 
