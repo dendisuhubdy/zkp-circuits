@@ -15,7 +15,7 @@ are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (293 tests: 290 pass, 3 ignored).
+- `cargo test` — the whole suite (304 tests: 301 pass, 3 ignored).
   Everything uses `FriProfile::Test`; measured in one run at the end of M4.4's
   chip tasks, `tests/bundle.rs` takes ~230 s (six proofs:
   four guest-level, plus one shared by every ledger-level test and one for
@@ -25,7 +25,7 @@ are `docs/01–06`; the README has the reading order.
   harness proves a 128-row table, so it is cheap despite 2 612 columns) and
   `tests/sha256.rs` ~1 s (same trick, a 64-row block). M4.4's four sBPF test
   files (`tests/sbpf_isa.rs`, `sbpf_interp.rs`, `sbpf_elf.rs`, `sbpf_abi.rs`,
-  38 tests, one `#[ignore]`d until the SPL Token ELF is committed) prove
+  49 tests, one `#[ignore]`d until the SPL Token ELF is committed) prove
   nothing and so cost well under a second between them — the interpreter is
   checked against `solana-sbpf` 0.11.1 natively, before anything reaches the
   machine.

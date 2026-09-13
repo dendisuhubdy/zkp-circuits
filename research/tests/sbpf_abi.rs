@@ -2,9 +2,14 @@
 //! `solana_program::entrypoint::deserialize` reads, the three SHA-256 digests that bind a run, and
 //! the eight public output words.
 
+mod common;
+use common::sbpf_elf_builder::build_elf;
+
 use rand_zkvm::notes;
-use rand_zkvm::sbpf::{self, Account, HostRef};
+use rand_zkvm::sbpf::{self, asm, insn, lddw, Account, HostRef};
 use sbpf_core::abi;
+use sbpf_core::interp::Halt;
+use sbpf_core::isa::opc;
 
 const MAX_PERMITTED_DATA_INCREASE: usize = 10_240;
 
@@ -222,4 +227,336 @@ fn a_malformed_input_vector_is_status_two_with_a_canonical_digest() {
     // recomputes the digest from the ELF and input it meant to run gets something else.
     let z = [0u8; 32];
     assert_eq!(out, abi::public_output(&mut h, 2, &z, &z, &z));
+}
+
+/// The documented preimage, computed independently of `abi::output_hash`: per **entry** in the
+/// order the region lists them (a duplicate entry contributing the account it duplicates),
+/// lamports and data_len as eight little-endian bytes each, then the data.
+fn expected_output_hash(entries: &[&Account]) -> [u8; 32] {
+    let mut msg = Vec::new();
+    for a in entries {
+        msg.extend_from_slice(&a.lamports.to_le_bytes());
+        msg.extend_from_slice(&(a.data.len() as u64).to_le_bytes());
+        msg.extend_from_slice(&a.data);
+    }
+    rand_zkvm::sha256::sha256(&msg)
+}
+
+#[test]
+fn output_hash_resolves_a_duplicate_against_the_full_entry_list() {
+    // A duplicate's marker byte indexes **all** entries seen so far, duplicates included — the
+    // index space `solana_program::entrypoint::deserialize` pushes into
+    // (`accounts.push(accounts[dup_info].clone())` over a `Vec` that already holds duplicates).
+    // Resolving it against the non-duplicate entries instead is silently wrong, and these two
+    // shapes are what tell the two apart.
+    let mut h = HostRef;
+    let (a, b, c) = (account(1, 16), account(2, 24), account(3, 32));
+
+    // `[A, A, B, B]`: the fourth entry's marker is 2. Against the full list that is `B`; against
+    // the non-duplicate list there is no index 2 at all, so a walk over that index space runs out
+    // and silently hashes a three-entry prefix.
+    let buf = sbpf::serialize_aligned(&[a.clone(), a.clone(), b.clone(), b.clone()], b"ix", &[0; 32]);
+    assert_eq!(sbpf::deserialize_accounts(&buf), vec![a.clone(), a.clone(), b.clone(), b.clone()]);
+    assert_eq!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a, &a, &b, &b]));
+    // And it is genuinely four entries, not the three-entry prefix the bug produced.
+    assert_ne!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a, &a, &b]));
+
+    // `[A, A, B, C, B]`: the fifth entry's marker is 2. Against the full list that is `B`; against
+    // the non-duplicate list index 2 is `C` — the wrong account, hashed without any error.
+    let buf = sbpf::serialize_aligned(
+        &[a.clone(), a.clone(), b.clone(), c.clone(), b.clone()],
+        b"ix",
+        &[0; 32],
+    );
+    assert_eq!(
+        sbpf::deserialize_accounts(&buf),
+        vec![a.clone(), a.clone(), b.clone(), c.clone(), b.clone()]
+    );
+    assert_eq!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a, &a, &b, &c, &b]));
+    assert_ne!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a, &a, &b, &c, &c]));
+
+    // A duplicate *of a duplicate* lands on the same account either way: `[A, A, A]`'s third entry
+    // carries the byte 1, which is itself a duplicate entry.
+    let buf = sbpf::serialize_aligned(&[a.clone(), a.clone(), a.clone()], b"ix", &[0; 32]);
+    assert_eq!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a, &a, &a]));
+
+    // A marker pointing at an entry that does not exist yet (its own ordinal, or beyond) is not a
+    // duplicate of anything: the walk stops rather than reading a slot it never filled.
+    let mut buf = sbpf::serialize_aligned(&[a.clone(), a.clone()], b"ix", &[0; 32]);
+    let dup_at = buf.len() - 32 - 8 - 2 - 8;
+    assert_eq!(buf[dup_at], 0, "the second entry's marker byte");
+    buf[dup_at] = 1; // its own ordinal
+    assert_eq!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a]));
+    buf[dup_at] = 200;
+    assert_eq!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a]));
+}
+
+#[test]
+fn output_hash_refuses_an_account_count_that_would_truncate() {
+    // A count above `u32::MAX` must not be narrowed into a small, plausible-looking number on the
+    // 32-bit target: it is clamped in `u64`, so the walk simply runs out of region.
+    let mut h = HostRef;
+    let a = account(1, 8);
+    let mut buf = sbpf::serialize_aligned(&[a.clone()], b"ix", &[0; 32]);
+    buf[0..8].copy_from_slice(&(u64::from(u32::MAX) + 2).to_le_bytes());
+    // The one real entry is hashed, then the region runs out — never a panic, and never a walk
+    // that believed there was exactly one account because the count truncated to 1.
+    assert_eq!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a]));
+    buf[0..8].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert_eq!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a]));
+}
+
+// ---- the whole call: `run_call_with` over a hand-built ELF ------------------------------------
+
+/// The offset of account 0's `lamports` in a serialized region: the count, then the marker, three
+/// flag bytes, the `original_data_len` slot, the key and the owner.
+const LAMPORTS_AT: i16 = 8 + 8 + 32 + 32;
+
+/// A program that stores `lamports` into account 0 and then does `tail`.
+fn lamports_writer(lamports: u64, tail: &[[u8; 8]]) -> Vec<u8> {
+    let mut p: Vec<[u8; 8]> = Vec::new();
+    p.extend_from_slice(&lddw(2, lamports));
+    p.push(insn(opc::ST_DW_REG, 1, 2, LAMPORTS_AT, 0)); // r1 is the input region's base
+    p.extend_from_slice(tail);
+    asm(&p)
+}
+
+/// Runs one whole call the way the guest will: the input vector through `abi::run_call_with`.
+fn run(elf: &[u8], input: &[u8]) -> ([u32; 8], Result<u64, Halt>, Vec<u8>) {
+    let call = sbpf::SbpfCall { elf: elf.to_vec(), input: input.to_vec() };
+    let words = call.input_words();
+    let mut ws = Box::new(abi::Workspace::ZERO);
+    let mut h = HostRef;
+    let (out, result) =
+        abi::run_call_with(&mut h, &mut ws, |i| words[i as usize], words.len() as u32);
+    (out, result, ws.input.input[..ws.input.input_len].to_vec())
+}
+
+#[test]
+fn a_successful_run_publishes_status_one_and_the_post_state() {
+    let mut h = HostRef;
+    let a = account(5, 0);
+    let input = sbpf::serialize_aligned(&[a.clone()], b"ix", &[7u8; 32]);
+    let elf = build_elf(
+        &lamports_writer(999, &[insn(opc::MOV64_IMM, 0, 0, 0, 0), insn(opc::EXIT, 0, 0, 0, 0)]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+
+    let (out, result, post) = run(&elf, &input);
+    assert_eq!(result, Ok(0));
+    assert_eq!(out[0], 1, "r0 == 0 is status 1");
+
+    // The mutation is real and readable back out of the workspace.
+    let post_accounts = sbpf::deserialize_accounts(&post);
+    assert_eq!(post_accounts[0].lamports, 999);
+    assert_ne!(a.lamports, 999, "the fixture would not otherwise prove anything");
+    // Everything but the lamports word is untouched.
+    let mut expected_post = a.clone();
+    expected_post.lamports = 999;
+    assert_eq!(post_accounts, vec![expected_post.clone()]);
+
+    // And the digest is over the POST-state, which is not the pre-state.
+    let pre_hash = abi::output_hash(&mut h, &input);
+    let post_hash = abi::output_hash(&mut h, &post);
+    assert_ne!(post_hash, pre_hash);
+    assert_eq!(post_hash, expected_output_hash(&[&expected_post]));
+    assert_eq!(
+        out,
+        abi::public_output(
+            &mut h,
+            1,
+            &rand_zkvm::sha256::sha256(&elf),
+            &rand_zkvm::sha256::sha256(&input),
+            &post_hash,
+        )
+    );
+}
+
+#[test]
+fn a_nonzero_return_publishes_status_zero_over_the_pre_state() {
+    let mut h = HostRef;
+    let a = account(5, 0);
+    let input = sbpf::serialize_aligned(&[a.clone()], b"ix", &[7u8; 32]);
+    // Mutates the account, *then* returns a `ProgramError`: the effect must not be published.
+    let elf = build_elf(
+        &lamports_writer(999, &[insn(opc::MOV64_IMM, 0, 0, 0, 42), insn(opc::EXIT, 0, 0, 0, 0)]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+
+    let (out, result, post) = run(&elf, &input);
+    assert_eq!(result, Ok(42));
+    assert_eq!(out[0], 0, "a non-zero r0 is status 0");
+    // The run really did change the region — the rule is about what is *bound*, not about undoing.
+    assert_eq!(sbpf::deserialize_accounts(&post)[0].lamports, 999);
+    let pre_hash = abi::output_hash(&mut h, &input);
+    assert_eq!(
+        out,
+        abi::public_output(
+            &mut h,
+            0,
+            &rand_zkvm::sha256::sha256(&elf),
+            &rand_zkvm::sha256::sha256(&input),
+            &pre_hash, // the PRE-state
+        )
+    );
+    // The error code itself is not published (the seven digest words are spoken for), so two
+    // different non-zero returns are indistinguishable in the output.
+    let other = build_elf(
+        &lamports_writer(999, &[insn(opc::MOV64_IMM, 0, 0, 0, 43), insn(opc::EXIT, 0, 0, 0, 0)]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+    let (out_other, result_other, _) = run(&other, &input);
+    assert_eq!(result_other, Ok(43));
+    // Only because the two ELFs differ do the digests differ; the status word is the same.
+    assert_eq!(out_other[0], out[0]);
+}
+
+#[test]
+fn an_exceptional_halt_publishes_status_two_over_the_pre_state() {
+    let mut h = HostRef;
+    let a = account(5, 0);
+    let input = sbpf::serialize_aligned(&[a.clone()], b"ix", &[7u8; 32]);
+    // Mutates the account and *then* halts — a load through r0, which is zero, so address 0. This
+    // is the rule that stops a partial effect being published: whatever the program managed to do
+    // before it died, the digest says nothing happened.
+    let elf = build_elf(
+        &lamports_writer(999, &[insn(opc::LD_DW_REG, 3, 0, 0, 0), insn(opc::EXIT, 0, 0, 0, 0)]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+
+    let (out, result, post) = run(&elf, &input);
+    assert_eq!(result, Err(Halt::AccessViolation(0)));
+    assert_eq!(out[0], 2, "an exceptional halt is status 2");
+    assert_eq!(sbpf::deserialize_accounts(&post)[0].lamports, 999, "the write did happen");
+    let pre_hash = abi::output_hash(&mut h, &input);
+    assert_eq!(
+        out,
+        abi::public_output(
+            &mut h,
+            2,
+            &rand_zkvm::sha256::sha256(&elf),
+            &rand_zkvm::sha256::sha256(&input),
+            &pre_hash, // the PRE-state, not the mutated region
+        )
+    );
+
+    // An ELF that does not load at all is status 2 the same way, over the same pre-state.
+    let mut broken = elf.clone();
+    broken[18] = 0xff; // e_machine
+    let (out, result, _) = run(&broken, &input);
+    assert_eq!(result, Err(Halt::BadElf));
+    assert_eq!(out[0], 2);
+    assert_eq!(
+        out,
+        abi::public_output(
+            &mut h,
+            2,
+            &rand_zkvm::sha256::sha256(&broken),
+            &rand_zkvm::sha256::sha256(&input),
+            &pre_hash,
+        )
+    );
+}
+
+#[test]
+fn the_run_starts_at_the_elf_entrypoint_and_sees_the_whole_input_region() {
+    // The guest's `r1` is the input region's base and the region is exactly `input_len` bytes: a
+    // program that reads the last byte succeeds and one that reads the next byte halts.
+    let a = account(5, 4);
+    let input = sbpf::serialize_aligned(&[a], b"ix", &[7u8; 32]);
+    let last = (input.len() - 1) as u64;
+
+    let mut p: Vec<[u8; 8]> = Vec::new();
+    p.extend_from_slice(&lddw(2, last));
+    p.push(insn(opc::ADD64_REG, 1, 2, 0, 0));
+    p.push(insn(opc::LD_B_REG, 0, 1, 0, 0));
+    p.push(insn(opc::MOV64_IMM, 0, 0, 0, 0));
+    p.push(insn(opc::EXIT, 0, 0, 0, 0));
+    let (out, result, _) = run(&build_elf(&asm(&p), &[], &[], &[], 0), &input);
+    assert_eq!(result, Ok(0));
+    assert_eq!(out[0], 1);
+
+    let mut p: Vec<[u8; 8]> = Vec::new();
+    p.extend_from_slice(&lddw(2, last + 1));
+    p.push(insn(opc::ADD64_REG, 1, 2, 0, 0));
+    p.push(insn(opc::LD_B_REG, 0, 1, 0, 0));
+    p.push(insn(opc::MOV64_IMM, 0, 0, 0, 0));
+    p.push(insn(opc::EXIT, 0, 0, 0, 0));
+    let (out, result, _) = run(&build_elf(&asm(&p), &[], &[], &[], 0), &input);
+    assert!(matches!(result, Err(Halt::AccessViolation(_))), "{result:?}");
+    assert_eq!(out[0], 2);
+
+    // A non-zero entrypoint is honoured: two separate two-slot routines, each with its own `exit`,
+    // so entering at slot 0 cannot fall through into the one at slot 2.
+    let text = asm(&[
+        insn(opc::MOV64_IMM, 0, 0, 0, 1),
+        insn(opc::EXIT, 0, 0, 0, 0),
+        insn(opc::MOV64_IMM, 0, 0, 0, 0),
+        insn(opc::EXIT, 0, 0, 0, 0),
+    ]);
+    assert_eq!(run(&build_elf(&text, &[], &[], &[], 0), &input).1, Ok(1));
+    assert_eq!(run(&build_elf(&text, &[], &[], &[], 2), &input).1, Ok(0));
+    // And the status word follows: a non-zero `r0` is status 0, a zero one status 1.
+    assert_eq!(run(&build_elf(&text, &[], &[], &[], 0), &input).0[0], 0);
+    assert_eq!(run(&build_elf(&text, &[], &[], &[], 2), &input).0[0], 1);
+}
+
+#[test]
+fn a_workspace_can_be_reused_without_carrying_state_over() {
+    // The guest holds one `Workspace` in `.bss`; a host test that runs two calls through one must
+    // get the same answers as two fresh ones, or the stack/heap zeroing is not doing its job.
+    let a = account(5, 0);
+    let input = sbpf::serialize_aligned(&[a], b"ix", &[7u8; 32]);
+    // Reads a stack slot it never wrote, so a workspace carrying a previous run's frame would
+    // answer differently.
+    let leaky = build_elf(
+        &asm(&[
+            insn(opc::LD_DW_REG, 0, 10, -8, 0),
+            insn(opc::EXIT, 0, 0, 0, 0),
+        ]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+    let writer = build_elf(
+        &asm(&[
+            insn(opc::MOV64_IMM, 2, 0, 0, 0x5eed),
+            insn(opc::ST_DW_REG, 10, 2, -8, 0),
+            insn(opc::MOV64_IMM, 0, 0, 0, 0),
+            insn(opc::EXIT, 0, 0, 0, 0),
+        ]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+
+    let fresh = run(&leaky, &input);
+    assert_eq!(fresh.1, Ok(0), "an unwritten stack slot reads as zero");
+
+    let mut ws = Box::new(abi::Workspace::ZERO);
+    let mut h = HostRef;
+    for elf in [&writer, &leaky] {
+        let call = sbpf::SbpfCall { elf: elf.clone(), input: input.clone() };
+        let words = call.input_words();
+        let (out, result) =
+            abi::run_call_with(&mut h, &mut ws, |i| words[i as usize], words.len() as u32);
+        if elf == &leaky {
+            assert_eq!(result, Ok(0), "the previous run's frame did not leak into this one");
+            assert_eq!(out, fresh.0);
+        }
+    }
 }

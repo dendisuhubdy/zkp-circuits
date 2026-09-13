@@ -209,7 +209,9 @@ pub fn decode_input<F: FnMut(u32) -> u32>(
 /// holds when it is called. Covers every account, writable or not.
 ///
 /// The walk is over the *aligned* format (`solana_program::entrypoint::deserialize`'s layout), and
-/// a duplicate account entry re-hashes the account it duplicates, at the position it occupies.
+/// a duplicate account entry re-hashes the account it duplicates, at the position it occupies. Its
+/// marker byte is an index into **all** entries seen so far, duplicates included — the same index
+/// space `deserialize` pushes into.
 ///
 /// Total by construction: a region that is not a serialized instruction, or that ends before its
 /// own account count does, hashes the prefix the walk got through and stops. Both the pre- and the
@@ -217,15 +219,23 @@ pub fn decode_input<F: FnMut(u32) -> u32>(
 /// consistently — and a well-formed one is exactly the documented preimage.
 pub fn output_hash<H: Host>(h: &mut H, input: &[u8]) -> [u8; 32] {
     let mut s = Sha256::new();
-    // Where each non-duplicate account's lamports and data sit, so a duplicate can be re-hashed.
+    // Where each entry's lamports and data sit, indexed by its **entry ordinal** — duplicates
+    // included. A duplicate's marker byte is an index into the full list of entries seen so far,
+    // not into the non-duplicate ones: `solana_program::entrypoint::deserialize` does
+    // `accounts.push(accounts[dup_info].clone())` over a `Vec` that already holds its own
+    // duplicates, and so does this crate's host twin (`rand_zkvm::sbpf::deserialize_accounts`).
+    // Indexing anything else silently hashes the wrong account — `[A, A, B, C, B]`'s last entry
+    // carries the byte 2, which is `B` among all entries but `C` among the non-duplicate ones.
     let mut seen = [(0usize, 0usize, 0usize); MAX_ACCOUNTS];
-    let mut n_seen = 0usize;
+    let mut n_entries = 0usize;
 
     let mut off = 0usize;
+    // Clamped in `u64`: on the 32-bit target a count above `u32::MAX` would otherwise truncate
+    // into a small, plausible-looking number instead of being refused.
     let n_accounts = match read_u64(input, 0) {
         Some(n) => {
             off = 8;
-            core::cmp::min(n as usize, MAX_ACCOUNTS)
+            core::cmp::min(n, MAX_ACCOUNTS as u64) as usize
         }
         None => 0,
     };
@@ -234,26 +244,18 @@ pub fn output_hash<H: Host>(h: &mut H, input: &[u8]) -> [u8; 32] {
             Some(d) => *d,
             None => break,
         };
-        if dup == NON_DUP_MARKER {
+        let entry = if dup == NON_DUP_MARKER {
             // marker, is_signer, is_writable, executable, then four bytes of `original_data_len`.
             let key_at = off + 8;
             let lamports_at = key_at + 64;
             let data_len_at = lamports_at + 8;
-            let (lamports, data_len) = match (read_u64(input, lamports_at), read_u64(input, data_len_at)) {
-                (Some(l), Some(d)) => (l, d),
-                _ => break,
-            };
+            let Some(data_len) = read_u64(input, data_len_at) else { break };
             let data_at = data_len_at + 8;
             let Ok(data_len) = usize::try_from(data_len) else { break };
             let Some(data_end) = data_at.checked_add(data_len) else { break };
             if data_end > input.len() {
                 break;
             }
-            if n_seen < MAX_ACCOUNTS {
-                seen[n_seen] = (lamports_at, data_at, data_len);
-                n_seen += 1;
-            }
-            hash_account(h, &mut s, lamports, data_len, &input[data_at..data_end]);
             // The realloc headroom, then padding to the next eight-byte boundary, then
             // `rent_epoch`.
             let after = match data_end.checked_add(MAX_PERMITTED_DATA_INCREASE) {
@@ -264,20 +266,30 @@ pub fn output_hash<H: Host>(h: &mut H, input: &[u8]) -> [u8; 32] {
                 Some(o) => o,
                 None => break,
             };
+            (lamports_at, data_at, data_len)
         } else {
             // A duplicate: the index, then seven bytes of padding, and nothing else.
-            let Some(&(lamports_at, data_at, data_len)) = seen.get(dup as usize) else { break };
-            if dup as usize >= n_seen {
+            if dup as usize >= n_entries {
                 break;
             }
-            let Some(lamports) = read_u64(input, lamports_at) else { break };
-            let Some(end) = data_at.checked_add(data_len) else { break };
-            if end > input.len() {
-                break;
-            }
-            hash_account(h, &mut s, lamports, data_len, &input[data_at..end]);
+            let Some(&entry) = seen.get(dup as usize) else { break };
             off += 8;
+            entry
+        };
+        // Every entry is recorded at its own ordinal, so a later duplicate of a duplicate lands on
+        // the same account either way.
+        if n_entries < MAX_ACCOUNTS {
+            seen[n_entries] = entry;
         }
+        n_entries += 1;
+
+        let (lamports_at, data_at, data_len) = entry;
+        let Some(lamports) = read_u64(input, lamports_at) else { break };
+        let Some(data_end) = data_at.checked_add(data_len) else { break };
+        if data_end > input.len() {
+            break;
+        }
+        hash_account(h, &mut s, lamports, data_len, &input[data_at..data_end]);
     }
     s.finish(h)
 }

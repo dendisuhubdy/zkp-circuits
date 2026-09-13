@@ -5,7 +5,7 @@
 //! A note on versions: what the M4.4 plan calls "SBPF v1" (fixed 512-byte stack frames, `lddw`,
 //! `le`/`be`, `neg`, no `BPF_PQR` class) is what `solana-sbpf` 0.11.1's enum calls
 //! `SBPFVersion::V0` — the format a non-upgradeable BPFLoader2 program like SPL Token is built
-//! for. `rand_zkvm::sbpf::oracle_config` pins that version, a 512-byte frame and 64 frames with
+//! for. `common::sbpf_oracle`'s `config()` pins that version, a 512-byte frame and 64 frames with
 //! no gaps, so the oracle and `sbpf-core` model the same machine.
 
 mod common;
@@ -831,5 +831,234 @@ fn callx_agrees_with_solana_sbpf() {
         let ours = sbpf::run_text(&text, &mut []).result.map_err(|_| ());
         let theirs = oracle::run_text(&text, &[]).0.map_err(|_| ());
         assert_eq!(ours, theirs, "callx r{reg} -> slot {target}");
+    }
+}
+
+/// A one-syscall program: set up `r1..r5` from `args` (each an absolute value, so an input-region
+/// pointer is written as `REGION_INPUT + off`), `call` the syscall, and return its `r0`.
+///
+/// The bytes are identical for both machines. `sbpf-core` reads the `src = 1` marker its loader
+/// writes; `solana-sbpf`'s V0 `CALL_IMM` ignores `src` entirely and resolves the immediate through
+/// the loader's function registry, which `common::sbpf_oracle` registers under the same twelve
+/// murmur3 names — so one program exercises both dispatchers.
+fn syscall_program(hash: u32, args: &[u64]) -> Vec<u8> {
+    let mut p: Vec<[u8; 8]> = Vec::new();
+    for (i, v) in args.iter().enumerate() {
+        p.extend_from_slice(&lddw(i as u8 + 1, *v));
+    }
+    p.push(insn(opc::CALL_IMM, 0, 1, 0, hash as i32));
+    p.push(exit());
+    asm(&p)
+}
+
+/// Runs one syscall program on both machines over the same 128-byte input region and asserts they
+/// agree on `r0` (or both fault) **and** on the region byte for byte.
+fn assert_syscall_agrees(name: &str, hash: u32, args: &[u64], region: &[u8]) {
+    let text = syscall_program(hash, args);
+    let mut ours_mem = region.to_vec();
+    let ours = sbpf::run_text(&text, &mut ours_mem).result.map_err(|_| ());
+    let (theirs, theirs_mem) = oracle::run_text(&text, region);
+    assert_eq!(ours, theirs.clone().map_err(|_| ()), "{name}: r0 (theirs: {theirs:?})");
+    assert_eq!(ours_mem, theirs_mem, "{name}: the input region's post-state");
+}
+
+/// A 128-byte scratch region with recognisable contents.
+fn scratch() -> Vec<u8> {
+    (0..128u8).collect()
+}
+
+#[test]
+fn the_memory_syscalls_agree_with_solana_sbpf() {
+    use sbpf_core::syscalls as sys;
+    let at = |off: u64| REGION_INPUT + off;
+
+    // `sol_memset_(dst, c, n)`: in bounds, zero length, and one byte too long.
+    assert_syscall_agrees("memset", sys::SOL_MEMSET, &[at(0), 0xab, 8], &scratch());
+    assert_syscall_agrees("memset 0", sys::SOL_MEMSET, &[at(0), 0xab, 0], &scratch());
+    assert_syscall_agrees("memset past", sys::SOL_MEMSET, &[at(120), 0xab, 9], &scratch());
+    assert_syscall_agrees("memset huge", sys::SOL_MEMSET, &[at(0), 0xab, 1 << 40], &scratch());
+    assert_syscall_agrees("memset region 0", sys::SOL_MEMSET, &[0, 0xab, 4], &scratch());
+
+    // `sol_memcpy_(dst, src, n)`: non-overlapping, and the overlap both machines refuse.
+    assert_syscall_agrees("memcpy", sys::SOL_MEMCPY, &[at(64), at(0), 32], &scratch());
+    assert_syscall_agrees("memcpy touching", sys::SOL_MEMCPY, &[at(8), at(0), 8], &scratch());
+    assert_syscall_agrees("memcpy overlap", sys::SOL_MEMCPY, &[at(4), at(0), 8], &scratch());
+    assert_syscall_agrees("memcpy overlap rev", sys::SOL_MEMCPY, &[at(0), at(4), 8], &scratch());
+    assert_syscall_agrees("memcpy past", sys::SOL_MEMCPY, &[at(120), at(0), 9], &scratch());
+
+    // `sol_memmove_(dst, src, n)`: overlap is allowed, in both directions, and across the 64-byte
+    // chunk `sbpf-core` copies in — which is where a backwards copy would go wrong if it did not.
+    assert_syscall_agrees("memmove up", sys::SOL_MEMMOVE, &[at(4), at(0), 100], &scratch());
+    assert_syscall_agrees("memmove down", sys::SOL_MEMMOVE, &[at(0), at(4), 100], &scratch());
+    assert_syscall_agrees("memmove far up", sys::SOL_MEMMOVE, &[at(60), at(0), 68], &scratch());
+    assert_syscall_agrees("memmove exact", sys::SOL_MEMMOVE, &[at(0), at(0), 128], &scratch());
+    assert_syscall_agrees("memmove past", sys::SOL_MEMMOVE, &[at(0), at(64), 100], &scratch());
+
+    // `sol_memcmp_(a, b, n, result)`: equal, and both signs of unequal — the result is a *signed*
+    // i32 written to the region, so a machine that wrote it unsigned would differ here.
+    let mut eq = scratch();
+    eq[64..96].copy_from_slice(&(0..32u8).collect::<Vec<_>>());
+    assert_syscall_agrees("memcmp eq", sys::SOL_MEMCMP, &[at(0), at(64), 32, at(100)], &eq);
+    let mut lt = scratch();
+    lt[0] = 5;
+    lt[64] = 9;
+    assert_syscall_agrees("memcmp negative", sys::SOL_MEMCMP, &[at(0), at(64), 8, at(100)], &lt);
+    let mut gt = scratch();
+    gt[0] = 9;
+    gt[64] = 5;
+    assert_syscall_agrees("memcmp positive", sys::SOL_MEMCMP, &[at(0), at(64), 8, at(100)], &gt);
+    // The difference straddling the 64-byte chunk boundary.
+    let mut late = scratch();
+    late[70] = 0xff;
+    assert_syscall_agrees("memcmp late", sys::SOL_MEMCMP, &[at(0), at(64), 64, at(0)], &late);
+
+    // Atomicity: a syscall does all of its work or none of it, so a four-byte result that only
+    // *partly* fits writes nothing at all — not two bytes and then a fault. Likewise a comparison
+    // whose difference lies before the point where its range runs out still faults, because the
+    // whole range is translated before a byte is read. (This pair is what the differential caught:
+    // the oracle used to validate lazily, and wrote a partial result the real runtime never would.)
+    assert_syscall_agrees("memcmp bad out", sys::SOL_MEMCMP, &[at(0), at(64), 8, at(126)], &lt);
+    assert_syscall_agrees("memcmp bad out edge", sys::SOL_MEMCMP, &[at(0), at(64), 8, at(124)], &lt);
+    assert_syscall_agrees("memcmp early diff, short range", sys::SOL_MEMCMP, &[at(0), at(64), 100, at(100)], &lt);
+    // And the same for a `memset` that would overrun: nothing is written before it faults.
+    assert_syscall_agrees("memset atomic", sys::SOL_MEMSET, &[at(126), 0xab, 4], &scratch());
+}
+
+#[test]
+fn sol_alloc_free_agrees_with_solana_sbpf() {
+    use sbpf_core::syscalls::SOL_ALLOC_FREE;
+    // The returned address itself is compared, not just "some address": both allocators hand out
+    // 8-aligned blocks going up from the heap region's base.
+    for size in [1u64, 7, 8, 9, 4096, HEAP_BYTES as u64, HEAP_BYTES as u64 + 1, 1 << 40] {
+        assert_syscall_agrees("alloc", SOL_ALLOC_FREE, &[size, 0], &scratch());
+    }
+    // A free is a no-op returning 0.
+    assert_syscall_agrees("free", SOL_ALLOC_FREE, &[8, REGION_HEAP], &scratch());
+
+    // Two allocations in one run: the second address must be the first plus the aligned size, on
+    // both machines. `r6` keeps the first across the second call.
+    for size in [1u64, 8, 9, 100] {
+        let mut p: Vec<[u8; 8]> = Vec::new();
+        p.extend_from_slice(&lddw(1, size));
+        p.push(insn(opc::MOV64_IMM, 2, 0, 0, 0));
+        p.push(insn(opc::CALL_IMM, 0, 1, 0, SOL_ALLOC_FREE as i32));
+        p.push(insn(opc::MOV64_REG, 6, 0, 0, 0));
+        p.extend_from_slice(&lddw(1, size));
+        p.push(insn(opc::MOV64_IMM, 2, 0, 0, 0));
+        p.push(insn(opc::CALL_IMM, 0, 1, 0, SOL_ALLOC_FREE as i32));
+        // Store both addresses into the input region so the *values* are compared too, not just
+        // their difference.
+        p.extend_from_slice(&lddw(3, REGION_INPUT));
+        p.push(insn(opc::ST_DW_REG, 3, 6, 0, 0));
+        p.push(insn(opc::ST_DW_REG, 3, 0, 8, 0));
+        p.push(insn(opc::SUB64_REG, 0, 6, 0, 0));
+        p.push(exit());
+        let text = asm(&p);
+        let mut ours_mem = vec![0u8; 32];
+        let ours = sbpf::run_text(&text, &mut ours_mem).result.map_err(|_| ());
+        let (theirs, theirs_mem) = oracle::run_text(&text, &[0u8; 32]);
+        assert_eq!(ours, theirs.map_err(|_| ()), "two allocations of {size}");
+        assert_eq!(ours_mem, theirs_mem, "the two addresses, for size {size}");
+        // And the bump really is aligned to 8.
+        assert_eq!(ours, Ok((size + 7) & !7), "size {size}");
+    }
+}
+
+#[test]
+fn sol_sha256_agrees_with_solana_sbpf() {
+    use sbpf_core::syscalls::SOL_SHA256;
+    // `sol_sha256(vals, vals_len, result)`: `vals` is an array of `(ptr, len)` pairs and the digest
+    // is over their concatenation. Laid out at 0, the strings at 32, the digest at 64.
+    let pairs = |lens: &[(u64, u64)]| {
+        let mut region = vec![0u8; 256];
+        for (i, (off, len)) in lens.iter().enumerate() {
+            region[16 * i..16 * i + 8].copy_from_slice(&(REGION_INPUT + off).to_le_bytes());
+            region[16 * i + 8..16 * i + 16].copy_from_slice(&len.to_le_bytes());
+        }
+        for (i, b) in region[96..256].iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+        }
+        region
+    };
+    // One segment, several segments, a zero-length segment, and none at all.
+    assert_syscall_agrees("sha256 1", SOL_SHA256, &[REGION_INPUT, 1, REGION_INPUT + 64], &pairs(&[(96, 6)]));
+    assert_syscall_agrees(
+        "sha256 3",
+        SOL_SHA256,
+        &[REGION_INPUT, 3, REGION_INPUT + 64],
+        &pairs(&[(96, 6), (110, 0), (120, 100)]),
+    );
+    assert_syscall_agrees("sha256 0", SOL_SHA256, &[REGION_INPUT, 0, REGION_INPUT + 64], &pairs(&[]));
+    // A segment crossing the 64-byte streaming chunk, and one that straddles a block boundary.
+    assert_syscall_agrees("sha256 64", SOL_SHA256, &[REGION_INPUT, 1, REGION_INPUT + 64], &pairs(&[(96, 64)]));
+    assert_syscall_agrees("sha256 160", SOL_SHA256, &[REGION_INPUT, 1, REGION_INPUT + 64], &pairs(&[(96, 160)]));
+    // A pointer or a result address out of bounds faults on both.
+    assert_syscall_agrees(
+        "sha256 bad ptr",
+        SOL_SHA256,
+        &[REGION_INPUT, 1, REGION_INPUT + 64],
+        &pairs(&[(96, 1000)]),
+    );
+    assert_syscall_agrees("sha256 bad out", SOL_SHA256, &[REGION_INPUT, 1, 0], &pairs(&[(96, 6)]));
+    // A digest pointer that only partly fits writes no part of the digest.
+    assert_syscall_agrees(
+        "sha256 bad out edge",
+        SOL_SHA256,
+        &[REGION_INPUT, 1, REGION_INPUT + 100],
+        &pairs(&[(96, 6)]),
+    );
+    assert_syscall_agrees("sha256 bad vals", SOL_SHA256, &[0, 1, REGION_INPUT + 64], &pairs(&[(96, 6)]));
+
+    // And the digest is the real SHA-256 of the concatenation, not merely a matching one.
+    let region = pairs(&[(96, 6), (110, 0), (120, 100)]);
+    let text = syscall_program(SOL_SHA256, &[REGION_INPUT, 3, REGION_INPUT + 64]);
+    let mut mem = region.clone();
+    assert_eq!(sbpf::run_text(&text, &mut mem).result, Ok(0));
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&region[96..102]);
+    msg.extend_from_slice(&region[120..220]);
+    assert_eq!(&mem[64..96], &rand_zkvm::sha256::sha256(&msg)[..]);
+}
+
+#[test]
+fn the_log_and_abort_syscalls_agree_with_solana_sbpf() {
+    use sbpf_core::syscalls as sys;
+    // The log family writes nothing and returns 0, but still translates its pointers — so a bad
+    // one faults on both machines, which is the only observable part.
+    assert_syscall_agrees("log", sys::SOL_LOG, &[REGION_INPUT, 13], &scratch());
+    assert_syscall_agrees("log 0", sys::SOL_LOG, &[REGION_INPUT, 0], &scratch());
+    assert_syscall_agrees("log past", sys::SOL_LOG, &[REGION_INPUT + 120, 9], &scratch());
+    assert_syscall_agrees("log bad", sys::SOL_LOG, &[0, 4], &scratch());
+    assert_syscall_agrees("log_64", sys::SOL_LOG_64, &[1, 2, 3, 4, 5], &scratch());
+    assert_syscall_agrees("log_cu", sys::SOL_LOG_COMPUTE_UNITS, &[], &scratch());
+    assert_syscall_agrees("log_pubkey", sys::SOL_LOG_PUBKEY, &[REGION_INPUT], &scratch());
+    assert_syscall_agrees("log_pubkey past", sys::SOL_LOG_PUBKEY, &[REGION_INPUT + 100], &scratch());
+    assert_syscall_agrees("log_pubkey bad", sys::SOL_LOG_PUBKEY, &[0], &scratch());
+
+    // `abort` and `sol_panic_` end the run on both.
+    assert_syscall_agrees("abort", sys::ABORT, &[], &scratch());
+    assert_syscall_agrees("panic", sys::SOL_PANIC, &[REGION_INPUT, 4, 1, 2], &scratch());
+
+    // A mutation before an abort is visible in the region on both machines — which is what makes
+    // `abi::run_call_with`'s "a failed run binds the pre-state" rule load-bearing rather than
+    // vacuous (`tests/sbpf_abi.rs` asserts the rule itself).
+    let mut p: Vec<[u8; 8]> = Vec::new();
+    p.extend_from_slice(&lddw(3, REGION_INPUT));
+    p.push(insn(opc::ST_DW_IMM, 3, 0, 0, 0x7f));
+    p.push(insn(opc::CALL_IMM, 0, 1, 0, sys::ABORT as i32));
+    p.push(exit());
+    let text = asm(&p);
+    let mut ours_mem = scratch();
+    let ours = sbpf::run_text(&text, &mut ours_mem).result;
+    let (theirs, theirs_mem) = oracle::run_text(&text, &scratch());
+    assert!(ours.is_err() && theirs.is_err(), "{ours:?} / {theirs:?}");
+    assert_eq!(ours_mem, theirs_mem);
+    assert_eq!(ours_mem[0], 0x7f, "the store landed before the abort");
+
+    // An unregistered hash is refused by both: `sbpf-core` returns `UnknownSyscall`, `solana-sbpf`
+    // `UnsupportedInstruction`, and the plan's out-of-scope names are exactly this case.
+    for name in [&b"sol_keccak256"[..], b"sol_invoke_signed_rust", b"sol_get_clock_sysvar"] {
+        let h = sbpf_core::syscalls::murmur3_32(name, 0);
+        assert_syscall_agrees(&String::from_utf8_lossy(name), h, &[], &scratch());
     }
 }

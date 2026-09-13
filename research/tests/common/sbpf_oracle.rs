@@ -85,9 +85,7 @@ declare_builtin_function!(
     SyscallLog,
     fn rust(_ctx: &mut Ctx, addr: u64, len: u64, _c: u64, _d: u64, _e: u64, m: &mut MemoryMapping,
     ) -> SyscallResult {
-        for i in 0..len {
-            load_u8(m, addr.wrapping_add(i))?;
-        }
+        validate(m, addr, len)?;
         Ok(0)
     }
 );
@@ -96,9 +94,7 @@ declare_builtin_function!(
     SyscallLogPubkey,
     fn rust(_ctx: &mut Ctx, addr: u64, _b: u64, _c: u64, _d: u64, _e: u64, m: &mut MemoryMapping,
     ) -> SyscallResult {
-        for i in 0..32 {
-            load_u8(m, addr.wrapping_add(i))?;
-        }
+        validate(m, addr, 32)?;
         Ok(0)
     }
 );
@@ -134,9 +130,7 @@ declare_builtin_function!(
     SyscallMemset,
     fn rust(_ctx: &mut Ctx, dst: u64, c: u64, n: u64, _d: u64, _e: u64, m: &mut MemoryMapping,
     ) -> SyscallResult {
-        for i in 0..n {
-            load_u8(m, dst.wrapping_add(i))?;
-        }
+        validate(m, dst, n)?;
         for i in 0..n {
             store_u8(m, dst.wrapping_add(i), c as u8)?;
         }
@@ -148,6 +142,14 @@ declare_builtin_function!(
     SyscallMemcmp,
     fn rust(_ctx: &mut Ctx, a: u64, b: u64, n: u64, out: u64, _e: u64, m: &mut MemoryMapping,
     ) -> SyscallResult {
+        // Agave translates both inputs as whole slices and the result as a whole `&mut i32` before
+        // comparing a single byte, so a range that runs out — or a four-byte result that does not
+        // fit — fails with nothing written. Validating lazily instead would let this oracle write a
+        // partial result that the real runtime never would (which is how the first run of
+        // `the_memory_syscalls_agree_with_solana_sbpf` caught this).
+        validate(m, a, n)?;
+        validate(m, b, n)?;
+        validate(m, out, 4)?;
         let mut result = 0i32;
         for i in 0..n {
             let x = load_u8(m, a.wrapping_add(i))?;
@@ -157,10 +159,10 @@ declare_builtin_function!(
                 break;
             }
         }
-        for (i, byte) in result.to_le_bytes().iter().enumerate() {
-            store_u8(m, out.wrapping_add(i as u64), *byte)?;
+        match m.store::<u32>(result as u32, out) {
+            ProgramResult::Ok(_) => Ok(0),
+            ProgramResult::Err(e) => Err(Box::new(e)),
         }
-        Ok(0)
     }
 );
 
@@ -186,6 +188,10 @@ declare_builtin_function!(
     SyscallSha256,
     fn rust(_ctx: &mut Ctx, vals: u64, n: u64, out: u64, _d: u64, _e: u64, m: &mut MemoryMapping,
     ) -> SyscallResult {
+        // As above: the pairs array and the 32-byte result are translated whole before anything is
+        // read or written, so a partial digest is never left behind.
+        validate(m, vals, n.saturating_mul(16))?;
+        validate(m, out, 32)?;
         let mut msg: Vec<u8> = Vec::new();
         for p in 0..n {
             let at = vals.wrapping_add(16 * p);
@@ -216,16 +222,23 @@ fn nonoverlapping(a: u64, b: u64, n: u64) -> bool {
 }
 
 fn copy(m: &mut MemoryMapping, dst: u64, src: u64, n: u64) -> SyscallResult {
-    // Validate both ranges before moving a byte, as `sbpf-core` does.
-    for i in 0..n {
-        load_u8(m, src.wrapping_add(i))?;
-        load_u8(m, dst.wrapping_add(i))?;
-    }
+    // Validate both ranges before moving a byte, as `sbpf-core` and Agave both do.
+    validate(m, src, n)?;
+    validate(m, dst, n)?;
     let bytes: Vec<u8> = (0..n).map(|i| load_u8(m, src.wrapping_add(i)).unwrap()).collect();
     for (i, byte) in bytes.iter().enumerate() {
         store_u8(m, dst.wrapping_add(i as u64), *byte)?;
     }
     Ok(0)
+}
+
+/// Every byte of `addr..addr + n` is readable — the whole-range translation Agave's syscalls do
+/// before they touch anything, so a syscall either does all of its work or none of it.
+fn validate(m: &MemoryMapping, addr: u64, n: u64) -> Result<(), Box<dyn std::error::Error>> {
+    for i in 0..n {
+        load_u8(m, addr.wrapping_add(i))?;
+    }
+    Ok(())
 }
 
 fn load_u8(m: &MemoryMapping, addr: u64) -> Result<u8, Box<dyn std::error::Error>> {

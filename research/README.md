@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~6-7 minutes wall time (thirteen proofs — M4.4's sha256_demo is the newest guest in the closing sweep — one of them the narrated production-profile one)
-cargo test              # 293 tests (290 pass, 3 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, sha256, sBPF interpreter, viewing keys, shielded-pool bundles
+cargo test              # 304 tests (301 pass, 3 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, sha256, sBPF interpreter, viewing keys, shielded-pool bundles
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick

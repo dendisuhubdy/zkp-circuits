@@ -13,7 +13,7 @@
 //! built for: **fixed** stack frames, `lddw`, `le`/`be`, `neg`, and no `BPF_PQR` class. In
 //! `solana-sbpf` 0.11.1's own enum that is `SBPFVersion::V0` — its `V1` is SIMD-0166's *dynamic*
 //! stack frames, which came later. Everything here implements the plan's v1 = the crate's V0, and
-//! `rand_zkvm::sbpf::oracle_config` pins the oracle to the same machine.
+//! `research/tests/common/sbpf_oracle.rs`'s `config()` pins the oracle to the same machine.
 //!
 //! # No panics on guest input
 //!
