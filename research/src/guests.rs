@@ -33,6 +33,26 @@ pub mod compiled {
         const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/keccak256.bin");
         Program::from_flat_binary(0x1000, BIN).expect("keccak256.bin is a committed, known-good build")
     }
+
+    /// M4.3's exit guest: an EVM interpreter over the ERC-20 subset, compiled from
+    /// `guests-compiled/evm` (`evm-core` plus a 20-line `main`, see that Makefile's header for the
+    /// exact `rustc +1.98.1` build) and committed as `guests-compiled/bin/evm.bin`.
+    ///
+    /// The private input is one call — bytecode, calldata, caller, the pre-state root and a Merkle
+    /// witness per storage slot touched (`evm_core::abi`'s layout, built host-side by
+    /// `evm::EvmCall::input_words`). The eight public outputs are the status word and the 224-bit
+    /// `hash(EVM_OUT, [codehash ‖ pre_root ‖ post_root ‖ return_hash ‖ logs_hash])` that binds the
+    /// contract and its state-root transition. Everything but the Keccak-f[1600] permutation and
+    /// the Poseidon2 sponge is ordinary compiled guest code: no table, syscall or public value is
+    /// new in M4.3.
+    /// Unlike `fib` and `keccak256` this one is an **image container**, not a bare flat binary: the
+    /// interpreter has a `.rodata` (panic locations, the constants LLVM materialised), and
+    /// `Program::from_flat_image` writes it into RAM with a prologue it synthesises below the text —
+    /// so the data is part of the program and `hc` binds it (`docs/01-isa.md`).
+    pub fn evm() -> Program {
+        const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/evm.bin");
+        Program::from_flat_image(BIN).expect("evm.bin is a committed, known-good build")
+    }
 }
 
 /// out0 = fib(n) mod 2^32, computed with a counted loop.

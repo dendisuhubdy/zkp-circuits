@@ -413,3 +413,162 @@ fn a_hash_call_whose_addresses_straddle_2_to_the_30_proves() {
     assert_eq!(exec.outputs[0], 7);
     m.verify(&p.digest(), &proof).unwrap();
 }
+
+/// **M4.3's exit test**: an ERC-20 `transfer` — Solidity's own runtime bytecode, run by the
+/// compiled EVM interpreter guest with the contract's storage supplied as depth-32 Poseidon2
+/// Merkle witnesses — proves under `R_exec` and verifies, and the public output binds the
+/// state-root transition.
+///
+/// The pre-state seeds `_balances[ALICE] = 1000` and `_totalSupply` through witnesses, so the
+/// runtime bytecode alone executes (there is no constructor). The guest's eight outputs are
+/// checked against a native run of the same `evm-core` code first — a proof only says that *some*
+/// consistent execution exists, so the semantics are pinned on the host — and the final assertion
+/// recomputes the digest from the host's own post-state root, which is what "the transition is
+/// bound" means: a verifier holding `(codehash, pre_root, post_root, return data, logs)` gets
+/// these seven words and no other post-root does.
+#[test]
+fn compiled_evm_erc20_transfer_proves_and_verifies() {
+    use evm_core::u256::U256;
+    use rand_zkvm::emulator::execute;
+    use rand_zkvm::evm::{erc20_transfer, ALICE, BOB};
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::compiled::evm();
+    let call = erc20_transfer(ALICE, BOB, U256::from_u32(250), &[(ALICE, U256::from_u32(1000))]);
+    let inputs = call.input_words();
+    let (want, outcome, post) = call.expected();
+    assert_eq!(outcome.status(), 1, "the native run must succeed before proving");
+    assert_eq!(outcome.n_logs, 1, "one Transfer event");
+    assert_ne!(post.root(), call.tree.root(), "the transfer moved the storage root");
+
+    // `Tier(18)` is the machine's next stop above 16: `machine::TIERS` is [10, 12, 14, 16, 18, 20],
+    // even only, so a workload over tier 16's 65 535 cycles pays for 2^18 rows whatever it actually
+    // uses (this one uses 126 357 of them, counting both digest prefixes).
+    let exec = execute(&p, &inputs, Tier(18).max_cycles()).unwrap();
+    assert_eq!(exec.outputs, want, "the guest's outputs disagree with the native run");
+
+    let t0 = std::time::Instant::now();
+    let (proof, _) = m.prove_salted(&p, &inputs, [9, 10, 11, 12], None).unwrap();
+    let prove_time = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    m.verify(&p.digest(), &proof).unwrap();
+    eprintln!(
+        "evm erc20 transfer: {} program words, {} input words, {} cycles, {} poseidon2 permutations, {} keccak permutations, tier {}, keccak_log_height {}, mem_log_height {}, proof {} bytes, prove {:?}, verify {:?}",
+        p.words.len(), inputs.len(), exec.cycles(),
+        exec.events.iter().filter(|e| e.hash_row.is_some()).count(),
+        exec.events.iter().filter(|e| e.keccak_row.is_some()).count(),
+        proof.tier.0, proof.keccak_log_height, proof.mem_log_height, proof.to_bytes().len(),
+        prove_time, t1.elapsed()
+    );
+    // The plan's exit criterion was tier ≤ 16 and its estimate tier 14; the measured cost is tier
+    // 18, the next rung up (the ladder is even-only). Pinned here as a *number*, so any change to
+    // the interpreter, the guest's program size or the input layout that moves the cost shows up as
+    // a failing test rather than as a quietly bigger proof. `docs/05-roadmap.md` records the
+    // deviation and the dominant costs; the named follow-up is a storage `MERKLE_VERIFY`-style
+    // syscall or a wider sponge rate, since 132 17-word `POSEIDON2` calls (four 32-level Merkle
+    // walks) and the software 256-bit dispatch are what the budget goes on — and tier 16 needs the
+    // whole call under 65 535 cycles, i.e. roughly half of what it costs now.
+    assert_eq!(proof.tier.0, 18, "M4.3 measured at tier 18");
+
+    // the post-tree the host derived agrees with what the guest bound: recompute the digest from
+    // the host's post root, and check no *other* root gives these words.
+    let mut h = rand_zkvm::evm::HostRef;
+    assert_eq!(
+        evm_core::abi::public_output(&mut h, &call.code, &call.tree.root(), &post.root(), &outcome),
+        want
+    );
+    assert_ne!(
+        evm_core::abi::public_output(&mut h, &call.code, &call.tree.root(), &call.tree.root(), &outcome),
+        want,
+        "the pre-root must not produce the same digest as the post-root"
+    );
+}
+
+/// `balanceOf`, `approve` and a `transfer` that exceeds the balance all run under the same guest
+/// binary — one interpreter, four call shapes — and the revert carries the `require` message.
+///
+/// Executed, not proved: the proof in the exit test above is what shows the guest provable, and a
+/// second (four-minute) proof of the same program with different private inputs would add nothing
+/// to it. These run on the emulator, which is the same semantics the AIR enforces.
+#[test]
+fn compiled_evm_balance_of_approve_and_a_revert_execute_correctly() {
+    use evm_core::u256::U256;
+    use rand_zkvm::emulator::execute;
+    use rand_zkvm::evm::*;
+    let p = guests::compiled::evm();
+    let cycles = Tier(18).max_cycles();
+
+    // balanceOf(ALICE) returns the seeded balance and touches only that slot
+    let mut bal = erc20_transfer(ALICE, BOB, U256::ZERO, &[(ALICE, U256::from_u32(1000))]);
+    bal.calldata = abi_call("balanceOf(address)", &[ALICE]);
+    bal.touched = vec![mapping_slot(&ALICE, SLOT_BALANCES)];
+    let (want, o, bal_post) = bal.expected();
+    assert_eq!(o.status(), 1);
+    assert_eq!(U256::from_be_slice(&o.ret[..32]), U256::from_u32(1000));
+    assert_eq!(bal_post.root(), bal.tree.root(), "a view call moves no storage");
+    assert_eq!(execute(&p, &bal.input_words(), cycles).unwrap().outputs, want);
+
+    // approve(BOB, 5): writes _allowances[ALICE][BOB] — the *nested* mapping, whose key is
+    // keccak(BOB ‖ keccak(ALICE ‖ 1)) — and emits one Approval
+    let mut ap = erc20_transfer(ALICE, BOB, U256::ZERO, &[]);
+    ap.calldata = abi_call("approve(address,uint256)", &[BOB, U256::from_u32(5)]);
+    ap.touched = vec![mapping_slot2(&ALICE, &BOB, SLOT_ALLOWANCES)];
+    let (want_ap, o_ap, ap_post) = ap.expected();
+    assert_eq!(o_ap.status(), 1);
+    assert_eq!(o_ap.n_logs, 1, "Approval");
+    assert_eq!(o_ap.logs[0].n_topics, 3);
+    assert_ne!(ap_post.root(), ap.tree.root(), "the allowance was written");
+    assert_eq!(execute(&p, &ap.input_words(), cycles).unwrap().outputs, want_ap);
+
+    // transfer of 5000 against a balance of 1000 reverts with the require message
+    let over = erc20_transfer(ALICE, BOB, U256::from_u32(5000), &[(ALICE, U256::from_u32(1000))]);
+    let (want_r, o_r, over_post) = over.expected();
+    assert_eq!(o_r.status(), 0);
+    // The revert data is Solidity's ABI-encoded `Error(string)`, not the bare message: the
+    // selector, the string's offset, its length, then the padded bytes. Decoding it is the point —
+    // a `require` message reaches the chain only through the public output's return-data hash, so
+    // the guest has to reproduce the encoding byte for byte, padding included.
+    assert_eq!(&o_r.ret[..4], &selector("Error(string)"), "an ABI-encoded Error(string)");
+    assert_eq!(U256::from_be_slice(&o_r.ret[4..36]), U256::from_u32(0x20), "the string's offset");
+    let n = U256::from_be_slice(&o_r.ret[36..68]).low_u32() as usize;
+    assert_eq!(
+        core::str::from_utf8(&o_r.ret[68..68 + n]).unwrap(),
+        "ERC20: transfer amount exceeds balance"
+    );
+    assert_eq!(o_r.ret_len, 68 + n.next_multiple_of(32), "the message is right-padded to a word");
+    assert_eq!(over_post.root(), over.tree.root(), "a revert moves no storage");
+    assert_eq!(execute(&p, &over.input_words(), cycles).unwrap().outputs, want_r);
+
+    // every one of the four calls is a different public output under one program digest
+    let exit = erc20_transfer(ALICE, BOB, U256::from_u32(250), &[(ALICE, U256::from_u32(1000))]);
+    let outs = [want, want_ap, want_r, exit.expected().0];
+    for (i, a) in outs.iter().enumerate() {
+        for b in &outs[i + 1..] {
+            assert_ne!(a, b, "two calls must not share a public output");
+        }
+    }
+}
+
+/// What an EVM-call proof costs at the profile a chain would use (80 queries, blowup 8, 20 PoW
+/// bits), the figure `docs/03-privacy.md` and `docs/04-guests.md` quote: the keccak table is
+/// present, so this is far above the keccak-free guests' ~1.25 MB. Ignored by default — one
+/// production-profile tier-16 proof is minutes of wall time.
+#[test]
+#[ignore]
+fn measure_production_profile_evm_erc20_transfer() {
+    use evm_core::u256::U256;
+    use rand_zkvm::evm::{erc20_transfer, ALICE, BOB};
+    let m = Machine::new(FriProfile::Production);
+    let p = guests::compiled::evm();
+    let call = erc20_transfer(ALICE, BOB, U256::from_u32(250), &[(ALICE, U256::from_u32(1000))]);
+    let inputs = call.input_words();
+    let t0 = std::time::Instant::now();
+    let (proof, exec) = m.prove_salted(&p, &inputs, [9, 10, 11, 12], None).unwrap();
+    let prove_time = t0.elapsed();
+    assert_eq!(exec.outputs, call.expected().0);
+    let t1 = std::time::Instant::now();
+    m.verify(&p.digest(), &proof).unwrap();
+    println!(
+        "evm erc20 transfer at the production profile: tier {}, keccak_log_height {}, proof {} bytes, prove {:?}, verify {:?}",
+        proof.tier.0, proof.keccak_log_height, proof.to_bytes().len(), prove_time, t1.elapsed()
+    );
+}
