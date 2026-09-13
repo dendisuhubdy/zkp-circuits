@@ -283,7 +283,24 @@ slots touched, one `Transfer` log.
 | Poseidon2 | 1 070 absorb rows (132 sponge calls: four 32-level Merkle walks, plus the leaves and the output digest), 5 797 permutations in all with the digest prefixes |
 | Keccak | 17 permutations (`codehash` over 1 296 bytes is ten of them; two mapping-slot hashes; the return-data and logs hashes) |
 | tier | **`Tier(18)`** — `keccak_log_height` would be 10 (17 permutations = 544 rows, padded to 1 024) |
-| the proof | **not produced on the development machine**: a tier-18 batch is 2^18 cpu rows, 2^20 memory and poseidon2 rows and a 2 612-column keccak table, and proving it peaked at ~25 GB resident and was OOM-killed twice on a 48 GB machine. `compiled_evm_erc20_transfer_proves_at_tier_18` is therefore `#[ignore]`d — run it where there is room. Everything that does not need 25 GB (the guest's outputs, the digest binding, the tier arithmetic) is asserted by `compiled_evm_erc20_transfer_binds_the_state_root_transition`, which always runs |
+| the proof | **not produced on the development machine (48 GB): three attempts, ≥ 28.5 GB resident at SIGKILL.** A tier-18 batch is 2^18 cpu rows, 2^20 memory and poseidon2 rows and a 2 612-column keccak table; the OS killed every attempt while the resident set was still growing, so the requirement is *above* 28.5 GB and a **≥ 64 GB machine** is the safe figure. `compiled_evm_erc20_transfer_proves_at_tier_18` is therefore `#[ignore]`d. Everything that does not need that memory — the guest's outputs against a native run, the digest binding, the tier arithmetic — is asserted by `compiled_evm_erc20_transfer_binds_the_state_root_transition`, which always runs |
+
+To produce it, on a machine with the memory:
+
+```sh
+cd research && cargo +1.98.1 test --release --test e2e \
+    compiled_evm_erc20_transfer_proves_at_tier_18 -- --ignored --nocapture
+```
+
+(The three attempts above were `cargo test` *without* `--release` — the dev `[profile.test]`, i.e.
+opt-level 1 with debug assertions on, which makes the prover both slower and hungrier. A release
+attempt on this laptop is untested, and is not expected to close a 2× gap.)
+
+Two things would close it for good, in order of effort: **a ≥ 64 GB machine**, which needs nothing
+from this crate; or the **storage `MERKLE_VERIFY`-style syscall** follow-up (or a wider sponge rate)
+bringing the whole call under tier 16's 65 535 cycles, where the proof is the 776 KB, 421-second one
+measured just below rather than a 28 GB one. The second is the same follow-up the tier deviation
+names, which is the argument for doing it rather than buying memory.
 
 **The in-suite proof.** `compiled_evm_storage_read_write_and_return_proves_and_verifies`
 proves **the same `evm.bin`, the same `hc` and the same `EVM_OUT` digest** on a

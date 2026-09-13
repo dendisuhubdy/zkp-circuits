@@ -164,7 +164,8 @@ suite rather than quietly costing every proof on the chain.
 `keccak_log_height = 7` and measures 776 248 bytes at
 `FriProfile::Test` (421 s to prove, 14.8 s to verify); the ERC-20
 `transfer` is the same guest at tier 18, whose proof the development machine could
-not build (~25 GB resident, OOM-killed on 48 GB — `docs/04-guests.md`).
+not build at all (three attempts, ≥ 28.5 GB resident at SIGKILL on a 48 GB laptop —
+`docs/04-guests.md` has the command and the ≥ 64 GB requirement).
 At the production profile a tier-18 EVM proof is about **3.2 MB**: ~1.25 MB
 for the eight ordinary tables at that tier plus the keccak table's ~1.91 MB,
 which is a width cost and does not shrink with the row count. The fullnode's

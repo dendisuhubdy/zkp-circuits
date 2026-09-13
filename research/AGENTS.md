@@ -19,8 +19,10 @@ are `docs/01–06`; the README has the reading order.
   the 1-real-1-dummy shape), `tests/viewing.rs` ~199 s, `tests/e2e.rs`
   ~417 s wall — M4.3's tier-16 EVM-call proof dominates it (421 s to prove and
   15 s to verify when run alone, overlapped here with the file's other tests),
-  and the ERC-20 transfer's tier-18 proof is `#[ignore]`d because it needs
-  ~25 GB of RAM (`docs/04-guests.md`), `tests/cheating.rs` ~60 s, `tests/zk.rs` ~18 s,
+  and the ERC-20 transfer's tier-18 proof is `#[ignore]`d because it needs more
+  memory than a 48 GB machine grants (≥ 28.5 GB resident at SIGKILL over three
+  attempts; `docs/04-guests.md` has the command and the ≥ 64 GB figure),
+  `tests/cheating.rs` ~60 s, `tests/zk.rs` ~18 s,
   `tests/tables.rs` ~10 s, `tests/isa.rs` ~6 s (M4.3's image-container tests
   prove two small programs), `tests/keccak.rs` ~1 s (its chip-alone
   harness proves a 128-row table, so it is cheap despite 2 612 columns), and

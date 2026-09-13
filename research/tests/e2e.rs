@@ -421,8 +421,8 @@ fn a_hash_call_whose_addresses_straddle_2_to_the_30_proves() {
 ///
 /// Part 2, the proof itself, is `compiled_evm_erc20_transfer_proves_at_tier_18`, which is
 /// `#[ignore]`d: a tier-18 batch is 2^18 cpu rows, 2^20 memory and poseidon2 rows and a 2 612-column
-/// keccak table, and proving it peaked at ~25 GB resident and was OOM-killed twice on a 48 GB
-/// machine. The always-run proof of this same guest binary is
+/// keccak table, and three attempts on a quiet 48 GB machine were SIGKILLed at ≥ 28.5 GB resident
+/// with the resident set still growing. The always-run proof of this same guest binary is
 /// `compiled_evm_storage_read_write_and_return_proves_and_verifies` below, which fits tier 16.
 ///
 /// The pre-state seeds `_balances[ALICE] = 1000` and `_totalSupply` through witnesses, so the
@@ -488,15 +488,23 @@ fn compiled_evm_erc20_transfer_binds_the_state_root_transition() {
 }
 
 /// **M4.3's exit test, part 2** — the ERC-20 `transfer` proof itself, `#[ignore]`d because of its
-/// size, not its correctness: the workload is tier 18 (2^18 cpu rows, 2^20 memory and poseidon2
-/// rows, plus the 2 612-column keccak table), which peaked at ~25 GB resident and was OOM-killed
-/// twice on the 48 GB machine M4.3 was developed on. Run it explicitly, with room:
-/// `cargo +1.98.1 test --release --test e2e erc20_transfer_proves -- --ignored --nocapture`.
+/// memory, not its correctness. The workload is tier 18 (2^18 cpu rows, 2^20 memory and poseidon2
+/// rows, plus the 2 612-column keccak table), and **three attempts on an otherwise quiet 48 GB
+/// machine were SIGKILLed with a maximum resident set of 28.5–28.9 GB** — still growing when the OS
+/// stepped in, so the requirement is above that and a **≥ 64 GB** machine is the safe figure. Run it
+/// there, explicitly:
 ///
-/// Everything about the call that does *not* need 25 GB —the guest's outputs, the digest binding,
-/// the tier — is asserted by part 1, which always runs, and the same guest binary is proved at
-/// tier 16 by the test below. What this one adds is the end-to-end fact for the milestone's own
-/// wording: this proof verifies.
+/// ```text
+/// cd research && cargo +1.98.1 test --release --test e2e \
+///     compiled_evm_erc20_transfer_proves_at_tier_18 -- --ignored --nocapture
+/// ```
+///
+/// Everything about the call that does *not* need that memory — the guest's outputs against a native
+/// run, the digest binding, the tier arithmetic — is asserted by part 1, which always runs, and the
+/// same guest binary, `hc` and output digest are proved at tier 16 by the test below. What this one
+/// adds is the end-to-end fact in the milestone's own wording: this proof verifies. The other way to
+/// get it is the storage `MERKLE_VERIFY`-syscall follow-up, which would put the transfer under tier
+/// 16 and its proof within a laptop (`docs/04-guests.md`, `docs/05-roadmap.md`'s deviation 7).
 #[test]
 #[ignore]
 fn compiled_evm_erc20_transfer_proves_at_tier_18() {
