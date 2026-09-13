@@ -13,6 +13,7 @@ const SYS_READ_INPUT: u32 = 2;
 const SYS_POSEIDON2: u32 = 3;
 const SYS_KECCAK: u32 = 4;
 const SYS_SHA256: u32 = 5;
+const SYS_READ_PUBLIC: u32 = 6;
 
 /// SHA-256's initial hash value `H(0)` (FIPS 180-4 §5.3.3), the chaining state `sha256` starts
 /// from; `research/src/sha256.rs::IV` is the same table host-side.
@@ -31,6 +32,27 @@ pub fn read_input(idx: u32) -> u32 {
         core::arch::asm!(
             "ecall",
             in("a7") SYS_READ_INPUT,
+            in("a0") idx,
+            lateout("a0") out,
+            options(nostack),
+        );
+    }
+    out
+}
+
+/// Returns **public** input word `idx` — committed to the proof's unsalted `H_PUB`
+/// (`pv::PUB0..7`), which anyone holding the words recomputes and checks
+/// (`Machine::verify_public`). Use this for data the chain sees anyway (a program image, a
+/// codehash, calldata): a digest the guest *declares* over these words is sound, where the
+/// same declaration over `read_input` words would be bound to nothing.
+/// `idx >= n_pub` can never be satisfied.
+#[inline(always)]
+pub fn read_public(idx: u32) -> u32 {
+    let out: u32;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") SYS_READ_PUBLIC,
             in("a0") idx,
             lateout("a0") out,
             options(nostack),

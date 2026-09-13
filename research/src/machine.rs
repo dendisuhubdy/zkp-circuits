@@ -492,6 +492,9 @@ pub enum ProveError {
     /// Audit ZH2 (2026-09-12): the same 16-bit `HASH_LEFT` bound caps the private-input vector
     /// (H_IN's indigest rows) at 65535 words.
     InputTooLong { len: usize },
+    /// Constraint set 6: the same 16-bit `HASH_LEFT` bound caps the **public** input segment
+    /// (H_PUB's pubdigest rows) at 65535 words, for the reason `InputTooLong` gives.
+    PublicTooLong { len: usize },
     /// Audit ZH3 (2026-09-12): an explicit `Some(tier)` outside `TIERS` — rejected before
     /// `Tier::cpu_height`/`alu_height`/`mem_height` shift by it (a shift-overflow panic in debug
     /// builds, a masked shift plus an abort-scale allocation in release). The prove-side mirror
@@ -635,17 +638,19 @@ pub fn check_declared_heights(
 /// split (review round 1, M6). Most callers (`main.rs`'s demo sections included) don't need a
 /// *particular* salt, just a fresh one; use `build_traces_salted` where a fixed, reproducible
 /// H_IN is specifically needed (e.g. two traces that must be compared).
-pub fn build_traces(program: &Program, inputs: &[u32], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
+pub fn build_traces(program: &Program, inputs: &[u32], public: &[u32], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
     use rand::RngExt;
     let salt: [u32; 4] = rand::rng().random();
-    build_traces_salted(program, inputs, salt, exec, tier)
+    build_traces_salted(program, inputs, public, salt, exec, tier)
 }
 
-pub fn build_traces_salted(program: &Program, inputs: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
+pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
     // M3.4: digest rows count as cycles too — the digest prefix is part of every proof's cpu
     // table, not just `exec.events`. M4.1: so does the input-digest prefix.
     let input_digest_rows = crate::hash::input_digest_row_count(inputs.len());
-    let cycles = exec.cycles() + program.digest_rows() + input_digest_rows;
+    // Constraint set 6: and so does the public-input-digest prefix.
+    let public_digest_rows = crate::hash::public_digest_row_count(public.len());
+    let cycles = exec.cycles() + program.digest_rows() + input_digest_rows + public_digest_rows;
     if cycles > tier.max_cycles() { return Err(ProveError::TooManyCycles { cycles, tier }); }
     // Audit fixes (2026-09-12): reject workloads the AIR can never satisfy *here*, where a clean
     // error is still possible, rather than deep inside `prove_batch`.
@@ -655,12 +660,13 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], salt: [u32; 4], ex
     // `n_in`), so a program or input vector longer than 65535 words is unprovable at any tier.
     if program.len() > u16::MAX as usize { return Err(ProveError::ProgramTooLong { len: program.len() }); }
     if inputs.len() > u16::MAX as usize { return Err(ProveError::InputTooLong { len: inputs.len() }); }
+    if public.len() > u16::MAX as usize { return Err(ProveError::PublicTooLong { len: public.len() }); }
     // ZH1: the poseidon2 table holds `2^(t-3)` permutation blocks against up to ~`2^t`
     // permutation-emitting rows under the cycle budget alone, so cycles fitting says nothing
     // about permutations fitting. Counted the same way the trace builder below counts them:
     // one per digest row, one per indigest row, one per absorb row.
     let absorb_rows = exec.events.iter().filter(|e| matches!(e.hash_row, Some(crate::emulator::HashRow::Absorb { .. }))).count();
-    let permutations = program.digest_rows() + input_digest_rows + absorb_rows;
+    let permutations = program.digest_rows() + input_digest_rows + public_digest_rows + absorb_rows;
     if permutations * crate::tables::poseidon2::BLOCK > tier.poseidon2_height() {
         return Err(ProveError::TooManyPoseidon2Permutations { perms: permutations, tier });
     }
@@ -779,11 +785,12 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], salt: [u32; 4], ex
     let poseidon2_t = poseidon2_trace(&all_hash_events, tier.poseidon2_height());
     let hc = program.digest();
     let hin = crate::hash::input_digest(salt, inputs);
+    let hpub = crate::hash::public_digest(public);
     Ok(Traces {
         program: program_t, cpu, memory, alu, range: range_t, nibble: nibble_t, poseidon2: poseidon2_t, input: input_t,
         keccak: keccak_t,
         sha256: sha256_t,
-        public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc, &hin),
+        public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc, &hin, &hpub),
         program_log_height, input_log_height, keccak_log_height, sha256_log_height, mem_log_height,
     })
 }
@@ -1047,20 +1054,20 @@ impl Machine {
     /// see that method's doc comment (controller ruling: H_IN, `pv::IN0..7`, must be salted or
     /// it is a guessable commitment to the private inputs). Every ordinary caller wants this;
     /// `prove_salted` exists only for tests that need a fixed salt to check against.
-    pub fn prove(&self, program: &Program, inputs: &[u32], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
+    pub fn prove(&self, program: &Program, inputs: &[u32], public: &[u32], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
         use rand::RngExt;
         let salt: [u32; 4] = rand::rng().random();
-        self.prove_salted(program, inputs, salt, tier)
+        self.prove_salted(program, inputs, public, salt, tier)
     }
 
     /// The body of `prove`, taking the H_IN salt explicitly instead of drawing it from OS
     /// entropy — what every backend variant (`prove_with`/`prove_on`) also threads through.
     /// `verify(hc, proof)` does not take the salt: it never leaves the prover except folded,
     /// non-invertibly, into `pv::IN0..7` (`hash::input_digest`'s doc comment).
-    pub fn prove_salted(&self, program: &Program, inputs: &[u32], salt: [u32; 4], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
+    pub fn prove_salted(&self, program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
         // Run up to the largest tier's cycle budget; a program that has not halted by then
         // can never be proved, so `OutOfCycles` and `TooManyCycles` agree on the limit.
-        let exec = execute(program, inputs, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
+        let exec = execute(program, inputs, public, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
         let tier = match tier {
             // Audit ZH3 (2026-09-12): an out-of-`TIERS` tier is an error here, not a
             // shift-overflow panic (debug) or a masked shift plus an abort-scale allocation
@@ -1069,17 +1076,17 @@ impl Machine {
             Some(t) if TIERS.contains(&t.0) => t,
             Some(t) => return Err(ProveError::BadTier(t.0)),
             None => {
-                let cycles = exec.cycles() + program.digest_rows() + crate::hash::input_digest_row_count(inputs.len());
+                let cycles = exec.cycles() + program.digest_rows() + crate::hash::input_digest_row_count(inputs.len()) + crate::hash::public_digest_row_count(public.len());
                 // Audit ZH1 (2026-09-12): fit the Poseidon2 permutation budget too — the cycle
                 // budget alone does not imply it (`2^(t-3)` blocks against up to ~`2^t`
                 // permutation-emitting rows), so the old cycles-only pick could walk straight
                 // into `poseidon2_trace`'s capacity assert.
                 let absorb_rows = exec.events.iter().filter(|e| matches!(e.hash_row, Some(crate::emulator::HashRow::Absorb { .. }))).count();
-                let permutations = program.digest_rows() + crate::hash::input_digest_row_count(inputs.len()) + absorb_rows;
+                let permutations = program.digest_rows() + crate::hash::input_digest_row_count(inputs.len()) + crate::hash::public_digest_row_count(public.len()) + absorb_rows;
                 Tier::for_workload(cycles, permutations).ok_or(ProveError::NoTier(cycles))?
             }
         };
-        let traces = build_traces_salted(program, inputs, salt, &exec, tier)?;
+        let traces = build_traces_salted(program, inputs, public, salt, &exec, tier)?;
         Ok((self.prove_traces(program, &traces, tier), exec))
     }
 
@@ -1129,9 +1136,9 @@ impl Machine {
     /// Prove on `backend`. `Backend::Cpu` is exactly `prove`; the other backends run the same
     /// batch STARK with `rand-zkvm-cuda`'s engines and hand back a `Proof` that this
     /// `Machine`'s own `verify` accepts.
-    pub fn prove_with(&self, backend: Backend, program: &Program, inputs: &[u32], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
+    pub fn prove_with(&self, backend: Backend, program: &Program, inputs: &[u32], public: &[u32], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
         match backend {
-            Backend::Cpu => self.prove(program, inputs, tier),
+            Backend::Cpu => self.prove(program, inputs, public, tier),
             #[cfg(feature = "reference-backend")]
             Backend::Reference => {
                 // Fresh entropy for the proving config (hiding), deterministic for the key
@@ -1139,7 +1146,7 @@ impl Machine {
                 let cfg = reference_cfg::config(self.profile, StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()));
                 let (mmcs_rng, pcs_rng) = key_rngs();
                 let key = reference_cfg::config(self.profile, mmcs_rng, pcs_rng);
-                self.prove_on(&cfg, &key, program, inputs, tier)
+                self.prove_on(&cfg, &key, program, inputs, public, tier)
             }
             #[cfg(any(feature = "cuda", feature = "mock-cuda"))]
             Backend::Cuda => {
@@ -1147,7 +1154,7 @@ impl Machine {
                 let cfg = cuda_cfg::config(self.profile, gpu.clone(), StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()));
                 let (mmcs_rng, pcs_rng) = key_rngs();
                 let key = cuda_cfg::config(self.profile, gpu, mmcs_rng, pcs_rng);
-                self.prove_on(&cfg, &key, program, inputs, tier)
+                self.prove_on(&cfg, &key, program, inputs, public, tier)
             }
         }
     }
@@ -1168,7 +1175,7 @@ impl Machine {
     /// backend proof stops matching what the CPU verifier recomputes. Change one, change the
     /// other.
     #[cfg(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda"))]
-    fn prove_on<SC>(&self, cfg: &SC, key_cfg: &SC, program: &Program, inputs: &[u32], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError>
+    fn prove_on<SC>(&self, cfg: &SC, key_cfg: &SC, program: &Program, inputs: &[u32], public: &[u32], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError>
     where
         SC: StarkGenericConfig<Challenge = Challenge, Challenger = Challenger>,
         // Bounds copied from `p3_batch_stark::prove_batch`'s signature, plus the pin that
@@ -1183,7 +1190,7 @@ impl Machine {
         // the same fresh-per-proof H_IN salt from OS entropy `prove`/`prove_salted` do.
         use rand::RngExt;
         let salt: [u32; 4] = rand::rng().random();
-        let exec = execute(program, inputs, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
+        let exec = execute(program, inputs, public, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
         let tier = match tier {
             // Audit ZH3 (2026-09-12): an out-of-`TIERS` tier is an error here, not a
             // shift-overflow panic (debug) or a masked shift plus an abort-scale allocation
@@ -1192,17 +1199,17 @@ impl Machine {
             Some(t) if TIERS.contains(&t.0) => t,
             Some(t) => return Err(ProveError::BadTier(t.0)),
             None => {
-                let cycles = exec.cycles() + program.digest_rows() + crate::hash::input_digest_row_count(inputs.len());
+                let cycles = exec.cycles() + program.digest_rows() + crate::hash::input_digest_row_count(inputs.len()) + crate::hash::public_digest_row_count(public.len());
                 // Audit ZH1 (2026-09-12): fit the Poseidon2 permutation budget too — the cycle
                 // budget alone does not imply it (`2^(t-3)` blocks against up to ~`2^t`
                 // permutation-emitting rows), so the old cycles-only pick could walk straight
                 // into `poseidon2_trace`'s capacity assert.
                 let absorb_rows = exec.events.iter().filter(|e| matches!(e.hash_row, Some(crate::emulator::HashRow::Absorb { .. }))).count();
-                let permutations = program.digest_rows() + crate::hash::input_digest_row_count(inputs.len()) + absorb_rows;
+                let permutations = program.digest_rows() + crate::hash::input_digest_row_count(inputs.len()) + crate::hash::public_digest_row_count(public.len()) + absorb_rows;
                 Tier::for_workload(cycles, permutations).ok_or(ProveError::NoTier(cycles))?
             }
         };
-        let traces = build_traces_salted(program, inputs, salt, &exec, tier)?;
+        let traces = build_traces_salted(program, inputs, public, salt, &exec, tier)?;
         let airs = chips(tier, traces.keccak_log_height, traces.sha256_log_height);
         let mats = traces.as_slice();
         // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the

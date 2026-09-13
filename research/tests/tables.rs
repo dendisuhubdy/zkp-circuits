@@ -104,7 +104,7 @@ fn nibble_table_answers_and4_or4_xor4_lookups() {
 #[test]
 fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
     let p = guests::fib(5);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     let t = program_trace(&p, &e.events, 16);
     assert_eq!(t.height(), 16);
     let w = program::col::WIDTH;
@@ -131,7 +131,7 @@ fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
 #[test]
 fn every_guest_program_trace_has_mult_word_equal_to_valid() {
     for (name, program, inputs) in guests::all() {
-        let e = execute(&program, &inputs, 1 << 20).unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        let e = execute(&program, &inputs, &[], 1 << 20).unwrap_or_else(|err| panic!("{name}: {err:?}"));
         let height = 1usize << program::program_log_height(program.len());
         let t = program_trace(&program, &e.events, height);
         let w = program::col::WIDTH;
@@ -288,7 +288,7 @@ fn program_decoder_equals_instr_decode() {
 #[test]
 fn memory_trace_is_sorted_and_consistent() {
     let p = guests::memcpy(4);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     let mut counts = RangeCounts::default();
     let t = memory_trace(&e.events, 0, 1 << 12, &mut counts);
     let w = memory::col::WIDTH;
@@ -423,7 +423,7 @@ fn input_table_shape_and_padding() {
 #[test]
 fn cpu_trace_mirrors_events_and_pads() {
     let p = guests::fib(3);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
     let t = cpu_trace(&p, &[], [0u32; 4], &e.events, 64, &mut range, &mut nibble);
@@ -460,7 +460,7 @@ fn cpu_trace_mirrors_events_and_pads() {
     let last = &t.values[(t.height() - 1) * w..t.height() * w];
     assert_eq!(last[cpu::col::WRITTEN0], F::ONE, "slot 0 was written");
     for k in 1..8 { assert_eq!(last[cpu::col::WRITTEN0 + k], F::ZERO, "slot {k} was not"); }
-    let pv = public_values(0, 10, &e.outputs, &p.digest(), &rand_zkvm::hash::input_digest([0u32; 4], &[]));
+    let pv = public_values(0, 10, &e.outputs, &p.digest(), &rand_zkvm::hash::input_digest([0u32; 4], &[]), &rand_zkvm::hash::public_digest(&[]));
     assert_eq!(pv.len(), cpu::pv::NUM);
     assert_eq!(pv[cpu::pv::OUT0], F::from_u32(2));
 }
@@ -468,7 +468,7 @@ fn cpu_trace_mirrors_events_and_pads() {
 #[test]
 fn cpu_trace_limbs_and_counts_every_load_store_address() {
     let p = guests::memcpy(4);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
     let t = cpu_trace(&p, &[], [0u32; 4], &e.events, 1 << 10, &mut range, &mut nibble);

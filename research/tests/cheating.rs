@@ -34,8 +34,8 @@ fn rejects_only_counts_a_constraint_failure_or_a_verify_error() {
 fn setup() -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let e = execute(&p, &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     (m, p, t)
 }
 
@@ -74,7 +74,7 @@ fn skipping_a_cycle_is_rejected() {
 #[test]
 fn proof_for_one_program_does_not_verify_another() {
     let m = Machine::new(FriProfile::Test);
-    let (proof, _) = m.prove(&guests::fib(10), &[], None).unwrap();
+    let (proof, _) = m.prove(&guests::fib(10), &[], &[], None).unwrap();
     assert!(rejects(|| m.verify(&guests::fib(11).digest(), &proof)));
 }
 
@@ -82,7 +82,7 @@ fn proof_for_one_program_does_not_verify_another() {
 fn wrong_tier_claim_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    let (mut proof, _) = m.prove(&p, &[], &[], None).unwrap();
     proof.tier = Tier(12);
     assert!(rejects(|| m.verify(&p.digest(), &proof)));
 }
@@ -91,8 +91,8 @@ fn wrong_tier_claim_is_rejected() {
 fn a_run_that_does_not_fit_the_tier_is_refused() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(300);   // ~1800 cycles > 2^10 - 1
-    assert!(matches!(m.prove(&p, &[], Some(Tier(10))), Err(rand_zkvm::machine::ProveError::TooManyCycles { .. })));
-    let (proof, _) = m.prove(&p, &[], None).unwrap();
+    assert!(matches!(m.prove(&p, &[], &[], Some(Tier(10))), Err(rand_zkvm::machine::ProveError::TooManyCycles { .. })));
+    let (proof, _) = m.prove(&p, &[], &[], None).unwrap();
     assert_eq!(proof.tier, Tier(12));
 }
 
@@ -100,7 +100,7 @@ fn a_run_that_does_not_fit_the_tier_is_refused() {
 fn out_of_range_tier_is_an_error_not_a_panic() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    let (mut proof, _) = m.prove(&p, &[], &[], None).unwrap();
     proof.tier = Tier(99);
     proof.public_values[cpu::pv::TIER] = 99;
     assert!(matches!(m.verify(&p.digest(), &proof), Err(rand_zkvm::machine::VerifyError::Tier)));
@@ -116,7 +116,7 @@ fn out_of_range_tier_is_an_error_not_a_panic() {
 fn wrong_entry_point_claim_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    let (mut proof, _) = m.prove(&p, &[], &[], None).unwrap();
     proof.public_values[cpu::pv::PC_ENTRY] = 4;
     assert!(rejects(|| m.verify(&p.digest(), &proof)));
 }
@@ -211,7 +211,7 @@ fn claiming_a_word_in_an_unwritten_output_slot_is_rejected() {
 fn non_canonical_public_values_are_an_error_not_a_panic() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    let (mut proof, _) = m.prove(&p, &[], &[], None).unwrap();
     m.verify(&p.digest(), &proof).unwrap();
     // `Val::from_u64` does not reduce, so `out0 + p` is the same field element and would
     // otherwise verify — with a different `to_bytes()` and a different apparent output.
@@ -328,9 +328,9 @@ fn storing_a_value_that_was_never_in_a_register_is_rejected() {
     a.extend(write_output(0, 6)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 5);
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     forge_a_store(&mut t, 0x0500_0000);
     assert_eq!(t.public_values[cpu::pv::OUT0], F::from_u32(0x0500_0000));
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
@@ -351,8 +351,8 @@ fn bumping_range8_on_a_bitwise_rows_now_unconstrained_a_limb_is_rejected() {
     a.push(and(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     t.range.values[0x12 * range::col::WIDTH + range::col::M_RANGE] += F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
@@ -369,8 +369,8 @@ fn bumping_range8_on_an_slt_rows_now_unconstrained_c_limb_is_rejected() {
     a.push(slt(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     t.range.values[range::col::WIDTH + range::col::M_RANGE] += F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
@@ -387,9 +387,9 @@ fn a_store_that_replaces_the_wrong_byte_is_rejected() {
     a.push(lw(7, 8, 0)); a.extend(write_output(0, 7)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0x112233ff);
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     // Find the SB row and corrupt MERGED to replace byte 1 instead of byte 0.
     let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
@@ -410,9 +410,9 @@ fn a_load_byte_with_flipped_sign_extension_is_rejected() {
     a.extend(write_output(0, 6)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0xffff_ffff);
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     let lb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_LB] == F::ONE).unwrap();
     t.cpu.values[lb_row * w + cpu::col::SGN] = F::ZERO; // flip: claim unsigned-looking zero-extend
@@ -432,8 +432,8 @@ fn a_misaligned_lh_is_rejected_by_the_air() {
     a.extend(write_output(0, 6)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     let lw_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_LW] == F::ONE).unwrap();
     // Retag this LW row as an LH with OFF0=1 (byte offset 1 — misaligned for a half).
@@ -454,9 +454,9 @@ fn a_sb_that_changes_a_byte_outside_its_offset_is_rejected() {
     a.push(lw(7, 8, 0)); a.extend(write_output(0, 7)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0x1122ff44);
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
     // Also corrupt byte 2 (outside off=1), leaving byte 1 correct.
@@ -487,9 +487,9 @@ fn mulhu_cannot_claim_hi_equals_2_32_minus_1_for_a_small_product() {
     a.push(mulhu(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0);
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulhu);
     let forged_carry = 0xffff_ffffu32; // would make HI = T2 + CARRY = 0xffff_ffff
@@ -520,9 +520,9 @@ fn a_small_in_range_forged_carry_on_a_mulhu_row_is_still_rejected() {
     a.push(mulhu(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0);
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulhu);
     let forged_carry = 100u32; // < 2^24, so the CARRY-limb check alone does not catch this
@@ -551,9 +551,9 @@ fn a_remainder_not_smaller_than_the_divisor_is_rejected() {
     a.push(remu(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 2);
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Remu);
     t.alu.values[row * w + alu::col::Q0] = F::from_u32(2); // quotient core: 3 -> 2
@@ -576,9 +576,9 @@ fn a_wrong_divz_on_a_nonzero_divisor_is_rejected() {
     a.push(divu(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 3);
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Divu);
     t.alu.values[row * w + alu::col::DIVZ] = F::ONE; // B = 3 != 0, but claim DIVZ
@@ -616,8 +616,8 @@ fn a_wrong_divz_on_a_nonzero_divisor_is_rejected() {
 fn a_mul_flag_set_on_an_otherwise_all_zero_padding_row_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::muldiv();
-    let e = execute(&p, &[], 10_000).unwrap();
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let wa = alu::col::WIDTH;
     let pad = t.alu.height() - 1;
     assert_eq!(t.alu.values[pad * wa + alu::col::IS_REAL], F::ZERO, "last alu row is padding");
@@ -639,9 +639,9 @@ fn a_sign_flipped_mulh_is_rejected() {
     a.push(mulh(7, 5, 6)); a.extend(write_output(0, 7)); a.extend(halt());
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0);
-    let mut t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulh);
     assert_eq!(t.alu.values[row * w + alu::col::SA], F::ONE, "A = -2 is negative");
@@ -699,8 +699,8 @@ fn bumping_poseidon2_mult_on_an_idle_row_is_rejected() {
 fn setup_poseidon2(msg: &[u32]) -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::poseidon2_demo(msg);
-    let e = execute(&p, &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     (m, p, t)
 }
 
@@ -897,7 +897,7 @@ fn audit_guest(noops: usize) -> (Program, [u32; 8]) {
     a.extend(write_output(0, REG_A2));
     a.extend(halt());
     let p = a.assemble();
-    let outputs = execute(&p, &[], 10_000).unwrap().outputs;
+    let outputs = execute(&p, &[], &[], 10_000).unwrap().outputs;
     (p, outputs)
 }
 
@@ -938,7 +938,7 @@ fn rogue_write_out(fin: bool, pc: u32, next_pc: u32, ptr: u32, words: [u32; 4], 
 fn rogue_traces(p: &rand_zkvm::isa::Program, mut events: Vec<CycleEvent>, outputs: [u32; 8]) -> Traces {
     for (i, e) in events.iter_mut().enumerate() { e.clk = i as u32; }
     let exec = rand_zkvm::emulator::Execution { events, outputs, halted: true };
-    build_traces_salted(p, &[], [0u32; 4], &exec, Tier(10)).unwrap()
+    build_traces_salted(p, &[], &[], [0u32; 4], &exec, Tier(10)).unwrap()
 }
 
 /// ZC1, the entry gate `(1 − SYS_HASH − is_hash − is_hash_out)·n(IS_HASH_OUT) = 0`: a
@@ -949,7 +949,7 @@ fn rogue_traces(p: &rand_zkvm::isa::Program, mut events: Vec<CycleEvent>, output
 #[test]
 fn a_free_standing_write_back_pair_after_an_ordinary_row_is_rejected() {
     let (p, outputs) = audit_guest(2);
-    let honest = execute(&p, &[], 10_000).unwrap();
+    let honest = execute(&p, &[], &[], 10_000).unwrap();
     let noops = noop_rows(&honest.events);
     assert_eq!(noops.len(), 2);
     let pc = honest.events[noops[1]].pc;
@@ -973,7 +973,7 @@ fn a_free_standing_write_back_pair_after_an_ordinary_row_is_rejected() {
 #[test]
 fn a_free_standing_write_back_pair_after_a_hash_group_is_rejected() {
     let (p, outputs) = audit_guest(1);
-    let honest = execute(&p, &[], 10_000).unwrap();
+    let honest = execute(&p, &[], &[], 10_000).unwrap();
     let noops = noop_rows(&honest.events);
     assert_eq!(noops.len(), 1);
     let pc = honest.events[noops[0]].pc;
@@ -1002,7 +1002,7 @@ fn a_free_standing_write_back_pair_after_a_hash_group_is_rejected() {
 #[test]
 fn a_free_standing_absorb_group_with_a_forged_state_is_rejected() {
     let (p, outputs) = audit_guest(2);
-    let honest = execute(&p, &[], 10_000).unwrap();
+    let honest = execute(&p, &[], &[], 10_000).unwrap();
     let noops = noop_rows(&honest.events);
     assert_eq!(noops.len(), 2);
     // The genuine digest at `0x40..0x47`: the message was four zero words (that region is
@@ -1053,7 +1053,7 @@ fn a_free_standing_absorb_group_with_a_forged_state_is_rejected() {
 fn hash_fin_on_the_ecall_row_detaching_hash_ptr_is_rejected() {
     const ROGUE_PTR: u32 = 0x8000_0000;
     let (p, outputs) = audit_guest(1);
-    let honest = execute(&p, &[], 10_000).unwrap();
+    let honest = execute(&p, &[], &[], 10_000).unwrap();
     let h = honest.events.iter().position(|e| matches!(e.sys, Some(Syscall::Poseidon2 { .. }))).expect("the poseidon2 ecall");
     let noops = noop_rows(&honest.events);
     assert_eq!(noops.len(), 1);
@@ -1108,7 +1108,7 @@ fn a_free_standing_write_back_pair_after_a_keccak_row_is_rejected() {
     a.extend(write_output(0, REG_A2));
     a.extend(halt());
     let p = a.assemble();
-    let honest = execute(&p, &[], 100_000).unwrap();
+    let honest = execute(&p, &[], &[], 100_000).unwrap();
     let k = honest.events.iter().position(|e| matches!(e.sys, Some(Syscall::Keccak { .. }))).expect("the keccak ecall");
     let noops = noop_rows(&honest.events);
     assert_eq!(noops.len(), 2);
@@ -1261,8 +1261,8 @@ const TEST_SALT: [u32; 4] = [0u32; 4];
 fn setup_with_inputs(inputs: &[u32]) -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::balance_check(1000); // reads inputs 0..3 once each
-    let e = execute(&p, inputs, 10_000).unwrap();
-    let t = build_traces_salted(&p, inputs, TEST_SALT, &e, Tier(10)).unwrap();
+    let e = execute(&p, inputs, &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, inputs, &[], TEST_SALT, &e, Tier(10)).unwrap();
     (m, p, t)
 }
 
@@ -1374,10 +1374,10 @@ fn two_reads_of_the_same_index_returning_different_words_is_rejected() {
     a.extend(halt());
     let p = a.assemble();
     let inputs = [7u32];
-    let e = execute(&p, &inputs, 10_000).unwrap();
+    let e = execute(&p, &inputs, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0, "two honest reads of the same index must agree");
     let m = Machine::new(FriProfile::Test);
-    let mut t = build_traces_salted(&p, &inputs, [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &inputs, &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     // Locate the second SYS_READ row (there are exactly two) and forge its returned word.
     let read_rows: Vec<usize> = (0..t.cpu.height()).filter(|&i| t.cpu.values[i * w + cpu::col::SYS_READ] == F::ONE).collect();
@@ -1441,7 +1441,7 @@ fn the_c1_witness_shrinking_n_in_while_still_reading_the_dropped_word_is_rejecte
 #[test]
 fn an_extra_real_input_row_at_idx_equal_to_n_in_is_rejected() {
     assert!(matches!(
-        execute(&guests::balance_check(1000), &[400u32, 250, 300], 10_000),
+        execute(&guests::balance_check(1000), &[400u32, 250, 300], &[], 10_000),
         Err(rand_zkvm::emulator::ExecError::InputIndex(3))
     ), "a READ_INPUT past the supplied inputs is exactly what the emulator refuses");
     let (m, p, mut t) = setup_with_inputs(&[400, 250, 300, 75]); // n_in = 4
@@ -1481,7 +1481,7 @@ fn an_extra_real_input_row_at_idx_equal_to_n_in_is_rejected() {
 /// permutation event), and `t.public_values` (`pv::IN0..7` becomes the canonical encoding of
 /// `perm(H_honest)`, the gratuitous extra permutation's actual output).
 fn append_gratuitous_indigest_permutation(p: &rand_zkvm::isa::Program, inputs: &[u32], mut t: Traces) -> Traces {
-    let e = execute(p, inputs, 10_000).unwrap();
+    let e = execute(p, inputs, &[], 10_000).unwrap();
     let w = cpu::col::WIDTH;
     let height = t.cpu.height();
     let real_row = p.digest_rows() + 1; // the one real indigest row (right after the salt row)
@@ -1657,8 +1657,8 @@ fn a_mult_read_bumped_on_an_input_padding_row_is_rejected() {
 fn setup_keccak() -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::keccak_demo(b"hi");
-    let e = execute(&p, &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     (m, p, t)
 }
 
@@ -1677,8 +1677,8 @@ fn setup_keccak_with_a_padding_block() -> (Machine, rand_zkvm::isa::Program, Tra
     }
     a.extend(halt());
     let p = a.assemble();
-    let e = execute(&p, &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     assert_eq!(t.keccak_log_height, 7, "three blocks rounded up to four");
     (m, p, t)
 }
@@ -1829,7 +1829,7 @@ fn a_keccak_height_past_the_tiers_ceiling_is_rejected_before_any_verifier_key_is
     // M4.2 (Task 6): a guest that actually calls `KECCAK`, so the honest proof carries the
     // ninth instance and the attacker's `degree_bits` edit below has a keccak entry to edit.
     let p = guests::keccak_demo(b"hi");
-    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.keccak_log_height, 5);
     assert_eq!(proof.batch.degree_bits.len(), 9);
     assert_eq!(Tier(10).max_keccak_log_height(), 15);
@@ -1852,7 +1852,7 @@ fn a_nonzero_keccak_height_below_one_block_is_rejected_before_any_verifier_key_i
     use rand_zkvm::machine::VerifyError;
     let prover = Machine::new(FriProfile::Test);
     let p = guests::keccak_demo(b"hi");
-    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.keccak_log_height, 5);
     proof.keccak_log_height = 3;
     let last = proof.batch.degree_bits.len() - 1;
@@ -1871,7 +1871,7 @@ fn a_memory_height_below_the_tier_floor_is_rejected_before_any_verifier_key_is_b
     use rand_zkvm::machine::VerifyError;
     let prover = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.mem_log_height, 12);
     proof.mem_log_height = 11;
     proof.batch.degree_bits[2] = 11 + 1; // memory is instance 2 in `chips()` order
@@ -1930,7 +1930,7 @@ fn a_keccak_height_past_the_absolute_cap_is_rejected_before_any_verifier_key_is_
     use rand_zkvm::machine::VerifyError;
     let prover = Machine::new(FriProfile::Test);
     let p = guests::keccak_demo(b"hi");
-    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.keccak_log_height, 5);
     proof.keccak_log_height = 25;
     let last = proof.batch.degree_bits.len() - 1;
@@ -1948,7 +1948,7 @@ fn a_memory_height_past_the_ceiling_is_rejected_before_any_verifier_key_is_built
     use rand_zkvm::machine::{check_declared_heights, VerifyError, MAX_MEM_LOG_HEIGHT};
     let prover = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.mem_log_height, 12);
     assert_eq!(MAX_MEM_LOG_HEIGHT, 24);
     proof.mem_log_height = 25;
@@ -2032,9 +2032,9 @@ fn keccak_ptr_traces(p1: u32) -> (Machine, rand_zkvm::isa::Program, Traces) {
     const P0: u32 = 0x2000_0000;
     let m = Machine::new(FriProfile::Test);
     let p = keccak_ptr_from_input();
-    let mut e = execute(&p, &[P0], 10_000).unwrap();
+    let mut e = execute(&p, &[P0], &[], 10_000).unwrap();
     relocate_keccak_ptr(&mut e, P0, p1);
-    let t = build_traces_salted(&p, &[p1], [0u32; 4], &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[p1], &[], [0u32; 4], &e, Tier(10)).unwrap();
     let w = cpu::col::WIDTH;
     let row = keccak_row(&t);
     // `HASH_PTR = B` (the `a0` the row read) and the four limbs recompose to it: the two
@@ -2076,8 +2076,8 @@ fn a_keccak_pointer_with_hp3_hi_equal_to_three_is_rejected() {
 fn setup_sha256() -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::sha256_demo();
-    let e = execute(&p, &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     assert_eq!(t.sha256_log_height, 6, "one compression fills the minimum block exactly");
     (m, p, t)
 }
@@ -2096,8 +2096,8 @@ fn setup_sha256_with_a_padding_block() -> (Machine, rand_zkvm::isa::Program, Tra
     }
     a.extend(halt());
     let p = a.assemble();
-    let e = execute(&p, &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
     assert_eq!(t.sha256_log_height, 8, "three blocks rounded up to four");
     (m, p, t)
 }
@@ -2179,7 +2179,7 @@ fn sha256_height_above_the_tier_cap_is_rejected() {
     use rand_zkvm::machine::VerifyError;
     let prover = Machine::new(FriProfile::Test);
     let p = guests::sha256_demo();
-    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.sha256_log_height, 6);
     assert_eq!(Tier(10).max_sha256_log_height(), 16);
     // `t + 7`, with `degree_bits` adjusted to match (the sha256 instance is last in `chips()`
@@ -2201,7 +2201,7 @@ fn a_nonzero_sha256_height_below_one_block_is_rejected() {
     use rand_zkvm::machine::VerifyError;
     let prover = Machine::new(FriProfile::Test);
     let p = guests::sha256_demo();
-    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     proof.sha256_log_height = 5;
     let last = proof.batch.degree_bits.len() - 1;
     proof.batch.degree_bits[last] = 5 + 1;
@@ -2326,8 +2326,8 @@ fn an_out_of_tiers_tier_is_an_error_on_the_prove_side_too() {
     use rand_zkvm::machine::ProveError;
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    assert!(matches!(m.prove(&p, &[], Some(Tier(99))), Err(ProveError::BadTier(99))));
-    assert!(matches!(m.prove(&p, &[], Some(Tier(11))), Err(ProveError::BadTier(11))));
+    assert!(matches!(m.prove(&p, &[], &[], Some(Tier(99))), Err(ProveError::BadTier(99))));
+    assert!(matches!(m.prove(&p, &[], &[], Some(Tier(11))), Err(ProveError::BadTier(11))));
 }
 
 /// Audit ZH1: the poseidon2 table holds `2^(t-3)` permutation blocks against up to ~`2^t`
@@ -2347,13 +2347,13 @@ fn a_workload_exceeding_the_poseidon2_budget_is_a_clean_error() {
     for _ in 0..592 { a.push(addi(0, 0, 0)); }
     let p = a.assemble(); // 599 words -> 150 digest-row permutations + 1 indigest > tier 10's 128 blocks
     assert_eq!(p.len(), 599);
-    let exec = execute(&p, &[], 10_000).unwrap();
+    let exec = execute(&p, &[], &[], 10_000).unwrap();
     assert!(exec.cycles() < 20, "only the leading few instructions ever execute");
     assert!(
-        matches!(build_traces_salted(&p, &[], [0u32; 4], &exec, Tier(10)), Err(ProveError::TooManyPoseidon2Permutations { .. })),
+        matches!(build_traces_salted(&p, &[], &[], [0u32; 4], &exec, Tier(10)), Err(ProveError::TooManyPoseidon2Permutations { .. })),
         "151 permutations cannot fit tier 10's 128 poseidon2 blocks"
     );
-    let (proof, _) = m.prove(&p, &[], None).expect("auto-tier must climb past the permutation wall, not panic");
+    let (proof, _) = m.prove(&p, &[], &[], None).expect("auto-tier must climb past the permutation wall, not panic");
     assert_eq!(proof.tier, Tier(12));
     m.verify(&p.digest(), &proof).unwrap();
 }
@@ -2370,10 +2370,10 @@ fn a_program_or_input_longer_than_the_16_bit_hash_left_cap_is_a_clean_error() {
     let mut words = a.assemble().words;
     words.resize(u16::MAX as usize + 1, 0x0000_0013); // trailing `addi x0, x0, 0`s, never executed
     let p = rand_zkvm::isa::Program::new(0, words);
-    assert!(matches!(m.prove(&p, &[], None), Err(ProveError::ProgramTooLong { .. })));
+    assert!(matches!(m.prove(&p, &[], &[], None), Err(ProveError::ProgramTooLong { .. })));
     let small = guests::fib(10);
     let inputs = vec![0u32; u16::MAX as usize + 1];
-    assert!(matches!(m.prove(&small, &inputs, None), Err(ProveError::InputTooLong { .. })));
+    assert!(matches!(m.prove(&small, &inputs, &[], None), Err(ProveError::InputTooLong { .. })));
 }
 
 /// Audit coverage: the verify-side declared-height guards for the program and input tables
@@ -2385,10 +2385,10 @@ fn out_of_range_declared_program_and_input_heights_are_errors_not_panics() {
     use rand_zkvm::machine::VerifyError;
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    let (mut proof, _) = m.prove(&p, &[], &[], None).unwrap();
     proof.program_log_height = program::MAX_LOG_HEIGHT + 1;
     assert!(matches!(m.verify(&p.digest(), &proof), Err(VerifyError::ProgramHeight)));
-    let (mut proof, _) = m.prove(&p, &[], None).unwrap();
+    let (mut proof, _) = m.prove(&p, &[], &[], None).unwrap();
     proof.input_log_height = rand_zkvm::tables::input::MAX_LOG_HEIGHT + 1;
     assert!(matches!(m.verify(&p.digest(), &proof), Err(VerifyError::InputHeight)));
 }

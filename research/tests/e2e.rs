@@ -40,9 +40,9 @@ fn a_program_much_longer_than_a_small_tiers_cpu_height_but_briefly_executed_prov
     assert_eq!(p.len(), 1_207, "the permutation arithmetic in this test's doc comment");
     assert!(p.len() > Tier(10).cpu_height(), "program must exceed a small tier's cpu height to exercise the fix");
 
-    let exec = rand_zkvm::emulator::execute(&p, &[], 1 << 20).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], 1 << 20).unwrap();
     assert!(exec.cycles() < 20, "only the leading few instructions ever execute");
-    let traces = build_traces_salted(&p, &[], [0u32; 4], &exec, Tier(14)).unwrap();
+    let traces = build_traces_salted(&p, &[], &[], [0u32; 4], &exec, Tier(14)).unwrap();
     // The program table's own height is driven by the program's length (`program_log_height`),
     // not by `Tier(14).cpu_height()` (16 384) — it is far smaller, and in particular still
     // bigger than `Tier(10).cpu_height()` would have offered, confirming the fix actually sized
@@ -63,7 +63,7 @@ fn every_guest_proves_and_verifies() {
     // unpredictable value on every run.
     let salt = [11u32, 22, 33, 44];
     for (name, program, inputs) in guests::all() {
-        let (proof, exec) = m.prove_salted(&program, &inputs, salt, None).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let (proof, exec) = m.prove_salted(&program, &inputs, &[], salt, None).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(proof.tier, Tier(10), "{name} should fit the smallest tier");
         assert_eq!(proof.public_values[2], exec.outputs[0] as u64);
         m.verify(&program.digest(), &proof).unwrap_or_else(|e| panic!("{name}: {e:?}"));
@@ -85,13 +85,13 @@ fn keccak_demo_proves_and_verifies_at_tier_10() {
     let m = Machine::new(FriProfile::Test);
     let msg: Vec<u8> = (0..64u8).collect();
     let p = guests::keccak_demo(&msg);
-    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
     let want = rand_zkvm::keccak::keccak256(&msg);
     for k in 0..8 {
         assert_eq!(exec.outputs[k], u32::from_le_bytes(want[4 * k..4 * k + 4].try_into().unwrap()), "digest word {k}");
     }
     let t0 = std::time::Instant::now();
-    let (proof, _) = m.prove_salted(&p, &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
+    let (proof, _) = m.prove_salted(&p, &[], &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
     let prove_time = t0.elapsed();
     assert_eq!(proof.keccak_log_height, 5, "one permutation fits the minimum block");
     // M4.2 (Task 6): a proof that *does* call `KECCAK` carries the ninth instance.
@@ -135,7 +135,7 @@ const SIZE_BAND_PCT: usize = 5;
 fn a_keccak_free_proof_carries_no_keccak_table() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (proof, _) = m.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    let (proof, _) = m.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.keccak_log_height, 0, "no KECCAK call, no keccak table");
     assert_eq!(proof.batch.degree_bits.len(), 8, "eight instances, not nine");
     m.verify(&p.digest(), &proof).unwrap();
@@ -160,10 +160,10 @@ fn a_keccak_free_proof_declares_the_tier_floor_memory_height() {
     use rand_zkvm::machine::build_traces_salted;
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
     let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
     assert!(accesses < 1 << 12, "fib(10) is nowhere near the tier-10 floor: {accesses} accesses");
-    let t = build_traces_salted(&p, &[], [0; 4], &exec, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10)).unwrap();
     assert_eq!(t.mem_log_height, 12, "exactly `t + 2`");
     assert_eq!(t.memory.height(), 1 << 12);
     let proof = m.prove_traces(&p, &t, Tier(10));
@@ -191,9 +191,9 @@ fn a_few_keccak_permutations_still_fit_under_the_tier_floor() {
     a.extend(write_output(0, 5));
     a.extend(halt());
     let p = a.assemble();
-    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
     assert_eq!(exec.events.iter().filter(|e| e.keccak_row.is_some()).count(), 3);
-    let t = build_traces_salted(&p, &[], [0; 4], &exec, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10)).unwrap();
     // Three permutations need three 32-row blocks -> 128 rows -> 2^7.
     assert_eq!(t.keccak_log_height, 7);
     let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
@@ -221,9 +221,9 @@ fn enough_keccak_permutations_raise_the_declared_memory_height_past_the_floor() 
     }
     a.extend(halt());
     let p = a.assemble();
-    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
     assert_eq!(exec.events.iter().filter(|e| e.keccak_row.is_some()).count(), 40);
-    let t = build_traces_salted(&p, &[], [0; 4], &exec, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10)).unwrap();
     let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
     assert!(((1 << 12)..1 << 13).contains(&accesses), "{accesses} accesses: past the floor, inside one more bit");
     assert_eq!(t.mem_log_height, 13, "the access count now drives the height");
@@ -245,7 +245,7 @@ fn enough_keccak_permutations_raise_the_declared_memory_height_past_the_floor() 
 fn sha256_demo_proves_and_verifies_with_one_sha256_block() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::sha256_demo();
-    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
     // 55 bytes: the largest message whose `0x80 ‖ zeros ‖ be64(bitlen)` padding still fits one
     // 64-byte block. `guests::SHA256_DEMO_MSG` is the same literal the guest hashes; the length
     // assertion is what keeps the two from drifting into a two-block message, which
@@ -263,7 +263,7 @@ fn sha256_demo_proves_and_verifies_with_one_sha256_block() {
     }
     assert_eq!(exec.events.iter().filter(|e| e.sha256_row.is_some()).count(), 1, "one compression");
     let t0 = std::time::Instant::now();
-    let (proof, _) = m.prove_salted(&p, &[], [1, 2, 3, 4], None).unwrap();
+    let (proof, _) = m.prove_salted(&p, &[], &[], [1, 2, 3, 4], None).unwrap();
     let prove_time = t0.elapsed();
     assert_eq!(proof.tier, Tier(10));
     assert_eq!(proof.sha256_log_height, 6, "one compression fills the minimum block exactly");
@@ -289,7 +289,7 @@ fn sha256_demo_proves_and_verifies_with_one_sha256_block() {
 fn a_sha256_free_proof_carries_no_sha256_table() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (proof, _) = m.prove_salted(&p, &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
+    let (proof, _) = m.prove_salted(&p, &[], &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.sha256_log_height, 0, "no SHA256 call, no sha256 table");
     assert_eq!(proof.keccak_log_height, 0, "and no KECCAK call either");
     assert_eq!(proof.batch.degree_bits.len(), 8, "the eight tables every proof carries");
@@ -314,8 +314,8 @@ fn a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile()
     use rand_zkvm::tables::sha256;
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
-    let mut t = build_traces_salted(&p, &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
     assert_eq!(t.sha256_log_height, 0, "fib makes no SHA256 call");
     let free = m.prove_traces(&p, &t, Tier(10));
     m.verify(&p.digest(), &free).unwrap();
@@ -345,8 +345,8 @@ fn measure_the_sha256_table_cost_at_the_production_profile() {
     use rand_zkvm::tables::sha256;
     let m = Machine::new(FriProfile::Production);
     let p = guests::fib(10);
-    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
-    let mut t = build_traces_salted(&p, &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
     let t0 = std::time::Instant::now();
     let free = m.prove_traces(&p, &t, Tier(10));
     let free_prove = t0.elapsed();
@@ -365,7 +365,7 @@ fn measure_the_sha256_table_cost_at_the_production_profile() {
     // And a guest that genuinely hashes, for the whole-proof number.
     let d = guests::sha256_demo();
     let t2 = std::time::Instant::now();
-    let (proof, dexec) = m.prove_salted(&d, &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
+    let (proof, dexec) = m.prove_salted(&d, &[], &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
     let demo_prove = t2.elapsed();
     m.verify(&d.digest(), &proof).unwrap();
     println!(
@@ -378,8 +378,8 @@ fn measure_the_sha256_table_cost_at_the_production_profile() {
 fn tier_padding_hides_cycle_count() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(5);
-    let (p10, e) = m.prove(&p, &[], Some(Tier(10))).unwrap();
-    let (p12, _) = m.prove(&p, &[], Some(Tier(12))).unwrap();
+    let (p10, e) = m.prove(&p, &[], &[], Some(Tier(10))).unwrap();
+    let (p12, _) = m.prove(&p, &[], &[], Some(Tier(12))).unwrap();
     assert!(e.cycles() < 100);
     m.verify(&p.digest(), &p10).unwrap();
     m.verify(&p.digest(), &p12).unwrap();
@@ -393,7 +393,7 @@ fn a_fresh_verifier_accepts_the_proof() {
     let prover = Machine::new(FriProfile::Test);
     let verifier = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (proof, _) = prover.prove(&p, &[], None).unwrap();
+    let (proof, _) = prover.prove(&p, &[], &[], None).unwrap();
     // M3.4: the verifier never touches `p`'s words at all — only its digest, `hc`, which
     // both sides compute identically (`Program::digest` is a pure host-side function, no
     // `Machine` involved) and which the proof itself carries as a public value.
@@ -406,7 +406,7 @@ fn a_fresh_verifier_accepts_the_proof() {
 fn verifier_key_is_cached_after_first_verify() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
-    let (proof, _) = m.prove(&p, &[], None).unwrap();
+    let (proof, _) = m.prove(&p, &[], &[], None).unwrap();
     let t0 = std::time::Instant::now();
     m.verify(&p.digest(), &proof).unwrap();
     let first = t0.elapsed();
@@ -462,7 +462,7 @@ fn measure_production_profile_at_tier_10_and_12() {
     for (label, tier, n) in [("tier 10", Tier(10), 10u32), ("tier 12", Tier(12), 650u32)] {
         let p = guests::fib(n);
         let t0 = std::time::Instant::now();
-        let (proof, _) = m.prove(&p, &[], Some(tier)).unwrap();
+        let (proof, _) = m.prove(&p, &[], &[], Some(tier)).unwrap();
         let prove_time = t0.elapsed();
         let t1 = std::time::Instant::now();
         m.verify(&p.digest(), &proof).unwrap();
@@ -475,7 +475,7 @@ fn measure_production_profile_at_tier_10_and_12() {
     let msg: Vec<u8> = (0..64u8).collect();
     let p = guests::keccak_demo(&msg);
     let t0 = std::time::Instant::now();
-    let (proof, _) = m.prove(&p, &[], Some(Tier(10))).unwrap();
+    let (proof, _) = m.prove(&p, &[], &[], Some(Tier(10))).unwrap();
     let prove_time = t0.elapsed();
     assert_eq!(proof.keccak_log_height, 5);
     let t1 = std::time::Instant::now();
@@ -488,8 +488,8 @@ fn compiled_fib_matches_the_hand_written_guest() {
     use rand_zkvm::emulator::execute;
     let compiled = guests::compiled::fib();
     let hand = guests::fib(20);
-    let exec_c = execute(&compiled, &[20], 50_000).unwrap();
-    let exec_h = execute(&hand, &[], 50_000).unwrap();
+    let exec_c = execute(&compiled, &[20], &[], 50_000).unwrap();
+    let exec_h = execute(&hand, &[], &[], 50_000).unwrap();
     assert_eq!(exec_c.outputs[0], exec_h.outputs[0]);
 }
 
@@ -497,7 +497,7 @@ fn compiled_fib_matches_the_hand_written_guest() {
 fn compiled_fib_proves_and_verifies() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::compiled::fib();
-    let (proof, exec) = m.prove(&p, &[20], None).unwrap();
+    let (proof, exec) = m.prove(&p, &[20], &[], None).unwrap();
     eprintln!("compiled fib(20): tier {:?}, {} cycles, proof {} bytes", proof.tier, exec.cycles(), proof.size());
     m.verify(&p.digest(), &proof).unwrap();
 }
@@ -519,14 +519,14 @@ fn compiled_keccak256_matches_the_host_in_one_permutation() {
         w[..c.len()].copy_from_slice(c);
         inputs.push(u32::from_le_bytes(w));
     }
-    let exec = rand_zkvm::emulator::execute(&p, &inputs, Tier(12).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, &[], Tier(12).max_cycles()).unwrap();
     let want = keccak::keccak256(&msg);
     for k in 0..8 {
         assert_eq!(exec.outputs[k], u32::from_le_bytes(want[4 * k..4 * k + 4].try_into().unwrap()), "digest word {k}");
     }
     assert_eq!(exec.events.iter().filter(|e| e.keccak_row.is_some()).count(), 1, "one rate block, one permutation");
     let t0 = std::time::Instant::now();
-    let (proof, _) = m.prove_salted(&p, &inputs, [5, 6, 7, 8], None).unwrap();
+    let (proof, _) = m.prove_salted(&p, &inputs, &[], [5, 6, 7, 8], None).unwrap();
     let prove_time = t0.elapsed();
     assert_eq!(proof.keccak_log_height, 5, "one permutation fits the minimum block");
     let t1 = std::time::Instant::now();
@@ -558,7 +558,7 @@ fn a_hash_call_whose_addresses_straddle_2_to_the_30_proves() {
     a.extend(write_output(0, 5));
     a.extend(halt());
     let p = a.assemble();
-    let (proof, exec) = m.prove(&p, &[], None).unwrap();
+    let (proof, exec) = m.prove(&p, &[], &[], None).unwrap();
     assert_eq!(exec.outputs[0], 7);
     m.verify(&p.digest(), &proof).unwrap();
 }
@@ -597,7 +597,7 @@ fn compiled_evm_erc20_transfer_binds_the_state_root_transition() {
 
     // `Tier(18)` is the machine's next rung above 16: `machine::TIERS` is [10, 12, 14, 16, 18, 20],
     // even only, so a workload over tier 16's 65 535 cycles pays for 2^18 rows whatever it uses.
-    let exec = execute(&p, &inputs, Tier(18).max_cycles()).unwrap();
+    let exec = execute(&p, &inputs, &[], Tier(18).max_cycles()).unwrap();
     assert_eq!(exec.outputs, want, "the guest's outputs disagree with the native run");
 
     // The tier the prover would pick, pinned as a number without paying for the proof: this is the
@@ -664,7 +664,7 @@ fn compiled_evm_erc20_transfer_proves_at_tier_18() {
     let call = erc20_transfer(ALICE, BOB, U256::from_u32(250), &[(ALICE, U256::from_u32(1000))]);
     let inputs = call.input_words();
     let t0 = std::time::Instant::now();
-    let (proof, exec) = m.prove_salted(&p, &inputs, [9, 10, 11, 12], None).unwrap();
+    let (proof, exec) = m.prove_salted(&p, &inputs, &[], [9, 10, 11, 12], None).unwrap();
     let prove_time = t0.elapsed();
     assert_eq!(exec.outputs, call.expected().0);
     let t1 = std::time::Instant::now();
@@ -716,7 +716,7 @@ fn compiled_evm_storage_read_write_and_return_proves_and_verifies() {
     assert_ne!(post.root(), call.tree.root(), "the SSTORE moved the root");
 
     let t0 = std::time::Instant::now();
-    let (proof, exec) = m.prove_salted(&p, &inputs, [13, 14, 15, 16], None).unwrap();
+    let (proof, exec) = m.prove_salted(&p, &inputs, &[], [13, 14, 15, 16], None).unwrap();
     let prove_time = t0.elapsed();
     assert_eq!(exec.outputs, want, "the guest's outputs disagree with the native run");
     let t1 = std::time::Instant::now();
@@ -754,7 +754,7 @@ fn compiled_evm_balance_of_approve_and_a_revert_execute_correctly() {
     assert_eq!(o.status(), 1);
     assert_eq!(U256::from_be_slice(&o.ret[..32]), U256::from_u32(1000));
     assert_eq!(bal_post.root(), bal.tree.root(), "a view call moves no storage");
-    assert_eq!(execute(&p, &bal.input_words(), cycles).unwrap().outputs, want);
+    assert_eq!(execute(&p, &bal.input_words(), &[], cycles).unwrap().outputs, want);
 
     // approve(BOB, 5): writes _allowances[ALICE][BOB] — the *nested* mapping, whose key is
     // keccak(BOB ‖ keccak(ALICE ‖ 1)) — and emits one Approval
@@ -766,7 +766,7 @@ fn compiled_evm_balance_of_approve_and_a_revert_execute_correctly() {
     assert_eq!(o_ap.n_logs, 1, "Approval");
     assert_eq!(o_ap.logs[0].n_topics, 3);
     assert_ne!(ap_post.root(), ap.tree.root(), "the allowance was written");
-    assert_eq!(execute(&p, &ap.input_words(), cycles).unwrap().outputs, want_ap);
+    assert_eq!(execute(&p, &ap.input_words(), &[], cycles).unwrap().outputs, want_ap);
 
     // transfer of 5000 against a balance of 1000 reverts with the require message
     let over = erc20_transfer(ALICE, BOB, U256::from_u32(5000), &[(ALICE, U256::from_u32(1000))]);
@@ -785,7 +785,7 @@ fn compiled_evm_balance_of_approve_and_a_revert_execute_correctly() {
     );
     assert_eq!(o_r.ret_len, 68 + n.next_multiple_of(32), "the message is right-padded to a word");
     assert_eq!(over_post.root(), over.tree.root(), "a revert moves no storage");
-    assert_eq!(execute(&p, &over.input_words(), cycles).unwrap().outputs, want_r);
+    assert_eq!(execute(&p, &over.input_words(), &[], cycles).unwrap().outputs, want_r);
 
     // every one of the four calls is a different public output under one program digest
     let exit = erc20_transfer(ALICE, BOB, U256::from_u32(250), &[(ALICE, U256::from_u32(1000))]);
@@ -811,7 +811,7 @@ fn measure_production_profile_evm_erc20_transfer() {
     let call = erc20_transfer(ALICE, BOB, U256::from_u32(250), &[(ALICE, U256::from_u32(1000))]);
     let inputs = call.input_words();
     let t0 = std::time::Instant::now();
-    let (proof, exec) = m.prove_salted(&p, &inputs, [9, 10, 11, 12], None).unwrap();
+    let (proof, exec) = m.prove_salted(&p, &inputs, &[], [9, 10, 11, 12], None).unwrap();
     let prove_time = t0.elapsed();
     assert_eq!(exec.outputs, call.expected().0);
     let t1 = std::time::Instant::now();
@@ -892,7 +892,7 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
     // The cap is not a tier's budget: see the comment above this test. It is a bound that fails
     // loudly if the guest ever runs away, rather than the tier the plan asked for.
     const CYCLE_CAP: usize = 4_000_000;
-    let exec = rand_zkvm::emulator::execute(&p, &inputs, CYCLE_CAP).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, &[], CYCLE_CAP).unwrap();
     assert_eq!(exec.outputs, want, "the in-circuit guest and the native run must agree");
 
     let compressions = exec.events.iter().filter(|e| e.sha256_row.is_some()).count();
@@ -951,7 +951,7 @@ fn compiled_sbpf_spl_token_transfer_of_too_much_fails_cleanly() {
     assert!(matches!(r0, Ok(code) if code != 0));
     assert_eq!(want[0], 0);
     assert_eq!(post, rand_zkvm::sbpf::deserialize_accounts(&call.input));
-    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), 4_000_000).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), &[], 4_000_000).unwrap();
     assert_eq!(exec.outputs, want);
     // Status 0 is not the only difference from the success case: the digest words differ too,
     // because a successful transfer's post-state is not its pre-state.
@@ -979,9 +979,9 @@ fn compiled_sbpf_spl_token_transfer_proves_and_verifies() {
     let call = rand_zkvm::sbpf::spl_transfer(250);
     let inputs = call.input_words();
     let (want, _r0, _post) = call.expected();
-    let exec = rand_zkvm::emulator::execute(&p, &inputs, Tier(18).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, &[], Tier(18).max_cycles()).unwrap();
     assert_eq!(exec.outputs, want);
-    let (proof, _) = m.prove_salted(&p, &inputs, [13, 14, 15, 16], None).unwrap();
+    let (proof, _) = m.prove_salted(&p, &inputs, &[], [13, 14, 15, 16], None).unwrap();
     eprintln!(
         "sbpf spl transfer: {} program words, {} input words, {} cycles, {} sha256 compressions, \
          tier {}, sha256_log_height {}, mem_log_height {}, proof {} bytes",
@@ -1011,7 +1011,7 @@ fn sbpf_cycle_breakdown_by_pc() {
     use std::collections::BTreeMap;
     let p = guests::compiled::sbpf();
     let call = rand_zkvm::sbpf::spl_transfer(250);
-    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), 4_000_000).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), &[], 4_000_000).unwrap();
     let mut hist: BTreeMap<u32, usize> = BTreeMap::new();
     for e in &exec.events {
         *hist.entry(e.pc).or_default() += 1;

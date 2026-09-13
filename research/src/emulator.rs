@@ -18,7 +18,7 @@ impl MemAccess { pub fn ts(&self, clk: u32) -> u32 { 4 * clk + self.slot } }
 pub struct AluEvent { pub op: AluOp, pub a: u32, pub b: u32, pub c: u32 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Syscall { Halt, WriteOutput { slot: u32, word: u32 }, ReadInput { idx: u32, word: u32 }, Poseidon2 { ptr: u32, n: u32 }, Keccak { ptr: u32 }, Sha256 { ptr: u32 } }
+pub enum Syscall { Halt, WriteOutput { slot: u32, word: u32 }, ReadInput { idx: u32, word: u32 }, ReadPublic { idx: u32, word: u32 }, Poseidon2 { ptr: u32, n: u32 }, Keccak { ptr: u32 }, Sha256 { ptr: u32 } }
 
 /// M4.2: the whole of one `KECCAK` syscall, on the single cpu row that issues it. `ptr` is the
 /// state's word address; `input`/`output` are the 50 words before and after the permutation, in
@@ -103,6 +103,10 @@ impl Execution { pub fn cycles(&self) -> usize { self.events.len() } }
 pub enum ExecError {
     OutOfCycles(usize), BadPc(u32), Misaligned(u32), BadSyscall(u32), OutputSlot(u32), DoubleWrite(u32),
     InputIndex(u32), Poseidon2WordCount(u32),
+    /// Constraint set 6: a `READ_PUBLIC` index at or past `n_pub`. `InputIndex`'s twin on the
+    /// public segment — the two spaces are indexed independently, so an index legal in one says
+    /// nothing about the other.
+    PublicIndex(u32),
     /// Audit ZM4 (2026-09-12): a `POSEIDON2` pointer at or above `2^30`. The cpu AIR bounds
     /// `HASH_PTR < 2^30` (the ecall row's `HP0..3`/`HP3_HI` decomposition — `MEM_ADDR`'s own
     /// `MA0..3`/`MA3_HI` bound, checked once and carried across the row-group). A pointer at or
@@ -142,7 +146,7 @@ pub const KECCAK_PTR_LIMIT: u32 = 0x3000_0000 - KECCAK_WORDS;
 /// `KECCAK_PTR_LIMIT`'s doc gives at length.
 pub const SHA256_PTR_LIMIT: u32 = 0x3000_0000 - SHA256_WORDS;
 
-pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<Execution, ExecError> {
+pub fn execute(program: &Program, inputs: &[u32], public: &[u32], max_cycles: usize) -> Result<Execution, ExecError> {
     let mut regs = [0u32; 32];
     let mut ram: HashMap<u32, u32> = HashMap::new(); // word address -> value; unwritten reads are 0
     let mut outputs = [0u32; NUM_OUTPUTS];
@@ -403,6 +407,11 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
                             c = word;
                             Syscall::ReadInput { idx: arg0, word }
                         }
+                        SYS_READ_PUBLIC => {
+                            let word = *public.get(arg0 as usize).ok_or(ExecError::PublicIndex(arg0))?;
+                            c = word;
+                            Syscall::ReadPublic { idx: arg0, word }
+                        }
                         other => return Err(ExecError::BadSyscall(other)),
                     });
                 }
@@ -414,7 +423,8 @@ pub fn execute(program: &Program, inputs: &[u32], max_cycles: usize) -> Result<E
             // through to the single-event push below, which would push a stray extra row.
             continue;
         }
-        let writes = dec.writes_rd == 1 || matches!(sys, Some(Syscall::ReadInput { .. }));
+        let writes = dec.writes_rd == 1
+            || matches!(sys, Some(Syscall::ReadInput { .. }) | Some(Syscall::ReadPublic { .. }));
         if writes {
             regs[dec.rd as usize] = c;
             acc.push(MemAccess { space: SPACE_REG, addr: dec.rd, slot: SLOT_W, value: c, is_write: true });

@@ -70,7 +70,7 @@ fn add64_probe(a: u64, b: u64) -> (u32, u32, u32) {
     asm.extend(write_output(2, CARRY));
     asm.extend(halt());
     let program = asm.assemble();
-    let e = execute(&program, &[], 1 << 16).unwrap();
+    let e = execute(&program, &[], &[], 1 << 16).unwrap();
     assert!(e.halted);
     (e.outputs[0], e.outputs[1], e.outputs[2])
 }
@@ -114,12 +114,12 @@ fn honest_two_in_two_out_proves_and_verifies() {
     let burn = 0u64;
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_eq!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time));
     let permutations = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. }))).count();
     let hash_calls = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Ecall { .. }))).count();
-    let (proof, exec) = m.prove(&program, &inputs_vec, None).unwrap();
+    let (proof, exec) = m.prove(&program, &inputs_vec, &[], None).unwrap();
     let total_permutations = permutations + program.digest_rows();
     eprintln!("bundle 2-in-2-out: {} words, {} exec cycles, {} hash calls, {} exec permutations, {} digest rows, {} total permutations, tier {:?}",
         program.len(), exec.cycles(), hash_calls, permutations, program.digest_rows(), total_permutations, proof.tier);
@@ -141,12 +141,12 @@ fn honest_one_in_one_out_with_dummies_proves() {
     let (fee, burn) = (100u64, 0u64);
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_eq!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time));
     let permutations = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. }))).count();
     let hash_calls = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Ecall { .. }))).count();
-    let (proof, exec) = m.prove(&program, &inputs_vec, None).unwrap();
+    let (proof, exec) = m.prove(&program, &inputs_vec, &[], None).unwrap();
     let total_permutations = permutations + program.digest_rows();
     eprintln!("bundle 1-in-1-out-with-dummies: {} words, {} exec cycles, {} hash calls, {} exec permutations, {} digest rows, {} total permutations, tier {:?}",
         program.len(), exec.cycles(), hash_calls, permutations, program.digest_rows(), total_permutations, proof.tier);
@@ -175,11 +175,11 @@ fn over_spend_is_rejected() {
     let (fee, burn) = (100u64, 0u64);
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted, "the guest runs to completion on any well-typed input vector");
     let expected_if_honest = expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
     assert_ne!(e.outputs, expected_if_honest, "the bad flag corrupts the digest an honest run would have produced");
-    let (proof, _) = m.prove(&program, &inputs_vec, None).unwrap();
+    let (proof, _) = m.prove(&program, &inputs_vec, &[], None).unwrap();
     assert!(m.verify(&program.digest(), &proof).is_ok(), "the STARK verifies: the guest faithfully computed ITS OWN (corrupted) digest");
 }
 
@@ -199,7 +199,7 @@ fn a_real_input_with_a_wrong_path_is_rejected() {
     let (fee, burn) = (0u64, 0u64);
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &real, &outputs, anchor, fee, burn, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_ne!(e.outputs, expected_bundle_outputs(&alice.sk, &real, &outputs, anchor, fee, burn, asset, time));
 }
@@ -230,7 +230,7 @@ fn a_dummy_input_with_a_garbage_path_is_never_read() {
     ];
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_eq!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time), "a dummy's path is never read, garbage or not");
 }
@@ -258,7 +258,7 @@ fn a_nonzero_amount_cannot_skip_membership() {
     ];
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted, "the branch condition reads amount, not a separate 'is dummy' flag — there is nothing to crash on");
     assert_ne!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time), "input 2's garbage path was used for real, since amount != 0 forced the membership branch");
 }
@@ -287,7 +287,7 @@ fn asset_mismatch_is_rejected() {
     // asset=1); the guest's separate per-input asset check (IN1_ASSET vs the bundle's public
     // ASSET field) is what catches the mismatch and sets `bad`.
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, claimed_asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_ne!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, claimed_asset, time));
 }
@@ -313,7 +313,7 @@ fn the_same_note_spent_as_both_inputs_is_rejected() {
     ];
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_ne!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time));
 }
@@ -335,7 +335,7 @@ fn identical_output_notes_are_rejected() {
     let outputs = [out, out]; // the exact same note, twice
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_ne!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time));
 }
@@ -397,7 +397,7 @@ fn a_64_bit_wrap_in_the_balance_is_rejected() {
     let (fee, burn) = (2u64, 0u64); // out1 + out2 + fee == 2^64 exactly, wraps to 0 == sum_in
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_ne!(e.outputs, expected_bundle_outputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time));
 }
@@ -424,12 +424,12 @@ fn tampering_the_published_digest_directly_is_a_constraint_violation() {
     ];
     let program = guests::bundle();
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, 0, 0, asset, time);
-    let e = execute(&program, &inputs_vec, 1 << 22).unwrap();
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     // The measured tier for this 1-real-1-dummy witness (Step 6's eprintln! reports tier 14 for
     // both bundle shapes) so the salted trace is built at the same height `prove_traces`
     // expects.
     let tier = Tier(14);
-    let mut t = build_traces_salted(&program, &inputs_vec, [0u32; 4], &e, tier).unwrap();
+    let mut t = build_traces_salted(&program, &inputs_vec, &[], [0u32; 4], &e, tier).unwrap();
     t.public_values[cpu::pv::OUT0] += F::ONE;
     assert!(rejects(|| { let p = m.prove_traces(&program, &t, tier); m.verify(&program.digest(), &p) }));
 }
@@ -505,7 +505,7 @@ fn fixture() -> &'static Fixture {
             Envelope::seal(&alice.vk, &alice.vk.address(), &outputs[1], &keys[1]),
         ];
         let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
-        let (proof, _) = m.prove(&ledger.bundle_program, &inputs_vec, None).unwrap();
+        let (proof, _) = m.prove(&ledger.bundle_program, &inputs_vec, &[], None).unwrap();
         m.verify(&ledger.bundle_program.digest(), &proof).unwrap();
         let nullifiers = [alice.vk.nullifier(&in_notes[0].commitment()), alice.vk.nullifier(&in_notes[1].commitment())];
         let commitments = [outputs[0].commitment(), outputs[1].commitment()];
@@ -916,7 +916,7 @@ fn a_transfer_that_spends_a_bundle_output_is_named_in_the_scan() {
     let (path, index) = l.path_for(&change.commitment()).expect("apply_bundle appended it");
     let anchor = l.root();
     let inputs = notes::transfer_inputs(&f.alice.sk, &change, &created, &path, index);
-    let (proof, _) = m.prove(&l.program, &inputs, None).unwrap();
+    let (proof, _) = m.prove(&l.program, &inputs, &[], None).unwrap();
     let nf = f.alice.vk.nullifier(&change.commitment());
     let tx = l.apply(&m, &proof, anchor, nf, created.commitment(), created.time, env).unwrap();
 
@@ -988,7 +988,7 @@ fn dummy_fixture() -> &'static DummyFixture {
             Envelope::seal(&alice.vk, &ghost.vk.address(), &outputs[1], &TxKey::random()),
         ];
         let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
-        let (proof, _) = m.prove(&ledger.bundle_program, &inputs_vec, None).unwrap();
+        let (proof, _) = m.prove(&ledger.bundle_program, &inputs_vec, &[], None).unwrap();
         // A dummy input's nullifier is computed exactly like a real one (§4 item 3 — `NULLIFY`
         // runs outside the skip branch), over a `cm_in` whose owner the guest forces to
         // `pk_self`, so the host reference has to do the same.

@@ -245,7 +245,12 @@ pub mod pv {
     /// the way `HC0..7` is against `hc` — it is a guest-visible commitment, not a
     /// verifier-side identity check (`docs/03-privacy.md`'s M4.1 section).
     pub const IN0: usize = HC0 + 8;
-    pub const NUM: usize = IN0 + 8; // 26
+    /// The unsalted public-segment commitment `H_PUB`, pinned by the last `IS_PUBDIGEST` row
+    /// (Task 2 — until then this is a declared value bound to nothing). Unlike `IN0..7` this
+    /// *is* checkable by a verifier: `Machine::verify_public` recomputes
+    /// `hash::public_digest(words)` from the words the chain publishes and compares.
+    pub const PUB0: usize = IN0 + 8;
+    pub const NUM: usize = PUB0 + 8; // 34
 }
 use col::*;
 
@@ -1194,11 +1199,12 @@ where
     }
 }
 
-pub fn public_values(pc_entry: u32, tier_log2: usize, outputs: &[u32; NUM_OUTPUTS], hc: &[u32; 8], hin: &[u32; 8]) -> Vec<F> {
+pub fn public_values(pc_entry: u32, tier_log2: usize, outputs: &[u32; NUM_OUTPUTS], hc: &[u32; 8], hin: &[u32; 8], hpub: &[u32; 8]) -> Vec<F> {
     let mut v = vec![F::from_u32(pc_entry), F::from_u64(tier_log2 as u64)];
     v.extend(outputs.iter().map(|o| F::from_u32(*o)));
     v.extend(hc.iter().map(|o| F::from_u32(*o)));
     v.extend(hin.iter().map(|o| F::from_u32(*o)));
+    v.extend(hpub.iter().map(|o| F::from_u32(*o)));
     v
 }
 
@@ -1407,6 +1413,12 @@ pub fn cpu_trace(program: &Program, inputs: &[u32], salt: [u32; 4], events: &[Cy
             Some(Syscall::Halt) => r[SYS_HALT] = F::ONE,
             Some(Syscall::WriteOutput { slot, .. }) => { r[SYS_WRITE] = F::ONE; r[OUT_SEL0 + slot as usize] = F::ONE; written[slot as usize] += 1; }
             Some(Syscall::ReadInput { .. }) => r[SYS_READ] = F::ONE,
+            // Constraint set 6, Task 1: `SYS_READ_PUBLIC` exists in the ISA and the emulator,
+            // but its selector column, its `PUBLIC_READ` bus message and the `IS_PUBDIGEST`
+            // region are Task 2's. Until then this row sets no syscall selector, which the AIR
+            // refuses outright (`IS_ECALL * (sys_sum - 1) == 0`) — so an execution that uses the
+            // syscall cannot be *proved* yet rather than being proved with the read unbound.
+            Some(Syscall::ReadPublic { .. }) => {}
             Some(Syscall::Poseidon2 { .. }) => r[SYS_HASH] = F::ONE,
             // M4.2: one row, and the pointer's own bounded byte decomposition — the same
             // `HP0..3`/`HP3_HI` columns (and the same `RANGE8`/`AND4` receipts) a `SYS_HASH`

@@ -83,6 +83,12 @@ pub mod domain {
     /// `SBPF_OUT_DOMAIN`). 12 and 13 are M4.3's (`STORAGE_LEAF`, `EVM_OUT`) and are left free so
     /// the two milestones' domains do not collide when both land.
     pub const SBPF_OUT: u32 = 14;
+    /// The public input segment's commitment (`hash::public_digest`), sealing the unsalted
+    /// words `SYS_READ_PUBLIC` draws from — the capacity-lane header `[PUB, n_pub, 0]` seeded
+    /// into the very first pubdigest-row permutation. `IN`'s header shape exactly, minus the
+    /// salt block: this digest is meant to be recomputed by a verifier who holds the words
+    /// (`Machine::verify_public`), which is precisely what a salted `H_IN` cannot support.
+    pub const PUB: u32 = 15;
     pub const TEST: u32 = 0xff;
 }
 
