@@ -30,8 +30,9 @@
 //!
 //! `input_hash` is [`canonical_input_hash`] over the instruction — the unpadded encoding of spec
 //! §9.4, not `sha256` of the aligned region, whose 10 240 bytes of realloc headroom per account
-//! were 98 % of what was hashed. What the encoding leaves out, [`check_region`] pins to zero at
-//! entry, so every byte the running program can read is either hashed or provably zero.
+//! were 98 % of what was hashed. What the encoding leaves out, [`check_region`] pins to a fixed
+//! value at entry — zero for the padding, `{0, 1}` for the flag bytes — so every byte the running
+//! program can read is either hashed or pinned.
 //! `output_hash` is [`output_hash`] over the accounts. The account list's *shape* is bound too: the
 //! preimage carries each entry's raw marker byte, so a duplicate entry and a repeated full entry
 //! are different calls even when every account field matches. Each
@@ -449,13 +450,6 @@ impl<'a> AccountWalk<'a> {
         }
     }
 
-    /// Records whether `input[from..to]` is all zeros.
-    ///
-    /// Four bytes per iteration, ORed together rather than compared, so the loop is branch-free and
-    /// pays its increment and test once per four bytes instead of once per byte — this scan covers
-    /// ~41 KB for a four-account region, so its constant is the whole cost of the zero-pinning. It
-    /// cannot use a wider *load*: the run starts at an offset the format does not align and
-    /// `#![forbid(unsafe_code)]` rules out the realignment that would need.
     /// Records whether every byte of `input[from..to]` is 0 or 1.
     fn check_bools(&mut self, from: usize, to: usize) {
         if let Some(bytes) = self.input.get(from..to) {
@@ -467,6 +461,13 @@ impl<'a> AccountWalk<'a> {
         }
     }
 
+    /// Records whether `input[from..to]` is all zeros.
+    ///
+    /// Four bytes per iteration, ORed together rather than compared, so the loop is branch-free and
+    /// pays its increment and test once per four bytes instead of once per byte — this scan covers
+    /// ~41 KB for a four-account region, so its constant is the whole cost of the zero-pinning. It
+    /// cannot use a wider *load*: the run starts at an offset the format does not align and
+    /// `#![forbid(unsafe_code)]` rules out the realignment that would need.
     fn check_zeros(&mut self, from: usize, to: usize) {
         if let Some(bytes) = self.input.get(from..to) {
             let mut acc = 0u8;
@@ -612,8 +613,8 @@ pub fn output_hash<H: Host>(h: &mut H, input: &[u8]) -> [u8; 32] {
 ///
 /// The aligned region leaves [`MAX_PERMITTED_DATA_INCREASE`] = 10 240 bytes of realloc headroom
 /// after every account's data; for the SPL Token `Transfer` fixture that is 40 960 of 41 825 bytes,
-/// so 640 of 654 SHA-256 compressions hashed nothing but zeros. The canonical encoding is ~801
-/// bytes and 13 compressions for the same call.
+/// so 640 of 654 SHA-256 compressions hashed nothing but zeros. The canonical encoding is 837
+/// bytes and 14 compressions for the same call.
 ///
 /// Every length prefix is load-bearing rather than decoration: without `n_accounts` and the
 /// per-field `data_len`/`instruction_data_len` the concatenation is ambiguous between different
