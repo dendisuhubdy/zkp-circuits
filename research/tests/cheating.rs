@@ -2433,3 +2433,397 @@ fn a_skipped_input_table_index_is_rejected() {
     t.input.values[iw + input::col::IDX] += F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
+
+// ---- the public segment (constraint set 6) ------------------------------------------------------
+//
+// M4.1's `input`-table attacks, one for one, against the `public` table and the split
+// `PUBLIC_DIGEST`/`PUBLIC_READ` bus pair — plus the two the public segment has that `input` does
+// not (a forged declared height, and a `SYS_READ_PUBLIC` row hidden behind padding), and the two
+// region-shape forgeries the Task 2 review named (an appended all-inactive pubdigest row, and a
+// `HASH_LEFT` leak across the indigest → pubdigest boundary).
+
+fn setup_with_public(public: &[u32]) -> (Machine, rand_zkvm::isa::Program, Traces) {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::public_echo(); // reads public[0..4], and public[1] twice
+    let e = execute(&p, &[], public, 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], public, TEST_SALT, &e, Tier(10)).unwrap();
+    (m, p, t)
+}
+
+/// (1) A real `public` row outside `{0..n_pub-1}`: an unclaimed `PUBLIC_DIGEST` supply the digest
+/// never demands, rejected whether or not anything claims to read it.
+#[test]
+fn a_real_public_row_past_n_pub_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    let w = col::WIDTH;
+    assert!(t.public.height() > 4, "the +1 padding-row rule leaves spare rows past the four real ones");
+    t.public.values[4 * w + col::WORD] = F::from_u32(999);
+    t.public.values[4 * w + col::IS_REAL] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (2) A word the digest did not absorb but a read returned: tamper the committed row's WORD, so
+/// the honest `SYS_READ_PUB` row's `C` no longer matches what `H_PUB` absorbed.
+#[test]
+fn a_public_read_disagreeing_with_the_committed_word_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    t.public.values[col::WORD] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (3) A read of a dropped index: clear a real row's `IS_REAL` while the guest still reads it.
+/// Two independent rules catch it — the prefix rule, and `PUBLIC_DIGEST`'s unclaimed demand.
+/// This is also the C1-shaped attack from the `public` table's own side: shrinking the table's
+/// real prefix cannot buy a read at the dropped index, because `PUBLIC_READ`'s count carries the
+/// same `IS_REAL` factor and so vanishes with it.
+#[test]
+fn a_read_of_a_dropped_public_index_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    let w = col::WIDTH;
+    t.public.values[3 * w + col::IS_REAL] = F::ZERO;
+    t.public.values[3 * w + col::WORD] = F::ZERO;
+    t.public.values[3 * w + col::MULT_READ] = F::ZERO;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (4) `MULT_READ` forged on a padding row — the AGENTS.md invariant-2 regression. The count's
+/// `IS_REAL` factor already zeroes the supply, so what rejects this is the explicit padding pin,
+/// which is exactly why that pin exists.
+#[test]
+fn a_mult_read_bumped_on_a_public_padding_row_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    let w = col::WIDTH;
+    assert_eq!(t.public.values[5 * w + col::IS_REAL], F::ZERO, "row 5 is padding");
+    t.public.values[5 * w + col::MULT_READ] = F::from_u32(3);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (5) A forged `H_PUB` public value.
+#[test]
+fn tampering_h_pub_in_public_values_is_rejected() {
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    t.public_values[cpu::pv::PUB0] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (6) A mismatched `public_log_height`: the declared height and the batch's degree bits disagree,
+/// which `verify`'s degree-bits equality catches before any verifier key is built.
+#[test]
+fn a_mismatched_public_height_is_rejected_before_any_verifier_key_is_built() {
+    let (m, p, t) = setup_with_public(&[11, 22, 33, 44]);
+    let mut pr = m.prove_traces(&p, &t, Tier(10));
+    pr.public_log_height += 1;
+    let fresh = Machine::new(FriProfile::Test);
+    assert!(fresh.verify(&p.digest(), &pr).is_err());
+    assert_eq!(fresh.cached_keys(), 0, "rejected before the preprocessed commitment is recomputed");
+}
+
+/// (6b) And a declared height outside `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` is an error, not a panic —
+/// the untrusted-shift guard `check_declared_heights` exists for.
+#[test]
+fn out_of_range_declared_public_heights_are_errors_not_panics() {
+    use rand_zkvm::machine::{check_declared_heights, VerifyError};
+    use rand_zkvm::tables::public;
+    let t = Tier(10);
+    for h in [0u8, 1, public::MAX_LOG_HEIGHT + 1, 200] {
+        assert!(matches!(
+            check_declared_heights(t, rand_zkvm::tables::program::MIN_LOG_HEIGHT, rand_zkvm::tables::input::MIN_LOG_HEIGHT, 0, 0, h, t.min_mem_log_height()),
+            Err(VerifyError::PublicHeight)
+        ), "public_log_height {h}");
+    }
+}
+
+/// (7) A `SYS_READ_PUBLIC` row in a proof whose public table is padded to hide it: zero out every
+/// real row of the table (so it declares an empty segment) while the cpu table's read row stands.
+/// `PUBLIC_READ` then has no provider for that `(idx, word)` at all.
+#[test]
+fn a_public_read_whose_table_is_padded_away_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    let w = col::WIDTH;
+    for r in 0..4 {
+        t.public.values[r * w + col::IS_REAL] = F::ZERO;
+        t.public.values[r * w + col::WORD] = F::ZERO;
+        t.public.values[r * w + col::MULT_READ] = F::ZERO;
+    }
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (8) A hole in the real-row prefix — the monotone-prefix rule, and independently the digest's
+/// unclaimed demand at the hole's index.
+#[test]
+fn a_hole_in_the_public_tables_real_prefix_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    let w = col::WIDTH;
+    assert_eq!(t.public.values[2 * w + col::IS_REAL], F::ONE, "row 2 is real, so clearing row 1 leaves a hole");
+    t.public.values[w + col::IS_REAL] = F::ZERO;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (9) A skipped index in the `IDX` chain — it would otherwise mis-key every `PUBLIC_DIGEST`
+/// and `PUBLIC_READ` message from that row on.
+#[test]
+fn a_skipped_public_table_index_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    let w = col::WIDTH;
+    t.public.values[w + col::IDX] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (10) Two reads of the same public index returning different words — `public_echo` reads
+/// `public[1]` twice, so the second read's row is there to tamper.
+#[test]
+fn two_public_reads_of_the_same_index_returning_different_words_is_rejected() {
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    let w = cpu::col::WIDTH;
+    let read_rows: Vec<usize> = (0..t.cpu.height()).filter(|&i| t.cpu.values[i * w + cpu::col::SYS_READ_PUB] == F::ONE).collect();
+    assert_eq!(read_rows.len(), 5, "public_echo makes five READ_PUBLIC calls");
+    t.cpu.values[read_rows[4] * w + cpu::col::C] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// ---- the two region-shape forgeries the Task 2 review named --------------------------------------
+//
+// Both rebuild the digest regions' own permutations and byte limbs by hand, so that the *only*
+// thing standing between the forged witness and acceptance is the single rule under test. The two
+// shared helpers below are what that costs; they are the `shrink_declared_n_in` machinery above,
+// factored for reuse rather than copied.
+
+/// Rebuilds `t.poseidon2` from the three digest regions' block lists, in the exact order
+/// `machine::build_traces_salted` emits them (program digest, then indigest, then pubdigest).
+/// Correct only for a guest with no `POSEIDON2` syscalls of its own — true of both guests below,
+/// so these blocks are the entire event list.
+fn rebuild_digest_permutations(
+    t: &mut Traces,
+    p: &rand_zkvm::isa::Program,
+    indigest: &[rand_zkvm::hash::DigestBlock],
+    pubdigest: &[rand_zkvm::hash::DigestBlock],
+) {
+    let to_events = |blocks: &[rand_zkvm::hash::DigestBlock]| -> Vec<poseidon2::Poseidon2Event> {
+        blocks.iter().map(|blk| {
+            let mut input = blk.state_in;
+            for k in 0..4 { if blk.active[k] { input[k] = F::from_u32(blk.words[k]); } }
+            poseidon2::Poseidon2Event { input, output: blk.state_out }
+        }).collect()
+    };
+    let all: Vec<poseidon2::Poseidon2Event> =
+        to_events(&rand_zkvm::hash::program_digest_rows(p.base_pc, &p.words))
+            .into_iter()
+            .chain(to_events(indigest))
+            .chain(to_events(pubdigest))
+            .collect();
+    t.poseidon2 = poseidon2::poseidon2_trace(&all, t.poseidon2.height());
+}
+
+/// RANGE8 is exact-count accounting (`RangeCounts`/`range_trace`), so every byte-limb column a
+/// hand-edit rewrites has to shift the `range` table's own supply by the same amount — otherwise
+/// the witness rejects on a RANGE8 imbalance rather than on the rule under test.
+fn shift_range8(t: &mut Traces, edits: &[(u32, u32)]) {
+    let rw = range::col::WIDTH;
+    for &(old, new) in edits {
+        t.range.values[old as usize * rw + range::col::M_RANGE] -= F::ONE;
+        t.range.values[new as usize * rw + range::col::M_RANGE] += F::ONE;
+    }
+}
+
+/// Writes `left` into a digest row's `HASH_LEFT` and its two `LEFT0` byte limbs, recording the
+/// RANGE8 shift the limb rewrite owes.
+fn set_hash_left(t: &mut Traces, row: usize, left: u32, edits: &mut Vec<(u32, u32)>) {
+    let w = cpu::col::WIDTH;
+    let old = t.cpu.values[row * w + cpu::col::HASH_LEFT].as_canonical_u64() as u32;
+    t.cpu.values[row * w + cpu::col::HASH_LEFT] = F::from_u32(left);
+    for j in 0..2 {
+        let (o, n) = ((old >> (8 * j)) & 0xff, (left >> (8 * j)) & 0xff);
+        t.cpu.values[row * w + cpu::col::LEFT0 + j] = F::from_u32(n);
+        edits.push((o, n));
+    }
+}
+
+/// Rewrites a digest region's final `H` encoding — the 32 RANGE8-checked byte limbs at `lo_col`
+/// plus the `hi == u32::MAX` gadget at `himax_col`/`inv_col` — from a final sponge state, and
+/// returns the eight canonical words so the caller can pin the matching public values.
+fn set_digest_encoding(
+    t: &mut Traces,
+    row: usize,
+    state_out: [F; 8],
+    lo_col: usize,
+    himax_col: usize,
+    inv_col: usize,
+    edits: &mut Vec<(u32, u32)>,
+) -> [u32; 8] {
+    let w = cpu::col::WIDTH;
+    let words = rand_zkvm::hash::split_digest([state_out[0], state_out[1], state_out[2], state_out[3]]);
+    for k in 0..8 {
+        let bl = limbs(words[k]);
+        for j in 0..4 {
+            let cell = row * w + lo_col + 4 * k + j;
+            edits.push((t.cpu.values[cell].as_canonical_u64() as u32, bl[j].as_canonical_u64() as u32));
+            t.cpu.values[cell] = bl[j];
+        }
+    }
+    for j in 0..4usize {
+        let hi = words[2 * j + 1];
+        if hi == u32::MAX {
+            t.cpu.values[row * w + himax_col + j] = F::ONE;
+            t.cpu.values[row * w + inv_col + j] = F::ZERO;
+        } else {
+            t.cpu.values[row * w + himax_col + j] = F::ZERO;
+            t.cpu.values[row * w + inv_col + j] = (F::from_u32(hi) - F::from_u32(u32::MAX)).inverse();
+        }
+    }
+    words
+}
+
+/// (11) The pubdigest twin of the M4.1 regression (h)
+/// (`an_appended_all_inactive_indigest_row_after_a_block_aligned_n_in_is_rejected`): an extra,
+/// all-inactive pubdigest row appended after the region's real blocks, demanding nothing on
+/// `PUBLIC_DIGEST` yet still charged a genuine `POSEIDON2` permutation — which would make `H_PUB`
+/// `perm(H_honest)` rather than a function of `public` alone. The rule that closes it is
+/// `is_pubdigest * (1 - ACT0) * HASH_IDX = 0` (`tables::cpu`): the *first* pubdigest row may be
+/// empty (`n_pub == 0` has a header-only block), every later one may not.
+///
+/// Unlike the indigest version this needs no row insertion and hence no `CLK`/memory shift: build
+/// the honest trace for `n_pub = 5` (two pubdigest rows), then rewrite it as the `n_pub = 4`
+/// segment spread over those same two rows, the second absorbing nothing. Everything else the AIR
+/// demands is made consistent by hand — both rows' `HASH_N`/`HASH_LEFT` (and its byte limbs, with
+/// the RANGE8 shift), the header lane `HS0+5`, the second row's state/lanes, both rows' genuine
+/// permutations, the final `H_PUB` encoding and `pv::PUB0..7`, and the `public` table's now-unread
+/// fifth row dropped so `PUBLIC_DIGEST` balances.
+///
+/// Discrimination: the `HASH_LEFT`-gated shape of this rule (`is_pubdigest * HASH_LEFT *
+/// (1 - ACT0)`) would be vacuous here — the appended row's `HASH_LEFT` is 0, since the real block
+/// already drained it — so it is specifically the `HASH_IDX` gate that rejects this witness.
+#[test]
+fn an_appended_all_inactive_pubdigest_row_is_rejected() {
+    use rand_zkvm::hash;
+    use rand_zkvm::tables::public::col as pcol;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44, 55]);
+    let w = cpu::col::WIDTH;
+    let offset = p.digest_rows() + hash::input_digest_row_count(0);
+    assert_eq!(t.cpu.values[(offset + 1) * w + cpu::col::IS_PUBDIGEST], F::ONE, "n_pub = 5 takes two pubdigest rows");
+    assert_eq!(t.cpu.values[(offset + 1) * w + cpu::col::HASH_IDX], F::ONE, "and the second of them is block 1");
+
+    // The one block `n_pub = 4` really needs, plus the gratuitous empty one after it.
+    let real = hash::public_digest_rows(&[11, 22, 33, 44])[0];
+    let extra = hash::DigestBlock {
+        idx: 1,
+        left_before: 0,
+        words: [0; 4],
+        active: [false; 4],
+        state_in: real.state_out,
+        state_out: hash::permute_state(real.state_out),
+    };
+    let mut edits: Vec<(u32, u32)> = Vec::new();
+
+    // Row 0: the same four absorbed words, now under a `n_pub = 4` header.
+    let r0 = offset * w;
+    t.cpu.values[r0 + cpu::col::HASH_N] = F::from_u32(4);
+    set_hash_left(&mut t, offset, real.left_before, &mut edits);
+    for k in 0..8 { t.cpu.values[r0 + cpu::col::HS0 + k] = real.state_in[k]; }
+
+    // Row 1: all four lanes inactive, `HASH_IDX` still 1 — the shape the rule forbids.
+    let r1 = (offset + 1) * w;
+    t.cpu.values[r1 + cpu::col::HASH_N] = F::from_u32(4);
+    set_hash_left(&mut t, offset + 1, extra.left_before, &mut edits);
+    for k in 0..8 { t.cpu.values[r1 + cpu::col::HS0 + k] = extra.state_in[k]; }
+    for k in 0..4 {
+        t.cpu.values[r1 + cpu::col::ACT0 + k] = F::ZERO;
+        // An inactive lane carries the entering state forward instead of absorbing a word.
+        t.cpu.values[r1 + cpu::col::HV0 + k] = extra.state_in[k];
+    }
+    // The first ordinary instruction row carries the region's own permutation output.
+    for k in 0..8 { t.cpu.values[(offset + 2) * w + cpu::col::HS0 + k] = extra.state_out[k]; }
+    let hpub = set_digest_encoding(&mut t, offset + 1, extra.state_out, cpu::col::PHVL0, cpu::col::PHIMAX0, cpu::col::PINV0, &mut edits);
+    for k in 0..8 { t.public_values[cpu::pv::PUB0 + k] = F::from_u32(hpub[k]); }
+    shift_range8(&mut t, &edits);
+
+    // The fifth committed word is gone from the digest's demand, so it must go from the table's
+    // supply too — otherwise `PUBLIC_DIGEST` rejects this before the lane-0 rule ever fires.
+    let pw = pcol::WIDTH;
+    assert_eq!(t.public.values[4 * pw + pcol::MULT_READ], F::ZERO, "public_echo never reads public[4]");
+    t.public.values[4 * pw + pcol::IS_REAL] = F::ZERO;
+    t.public.values[4 * pw + pcol::WORD] = F::ZERO;
+    rebuild_digest_permutations(&mut t, &p, &hash::input_digest_rows(TEST_SALT, &[]), &[real, extra]);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// A guest with *both* segments, so the indigest → pubdigest boundary below is the real one: the
+/// first pubdigest row's `HASH_LEFT` is seeded to a genuinely nonzero `n_pub`.
+fn setup_with_inputs_and_public(inputs: &[u32], public: &[u32]) -> (Machine, rand_zkvm::isa::Program, Traces) {
+    let m = Machine::new(FriProfile::Test);
+    let mut a = Assembler::new(0);
+    a.extend(read_input(0));
+    a.push(mv(5, REG_A0));
+    a.extend(read_public(0));
+    a.push(add(6, 5, REG_A0));
+    a.extend(write_output(0, 6));
+    a.extend(halt());
+    let p = a.assemble();
+    let e = execute(&p, inputs, public, 10_000).unwrap();
+    let t = build_traces_salted(&p, inputs, public, TEST_SALT, &e, Tier(10)).unwrap();
+    (m, p, t)
+}
+
+/// (12) The indigest drain split. Constraint set 6 had to *delete* `indigest_last * n(HASH_LEFT)
+/// = 0` — the row after the last indigest row is now the first pubdigest row, whose `HASH_LEFT`
+/// is legitimately `n_pub` — and replace it with a *local* full-drain check on the last indigest
+/// row's own columns, `indigest_last * (HASH_LEFT - indigest_drain) = 0`. Without that
+/// replacement `HASH_LEFT` would leak straight across the boundary: a witness could declare
+/// `n_in` larger than the words it actually absorbs, stop absorbing early, and have the leftover
+/// silently overwritten by the pubdigest region's own seed.
+///
+/// This is that witness: `n_in` declared as 5 (header lane, `HASH_N`, and both rows' `HASH_LEFT`)
+/// while the single real block still absorbs only the four genuine inputs, so the last indigest
+/// row ends with `HASH_LEFT = 5` against an `active_sum` of 4. Every other rule is satisfied by
+/// hand — the salt row's chain rule (`5 - 0 - 5 = 0`, the salt does not drain), the digest-boundary
+/// seed (`n(HASH_LEFT) = n(HASH_N) = 5`), the two genuine permutations under the new header, the
+/// `IPOUT0..7` output columns, the `H_IN` encoding and `pv::IN0..7`. `INPUT_DIGEST` is untouched:
+/// the real block still demands indices 0..3 with the words the `input` table supplies.
+#[test]
+fn an_indigest_region_leaking_hash_left_into_the_public_digest_region_is_rejected() {
+    use rand_zkvm::hash;
+    let inputs = [400u32, 250, 300, 75];
+    let public = [11u32, 22, 33, 44];
+    let (m, p, mut t) = setup_with_inputs_and_public(&inputs, &public);
+    let w = cpu::col::WIDTH;
+    let offset = p.digest_rows(); // the salt row; the one real input block follows it
+    assert_eq!(t.cpu.values[(offset + 1) * w + cpu::col::INDIGEST_LAST], F::ONE, "n_in = 4 is one real block");
+    assert_eq!(t.cpu.values[(offset + 2) * w + cpu::col::HASH_LEFT], F::from_u32(4), "and the pubdigest region opens at n_pub = 4");
+
+    // `hash::input_digest_rows(TEST_SALT, inputs)` with the header's `n_in` lane forged to 5 —
+    // a shape no honest call produces, so it is built here directly.
+    const FORGED_N_IN: u32 = 5;
+    let mut state = [F::ZERO; 8];
+    state[4] = F::from_u32(rand_zkvm::notes::domain::IN);
+    state[5] = F::from_u32(FORGED_N_IN);
+    let mut blocks: Vec<hash::DigestBlock> = Vec::new();
+    for (idx, words) in [(0u32, TEST_SALT), (1, inputs)] {
+        let state_in = state;
+        let mut merged = state;
+        for k in 0..4 { merged[k] = F::from_u32(words[k]); }
+        state = hash::permute_state(merged);
+        blocks.push(hash::DigestBlock { idx, left_before: FORGED_N_IN, words, active: [true; 4], state_in, state_out: state });
+    }
+
+    let mut edits: Vec<(u32, u32)> = Vec::new();
+    for (i, blk) in blocks.iter().enumerate() {
+        let r = (offset + i) * w;
+        t.cpu.values[r + cpu::col::HASH_N] = F::from_u32(FORGED_N_IN);
+        set_hash_left(&mut t, offset + i, blk.left_before, &mut edits);
+        for k in 0..8 { t.cpu.values[r + cpu::col::HS0 + k] = blk.state_in[k]; }
+        // Every lane stays active with the same word, so `HV0..3` and `ACT0..3` are unchanged.
+    }
+    let last = *blocks.last().unwrap();
+    for k in 0..8 { t.cpu.values[(offset + 1) * w + cpu::col::IPOUT0 + k] = last.state_out[k]; }
+    let hin = set_digest_encoding(&mut t, offset + 1, last.state_out, cpu::col::IHVL0, cpu::col::IHIMAX0, cpu::col::IINV0, &mut edits);
+    for k in 0..8 { t.public_values[cpu::pv::IN0 + k] = F::from_u32(hin[k]); }
+    shift_range8(&mut t, &edits);
+    rebuild_digest_permutations(&mut t, &p, &blocks, &hash::public_digest_rows(&public));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
