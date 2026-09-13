@@ -288,3 +288,27 @@ M5.1 is planned first and M5.2's plan is written after M5.1's measurement)
 - Whether the aggregate program should also bind the inner proofs' `H_IN` values (it does not need
   to: the bundle digest already binds the bundle; recorded here so the aggregation spec can decide).
 - The rVM's own verifier key arity and how the fullnode pins it (the vendoring task).
+
+## 12. Errata from the M5.1 plan (2026-09-13, binding)
+
+Writing the M5.1 plan against the code corrected five details of this spec; the plan's text wins:
+
+1. **Digest width is 4, not 8.** The machine's `DIGEST_ELEMS = 4` (`PaddingFreeSponge<_, 8, 4, 4>`,
+   `TruncatedPermutation<_, 2, 4, 8>`); a commitment is a `MerkleCap` of four digests (16 elements).
+   `Digest = [Felt; 4]`; the published inner verifier key digest is a 4-element sponge over
+   `[RVM_VK_DOMAIN ‖ shape words ‖ cap(16)]`, recomputed identically by the node and in-program.
+2. **Public values: all 26 per inner proof, not eight.** `PUBLIC` emits every `pv` value of each
+   inner proof in `pv` order (`PC_ENTRY`, `TIER`, `OUT0..7`, `HC0..7`, `IN0..7`). Dropping `HC0..7`
+   would let an aggregate accept a proof of a different guest. Layout: `[vk_digest(4), N, then
+   26·N]`. The fullnode's aggregate admission recomputes the list from the covered bundles' public
+   fields and its registered `hc`.
+3. **Witness order is consumption order, not postcard order.** FRI needs each round's arity and the
+   query indices before the openings they index; the tape is a pinned 14-segment layout with
+   postcard order inside each segment (plan Task 4).
+4. **The fold is Plonky3 0.7's arity-2^k barycentric interpolation at `beta` (`max_log_arity = 3`)**,
+   not the arity-2 shape §4.2 sketched; leaves carry 4 salt and 4 random-codeword columns and the
+   pruned multiproof is expanded per query with `restore_and_recompute_paths`.
+5. **`recursion/` is its own package root** (`rand_zkvm = { path = "../research" }`), not a member of
+   a root workspace (there is none, and adding one would void `research`'s `[profile.*]` tables).
+   Commands run from `recursion/`. The only edits outside it: `research/src/machine.rs` exposes
+   `log_ext_degrees` and three test hooks.
