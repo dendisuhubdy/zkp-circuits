@@ -422,3 +422,272 @@ and M4.3 is a constraint-set change and therefore a hard fork when vendored.
   signature check, or the shielded pool's nullifier model — **or `EVM_OUT` gains a caller field in
   a later constraint set.** No owner yet; M4.3's exit criterion does not ask for it, and
   `research/docs/{03-privacy,04-guests}.md` now state the gap where a reader would look for it.
+
+## 9. Addendum 2026-09-13 — the public input segment (constraint set 6)
+
+Date: 2026-09-13. Status: rulings fixed by the coordinator; this section is the decision record.
+Applies to `circuits` at `fe98305`. Implementation plan:
+`docs/superpowers/plans/2026-09-13-zkvm-public-input.md`.
+
+This is **option B of §5.1 item 8**, taken. §5.1 item 8 established that an ELF arriving as private
+input *must* be hashed in-circuit, because `H_IN` is salted and hiding and therefore cannot check a
+declared digest; and that the only way to make a declared digest sound is to give the machine a
+second input space the verifier can see. That is what this addendum specifies. Option A (bake the
+ELF into the data segment so `hc` binds it) is **not** taken: it exceeds the loader's 65 535-word
+program cap by ~20 % and makes the guest program-specific.
+
+Numbering: §6 "What does not change" through §8 "Open items" are M4's own and are untouched; this
+addendum is §9 because §6 is taken, exactly as §3.1/§4.1/§5.1 are amendments in place. Where this
+section and §5.1 item 8 differ — they differ on one number, the resulting tier — **this section
+supersedes it**.
+
+### 9.1 The design: a second, unsalted input space
+
+The private input space is untouched. Alongside it the machine gains a **public segment**: the same
+mechanism, minus the salt, with its own digest published as its own public values.
+
+**A new witness table `public`**, `research/src/tables/public.rs`, mirroring `input` column for
+column: `IDX` (the row's own index, 0 at row 0, `+1` every row including through padding), `WORD`,
+`IS_REAL` (a boolean monotone prefix), `MULT_READ`; `col::WIDTH = 4`. Its height is proof-declared
+as `Proof::public_log_height`, under `public_log_height(n) = pad_height(n + 1, MIN_HEIGHT)` with
+`MIN_HEIGHT = 4`, `MIN_LOG_HEIGHT = 2`, `MAX_LOG_HEIGHT = 20` — `tables::input`'s rule, constants
+included, and `check_declared_heights` bounds the declaration to `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]`
+before anything is sized from it. Padding rows pin `WORD` and `MULT_READ` to zero (AGENTS.md
+invariants 1 and 2).
+
+**Two new buses, `PUBLIC_DIGEST` and `PUBLIC_READ`**, mirroring `INPUT_DIGEST`/`INPUT_READ`
+including the split, and for the identical reason — M4.1 review round 1, C1:
+
+* `PUBLIC_DIGEST`, count `IS_REAL`, the digest rows' *only* source of `(IDX, WORD)`, one unit per
+  real row and completely independent of how many times that index is read.
+* `PUBLIC_READ`, count `IS_REAL * MULT_READ`, `SYS_READ_PUBLIC`'s only source.
+
+A single bus with count `IS_REAL * (1 + MULT_READ)` would be unsound here for exactly the reason it
+was unsound for `input`: LogUp balances per `(idx, word)` key, not per *consumer class*, so a prover
+could stop the digest absorbing index `k` (dropping demand by one) while a genuine
+`READ_PUBLIC(k)` still succeeded on the row's remaining unit of supply — `H_PUB` would then commit
+to fewer words than the guest read, with every constraint satisfied. With the buses split,
+`PUBLIC_DIGEST` alone forces `real_count == n_pub` and forces the absorbed words to equal the
+table's `WORD` values, exactly as `program`'s `MULT_WORD = VALID` argument does for `PROGRAM_WORD`.
+Bus count: fourteen → **sixteen**.
+
+**A third digest region on the cpu table**, `IS_PUBDIGEST`, entered off `INDIGEST_LAST` precisely as
+`IS_INDIGEST` is entered off `DIGEST_LAST`, sharing the absorb machinery (`HS0..7`, `HV0..3`,
+`ACT0..3`, `HASH_LEFT`, `HASH_IDX`, `LEFT0..1`, `IDX0..1` — `IS_DIGEST`, `IS_HASH`, `IS_INDIGEST`
+and `IS_PUBDIGEST` are pairwise mutually exclusive) and getting its own final-encoding columns
+`PHVL0..31`/`PHIMAX0..3`/`PINV0..3`, on the same reasoning that gave the indigest region
+`IHVL`/`IHIMAX`/`IINV` rather than reusing `DHVL`. It computes
+
+```
+H_PUB = Poseidon2(domain PUB, n_pub; words)
+```
+
+with **no salt**: capacity lanes seeded `[PUB_DOMAIN, n_pub, 0]` on the transition out of
+`INDIGEST_LAST`, then `⌈n_pub/4⌉` blocks of public words absorbed four to a row, each active lane
+consuming `PUBLIC_DIGEST` at `(HASH_IDX * 4 + k, HV0+k)`. There is no salt row, so — unlike `H_IN`,
+whose salt block guarantees at least one permutation — the region uses `program_digest`'s
+`max(1, ⌈n/4⌉)` rule: `public_digest_row_count(n) = n.div_ceil(4).max(1)`, and `n_pub == 0` costs
+one permutation of the header alone. `notes::domain::PUB = 15` (next free; `SBPF_OUT` is 14).
+
+**The `H_IN` region is touched in exactly one place, and it is not optional.** M4.1 hit this bug
+once already (`DPOUT0..7`'s doc comment): the last indigest row's own permutation output is read
+back through `n(HS0 + j)`, and the row after it is now the first *pubdigest* row, whose `n(HS0..7)`
+must carry `H_PUB`'s header seed. Two unrelated values cannot occupy one cell, so the last indigest
+row gains dedicated output columns **`IPOUT0..7`**, and both its `POSEIDON2` `state_out` argument
+and its `IHVL` canonical-encoding pin retarget from `n(HS0 + j)` to `v(IPOUT0 + j)` — the same fix
+`DPOUT0..7` is, one region later. `H_IN` itself, its salt, the `input` table and both input buses
+are otherwise unchanged.
+
+**Eight new public values.** `pv::PUB0 = pv::IN0 + 8 = 26`, `pv::PUB7 = 33`, `pv::NUM` **26 → 34**,
+pinned by the last `IS_PUBDIGEST` row exactly as `pv::IN0..7` is pinned by the last `IS_INDIGEST`
+row.
+
+### 9.2 ABI
+
+**`SYS_READ_PUBLIC = 6`** — `a0 = idx` in, `a0 = word` out; `SYS_READ_INPUT`'s shape exactly, one
+cpu row, a new `SYS_READ_PUB` selector, the returned word drawn on `PUBLIC_READ` with
+`Count::bounded(v(SYS_READ_PUB), 1)` keyed `[v(B), v(C)]`, and the ordinary
+`WRITES_RD`/register-writeback path carrying `C` back to `a0`. **`idx >= n_pub` is refused the way
+`READ_INPUT` refuses it, which is not a halt**: `emulator::execute` returns
+`ExecError::PublicIndex(idx)` and the run produces no trace at all, mirroring
+`ExecError::InputIndex`. (Recorded because the ruling said "exceptional halt"; the machine has no
+such notion for this syscall, and mirroring `READ_INPUT` is what the ruling asks for.)
+
+**Guest SDK** gains `guest_sdk::read_public(idx) -> u32`; `research/src/asm.rs` gains
+`ops::read_public(idx)`, the twin of `ops::read_input`.
+
+**Prover API.** `public: &[u32]` is a new parameter of every entry point that took `inputs`:
+
+```rust
+Machine::prove(&self, program: &Program, inputs: &[u32], public: &[u32], tier: Option<Tier>)
+Machine::prove_salted(&self, program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], tier: Option<Tier>)
+Machine::prove_with(&self, backend: Backend, program: &Program, inputs: &[u32], public: &[u32], tier: Option<Tier>)
+machine::build_traces(program, inputs, public, exec, tier)
+machine::build_traces_salted(program, inputs, public, salt, exec, tier)
+emulator::execute(program, inputs, public, max_cycles)
+hash::public_digest(public: &[u32]) -> [u32; 8]
+hash::public_digest_rows(public: &[u32]) -> Vec<DigestBlock>
+hash::public_digest_row_count(n: usize) -> usize
+```
+
+`Proof` gains `public_log_height: u8`; `Traces` gains `public: RowMajorMatrix<Val>` and
+`public_log_height: u8`; `Machine::verifier_key` gains a sixth component and becomes
+`(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height,
+public_log_height)`; `check_declared_heights`, `log_ext_degrees` and `max_constraint_degrees` all
+gain the parameter. `Chip::Public` is appended **last** in `machine::chips()`, after `Sha256`, with
+its `log_ext_degrees` entry after sha256's.
+
+Note the consequence of "last": `Chip::Public` is *mandatory* but sits behind two *optional* chips,
+so its index is `8 + (klh != 0) + (slh != 0)` — 8, 9 or 10. Every pre-existing index is undisturbed
+(`i == 1` is still `Cpu`, the public-values slot; `i == 2` is still `Memory`, which
+`tests/cheating.rs` indexes directly), which is the property that mattered; but
+`tests/tables.rs::alu_max_constraint_degree_is_pinned` now pins a **nine**-chip bare shape and an
+**eleven**-chip full shape.
+
+### 9.3 Verification, and what the chain does
+
+`Machine::verify(hc, proof)` **keeps its signature and its meaning**: it checks the STARK and `hc`.
+Alongside it:
+
+```rust
+Machine::verify_public(&self, hc: &[u32; 8], public_words: &[u32], proof: &Proof) -> Result<(), VerifyError>
+```
+
+which runs `verify` and then additionally recomputes `hash::public_digest(public_words)` natively
+and compares it against `pv::PUB0..7`, returning `VerifyError::PublicValues` on a mismatch. **The
+chain publishes the public words with the transaction and calls `verify_public`.** That is the
+whole of the new soundness story: `H_PUB` is unsalted, so a party holding the words can check it,
+which is exactly what `H_IN` cannot do and why a guest-declared `program_hash` was unsound before.
+
+A proof with `n_pub = 0` carries `H_PUB = public_digest(&[])`, the digest of the header alone — a
+fixed, known value. **Every existing guest keeps proving unchanged with `public = &[]`**, and every
+existing test keeps its expected outputs; only the call sites gain an argument.
+
+### 9.4 The sBPF guest
+
+The guest stops carrying the ELF privately and stops hashing it.
+
+* **The ELF moves to the public segment.** Public vector `[n_elf, elf bytes…]`; private vector
+  `[n_input, input bytes…]` only. `sbpf_core::abi::decode_input` splits into two cursors, one per
+  segment; `SbpfCall` gains `public_words()` beside `input_words()`.
+* **`program_hash` is dropped** — the ~1.20 M cycles of SHA-256 over the 108 600-byte ELF go away.
+  The run's program binding is now `H_PUB` itself, checked by the chain against the ELF it published.
+* **The public output changes** (this supersedes the M4.4 "Public output" ruling):
+  `out0 = status`, `out1..7` = words 0..6 of `hash(domain::SBPF_OUT,
+  [input_hash(8) ‖ output_hash(8)])` — a 16-word preimage where M4.4's was 24.
+* **`input_hash` becomes canonical and unpadded** (the change §5.1 item 8 deferred into this same
+  milestone). Instead of `sha256` over the aligned region with its `MAX_PERMITTED_DATA_INCREASE =
+  10 240`-byte realloc padding per account, it is `sha256` over:
+
+| field | bytes | notes |
+|---|---|---|
+| `program_id` | 32 | |
+| `n_accounts` | 8 | little-endian `u64`, the count the walk actually used (clamped at `MAX_ACCOUNTS`) |
+| per account entry, in entry order — a duplicate entry re-encodes in full the account it duplicates, at the position it occupies, the same walk `output_hash` does: | | |
+| `key` | 32 | |
+| `owner` | 32 | |
+| `lamports` | 8 | little-endian `u64` |
+| `data_len` | 8 | little-endian `u64` |
+| `data` | `data_len` | exactly — no realloc padding, no 8-byte alignment padding, no `rent_epoch` |
+| `is_signer`, `is_writable`, `executable` | 1 each | 0 or 1 |
+| `instruction_data_len` | 8 | little-endian `u64` |
+| instruction data | `instruction_data_len` | |
+
+  The two length prefixes and the trailing instruction data are **not** decoration and are not in
+  the ruling's field list: without `n_accounts` and the per-field `data_len`/`instruction_data_len`
+  prefixes the concatenation is ambiguous between different account splits, and without the
+  instruction data `input_hash` would not bind the instruction at all (for the exit fixture, not the
+  transferred amount). Expected saving, per `docs/04-guests.md`: the fixture's 41 825-byte aligned
+  region (654 compressions, 640 of them hashing nothing but zeros) becomes ~801 bytes, ~13
+  compressions — **~290 K cycles**.
+* **The EVM guest (M4.3) is not changed by this plan.** It may adopt the public segment later — a
+  public `codehash` segment is the obvious next user — but nothing here touches `evm-core`,
+  `src/evm.rs` or the `evm` binary.
+
+### 9.5 Cost model
+
+Per proof, against the machine as it stands:
+
+| what | cost |
+|---|---|
+| `public` table | `2^public_log_height` rows × 4 columns; `MIN_HEIGHT = 4`, so a `public = &[]` proof pays 4 rows |
+| cpu rows | `+ max(1, ⌈n_pub/4⌉)` digest rows, which are cycles and count against the tier's budget |
+| poseidon2 blocks | `+ max(1, ⌈n_pub/4⌉)` permutations, `BLOCK = 32` rows each, against `tier.poseidon2_height()` |
+| public values | 26 → 34 `u64`s in `Proof::public_values` |
+| batch instances | 8/9/10 → 9/10/11 |
+| effective cap on `n_pub` | 65 535 — `HASH_LEFT` is 16-bit in the cpu AIR's `LEFT0..1` limbs, exactly as for `n_in` and the program's length; `MAX_LOG_HEIGHT = 20` is only the table-shape ceiling |
+| a guest that uses no public segment | four table rows, one permutation, eight public values; no syscall, no new leak beyond `public_log_height = 2` |
+
+**The sBPF exit test, projected.** From `docs/04-guests.md`'s measured breakdown of the 1 753 945
+cycles:
+
+| term | cycles |
+|---|---|
+| measured baseline | 1 753 945 |
+| − `program_hash`: 1 698 compressions at ~451 | −765 798 |
+| − `input_hash` canonicalised: 654 compressions → ~13 | −288 941 |
+| = projected | **~699 000** |
+
+What does **not** come off is the tape: the guest still has to read all 27 151 ELF words to run
+them, and under this design it reads them with `READ_PUBLIC` instead of `READ_INPUT` at the same
+~15.8 cycles per word (~430 K, inside the 600 725 the breakdown attributes to `run_call_with`).
+
+**This corrects §5.1 item 8 and `docs/04-guests.md`, which both say option B "lands at tier 18".**
+It does not. ~699 K cycles is above `Tier(18)`'s 262 143 budget and lands at **`Tier(20)`** — the
+same tier option A was estimated at, but without A's 65 535-word program cap problem and without
+making the guest program-specific, and with two large secondary wins A does not get:
+`sha256_log_height` falls from 18 to ~10 (2 368 compressions → ~29), and the private input vector
+falls from 37 609 words to 10 459. Reaching tier 18 needs the tape cost itself addressed — a bulk
+"read `n` public words into memory" syscall, one cpu row per four words instead of one per word, is
+the obvious lever — and that is **out of scope here**, recorded as an open item.
+
+Consequently `compiled_sbpf_spl_token_transfer_proves_and_verifies` is expected to stay `#[ignore]`d
+after this work, with a *new* measurement in its message, and the ≥ 64 GB path written down as M4.3
+does for its own tier-18 proof: a tier-20 batch is four times the cpu rows of the tier-18 EVM proof
+that already needed ≥ 28.5 GB and was SIGKILLed on this 48 GB machine. The plan un-ignores it only
+if the measured tier is ≤ 18 **and** the proof completes here.
+
+### 9.6 Privacy
+
+`docs/03-privacy.md`'s leak table gains, on the sBPF row and as a general statement:
+
+> **the public segment is published by construction — that is its purpose**; a guest that wants its
+> program hidden keeps it in the private input as before.
+
+and a new structural row for `public_log_height`, which is the same class of coarse leak
+`program_log_height`, `keccak_log_height` and `sha256_log_height` already are: it bounds `n_pub` to
+within a factor of two, and its minimum (2) means "this proof has no public segment".
+
+Nothing else about the privacy model moves. `H_IN` stays salted and hiding, `hc` stays binding and
+not hiding, and the open item "a hiding program commitment" (§8, and `docs/03-privacy.md`) is
+untouched — this addendum makes the *unhidden* case sound, it does not make the hidden case cheap.
+
+### 9.7 Vendoring
+
+**This is constraint set 6 for the fullnode. Proofs from set 5 no longer verify** — `pv::NUM`
+changes, the batch's instance count changes, and `Proof` gains a field. The fullnode is **not**
+re-vendored by this plan. Note for whoever does: `deploy/sync-zkvm.sh` patches on an anchor that is
+the *exact* `verifier_key` signature line, and that signature gains a sixth parameter here; the
+script also tracks `pv::NUM`. Both must be updated in the same vendoring, and the script fails
+loudly rather than silently mispatching (it already carries the message for it).
+
+**The recursion VM (M5) is unaffected.** `docs/superpowers/specs/2026-09-13-zkvm-m5-recursion-vm-design.md`
+§2 "Witness, not input" states the rVM has no salted input commitment and does not want one, and §9
+lists "the RV32 machine's public unsalted input segment" as explicitly out of M5's scope. Nothing
+here changes an rVM table, bus or instruction.
+
+### 9.8 Rulings
+
+| ruling | why | cost if wrong |
+|---|---|---|
+| a second, unsalted **public segment** rather than splitting `H_IN` into public and private halves | a split `H_IN` would change the meaning of an existing public value and force every M4.1-era consumer to re-reason about what `pv::IN0..7` commits to; a second space leaves `H_IN`, its salt and the `input` table alone, and a guest that wants nothing public declares `public = &[]` | one more table, two more buses, one more digest region, one more `u8` in `Proof` |
+| the `public` table mirrors `input` exactly, **including the two-bus split** | the M4.1 review-round-1 C1 attack applies verbatim: one bus with count `IS_REAL*(1 + MULT_READ)` lets a prover shrink the digest's absorbed set while the read of the dropped index still succeeds, because LogUp balances per key, not per consumer class | one extra bus; a single bus would be a soundness hole, not a size win |
+| `H_PUB` carries **no salt** | the salt is what makes `H_IN` uncheckable by a verifier; the entire point of this segment is that `verify_public` can recompute the digest from published words | the segment would be as useless as `H_IN` for binding a declared digest |
+| `Machine::verify(hc, proof)` keeps its signature; the digest check is a separate `verify_public` | every existing caller and every existing test keeps working, and a consumer that genuinely has no public words (`n_pub = 0`) should not be made to pass an empty slice to the primary entry point | a chain that calls `verify` instead of `verify_public` gets a proof whose public words are unchecked — documented, and the reason `verify_public` is the one the fullnode calls |
+| `Chip::Public` appended **last**, after the two optional chips | keeps `i == 1` (`Cpu`, the public-values slot) and `i == 2` (`Memory`, indexed directly by `tests/cheating.rs`) exactly where they are — the property `chips()`'s doc comment protects | a mandatory chip whose index varies with two optional ones; the degree-pin test grows to nine- and eleven-chip shapes |
+| the last indigest row gains dedicated `IPOUT0..7` output columns | the row after it is now the first pubdigest row, whose `n(HS0..7)` carries `H_PUB`'s header — the identical collision M4.1 solved with `DPOUT0..7`, one region later | eight columns; without them an *honest* witness is unsatisfiable, which is precisely how M4.1 found it |
+| the sBPF guest's `out1..7` drops `program_hash` and becomes `hash(SBPF_OUT, [input_hash ‖ output_hash])` | with the ELF in the public segment the program is bound by `H_PUB`, which the chain checks directly; recomputing a SHA-256 of it in-circuit would be 1 698 compressions of pure redundancy | a chain built against M4.4's 24-word preimage re-cuts its digest; the domain constant is unchanged, so a stale verifier fails loudly rather than silently |
+| `input_hash` over a canonical, unpadded encoding, with explicit length prefixes and the instruction data included | 640 of the aligned region's 654 compressions hash `MAX_PERMITTED_DATA_INCREASE` zeros; and a concatenation without length prefixes is ambiguous, while one without the instruction data would not bind the amount transferred | ~290 K cycles if not done; an ambiguous or incomplete preimage if done carelessly — the reason the layout is written out field by field above |
+| the EVM guest is not changed | M4.3 is finished and measured; adopting the segment there is a separate, optional win and would put a second guest's re-measurement on this plan's critical path | the EVM guest keeps carrying its bytecode privately, which is also its privacy story |
+| constraint set 6, and the fullnode is not re-vendored here | the node's vendoring is its own reviewed change, and `deploy/sync-zkvm.sh`'s anchor moves with the `verifier_key` signature | a hard fork when it is vendored, as M4.1–M4.4 each are |
+| the exit test is un-ignored only if it measures ≤ tier 18 **and** proves on this 48 GB machine | §9.5's arithmetic says it will not; a test that is `#[ignore]`d with an honest measurement is worth more than one that is un-ignored and cannot run | the measurement stands in the ignore message and in `docs/04-guests.md`, as M4.3's tier-18 EVM proof already does |
