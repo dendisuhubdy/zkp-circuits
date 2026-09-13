@@ -20,8 +20,9 @@ ELF := target/$(TARGET)/release/evm-guest
 # they are simply faster, measured both ways on the ERC-20 transfer: 121 763 executed cycles and
 # 17 983 program words with the tables (126 491 all in, counting the digest prefixes) against
 # 123 659 and 17 065 with the compare-and-branch chain (128 158 all in) — the tables cost ~900 more
-# program words and save ~1 900 execution cycles. (Both figures are from the same build pair; the
-# committed image is ~130 cycles cheaper again after a later `storage.rs` tidy-up.)
+# program words and save ~1 900 execution cycles. (Both figures are from the same build pair, which
+# predates two later `storage.rs` changes — a tidy-up and the duplicate-leaf-index check; the
+# committed image measures 121 638 executed cycles over 18 009 program words, `docs/04-guests.md`.)
 ROOT := $(shell cd ../.. && pwd)
 RUSTFLAGS_LIST := ["-C","link-arg=-Tevm.ld","-C","target-feature=-unaligned-scalar-mem","--remap-path-prefix=$(ROOT)=/rand-circuits"]
 CARGO_CONFIG := --config 'target.$(TARGET).rustflags=$(RUSTFLAGS_LIST)'

@@ -191,7 +191,7 @@ machine has no OS to return *to*.
 A hand-written sponge loop has no `.rodata`. A real compiler output always
 does: LLVM puts a `match`'s jump table there, every panic `Location` and its
 file-name string, and any constant it decides not to rematerialise. M4.3's
-EVM interpreter guest is 64 KB of text and 2 428 bytes of `.rodata`, and with the
+EVM interpreter guest is 64 KB of text and 2 444 bytes of `.rodata`, and with the
 flat loader that data had nowhere to go — the image would not even load
 (every word of it has to decode as an instruction), and dropping the section
 was worse than useless: the guest reads zeros where `U256::MAX` should be and
@@ -212,8 +212,8 @@ every 2 KiB (so the store's offset always fits the signed 12-bit S-type
 immediate — AGENTS.md invariant 3). Zero words are skipped, because the
 memory table constrains the first read of a fresh address to return 0, so RAM
 already holds what the image says for them; the prologue is proportional to a
-guest's *non-zero* data: the M4.3 guest's 2 428 bytes are 607 words of which
-585 are non-zero, and cost 1 630 prologue instructions.
+guest's *non-zero* data: the M4.3 guest's 2 444 bytes are 611 words of which
+589 are non-zero, and cost 1 639 prologue instructions.
 
 Three properties make this the whole feature:
 

@@ -239,19 +239,36 @@ call's access list. `MAX_WITNESSES = 16`.
 
 **Known limitation (storage index).** The leaf position is only the top 32
 bits of `keccak256(slot)`, so two slots can be ground into one position at
-about 2^32 work. That is **not** a forgery: a position holds one slot, and the
-colliding slot simply has no witness that verifies, so the call halts
-exceptionally (status 2, state unchanged). It is a griefing vector — an
-attacker who grinds a collision against a known contract can make one pair of
-slots unusable together — and it is fail-closed. The remedy, when it matters,
-is a deeper index (the full 256-bit slot hash over a depth-256 tree, or a
-sparse index with 64+ bits), which is a tree-shape change, not a protocol one.
+about 2^32 work. A colliding pair is **refused at the input**: `push` rejects a
+witness whose leaf position a previous witness already claimed, which
+`decode_input` turns into a parse error and so into the canonical malformed
+output (status 2, `post_root = pre_root`). One position therefore carries one
+witness per call, and a call that needs both slots of a ground pair cannot be
+proved at all. That is a griefing vector — an attacker who grinds a collision
+against a known contract can make one pair of slots unusable together — and it
+is fail-closed.
+
+The refusal is what makes it fail-closed, and it is not belt-and-braces. The
+leaf is canonical in the value, so both witnesses of a ground pair verify
+while the position is empty (the same `H(STORAGE_LEAF, [0; 16])` leaf under the
+same siblings). Accepting them would let a contract that reads both slots
+before writing both bind a `post_root` carrying only the *second* store — the
+sibling refresh never touches a witness at the updated witness's own index, and
+the second store folds its original siblings — while the interpreter carried on
+for the rest of the call believing both writes had landed. That is a divergence
+between the bound root and the executed call, i.e. a forgery, not griefing;
+refusing the pair where it enters is the five-line fix, and it is why the
+witness set's positions are checked for distinctness rather than assumed
+distinct. The remedy for the collision itself, when it matters, is a deeper
+index (the full 256-bit slot hash over a depth-256 tree, or a sparse index with
+64+ bits), which is a tree-shape change, not a protocol one.
 
 **Traps.** `Halt` is `Stop`, `Return`, `Revert`, `OutOfGas`, `StackUnderflow`,
 `StackOverflow` (1024), `BadJump`, `Invalid` (`0xfe`), `Trap(op)` for anything
 outside the subset, `NoWitness`, `BadWitness`, and `OutOfBounds` (a memory
 range past 64 KiB, return data past 1 KiB, more logs than `MAX_LOGS`, an
-over-long code or calldata). Everything but `Stop`/`Return`/`Revert` is status
+over-long code or calldata, and every `ParseError` — including two witnesses at
+one leaf position). Everything but `Stop`/`Return`/`Revert` is status
 2 and burns the whole gas limit. None of them is a panic: every length
 involved is prover-supplied, and a panicking guest aborts *without* producing a
 proof, where an exceptional halt produces a proof that says the call was
@@ -277,10 +294,10 @@ slots touched, one `Transfer` log.
 | | |
 |---|---|
 | contract | `guests-compiled/evm/contracts/ERC20.sol`, `solc 0.8.37`, `--optimize --optimize-runs 200 --evm-version shanghai`, 1 296 bytes of runtime bytecode (committed as hex; `contracts/SOLC.md` records the binary's sha256 and the exact command) |
-| guest program | **17 978 words** — 16 348 of text plus a 1 630-instruction data prologue for 2 428 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations) — and 4 495 program-digest rows |
+| guest program | **18 009 words** — 16 370 of text plus a 1 639-instruction data prologue for 2 444 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations) — and 4 503 program-digest rows |
 | input vector | 921 words (the bytecode, 68 bytes of calldata, the env, two 272-word witnesses) → 232 input-digest rows |
-| cycles | **121 630 executed**, 126 357 total with both digest prefixes |
-| Poseidon2 | 1 070 absorb rows (132 sponge calls: four 32-level Merkle walks, plus the leaves and the output digest), 5 797 permutations in all with the digest prefixes |
+| cycles | **121 638 executed**, 126 373 total with both digest prefixes |
+| Poseidon2 | 1 070 absorb rows (132 sponge calls: four 32-level Merkle walks, plus the leaves and the output digest), 5 805 permutations in all with the digest prefixes |
 | Keccak | 17 permutations (`codehash` over 1 296 bytes is ten of them; two mapping-slot hashes; the return-data and logs hashes) |
 | tier | **`Tier(18)`** — `keccak_log_height` would be 10 (17 permutations = 544 rows, padded to 1 024) |
 | the proof | **not produced on the development machine (48 GB): three attempts, ≥ 28.5 GB resident at SIGKILL.** A tier-18 batch is 2^18 cpu rows, 2^20 memory and poseidon2 rows and a 2 612-column keccak table; the OS killed every attempt while the resident set was still growing, so the requirement is *above* 28.5 GB and a **≥ 64 GB machine** is the safe figure. `compiled_evm_erc20_transfer_proves_at_tier_18` is therefore `#[ignore]`d. Everything that does not need that memory — the guest's outputs against a native run, the digest binding, the tier arithmetic — is asserted by `compiled_evm_erc20_transfer_binds_the_state_root_transition`, which always runs |
@@ -298,7 +315,7 @@ attempt on this laptop is untested, and is not expected to close a 2× gap.)
 
 Two things would close it for good, in order of effort: **a ≥ 64 GB machine**, which needs nothing
 from this crate; or the **storage `MERKLE_VERIFY`-style syscall** follow-up (or a wider sponge rate)
-bringing the whole call under tier 16's 65 535 cycles, where the proof is the 776 KB, 421-second one
+bringing the whole call under tier 16's 65 535 cycles, where the proof is the 774 KB, 438-second one
 measured just below rather than a 28 GB one. The second is the same follow-up the tier deviation
 names, which is the argument for doing it rather than buying memory.
 
@@ -313,9 +330,9 @@ neither the ERC-20's 1 296-byte `codehash` nor its second Merkle walk:
 
 | | |
 |---|---|
-| cycles | 28 197 executed |
+| cycles | 28 201 executed |
 | tier | `Tier(16)`, `keccak_log_height = 7`, `mem_log_height = 18` |
-| proof | 776 248 bytes; 421 s to prove, 14.8 s to verify |
+| proof | 773 848 bytes; 438 s to prove, 14.2 s to verify |
 
 `compiled_evm_balance_of_approve_and_a_revert_execute_correctly` runs three
 more call shapes through the *same* binary and the same `hc` — `balanceOf`
@@ -343,10 +360,10 @@ report has the full table):
 | the four Merkle walks (132 17-word `POSEIDON2` calls at ~207 cycles each, measured as the slope of 1, 2 and 3 `SLOAD`s) | ~27 300 |
 | the code: decoding 1 296 bytes, the jumpdest scan, and `codehash` over it | 23 021 |
 | fixed overhead of any call: the cursor, the interpreter's setup, the output digest | 13 922 |
-| decoding the two 272-word witnesses | 6 334 |
-| the program- and input-digest prefixes | 4 727 |
+| decoding the two 272-word witnesses | 6 342 |
+| the program- and input-digest prefixes | 4 735 |
 
-Local levers took the first working cut from 224 212 total cycles to 126 357
+Local levers took the first working cut from 224 212 total cycles to 126 373
 (both tier 18, but the first was 1.7× the second), each measured rather than
 assumed:
 

@@ -61,7 +61,7 @@ use crate::interp::{
     Buffers, Env, Halt, Interpreter, Log, Outcome, MAX_CALLDATA_BYTES, MAX_CODE_BYTES, MAX_LOGS,
     MAX_RETURN_BYTES, MAX_TOPICS,
 };
-use crate::storage::{StorageTree, Witness, EVM_OUT_DOMAIN, MAX_WITNESSES};
+use crate::storage::{StorageError, StorageTree, Witness, EVM_OUT_DOMAIN, MAX_WITNESSES};
 use crate::u256::U256;
 use crate::{dhash, keccak256, Host};
 
@@ -85,6 +85,10 @@ pub enum ParseError {
     CalldataTooLong,
     /// `n_witnesses` above [`MAX_WITNESSES`].
     TooManyWitnesses,
+    /// Two witnesses claim one leaf position (`StorageError::DuplicateIndex`): the same slot
+    /// twice, or two slots ground into one 32-bit index. `storage`'s module doc says why this has
+    /// to be refused here rather than tolerated.
+    DuplicateWitnessIndex,
 }
 
 /// Reads the input vector through a `read(idx) -> u32` closure, so the same code runs on the host
@@ -230,7 +234,9 @@ impl Workspace {
 /// position is a Keccak of its slot (`StorageTree::push` caches it).
 ///
 /// Refuses, rather than trusting, everything the layout leaves to the prover: a code or calldata
-/// length above its cap, more than [`MAX_WITNESSES`] witnesses, and a vector that ends before the
+/// length above its cap, more than [`MAX_WITNESSES`] witnesses, two witnesses at one leaf position
+/// (`storage`'s module doc: the both-empty collision would otherwise let the bound `post_root` and
+/// the interpreter's own view come apart), and a vector that ends before the
 /// layout does (which is also how a `n_witnesses` overrunning the vector shows up). The
 /// interpreter refuses the two length caps a second time, from its own side
 /// (`Interpreter::new`'s deferred halt): belt and braces on the one input a contract's own code
@@ -261,9 +267,12 @@ pub fn decode_input<H: Host, F: FnMut(u32) -> u32>(
             siblings: core::array::from_fn(|_| c.word8()),
             verified: false,
         };
-        // `n <= MAX_WITNESSES` was checked above, so `push` cannot be full.
-        if dst.storage.push(h, w).is_err() {
-            return Err(ParseError::TooManyWitnesses);
+        // `n <= MAX_WITNESSES` was checked above, so `TooMany` cannot happen; the reachable
+        // rejection is a second witness at a leaf position already taken.
+        match dst.storage.push(h, w) {
+            Ok(()) => {}
+            Err(StorageError::DuplicateIndex) => return Err(ParseError::DuplicateWitnessIndex),
+            Err(_) => return Err(ParseError::TooManyWitnesses),
         }
     }
     // Checked once, at the end. Nothing above branches on anything but a length, and a read past

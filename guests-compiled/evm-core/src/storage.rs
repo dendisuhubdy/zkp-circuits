@@ -13,6 +13,16 @@
 //! read as a `u32` whose bit `i` (LSB first) chooses left (0) or right (1) at level `i` — the
 //! note tree's `emit_merkle_verify` convention exactly.
 //!
+//! **At most one witness per leaf position** ([`StorageTree::push`]): a second witness at a
+//! position already taken is [`StorageError::DuplicateIndex`], which the ABI turns into a parse
+//! error (status 2, `post_root = pre_root`). Two *distinct* slots ground into one 32-bit position
+//! would otherwise both verify whenever the position is empty — both leaves are the canonical
+//! `H(STORAGE_LEAF, [0; 16])` under identical siblings — and then a call that read both before
+//! writing both would bind a `post_root` holding only the second store while the interpreter
+//! carried on believing in the first. Refusing the pair at the input is what makes a position
+//! collision the fail-closed griefing the spec claims and never a divergence between the bound
+//! root and the run.
+//!
 //! **The leaf is canonical in the value** ([`leaf_hash`]): a zero value hashes to the one
 //! `H(STORAGE_LEAF, [0; 16])` whatever the slot is, so an absent slot, a never-written slot and a
 //! slot written back to zero are indistinguishable and the root is history-independent.
@@ -66,6 +76,9 @@ pub enum StorageError {
     BadWitness,
     /// More than [`MAX_WITNESSES`] witnesses were pushed.
     TooMany,
+    /// Two witnesses claim one leaf position — the same slot twice, or two slots ground into one
+    /// 32-bit index. Refused at [`StorageTree::push`]: see the module doc.
+    DuplicateIndex,
 }
 
 /// The guest's view of contract storage: a root and up to [`MAX_WITNESSES`] witnesses.
@@ -132,11 +145,23 @@ impl StorageTree {
 
     /// Take a witness, computing its leaf position from its own slot. The index is never supplied
     /// from outside, which is what keeps `indices` honest.
+    ///
+    /// Two witnesses at one leaf position are [`StorageError::DuplicateIndex`] — the module doc
+    /// says why the alternative is a forgery rather than griefing. Nothing legitimate is refused:
+    /// the same slot twice is redundant (`find` would only ever see the first), and two distinct
+    /// slots at one position can both be valid only while both are zero, which the known
+    /// limitation already gives up on.
     pub fn push<H: Host>(&mut self, h: &mut H, w: Witness) -> Result<(), StorageError> {
         if self.n == MAX_WITNESSES {
             return Err(StorageError::TooMany);
         }
-        self.indices[self.n] = slot_index(h, &w.slot);
+        let idx = slot_index(h, &w.slot);
+        for j in 0..self.n {
+            if self.indices[j] == idx {
+                return Err(StorageError::DuplicateIndex);
+            }
+        }
+        self.indices[self.n] = idx;
         self.witnesses[self.n] = w;
         self.n += 1;
         Ok(())

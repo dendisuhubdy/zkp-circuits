@@ -12,22 +12,24 @@ are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (275 tests: 272 pass, 3 ignored).
-  Everything uses `FriProfile::Test`; measured in one run at the end of the
-  2026-09-12 audit-port wave, `tests/bundle.rs` takes ~213 s (six proofs:
+- `cargo test` — the whole suite (277 tests: 274 pass, 3 ignored).
+  Everything uses `FriProfile::Test`; measured in one 2026-09-13 run (~17 min
+  wall, 27 GB peak resident — a run that shared the laptop with another
+  worktree's suite, so every figure here is an upper bound rather than a quiet
+  best case), `tests/bundle.rs` takes ~270 s (six proofs:
   four guest-level, plus one shared by every ledger-level test and one for
-  the 1-real-1-dummy shape), `tests/viewing.rs` ~199 s, `tests/e2e.rs`
-  ~417 s wall — M4.3's tier-16 EVM-call proof dominates it (421 s to prove and
-  15 s to verify when run alone, overlapped here with the file's other tests),
+  the 1-real-1-dummy shape), `tests/viewing.rs` ~207 s, `tests/e2e.rs`
+  ~452 s wall — M4.3's tier-16 EVM-call proof dominates it (~438 s to prove and
+  ~14 s to verify when run alone, overlapped here with the file's other tests),
   and the ERC-20 transfer's tier-18 proof is `#[ignore]`d because it needs more
   memory than a 48 GB machine grants (≥ 28.5 GB resident at SIGKILL over three
   attempts; `docs/04-guests.md` has the command and the ≥ 64 GB figure),
-  `tests/cheating.rs` ~60 s, `tests/zk.rs` ~18 s,
+  `tests/cheating.rs` ~37 s, `tests/zk.rs` ~19 s,
   `tests/tables.rs` ~10 s, `tests/isa.rs` ~6 s (M4.3's image-container tests
   prove two small programs), `tests/keccak.rs` ~1 s (its chip-alone
   harness proves a 128-row table, so it is cheap despite 2 612 columns), and
   the four EVM host suites — `tests/evm_u256.rs` (6), `tests/evm_storage.rs`
-  (11), `tests/evm_interp.rs` (17), `tests/evm_abi.rs` (8) — well under a
+  (13), `tests/evm_interp.rs` (17), `tests/evm_abi.rs` (8) — well under a
   second between them, because they prove nothing: they run `evm-core`
   natively over `evm::HostRef`.
   All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a

@@ -174,6 +174,59 @@ fn pushing_more_than_max_witnesses_is_rejected() {
     assert!(matches!(g.push(&mut h, extra), Err(gs::StorageError::TooMany)));
 }
 
+/// Two witnesses at one leaf position must be refused where they enter, not tolerated.
+///
+/// The leaf is canonical in the value, so a *ground* pair of distinct slots at one 32-bit position
+/// both verify while the position is empty (identical `H(STORAGE_LEAF, [0; 16])` leaves, identical
+/// siblings). A call that then read both and wrote both would bind a `post_root` carrying only the
+/// second store — `store`'s refresh loop never touches a witness whose index equals the updated
+/// one, and the second store folds its *original* siblings — while the interpreter ran on for the
+/// rest of the call believing both writes happened. That is a divergence between the bound root and
+/// the executed call, not the fail-closed griefing the docs claim, so `push` refuses the second
+/// witness. 2^32 grinding is out of reach for a test; the same slot twice is the same defect
+/// through the same `indices` check.
+#[test]
+fn two_witnesses_at_one_leaf_position_are_refused_at_push() {
+    let mut t = SparseTree::new();
+    t.insert(s(1), s(11));
+    t.insert(s(2), s(22));
+    let mut h = HostRef;
+    let mut g = StorageTree::new(t.root());
+    g.push(&mut h, into_guest(t.witness(&s(1)))).unwrap();
+    // a second witness for the same slot: same index, refused, and nothing was taken
+    let dup = into_guest(t.witness(&s(1)));
+    assert!(matches!(g.push(&mut h, dup), Err(gs::StorageError::DuplicateIndex)));
+    assert_eq!(g.len(), 1);
+    // a different position still goes in, so the check is on the index and not on the count
+    g.push(&mut h, into_guest(t.witness(&s(2)))).unwrap();
+    assert_eq!(g.len(), 2);
+    assert_eq!(g.load(&mut h, &s(1)).unwrap(), s(11));
+    assert_eq!(g.load(&mut h, &s(2)).unwrap(), s(22));
+}
+
+/// The host mirror: `EvmCall::input_words` will not encode a vector the guest is bound to reject,
+/// so a fixture cannot build the divergent call silently and have it look like a real one. (The
+/// matching assert in `SparseTree::witness` — a leaf position held by a *different* slot — has no
+/// test, because `insert`'s own assert makes that state unreachable through the type; it is there so
+/// the property stays checked rather than argued.)
+#[test]
+#[should_panic(expected = "two touched slots share one leaf position")]
+fn the_host_refuses_to_build_a_vector_with_two_witnesses_at_one_position() {
+    let mut tree = SparseTree::new();
+    tree.insert(s(1), s(11));
+    let call = rand_zkvm::evm::EvmCall {
+        code: vec![0x00],
+        calldata: vec![],
+        address: U256::ZERO,
+        caller: U256::ZERO,
+        callvalue: U256::ZERO,
+        gas_limit: 1_000,
+        tree,
+        touched: vec![s(1), s(1)],
+    };
+    let _ = call.input_words();
+}
+
 /// The guest's Merkle fold must be the note tree's, not just self-consistent with the host
 /// builder: bit `i` of the index (LSB first) chooses left (0) or right (1) at level `i`, and the
 /// node hash is `H(NODE, left, right)` — the convention `asm::emit_merkle_verify` implements

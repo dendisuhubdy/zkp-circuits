@@ -358,6 +358,28 @@ fn a_malformed_input_vector_is_an_exceptional_halt_not_a_panic() {
     assert_eq!(parse(&vec![]), ParseError::Truncated);
     assert_eq!(run(&vec![]), (malformed, 2, Halt::OutOfBounds, 0, 0, 0));
 
+    // 7. two witnesses at one leaf position. `EvmCall::input_words` refuses to build this (a
+    //    ground collision is 2^32 work, so the duplicate is spliced in by hand: the sample's one
+    //    witness, declared twice), because accepting it is a forgery and not griefing — see
+    //    `evm_core::storage`'s module doc and `tests/evm_storage.rs`.
+    let mut w = c.input_words();
+    let wit_words = w[n_at + 1..].to_vec();
+    assert_eq!(wit_words.len(), WITNESS_WORDS);
+    w[n_at] = 2;
+    w.extend_from_slice(&wit_words);
+    assert_eq!(parse(&w), ParseError::DuplicateWitnessIndex);
+    assert_eq!(run(&w), (malformed, 2, Halt::OutOfBounds, 0, 0, 0));
+    // the same vector with the second witness at a *different* position parses and runs
+    let mut ok = sample();
+    ok.tree.insert(U256::from_u32(2), U256::from_u32(7));
+    ok.touched = vec![U256::from_u32(1), U256::from_u32(2)];
+    let w = ok.input_words();
+    assert_eq!(w[w.len() - 1 - 2 * WITNESS_WORDS], 2);
+    let mut ws = Box::new(Workspace::ZERO);
+    let mut cur = InputCursor::new(|i| w[i as usize], w.len() as u32);
+    decode_input(&mut HostRef, &mut ws.input, &mut cur).expect("two distinct positions parse");
+    assert_eq!(ws.input.storage.len(), 2);
+
     // the belt to the interpreter's braces: at the caps everything still parses and runs
     let mut at_cap = sample();
     at_cap.code = vec![0x5b; MAX_CODE_BYTES]; // 24 576 JUMPDESTs, then off the end = STOP

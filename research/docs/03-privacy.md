@@ -161,8 +161,8 @@ suite rather than quietly costing every proof on the chain.
 
 **An EVM call proof (M4.3) is the first real workload that carries the table.**
 `guests::compiled::evm` on a storage read-modify-write proves at `Tier(16)` with
-`keccak_log_height = 7` and measures 776 248 bytes at
-`FriProfile::Test` (421 s to prove, 14.8 s to verify); the ERC-20
+`keccak_log_height = 7` and measures 773 848 bytes at
+`FriProfile::Test` (438 s to prove, 14.2 s to verify); the ERC-20
 `transfer` is the same guest at tier 18, whose proof the development machine could
 not build at all (three attempts, ≥ 28.5 GB resident at SIGKILL on a 48 GB laptop —
 `docs/04-guests.md` has the command and the ≥ 64 GB requirement).

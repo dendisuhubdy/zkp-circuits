@@ -204,16 +204,23 @@ the machine: M4.3 added no table, bus, syscall or public value.
    `hash(STORAGE_LEAF, [slot ‖ value])` and canonical in the value (a zero value hashes to one
    fixed leaf whatever the slot), so the root is history-independent and the empty tree has a
    well-defined root. `STORAGE_LEAF = 12` and `EVM_OUT = 13` are the two new `notes::domain` tags.
-   Known limitation: a 32-bit index is grindable at ~2^32, and a collision makes the *other* slot
-   of the pair unwitnessable — fail-closed griefing, never forgery; the remedy is a deeper index
-   (`research/docs/04-guests.md`).
+   Known limitation: a 32-bit index is grindable at ~2^32. A colliding pair is **refused where the
+   witnesses enter** — `StorageTree::push` rejects a second witness at a leaf position already
+   claimed, which `decode_input` turns into the canonical malformed output (status 2,
+   `post_root = pre_root`) — so a call needing both slots of a ground pair cannot be proved:
+   fail-closed griefing, never forgery. The refusal is load-bearing rather than defensive: because
+   the leaf is canonical in the value, both witnesses of a ground pair *do* verify while the
+   position is empty, and accepting them would let a call that reads both slots before writing both
+   bind a `post_root` holding only the second store while the interpreter believed in both — a
+   divergence between the bound root and the executed call. The remedy for the collision itself is
+   a deeper index (`research/docs/04-guests.md`).
 3. **`SLOAD`/`SSTORE` are guest code, not a syscall.** §4 says membership "uses the existing
    `MERKLE_VERIFY` routine". That routine is an `asm.rs` *guest-level* helper, not a syscall, and
    `evm-core` is compiled Rust: it walks the path itself over `POSEIDON2`. Multi-slot updates
    refresh the sibling every other witness holds at the level where its path diverges from the
    updated one, which §4 does not mention and which independent witnesses require.
 4. **The cycle budget was optimistic by an order of magnitude.** §4 estimates ~400 opcodes at
-   5–20 cycles → 8 000–12 000 cycles → tier 14. Measured: **121 630 executed cycles (126 357 with the digest prefixes), `Tier(18)`**.
+   5–20 cycles → 8 000–12 000 cycles → tier 14. Measured: **121 638 executed cycles (126 373 with the digest prefixes), `Tier(18)`**.
    The estimate's error is not the dispatch loop (§4's predicted culprit): it is that each of the
    four 32-level Merkle walks is 33 `POSEIDON2` calls (~27 300 cycles in all) and that a software
    256-bit interpreter costs ~200 cycles an opcode, not 5–20. The dispatch loop *is* now a real

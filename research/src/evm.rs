@@ -146,8 +146,17 @@ impl SparseTree {
 
     /// The witness for `slot`: its value (zero if the slot was never written) and, for each level
     /// `l = 0..DEPTH`, the hash of the sibling subtree of the path's node at that level, bottom-up.
+    ///
+    /// Panics, like [`insert`](Self::insert), if a *different* slot holds this leaf position:
+    /// `entries` is keyed by position, so without the check the colliding slot's value and leaf
+    /// would be handed back as this slot's — a witness that cannot verify, presented as if it
+    /// could. `insert` already makes that state unreachable through this type; the assert is here
+    /// so it stays unreachable rather than being unreachable by argument.
     pub fn witness(&self, slot: &U256) -> Witness {
         let idx = slot_index(slot);
+        if let Some((held, _)) = self.entries.get(&idx) {
+            assert_eq!(held, slot, "leaf position {idx} is held by a different slot");
+        }
         let value = self.entries.get(&idx).map(|(_, v)| *v).unwrap_or(U256::ZERO);
         let siblings = std::array::from_fn(|l| self.node_at(l, ((idx as u64) >> l) ^ 1));
         Witness { slot: *slot, value, siblings }
@@ -208,7 +217,18 @@ impl EvmCall {
     ///
     /// Panics on a gas limit above `u32::MAX`, which the single `gas_limit` word cannot carry —
     /// a test's own constant, not prover-supplied, so an assert is the right choke point here.
+    ///
+    /// Panics, too, if two `touched` slots share a leaf position (the same slot listed twice, or a
+    /// ground collision): the guest refuses such a vector at `StorageTree::push`
+    /// (`ParseError::DuplicateWitnessIndex` → status 2), so a fixture that built one would be
+    /// testing the malformed path while looking like a real call. A test that *means* to exercise
+    /// the rejection splices the duplicate into the word vector itself.
     pub fn input_words(&self) -> Vec<u32> {
+        let mut idxs: Vec<u32> = self.touched.iter().map(slot_index).collect();
+        let n = idxs.len();
+        idxs.sort_unstable();
+        idxs.dedup();
+        assert_eq!(idxs.len(), n, "two touched slots share one leaf position");
         let mut w = Vec::new();
         push_bytes(&mut w, &self.code);
         push_bytes(&mut w, &self.calldata);

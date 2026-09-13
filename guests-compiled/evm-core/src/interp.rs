@@ -687,14 +687,15 @@ fn read_padded(src: &[u8], offset: &U256) -> U256 {
     U256::from_be_bytes(&b)
 }
 
-/// Every storage failure is an exceptional halt; `TooMany` cannot reach here (only
-/// `StorageTree::push` returns it, and Task 4's input cursor is what calls that), but it is a
-/// capacity overrun like the others.
+/// Every storage failure is an exceptional halt; `TooMany` and `DuplicateIndex` cannot reach here
+/// (only `StorageTree::push` returns them, and Task 4's input cursor is what calls that — where
+/// both become a `ParseError` and the canonical malformed output), but both are input defects of
+/// the same kind as a capacity overrun.
 fn halt_of(e: StorageError) -> Halt {
     match e {
         StorageError::NoWitness => Halt::NoWitness,
         StorageError::BadWitness => Halt::BadWitness,
-        StorageError::TooMany => Halt::OutOfBounds,
+        StorageError::TooMany | StorageError::DuplicateIndex => Halt::OutOfBounds,
     }
 }
 
