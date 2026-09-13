@@ -1,8 +1,9 @@
 /* guest-sdk/guest.ld with one change: ORIGIN is 0x10000 rather than 0x1000, leaving 0xf000 bytes
    (15 360 instructions) of program space below the text for the data prologue the loader
    synthesises (`Program::from_flat_image`, research/docs/01-isa.md). This guest's .rodata is
-   ~3 KB — jump tables, panic locations, the constants LLVM materialised — which costs ~2 200
-   prologue instructions, so the room is about seven times what is needed.
+   2 428 bytes — jump tables, panic locations, the constants LLVM materialised — i.e. 607 words of
+   which 585 are non-zero, costing 1 630 prologue instructions, so the room reserved here is about
+   nine times what is needed.
 
    A guest with no data segment needs none of this and keeps using guest-sdk/guest.ld unchanged:
    its prologue is empty and its text stays at 0x1000 (`tests/isa.rs`'s

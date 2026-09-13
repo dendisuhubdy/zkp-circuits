@@ -31,6 +31,9 @@ CARGO_CONFIG := --config 'target.$(TARGET).rustflags=$(RUSTFLAGS_LIST)'
 # needs a solc at all; the runtime bytecode is committed.
 SOLC ?= solc
 SOLC_FLAGS := --optimize --optimize-runs 200 --evm-version shanghai --bin-runtime
+# The pinned version, asserted before the compile: a different 0.8.x optimises differently, so a
+# silent version drift would show up as a mystifying hex diff rather than as the real problem.
+SOLC_VERSION := 0.8.37
 
 .PHONY: all clean check-toolchain contracts install
 all: bin/evm.bin bin/evm.bin.sha256
@@ -45,7 +48,7 @@ check-toolchain:
 	rustup +1.98.1 target add $(TARGET)
 	rustup +1.98.1 component add llvm-tools
 
-$(ELF): src/main.rs ../evm-core/src/*.rs ../../guest-sdk/src/lib.rs evm.ld .cargo/config.toml Cargo.toml Makefile
+$(ELF): src/main.rs ../evm-core/src/*.rs ../../guest-sdk/src/lib.rs evm.ld .cargo/config.toml Cargo.toml Cargo.lock Makefile
 	cargo +1.98.1 build --release --target $(TARGET) $(CARGO_CONFIG)
 
 # Not `objcopy -O binary`: this guest has a data segment (.rodata — jump-table-free but still panic
@@ -59,16 +62,24 @@ bin/evm.bin: $(ELF) ../mkimage.py
 bin/evm.bin.sha256: bin/evm.bin
 	cd bin && shasum -a 256 evm.bin > evm.bin.sha256
 
-# Recompile ERC20.sol and diff against the committed runtime bytecode. Requires a solc of the
-# version contracts/SOLC.md pins (a different 0.8.x optimises differently and will differ); skipped
-# with a message when none is on PATH, so it is safe to run anywhere.
+# Recompile ERC20.sol and diff against the committed runtime bytecode. Needs the exact solc
+# contracts/SOLC.md pins — a different 0.8.x optimises differently and the hex will differ, so the
+# version is asserted rather than trusted. With no solc on PATH the target says so and succeeds, so
+# it is safe to run anywhere; no test needs it.
 contracts:
 	@if ! command -v $(SOLC) >/dev/null 2>&1; then \
 		echo "contracts: no '$(SOLC)' on PATH — see contracts/SOLC.md for the pinned binary; nothing to check"; \
 	else \
-		$(SOLC) --version | tail -1; \
-		$(SOLC) $(SOLC_FLAGS) contracts/ERC20.sol | tail -1 > /tmp/erc20.runtime.hex; \
-		diff -u contracts/erc20.runtime.hex /tmp/erc20.runtime.hex && \
+		v=$$($(SOLC) --version | tail -1); \
+		echo "contracts: $$v"; \
+		case "$$v" in *"$(SOLC_VERSION)"*) ;; *) \
+			echo "contracts: FAIL — this is not the pinned solc $(SOLC_VERSION) (contracts/SOLC.md); its output will differ" >&2; \
+			exit 1 ;; \
+		esac; \
+		tmp=$$(mktemp -t erc20.runtime.hex); \
+		trap 'rm -f "$$tmp"' EXIT INT TERM; \
+		$(SOLC) $(SOLC_FLAGS) contracts/ERC20.sol | tail -1 > "$$tmp"; \
+		diff -u contracts/erc20.runtime.hex "$$tmp" && \
 			echo "contracts: erc20.runtime.hex reproduces"; \
 	fi
 
