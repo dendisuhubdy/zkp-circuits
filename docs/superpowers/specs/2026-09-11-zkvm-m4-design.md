@@ -650,6 +650,24 @@ cycles:
 | − `program_hash`: 1 698 compressions at ~451 | −765 798 |
 | − `input_hash` canonicalised: 654 compressions → ~13 | −288 941 |
 | = projected | **~699 000** |
+| **= measured (2026-09-13, constraint set 6 as built)** | **694 498** |
+
+**Measured against the projection, term by term** (`docs/04-guests.md`'s table
+is the full one). The total lands within 1 % of ~699 000, but two terms moved
+after the reviews and roughly cancel: `input_hash` over the canonical encoding
+is **837 bytes / 14 compressions**, not the ~801 / 13 first estimated, because
+the review added the entry marker byte and `rent_epoch` to the preimage; and
+`check_region`'s scan — pinning to zero the 40 972 bytes the canonical encoding
+no longer hashes, and to `{0, 1}` the flag bytes — costs **~116 000 cycles** at
+~2.8 cycles a byte, which the projection did not have a line for at all
+(a sixth of what hashing those bytes used to cost, so it is still a clear win).
+The other measured figures: **8 317** program words (up 602, from a second
+`InputCursor` instantiation and a fourth `AccountWalk` driver), **10 458**
+private and **27 151** public input words, **30** SHA-256 compressions
+(14 + 8 + 8), `sha256_log_height` **11**, guest image **29 996 B**.
+`694 498 < Tier(20).max_cycles() = 1 048 575` and
+`694 498 > Tier(18).max_cycles() = 262 143`, so the tier conclusion below
+stands exactly as written.
 
 What does **not** come off is the tape: the guest still has to read all 27 151 ELF words to run
 them, and under this design it reads them with `READ_PUBLIC` instead of `READ_INPUT` at the same
@@ -669,6 +687,16 @@ after this work, with a *new* measurement in its message, and the ≥ 64 GB path
 does for its own tier-18 proof: a tier-20 batch is four times the cpu rows of the tier-18 EVM proof
 that already needed ≥ 28.5 GB and was SIGKILLed on this 48 GB machine. The plan un-ignores it only
 if the measured tier is ≤ 18 **and** the proof completes here.
+
+**Outcome (2026-09-13).** The measured tier is 20, not ≤ 18, so the test stays
+`#[ignore]`d with the new measurement in its message and the ≥ 64 GB path in its
+doc comment. The controller ruled that the proof not be attempted on this
+machine at all: a tier-20 batch is four times the tier-18 EVM proof's cpu rows,
+macOS swaps rather than failing fast, and another session was running cluster
+suites on the same hardware — so the attempt would have cost hours and added
+nothing to what the EVM proof's three SIGKILLs at 28.5–28.9 GB already say. The
+executor-level test is what pins the behaviour, and it tripwires in both
+directions on the cycle count.
 
 ### 9.6 Privacy
 

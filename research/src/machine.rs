@@ -891,7 +891,10 @@ pub struct Proof {
     /// leak `program_log_height` and `input_log_height` already are (`docs/03-privacy.md`'s
     /// "What a proof leaks"), and a far smaller one here, since the public segment's *words* are
     /// published with the transaction anyway (that is what `Machine::verify_public` checks).
-    /// `MIN_LOG_HEIGHT` means "this proof has no public segment".
+    /// `MIN_LOG_HEIGHT` is *not* the "no public segment" marker `keccak_log_height = 0` is: the
+    /// table's `MIN_HEIGHT` is 4 and one row is always padding, so the floor covers every
+    /// `n_pub` in `0..=3` alike. "This proof has no public segment" is not something the height
+    /// alone says — only that the segment is at most three words long.
     pub public_log_height: u8,
     /// M4.2 (controller ruling 1): the memory table's height, declared by the prover as
     /// `max(t + 2, log2_ceil(accesses + 1))`. `verify` checks only

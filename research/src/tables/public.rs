@@ -65,8 +65,9 @@ pub const MIN_LOG_HEIGHT: u8 = 2; // 1 << 2 == MIN_HEIGHT
 /// MAX_LOG_HEIGHT`'s role exactly, at the same size. This is only the table-shape ceiling, not
 /// the effective cap on `n_pub`: `cpu`'s shared absorb machinery range-checks `HASH_LEFT` (the
 /// words-not-yet-absorbed counter) via two `RANGE8` limbs on every pubdigest row, bounding it to
-/// 16 bits — so `n_pub` is effectively capped at 65535 well before `MAX_LOG_HEIGHT` bites
-/// (`machine::ProveError::PublicTooLong`).
+/// 16 bits — so `n_pub` is effectively capped at 65535 (`machine::ProveError::PublicTooLong`)
+/// well before `MAX_LOG_HEIGHT` bites (`machine::ProveError::PublicTooLarge`, the guard on this
+/// constant itself).
 pub const MAX_LOG_HEIGHT: u8 = 20;
 
 /// Same "+1 padding row, floor at MIN_HEIGHT" rule as `tables::input::input_log_height`.

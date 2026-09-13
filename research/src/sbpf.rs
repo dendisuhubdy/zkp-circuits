@@ -388,7 +388,7 @@ fn pack_bytes(bytes: &[u8]) -> Vec<u32> {
 /// ```
 ///
 /// No realloc headroom, no alignment padding and no `original_data_len`: the aligned region's
-/// 41 825 bytes for the SPL Token `Transfer` fixture become 833. Those omitted bytes are the ones
+/// 41 825 bytes for the SPL Token `Transfer` fixture become 837. Those omitted bytes are the ones
 /// the guest pins to zero at entry (`sbpf_core::abi::check_region`), which is why leaving them out
 /// binds the region all the same.
 ///

@@ -107,19 +107,21 @@ fn keccak_demo_proves_and_verifies_at_tier_10() {
 
 /// A keccak-free `guests::fib(10)` proof at `Tier(10)` and `FriProfile::Test`, measured.
 ///
-/// M4.2 measured this on the branch base `b1d01d9` — the last commit before the keccak table —
-/// over three consecutive proofs: 274 156 / 275 916 / 276 684 bytes (the hiding PCS's fresh
-/// per-proof entropy moves the postcard encoding by a few hundred bytes run to run), and took
-/// the middle, 275 916.
+/// **The current figure is constraint set 6's**, which is why the constant is no longer named for
+/// M4.2 — it was `PRE_M4_2_TIER_10_TEST_PROFILE_BYTES` while it held M4.2's own baseline, and kept
+/// that name for one commit too long after it stopped doing so.
 ///
-/// **Re-measured for constraint set 6**, which grew the same proof by ~8%: 297 223 / 298 791 /
-/// 299 143 / 299 783 over four consecutive proofs, middle 298 791. The growth is the public
-/// segment's structural cost and is expected — the cpu table gained 51 columns (the
+/// The history, since the point of the constant is the comparison: M4.2 measured 275 916 on the
+/// branch base `b1d01d9` — the last commit before the keccak table — as the middle of three
+/// consecutive proofs (274 156 / 275 916 / 276 684; the hiding PCS's fresh per-proof entropy moves
+/// the postcard encoding by a few hundred bytes run to run). Constraint set 6 grew the same proof by
+/// ~8% to **298 791**, the middle of four (297 223 / 298 791 / 299 143 / 299 783). The growth is the
+/// public segment's structural cost and is expected — the cpu table gained 51 columns (the
 /// `SYS_READ_PUB`/`IS_PUBDIGEST`/`PUBDIGEST_LAST` selectors, `IPOUT0..7`, and the
 /// `PHVL0..31`/`PHIMAX0..3`/`PINV0..3` final-encoding block) and the batch gained a mandatory
 /// ninth instance, the 4-column `public` table; every FRI query opens a leaf of the batch's
 /// full width. `SIZE_BAND_PCT` is the tolerance around the current figure.
-const PRE_M4_2_TIER_10_TEST_PROFILE_BYTES: usize = 298_791;
+const TIER_10_TEST_PROFILE_BYTES: usize = 298_791;
 
 /// Tolerance, in percent, on the size assertion in `a_keccak_free_proof_carries_no_keccak_table`.
 ///
@@ -151,14 +153,14 @@ fn a_keccak_free_proof_carries_no_keccak_table() {
     m.verify(&p.digest(), &proof).unwrap();
 
     let size = proof.to_bytes().len();
-    let lo = PRE_M4_2_TIER_10_TEST_PROFILE_BYTES * (100 - SIZE_BAND_PCT) / 100;
-    let hi = PRE_M4_2_TIER_10_TEST_PROFILE_BYTES * (100 + SIZE_BAND_PCT) / 100;
+    let lo = TIER_10_TEST_PROFILE_BYTES * (100 - SIZE_BAND_PCT) / 100;
+    let hi = TIER_10_TEST_PROFILE_BYTES * (100 + SIZE_BAND_PCT) / 100;
     assert!(
         (lo..=hi).contains(&size),
         "keccak-free proof should be within {SIZE_BAND_PCT}% of the measured keccak-free size \
-         ({PRE_M4_2_TIER_10_TEST_PROFILE_BYTES} bytes): got {size}"
+         ({TIER_10_TEST_PROFILE_BYTES} bytes): got {size}"
     );
-    eprintln!("keccak-free fib(10) at tier 10, Test profile: {size} bytes (measured baseline: {PRE_M4_2_TIER_10_TEST_PROFILE_BYTES})");
+    eprintln!("keccak-free fib(10) at tier 10, Test profile: {size} bytes (measured baseline: {TIER_10_TEST_PROFILE_BYTES})");
 }
 
 /// M4.2 (controller ruling 1): the memory table's height is **proof-declared**, floored at the
@@ -998,44 +1000,78 @@ fn compiled_sbpf_spl_token_transfer_of_too_much_fails_cleanly() {
     assert_ne!(&want[1..], &ok[1..], "the two runs must not publish the same digest");
 }
 
-/// M4.4's exit test as the plan wrote it: the `Transfer` proves and verifies at tier 18 or lower.
+/// **M4.4's exit test, the proving half** — the SPL Token `Transfer` proves and verifies, and the
+/// verifier recomputes `H_PUB` from the published ELF words (`verify_public`) rather than taking the
+/// guest's word for which program ran. Constraint set 6 moved it from *unprovable at any tier* to
+/// **`Tier(20)`**: 1 753 945 cycles became 694 498 once the ELF left the private tape and
+/// `input_hash` became the canonical encoding (the executor half above measures all of it).
 ///
-/// `#[ignore]`d because it cannot pass on this machine — see the comment above
-/// `compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest` for the measured
-/// reason and the two sound remedies. It is written out in full so that the moment the ELF moves
-/// into the guest's data segment, or the input commitment gains a public segment, un-ignoring this
-/// is the whole of the work.
+/// Still `#[ignore]`d, and now for M4.3's reason rather than M4.4's — **memory, not correctness**.
+/// A tier-20 batch is 2^20 cpu rows, 2^22 memory and poseidon2 rows and a 466-column sha256 table:
+/// **four times the cpu rows** of the tier-18 EVM proof
+/// (`compiled_evm_erc20_transfer_proves_at_tier_18`), which was SIGKILLed on this same otherwise
+/// quiet 48 GB machine three times over with a **maximum resident set of 28.5–28.9 GB and still
+/// growing**. This one was not attempted here at all: macOS swaps rather than failing fast, so the
+/// attempt costs hours and tells you nothing the EVM proof has not already. A **≥ 64 GB** machine is
+/// the figure M4.3 arrived at for a tier-18 batch; a tier-20 batch wants more than that again. Run
+/// it there, explicitly:
+///
+/// ```text
+/// cd research && cargo +1.98.1 test --release --test e2e \
+///     compiled_sbpf_spl_token_transfer_proves_and_verifies -- --ignored --nocapture
+/// ```
+///
+/// Everything about the call that does *not* need that memory is asserted by
+/// `compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest`, which always runs:
+/// the guest's eight output words against the native interpreter, the compression count, the
+/// `sha256_log_height`, and the cycle count tripwired in both directions. What this one adds is the
+/// end-to-end fact in the milestone's own wording — this proof verifies, at a tier the machine has.
+/// Getting it under a laptop needs the tape cost itself addressed (a bulk public-read syscall, one
+/// cpu row per four words: spec §9.5's open item, `docs/04-guests.md`).
 #[test]
-#[ignore = "1 753 945 cycles: above Tier(20)'s 1 048 575 budget, let alone the plan's tier 18. \
-            The 108 600-byte ELF is 1 698 of the 2 368 compressions (72 %); carrying and hashing \
-            it in-circuit as program_hash is about 1.20 M of the 1.75 M cycles (69 %), which \
-            cannot just be declared instead (H_IN is hiding, so a digest the guest does not \
-            recompute binds nothing). Needs the ELF in the guest's data segment (tier 20) or a \
-            public input segment (tier 18): docs/04-guests.md, design spec 5.1 item 8"]
+#[ignore = "Tier(20): 694 498 cycles against its 1 048 575 budget — provable, but not on this \
+            48 GB machine. A tier-20 batch is 4x the cpu rows of the tier-18 EVM proof, which was \
+            SIGKILLed here three times at >= 28.5 GB resident and still growing; run this on a \
+            >= 64 GB machine with `-- --ignored`. Constraint set 6 got it here from 1 753 945 \
+            cycles and 2 368 compressions (now 30, sha256_log_height 11): the ELF is the public \
+            segment, so H_PUB binds it and the guest hashes nothing, and input_hash is over the \
+            837-byte canonical encoding. Tier 18 needs a bulk public-read syscall: \
+            docs/04-guests.md, design spec 9.5"]
 fn compiled_sbpf_spl_token_transfer_proves_and_verifies() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::compiled::sbpf();
     let call = rand_zkvm::sbpf::spl_transfer(250);
-    let inputs = call.input_words();
+    let private = call.input_words();
     let public = call.public_words();
     let (want, _r0, _post) = call.expected();
-    let exec = rand_zkvm::emulator::execute(&p, &inputs, &public, Tier(18).max_cycles()).unwrap();
+    let exec =
+        rand_zkvm::emulator::execute(&p, &private, &public, Tier(20).max_cycles()).unwrap();
     assert_eq!(exec.outputs, want);
-    let (proof, _) = m.prove_salted(&p, &inputs, &public, [13, 14, 15, 16], None).unwrap();
+    let t0 = std::time::Instant::now();
+    let (proof, _) = m.prove_salted(&p, &private, &public, [13, 14, 15, 16], None).unwrap();
+    let prove_time = t0.elapsed();
     eprintln!(
-        "sbpf spl transfer: {} program words, {} input words, {} cycles, {} sha256 compressions, \
-         tier {}, sha256_log_height {}, mem_log_height {}, proof {} bytes",
+        "sbpf spl transfer: {} program words, {} private input words, {} public words, {} cycles, \
+         {} sha256 compressions, tier {}, sha256_log_height {}, public_log_height {}, \
+         mem_log_height {}, proof {} bytes, prove {:?}",
         p.len(),
-        inputs.len(),
+        private.len(),
+        public.len(),
         exec.cycles(),
         exec.events.iter().filter(|e| e.sha256_row.is_some()).count(),
         proof.tier.0,
         proof.sha256_log_height,
+        proof.public_log_height,
         proof.mem_log_height,
         proof.size(),
+        prove_time,
     );
-    m.verify(&p.digest(), &proof).unwrap();
-    assert!(proof.tier.0 <= 18, "M4.4 requires tier <= 18");
+    // `verify_public`, not `verify`: the whole point of constraint set 6 is that a verifier holding
+    // the ELF words recomputes `H_PUB` and checks it against `pv::PUB0..7`, which is what binds the
+    // program now that the guest no longer hashes it. `verify` alone would accept a proof of some
+    // *other* program's run.
+    m.verify_public(&p.digest(), &public, &proof).unwrap();
+    assert!(proof.tier.0 <= 20, "the public segment buys Tier(20); above it, re-measure");
     assert!(proof.sha256_log_height >= 6);
 }
 

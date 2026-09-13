@@ -141,6 +141,19 @@ needs one, is read through the row's memory-access slot as register `a1`
 (register 11); the result of a value-returning syscall is written back to
 `a0`.
 
+**Two input spaces, and they are not interchangeable.** A guest reads from
+two independent, separately-indexed vectors. `READ_INPUT` (2) reads the
+**private** one, bound to the salted, hiding commitment `H_IN` — the
+verifier learns nothing about the words and cannot check a claim about
+them. `READ_PUBLIC` (6, constraint set 6) reads the **public** one, bound
+to the *unsalted* `H_PUB`, which a verifier holding the words recomputes
+natively and compares (`Machine::verify_public`). Both are read-only and
+both are unforgeable in the same way — repeated reads of an index agree,
+and an out-of-range index is unsatisfiable — but only the public segment's
+contents are checkable by anyone but the prover, and that is precisely
+because they are published. Which vector a value belongs in is a privacy
+decision, not a performance one: see `docs/03-privacy.md`.
+
 | # | Name | Milestone | Effect |
 |---|---|---|---|
 | 0 | `HALT` | M1 | ends execution; every remaining row in the table is padding |
@@ -149,6 +162,7 @@ needs one, is read through the row's memory-access slot as register `a1`
 | 3 | `POSEIDON2 ptr n` | M3.2 | hashes the `n` words at word address `ptr` (`0 <= n <= POSEIDON2_MAX_WORDS = 4096`) with the Poseidon2 sponge (rate 4, overwrite mode, no padding — `hash::sponge_hash`, the exact `PaddingFreeSponge<_, 8, 4, 4>` semantics) and overwrites `ptr..ptr+8` with the 8-word (lo/hi) digest in place |
 | 4 | `KECCAK ptr` | M4.2 | applies one Keccak-f[1600] permutation in place to the `KECCAK_WORDS = 50` words at word address `ptr` (`ptr <= KECCAK_PTR_LIMIT = 0x3000_0000 - 50`, so the whole state stays below `2^30`; the cpu AIR's own bound on a `SYS_KECCAK` row is the marginally looser `ptr < 0x3000_0000`) — lane `i`'s low word at `ptr + 2i`, its high word at `ptr + 2i + 1` (`keccak::state_to_words`). Takes no second argument: the state's width is fixed. One cpu row per call (unlike `POSEIDON2`), because the `keccak` chip proves the 24 rounds and sends the permutation's own 100 memory accesses — the cpu table witnesses the call, never the rounds. Padding and rate are the guest's business; `guest_sdk::keccak256` is the Keccak-256 sponge built over it |
 | 5 | `SHA256 ptr` | M4.4 | applies one SHA-256 compression in place to the `SHA256_WORDS = 24` words at word address `ptr` (`ptr <= SHA256_PTR_LIMIT = 0x3000_0000 - 24`, so the whole buffer stays below `2^30`; the cpu AIR's own bound on a `SYS_SHA256` row is the marginally looser `ptr < 0x3000_0000`). Words `0..16` are the 512-bit message block as sixteen **big-endian-valued** 32-bit words (word `i` holds the block's bytes `4i..4i+4` as `u32::from_be_bytes`, `sha256::bytes_to_words`' layout); words `16..24` are the chaining state `H[0..8]`. The syscall computes `H <- H + f(H, W)` (FIPS 180-4 §6.2.2) and writes the new state back over words `16..24`, leaving the message words untouched — so a Merkle-Damgard loop can refill just the block slot for the next call. Takes no second argument: both widths are fixed. One cpu row per call, like `KECCAK`, because the `sha256` chip proves the 64 rounds and sends the compression's own 32 memory accesses (24 reads, 8 write-backs). Padding and the Merkle-Damgard loop are the guest's business; `guest_sdk::sha256` is the full hash built over it |
+| 6 | `READ_PUBLIC idx` | CS6 | returns public segment word `idx` in `a0` — committed to the **unsalted** `H_PUB` (`pv::PUB0..7`), which a verifier holding the words recomputes natively and compares (`Machine::verify_public`); two reads of the same `idx` are guaranteed to agree, and `idx >= n_pub` cannot be satisfied at all. Structurally `READ_INPUT`'s twin — its own `public` table, its own `PUBLIC_DIGEST`/`PUBLIC_READ` bus pair, its own digest region in the cpu table — and semantically its opposite: `H_IN` hides what it binds, `H_PUB` publishes it. The segment is mandatory and may be empty; a guest that never calls this pays four table rows and one permutation (`docs/02-tables-and-buses.md`, `docs/03-privacy.md`) |
 
 ## The flat-binary loader (M4.1)
 
@@ -248,8 +262,9 @@ is not one.
 Two committed guests take this path. M4.3's `evm` is 2 444 bytes of `.rodata`
 (jump tables, panic locations, materialised constants) costing 1 639 prologue
 instructions, and M4.4's `sbpf` — the sBPF interpreter — is 1 856 bytes costing
-1 288, so the SPL Token exit guest is 7 715 program words of which the prologue
-is 17 % (`docs/04-guests.md`'s "The `sbpf` guest"). Both are well inside the
+1 288, so the SPL Token exit guest is 8 317 program words of which the prologue
+is 15 % (`docs/04-guests.md`'s "The `sbpf` guest"; it was 7 715 words before
+constraint set 6 split the guest's input cursor in two). Both are well inside the
 `0xf000` bytes `ORIGIN = 0x10000` reserves. Task 5's report predicted the need:
 a real compiler output always has read-only data, and `sbpf-core`'s is the
 `Halt::Trap(&'static str)` literals before anything else.

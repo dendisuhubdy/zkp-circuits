@@ -31,7 +31,7 @@ fn main() {
     let exec = execute(&program, &inputs, &[], 1 << 20).unwrap();
     println!("inputs {:?} → outputs {:?} in {} cycles ({:?})", inputs, &exec.outputs[..2], exec.cycles(), t.elapsed());
 
-    hr("Part 4 · Arithmetize: eight tables on fourteen buses (nine or ten with a keccak/sha256 table)");
+    hr("Part 4 · Arithmetize: nine tables on sixteen buses (ten or eleven with a keccak/sha256 table)");
     // M3.4/M4.1: the cpu table's two digest-row prefixes (program `hc` and the salted `H_IN`)
     // count as cycles too — and the auto-tier pick fits the Poseidon2 permutation budget as
     // well as the cycle budget (audit ZH1, 2026-09-12).

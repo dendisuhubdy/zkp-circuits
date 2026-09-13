@@ -1,10 +1,14 @@
 # The tables and their buses
 
-The relation is proved as one batch of **eight AIR tables, plus either of two
-optional hash chips — nine with a keccak table (M4.2), nine with a sha256 one
-(M4.4), ten with both** — under one commitment and one FRI opening
-(`p3-batch-stark`). Ten tables exist; how many a given proof carries is its own
-declaration (`Proof::keccak_log_height`, `Proof::sha256_log_height`). Tables never call each other directly; they exchange facts
+The relation is proved as one batch of **nine AIR tables, plus either of two
+optional hash chips — ten with a keccak table (M4.2), ten with a sha256 one
+(M4.4), eleven with both** — under one commitment and one FRI opening
+(`p3-batch-stark`). Eleven tables exist; how many a given proof carries is its own
+declaration (`Proof::keccak_log_height`, `Proof::sha256_log_height`). The ninth
+mandatory table is `public` (constraint set 6): unlike the two hash chips it is
+**not** optional, because every proof commits to a public input segment even when
+that segment is empty — a `public = &[]` proof still pays four rows and one
+permutation. Tables never call each other directly; they exchange facts
 through named LogUp buses, and the batch verifier checks that every bus
 balances globally.
 
@@ -28,7 +32,14 @@ balances globally.
                      │                       ▼                     │
                      │                 ┌───────────┐               │
                      │                 │   INPUT   │  main; one row per
-                     │                 └───────────┘  committed input word
+                     │                 └───────────┘  committed private word
+                     │                       │ (no further buses)  │
+                     │                       │ PUBLIC_DIGEST /     │
+                     │                       │ PUBLIC_READ (CS6)   │
+                     │                       ▼                     │
+                     │                 ┌───────────┐               │
+                     │                 │  PUBLIC   │  main, MANDATORY; one row
+                     │                 └───────────┘  per public segment word
                      │                       │ (no further buses)  │
                      └──────────────────┬────┴──────────────────────┘
                               ┌──────────┴──────────┐
@@ -68,8 +79,10 @@ balances globally.
                     8 write-backs of the new state, per 64-row block (M4.4)
 ```
 
-Fourteen buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
-`INPUT_READ` (M4.1, carried by the new `input` table), `MEMORY`, `ALU`,
+Sixteen buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
+`INPUT_READ` (M4.1, carried by the new `input` table), `PUBLIC_DIGEST`,
+`PUBLIC_READ` (constraint set 6, carried by the `public` table — the same
+two-bus split, for the same reason, one segment over), `MEMORY`, `ALU`,
 `RANGE8` and `POW2` (carried by the range table), `AND4`, `OR4`, `XOR4`
 (carried by the nibble table), `POSEIDON2` (carried by the poseidon2
 table), `KECCAK` (M4.2, carried by the keccak table — and so declared but
@@ -155,6 +168,84 @@ mirroring `program_log_height`; `Machine::verify` bounds it to
 shared absorb machinery range-checks `HASH_LEFT` via two `RANGE8` limbs on
 every indigest row, bounding it to 16 bits — so the effective cap on
 `n_in` is 65535, well below what `MAX_LOG_HEIGHT` alone would allow.
+
+## `public` — main, `col::WIDTH = 4` (CS6)
+
+`input`'s twin, one segment over: one row per committed **public** input
+word, with the same four columns (`IDX`, `WORD`, `IS_REAL`, `MULT_READ`),
+the same monotone real/padding prefix, and the same `+1`-per-row `IDX`
+chain through the padding. `src/tables/public.rs` is deliberately a copy of
+`src/tables/input.rs` with the two bus names substituted rather than a
+generalization of it — the three digest regions in `cpu` are parallel
+mirrors for the same reason (M4.1's choice), and a shared abstraction over
+two tables that differ only in which bus they provide on would cost more in
+indirection than it saves in lines.
+
+What it is *not* a copy of is the semantics. `input` backs `H_IN`, which is
+**salted and hiding**: a verifier holding it learns nothing and can check
+nothing. `public` backs `H_PUB`, which is **unsalted**, so a verifier that
+holds the segment's words recomputes the digest natively and compares it
+against `pv::PUB0..7` (`Machine::verify_public`). That is the whole purpose
+of the table — see "Why the program digest is in-circuit" below for the
+same argument applied to `hc`, and `docs/03-privacy.md` for what publishing
+the words costs.
+
+**The table is mandatory.** `keccak` and `sha256` are dropped from the
+batch when the guest never calls them; `public` never is. A proof with
+`public = &[]` still carries the instance, still runs one pubdigest row,
+and still pins the digest of the empty segment into its public values —
+which is what makes `n_pub = 0` a *stated* fact rather than an absent one.
+The cost is four rows and one Poseidon2 permutation, and it is what the
+mandatory-instance design buys: the batch's instance count never depends on
+whether a *mandatory* commitment exists, only on the two optional chips.
+
+**Two buses, not one — the same C1 argument, in the public segment's own
+terms.** A single `PUBLIC_WORD` bus with count `IS_REAL * (1 + MULT_READ)`
+would be unsound here exactly as it was for `input`: LogUp balances per
+`(idx, word)` key, not per consumer class, so a prover could shrink the
+digest's demand at some index — excluding that word from `H_PUB` — while a
+genuine `READ_PUBLIC` at the same index still succeeded on the row's
+remaining unit of supply. `H_PUB` would then commit to fewer words than the
+guest read, and since `H_PUB` is the thing a verifier recomputes from the
+*published* words, the mismatch would be a proof that verifies against a
+segment it did not actually read. The table provides on two:
+
+- `PUBLIC_DIGEST`, count `IS_REAL` — the `cpu` table's `IS_PUBDIGEST` rows'
+  only source of `(idx, word)`, one unit per real row, independent of how
+  many times that index is read.
+- `PUBLIC_READ`, count `IS_REAL * MULT_READ` — `SYS_READ_PUBLIC`'s only
+  source, with `MULT_READ` unrelated to `PUBLIC_DIGEST`'s count.
+
+`PUBLIC_DIGEST` alone then forces `real_count == n_pub` and forces the
+absorbed words to equal this table's `WORD` values, by `program`'s
+`MULT_WORD = VALID` argument: a real row past `n_pub` is unclaimed supply
+and an index the digest demands but this table does not supply is unclaimed
+demand, and either is a `LOOKUP_BALANCE_PANIC`. `PUBLIC_READ` then ties
+`MULT_READ` to the true `SYS_READ_PUBLIC` count per index, independently.
+`MULT_READ` needs no range check of its own for `input`'s reason: `IDX` is
+one row per index and never revisited, so an inflated `MULT_READ` only ever
+inflates that row's own supply and is caught by the bus balance whatever its
+magnitude.
+
+**Padding.** `WORD` and `MULT_READ` are both pinned to 0 wherever
+`IS_REAL = 0` (AGENTS.md invariants 1 and 2). `tests/cheating.rs` tampers
+with each — a real row past `n_pub`, a forged `WORD`, a dropped index, a
+padding row carrying `MULT_READ`, a read hidden behind padding, a prefix
+hole, an index skip and two disagreeing repeat reads — and every one is a
+rejection.
+
+**Height.** `public_log_height(n)` is `input_log_height`'s rule verbatim
+(`MIN_HEIGHT = 4`, `MIN_LOG_HEIGHT = 2`, `MAX_LOG_HEIGHT = 20`): declare
+`n+1` rows, floor at `MIN_HEIGHT`. `Proof::public_log_height` carries it and
+`check_declared_heights` bounds it to `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` —
+a plain range check with **no `0` escape**, since the table is mandatory
+(`VerifyError::PublicHeight`). Note what `MIN_LOG_HEIGHT` therefore does
+*not* mean: it is not `keccak_log_height = 0`'s exact "no such table"
+marker, because the floor covers every `n_pub` in `0..=3` alike. As for
+`n_in`, the effective cap on `n_pub` is 65535 rather than `2^20`, because
+`cpu`'s shared absorb machinery range-checks `HASH_LEFT` to 16 bits on every
+pubdigest row (`machine::ProveError::PublicTooLong`; `PublicTooLarge` is the
+`MAX_LOG_HEIGHT` guard).
 
 ## `program` — main, `col::WIDTH = 108`
 
@@ -270,12 +361,15 @@ separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 exactly one traversal of the whole program for `hc`, regardless of how the
 program actually ran.
 
-## `cpu` — main, `col::WIDTH = 224`
+## `cpu` — main, `col::WIDTH = 275`
 
 (The heading read `222` from M4.1 until M4.4 corrected it: M4.2's `SYS_KECCAK`
 column took the table to 223 without the heading following, and M4.4's
-`SYS_SHA256` takes it to 224. Both are appended at the end of the column list
-so no pre-existing index moves — see the `SYS_KECCAK`/`SYS_SHA256` doc comments
+`SYS_SHA256` took it to 224. Constraint set 6 adds 51 — `SYS_READ_PUB`,
+`IS_PUBDIGEST`, `PUBDIGEST_LAST`, `IPOUT0..7`, and the pubdigest
+final-encoding block `PHVL0..31`/`PHIMAX0..3`/`PINV0..3` — for 275. All of
+them are appended at the end of the column list so no pre-existing index
+moves — see the `SYS_KECCAK`/`SYS_SHA256`/`SYS_READ_PUB` doc comments
 in `src/tables/cpu.rs` for why that matters to the vendoring node.)
 
 Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
@@ -309,10 +403,19 @@ permutation output. Then the M4.1 indigest-row columns (their own
 subsection below, mirroring the digest-row prefix): `is_indigest`,
 `indigest_last`, `is_salt`, 32 byte limbs `ihvl0..31` of the 8 `H_IN`
 output words, and the canonical-encoding gadget's `ihimax0..3`/`iinv0..3`
-(last indigest row only). This is the only table with public
+(last indigest row only). Then, mirroring that mirror one region later,
+constraint set 6's pubdigest columns (their own subsection below):
+`sys_read_pub`, `is_pubdigest`, `pubdigest_last`, eight dedicated columns
+`ipout0..7` holding the *indigest* region's last real permutation output
+(M4.1's `dpout0..7` deviation repeated for the identical reason — the
+`hs0..7` cell at the indigest-to-pubdigest transition now carries `H_PUB`'s
+header seed), 32 byte limbs `phvl0..31` of the 8 `H_PUB` output words, and
+the canonical-encoding gadget's `phimax0..3`/`pinv0..3` (last pubdigest row
+only). This is the only table with public
 values: `pc_entry`, the tier index, the eight output words, (M3.4) the
-eight `hc` words `pv::HC0..HC7`, and (M4.1) the eight `H_IN` words
-`pv::IN0..IN7` — `pv::NUM` grows from 18 to 26.
+eight `hc` words `pv::HC0..HC7`, (M4.1) the eight `H_IN` words
+`pv::IN0..IN7`, and (constraint set 6) the eight `H_PUB` words
+`pv::PUB0..PUB7` — `pv::NUM` grows 18 → 26 → **34**.
 
 Constraints, in words: `is_real` is boolean and monotone (once 0, stays 0);
 `clk` starts at 0 and increments by 1 on real rows; the first row's `pc`
@@ -739,6 +842,99 @@ canonical byte-decomposition-and-non-canonical-rejection gadget
 checked by `Machine::verify` against a caller-supplied value — it is a
 guest-visible commitment the guest itself opens (with the salt) if it
 chooses to, not a verifier-side identity check.
+
+### CS6: the pubdigest-row region — `H_PUB` in-circuit, and the `SYS_READ_PUB` row
+
+A *third* digest region follows the indigest one, on exactly the terms the
+second followed the first. `IS_PUBDIGEST` rows absorb the public input
+segment into `H_PUB` (`pv::PUB0..PUB7`) over the same shared absorb
+machinery (`HS0..7`, `HV0..3`, `ACT0..3`, `HASH_LEFT`, `HASH_IDX` and their
+byte limbs), with its own final-encoding columns
+(`PHVL0..31`/`PHIMAX0..3`/`PINV0..3`) rather than reusing the indigest
+region's — a mirror, again, not a generalization, for M4.1's reason. Three
+near-identical regions is the point at which a fourth would be worth
+factoring; three are not.
+
+**`IPOUT0..7` is `DPOUT0..7`'s twin, one region later, and for the identical
+reason.** M4.1 moved the *program* digest's last real permutation output out
+of `n(HS0..7)` into dedicated columns because the physical cell one row later
+had been claimed by `H_IN`'s header seed. Constraint set 6 repeats that
+exactly: the last **indigest** row's `n(HS0..7)` is now the first pubdigest
+row's header, so the indigest region's own permutation output moves to
+`IPOUT0..7`, and its two consumers on that row — the `POSEIDON2` lookup's
+`state_out` argument and the `IHVL` canonical-encoding pin — read
+`v(IPOUT0 + j)` instead of `n(HS0 + j)`. Nothing else changes. The last
+*pubdigest* row needs no such column: the row after it is an ordinary
+instruction row with no header to seed, so `PUBDIGEST_LAST` reads
+`n(HS0 + j)` directly.
+
+**The region is mandatory, contiguous and entered exactly once.**
+`indigest_last · (1 − n(IS_PUBDIGEST)) = 0` forces entry on the transition
+out of the indigest region, and
+`(1 − is_indigest) · (1 − is_pubdigest) · n(IS_PUBDIGEST) = 0` forbids
+re-entry from anywhere else. `IS_DIGEST`, `IS_HASH`, `IS_HASH_OUT`,
+`IS_INDIGEST` and `IS_PUBDIGEST` are pairwise mutually exclusive, which is
+what makes sharing the absorb columns safe; `is_pubdigest` joins `off_cpu`,
+`is_hash_or_digest`, the `IDX0+1` `RANGE8` count, the `NEXT_PC = PC` rule
+and the fallthrough-rule exclusion alongside the other two regions.
+
+**The header, and the one structural difference from `H_IN`: no salt row.**
+The capacity header `[PUB, n_pub, 0]` is seeded on the transition out of
+`INDIGEST_LAST` (`n(HS0..7) = [0, 0, 0, 0, PUB, n_pub, 0, 0]`,
+`n(HASH_IDX) = 0`, `n(HASH_LEFT) = n(HASH_N)`), the way the indigest header
+is seeded on `DIGEST_LAST`. But `H_PUB` is deliberately **unsalted** — a
+salt would make it hiding, and a hiding digest is exactly what a verifier
+cannot recompute — so there is no `IS_SALT` analogue: `HASH_IDX` starts at 0
+on the first pubdigest row, every pubdigest row drains `HASH_LEFT` by its
+own `active_sum`, and each active lane consumes `PUBLIC_DIGEST` at
+`HASH_IDX · 4 + k` with no `−1` offset and no salt-row exemption.
+
+**Two consequences of having no salt row, both spelled out in the AIR.**
+First, the drain chain stays gated by bare `is_pubdigest` rather than a
+`not_final_pubdigest`: the row after the last pubdigest row is the first
+instruction row, whose `HASH_LEFT` is honestly 0, so the chain rule and the
+local `pubdigest_last · (HASH_LEFT − active_sum) = 0` agree there instead of
+conflicting. (The *indigest* region's own chain had to split for the
+opposite reason, and did — `indigest_last · n(HASH_LEFT) = 0` became a local
+`indigest_last · (HASH_LEFT − indigest_drain) = 0` with the chain rule gated
+by `not_final_indigest`, since `n(HASH_LEFT)` on that row is now the
+pubdigest header's `n_pub`. That is the same conflict M4.1 hit one region
+earlier, fixed the same way, with coverage unchanged:
+`is_indigest = not_final_indigest + indigest_last` under `INDIGEST_LAST`'s
+own pin.) Second, "lane 0 is always active" cannot be stated
+unconditionally: at `n_pub = 0` the single header-only block has no active
+lane. The rule is therefore `is_pubdigest · (1 − ACT0) · HASH_IDX = 0` —
+only the region's *first* row may be empty. An empty row spliced in at the
+front is excluded separately, because a non-final pubdigest row must be full
+(`ACT3 = 1`), which cascades to `ACT0 = 1` through the contiguous-prefix
+rule. Degree 3. Without it, M4.1 review round 1's (h) forgery reappears
+here: an extra all-inactive row demanding nothing on `PUBLIC_DIGEST` yet
+still charged a real `POSEIDON2` permutation, making `H_PUB =
+perm(H_honest)` rather than a function of the segment alone.
+
+**`PUBDIGEST_LAST`** publishes `H_PUB` to `pv::PUB0..PUB7` through the
+`IHVL` block verbatim — 32 `RANGE8`-checked byte limbs, the `PHIMAX`/`PINV`
+non-canonical-encoding rejection, the eight public-value pins. `SELECTORS`
+(the columns forced to zero on padding rows) gains `SYS_READ_PUB` and
+`IS_PUBDIGEST`, taking it to 30; `PUBDIGEST_LAST` stays out of it, mirroring
+`INDIGEST_LAST`/`DIGEST_LAST` — it is pinned to zero off its own region
+instead. Unlike `H_IN`, and unlike `hc`,
+`H_PUB` is checked against something a *caller* supplies:
+`Machine::verify_public(hc, public_words, proof)` is `verify` plus a native
+`hash::public_digest(public_words) == pv::PUB0..7` comparison. Plain
+`verify` still exists and still ignores the segment, which is right for a
+guest with an empty one and wrong for a guest whose binding depends on the
+words — the sBPF guest being exactly that case (`docs/04-guests.md`).
+
+**The `SYS_READ_PUB` row kind.** `READ_PUBLIC` is a single-row syscall like
+`READ_INPUT`: `SYS_READ_PUB` joins `sys_sum`, `defines_c` and `count3`, is
+zeroed by `off_cpu`, pins its own syscall number
+(`SYS_READ_PUB · (A − SYS_READ_PUBLIC) = 0`), and consumes
+`PUBLIC_READ.lookup_key([B, C], SYS_READ_PUB)` — `B` the index, `C` the word
+returned in `a0`. `C` was previously pinned to zero on every row kind that
+does not define it; `defines_c` now excludes this kind and hands the pin to
+the bus, which is what AGENTS.md invariant 1 requires of a new message
+column.
 
 ### M4.2: the `KECCAK` ecall row
 
@@ -1236,7 +1432,9 @@ are enforced, on both sides, as `min(ℓ + 5, 20)` (M4.2, Task 5 review).
 
 **The table is optional per proof** (M4.2, Task 6). `keccak_log_height = 0`
 is not a height: it is the declaration "this proof has no keccak table", and
-`machine::chips` then returns eight chips instead of nine. Through the first
+`machine::chips` then returns one chip fewer (eight instead of nine when M4.2
+built it; nine instead of ten since constraint set 6 added the mandatory
+`public` table). Through the first
 cut of M4.2 a keccak-free guest still carried one 32-row padding block, and
 because FRI openings scale with a batch's *column* count rather than its row
 count, that block cost ~1.91 MB of every production proof at the restored
@@ -1246,9 +1444,12 @@ instance is safe without touching the cpu table or the keccak AIR: with no
 keccak table in the batch the `KECCAK` bus has **no provider**, so any cpu row
 with `SYS_KECCAK = 1` leaves it unbalanced and the proof cannot be built
 (`tests/cheating.rs::a_keccak_syscall_without_a_keccak_table_is_rejected`).
-The keccak chip is appended last in `chips()` exactly so that removing it
-disturbs no other instance's index — `i == 1` (cpu) is still the
-public-values slot, `i == 2` still memory. `Machine::verify` range-checks
+The keccak chip is appended after the mandatory eight in `chips()` exactly so
+that removing it disturbs no other instance's index — `i == 1` (cpu) is still
+the public-values slot, `i == 2` still memory. Constraint set 6's `public`
+table is pushed **after both** optional chips, so its index is
+`8 + (klh != 0) + (slh != 0)` and the same property still holds in every
+combination. `Machine::verify` range-checks
 `keccak_log_height` only when it is non-zero (`0` is exempt; any *other*
 value outside `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` is still
 `VerifyError::KeccakHeight`, and one inside it but past `ℓ + 5` is
@@ -1529,9 +1730,12 @@ Measured (`p3_batch_stark::symbolic::get_max_constraint_degree`, pinned by
 `tests/tables.rs::alu_max_constraint_degree_is_pinned`) against the real,
 same-bus-packed lookup contexts (M4.1, `machine::chips()` order): `program`
 2, `cpu` 8, `memory` 4, `alu` 8, `range` 2, `nibble` 2, `poseidon2` 4,
-`input` 2, `keccak` 3 (M4.2) and `sha256` 4 (M4.4; the last two entries exist
-only when the proof declares those tables — the pin test asserts the eight-chip
-and ten-chip shapes and that the other eight degrees are identical between them) — `alu`'s comes from the M2.6 `div`
+`input` 2, `keccak` 3 (M4.2), `sha256` 4 (M4.4) and `public` 2 (CS6; the two
+hash entries exist only when the proof declares those tables, and `public` is
+last in `chips()` order, so dropping both moves it from index 10 to index 8 —
+the pin test asserts the **nine-chip** and **eleven-chip** shapes, that the
+eight mandatory non-public degrees are identical between them, and that
+`public`'s own degree is the same at either index) — `alu`'s comes from the M2.6 `div`
 sign-fix identity, `cpu`'s from its packed lookup fraction-pins rather than
 its own row logic (whose costliest single constraint is only degree 6),
 `poseidon2`'s from its S-box split (see that table's own section). M3.2's
@@ -1574,6 +1778,17 @@ degree is 2: `IS_REAL` alone (degree 1) provides `INPUT_DIGEST`, and
 `IS_REAL * MULT_READ` (degree 2) provides `INPUT_READ` — the same ceiling
 the earlier, since-replaced single-bus `IS_REAL * (1 + MULT_READ)` formula
 had.
+
+**Constraint set 6's additions land the same way, and were measured after
+each review round.** The `public` table is `input`'s degree profile
+verbatim — 2, from `IS_REAL * MULT_READ` providing `PUBLIC_READ`. The
+pubdigest region mirrors the indigest region's, with one new rule worth
+naming: `is_pubdigest · (1 − ACT0) · HASH_IDX = 0` (the "only the first
+pubdigest row may be empty" rule above) is **degree 3**, which is the price
+of the missing salt row and is still well under `cpu`'s 8. `cpu`'s measured
+degree stays 8; `IPOUT0..7` are free columns outside their own gate, exactly
+as `DPOUT0..7` already were, and appear in messages only multiplied by
+`indigest_last`.
 
 **M4.2's keccak chip measures 3 — including its packed lookups, which is the
 number that was actually in doubt.** The AIR's own row logic is 3 by

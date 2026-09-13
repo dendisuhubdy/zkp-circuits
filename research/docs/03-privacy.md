@@ -293,6 +293,22 @@ weakened by the first, and nothing about the first leaks anything the
 second didn't already require the guest to prove; it is simply redundant
 coverage of the same private-input vector by two independent mechanisms.
 
+**The public segment is the same machinery with the salt removed (constraint
+set 6).** `READ_PUBLIC idx` (syscall 6) reads a second, independently-indexed
+vector bound to `H_PUB = pv::PUB0..7` by a third digest region and the
+`public` table's own `PUBLIC_DIGEST`/`PUBLIC_READ` bus pair, with exactly
+`H_IN`'s unforgeability: repeated reads of an index agree, an out-of-range
+index is unsatisfiable. The one difference is the salt, and it is the whole
+difference. `H_IN` is salted, which makes it *hiding* and therefore
+uncheckable by anyone who does not hold the salt — the property that made a
+declared `program_hash` unsound for the sBPF guest. `H_PUB` is unsalted, so
+`Machine::verify_public(hc, public_words, proof)` recomputes it natively from
+the words a caller supplies and compares. That is a strictly stronger binding
+and a strictly weaker privacy guarantee, and the two cannot be had at once
+from the same commitment; which vector a value belongs in is the guest
+author's decision. A hiding commitment a verifier could still check against a
+*separate* public value is the open item this does not close.
+
 ## Selective disclosure: viewing keys
 
 A shielded transaction is opaque to the chain and readable by exactly two
@@ -411,15 +427,20 @@ spells a bound differently from M4.2;
 `[tier + 2, MAX_MEM_LOG_HEIGHT]` (M4.2 — the memory table's height is
 proof-declared now, see "Tiers: what padding hides" below; both ends are
 pinned by `tests/cheating.rs`, the ceiling since the Task 5 review); the
-proof's degree bits match the heights that tier (and the five declared
-heights) imply for all eight tables — nine or ten when `keccak_log_height` and
+`proof.public_log_height` is within `[tables::public::MIN_LOG_HEIGHT,
+tables::public::MAX_LOG_HEIGHT] = [2, 20]` (constraint set 6 — a plain range
+check with **no `0` escape**, because unlike the two hash tables the `public`
+instance is mandatory: `VerifyError::PublicHeight`);
+the proof's degree bits match the heights that tier (and the six declared
+heights) imply for all nine tables — ten or eleven when `keccak_log_height` and
 `sha256_log_height` are non-zero — and
 since that comparison is of whole lists it is simultaneously the check that
 the batch has the right *number* of instances for what the proof declares;
 and finally the batch
 STARK itself, against a verifier key recomputed from the tier and the
 declared heights — `Machine::verifier_key(tier, program_log_height,
-input_log_height, keccak_log_height, sha256_log_height)`, which includes
+input_log_height, keccak_log_height, sha256_log_height, public_log_height)`,
+which includes
 the range and nibble tables' preprocessed commitments (256 rows each, since
 M2.3 split the 2^16-row byte table in two) and the Poseidon2 chip's
 round-constant table. M3.4:
@@ -428,16 +449,19 @@ round-constant table. M3.4:
 in-circuit, to the digest group's own `pc` (and, indirectly, to `hc` itself,
 since `Program::digest` absorbs `base_pc`). `Machine::verifier_key` caches
 this by `(tier, program_log_height, input_log_height, keccak_log_height,
-sha256_log_height)`
+sha256_log_height, public_log_height)`
 now (M4.1 grew the 2-tuple to a 3-tuple, M4.2's keccak table to a
-4-tuple and M4.4's sha256 table to a 5-tuple — independent, unrelated height
+4-tuple, M4.4's sha256 table to a 5-tuple and constraint set 6's `public`
+table to a 6-tuple — independent, unrelated height
 parameters, so a folded single
 value would obscure rather than simplify). `keccak_log_height = 0` is an
 ordinary value of that fourth component and a genuinely distinct key: it
-selects the eight-chip batch, whose preprocessed commitment omits the keccak
+selects the nine-chip batch, whose preprocessed commitment omits the keccak
 table's 99 periodic columns entirely; `sha256_log_height` is the same story for
 the 10 periodic columns of M4.4's chip, and the two are independent, so the four
-combinations are four keys. **The arity change is a vendoring-visible one:** the
+combinations are four keys. `public_log_height` has no such `0`: the `public`
+table is mandatory, so it is an ordinary height component that varies with
+`n_pub` and never selects the table away. **The arity change is a vendoring-visible one:** the
 fullnode's `deploy/sync-zkvm.sh` anchors on this function's signature, so
 re-vendoring this constraint set has to update it (that update is not made here —
 this plan does not re-vendor the node). `mem_log_height` is deliberately *not* a
@@ -552,9 +576,11 @@ refused by `build_traces`, not silently truncated.
 | Gas tier `ℓ` | public per proof (the proof's own size already reveals its trace height, so hiding the tier index buys nothing at the single-proof level; a batch-level histogram, as the whitepaper describes, is a property of the aggregation layer, not of one proof) |
 | `keccak_log_height` (M4.2) | public — an upper bound on the number of `KECCAK` permutations, rounded up to a power of two, exactly as `program_log_height` is for program size: above zero it reveals the count to within a factor of two. `0` is exact and means "this program made no `KECCAK` call" (M4.2, Task 6 — the proof then carries no keccak table at all, which is what makes it ~1.91 MB smaller at the production profile, ~705 KB at the 27 queries M4.2 measured); the same class of structural, program-shaped leak `program_log_height` is |
 | `sha256_log_height` (M4.4) | public — the same thing for `SHA256` compressions (64-row blocks, so `6` covers 1, `7` covers 2, `8` covers 3–4, …). `0` is exact and means "this program made no `SHA256` call", and is what lets the proof drop the 466-column sha256 table: ~92 KB at `FriProfile::Test`, ~400 KB at the production profile. Independent of `keccak_log_height`, so the pair says which of the two hash syscalls the program uses |
+| `public_log_height` (CS6) | public — the `public` table's declared height, and the same class of coarse, structural leak `program_log_height`, `keccak_log_height` and `sha256_log_height` already are: it bounds `n_pub` to within a factor of two. It has no exact `0` the way the two hash heights do, because the table is **mandatory** — its minimum, `2`, covers every `n_pub` in `0..=3` alike, so it says "at most three public words", not "no public segment". It is also the least interesting leak in this table: the segment's *words* are published with the transaction anyway, which is the entire point of it |
 | `mem_log_height` (M4.2) | public — the memory table's declared height, floored at the tier's own `2^(ℓ+2)`. Constant, and so uninformative, for every guest whose memory traffic fits what the tier already budgets; above that it bounds the access count to within a factor of two |
 | Eight output words | public |
 | Private inputs (`READ_INPUT` values) | hidden — witness only; bound (M4.1) to a salted, hiding commitment `H_IN = pv::IN0..IN7` so repeated reads of the same index agree and out-of-range reads are unsatisfiable, but `H_IN` itself opens nothing without the salt (never published) |
+| Public inputs (`READ_PUBLIC` values, CS6) | **published by construction — that is their purpose.** The segment is bound to `H_PUB = pv::PUB0..7`, which is *unsalted*, so a verifier holding the words recomputes it natively and compares (`Machine::verify_public`). That checkability is exactly what a salt would destroy, so there is no version of this that both binds publicly and hides. A guest that wants a value hidden keeps it in the private input as before; the two spaces are independent and a guest may use either, both, or neither |
 | Every register and memory value | hidden |
 | Every branch taken | hidden |
 | The exact cycle count | hidden — only the padded tier height is visible |
@@ -566,9 +592,11 @@ refused by `build_traces`, not silently truncated.
 | EVM call: the status word, `codehash`, both state roots, the return-data hash, the logs' topics | public **by construction of the verifier**, not by the proof — `out1..out7` is a 224-bit digest of `(codehash, pre_root, post_root, return_hash, logs_hash)`, which reveals nothing by itself, but a chain that means to *use* the call recomputes that digest from the contract and roots it already holds, so it must know them. What the digest is for is binding the transition the chain applies to the one the guest proved — and that is *all* it is for: it says the transition is a correct execution of that code, not that whoever submitted it was allowed to cause it (the `caller` row above) |
 | EVM call: `caller`, `address`, `callvalue` | hidden **and unbound** — the proof does not authorise the call. No public output commits to them and `H_IN` is hiding, so a verified proof attests only *"there exists some `(caller, calldata)` under which `codehash` maps `pre_root` to `post_root`"*. Any prover holding the witnesses can pick `caller` and prove an ERC-20 `transfer` out of any holder; `logs_hash` binds the `Transfer` topics, but a topic is only what the bytecode emitted, and no signature is checked in the guest. Authorisation is the consuming chain's job — the spend authority on the bundle, an in-guest signature check, or a caller field in a later `EVM_OUT` — and it is an open item, not something M4.3 provides (`docs/04-guests.md`'s known limitations, spec §8) |
 | EVM call: which slots were touched, which opcodes ran, the gas used, the log *data* | hidden — the witness count is bounded by `MAX_WITNESSES` and the cycle count by the tier, and the public digest binds the roots rather than the path between them. A log's topics are hashed into the digest; its data is dropped entirely |
-| sBPF call (`guests::compiled::sbpf`, M4.4): the Solana program, the instruction, the accounts and their post-state | hidden — the ELF and the serialized instruction are `READ_INPUT` values bound to `H_IN`, and the eight output words are a status word plus a 224-bit Poseidon2 digest over three SHA-256 digests (`program_hash`, `input_hash`, `output_hash`), so the chain learns neither which program ran nor over what. A verifier who *already has* the program and the instruction can recompute all three and confirm the run; one who does not learns only the status |
+| EVM call (M4.3): is any of this changed by the public segment? | **no.** M4.3's guest is untouched by constraint set 6: its bytecode, calldata, caller, call value and storage witnesses are all still private-input words bound to the salted `H_IN`, and a confidential contract is still an interpreter's `hc` plus a commitment to bytecode nobody publishes. The segment is available to it — an EVM guest that wanted its bytecode public could adopt it and drop its own `codehash` recomputation the way the sBPF guest dropped `program_hash` — but that would be a different privacy posture, chosen deliberately, and nothing in this work makes it for anyone |
+| sBPF call (`guests::compiled::sbpf`, M4.4, **changed by CS6**): the Solana program (the ELF) | **published.** The ELF is the *public* segment now, not a `READ_INPUT` value: `H_PUB` binds it and the chain checks that digest against the ELF it published. This is the price of the binding being cheap — `program_hash` is gone from the output digest and the guest hashes nothing, because `H_PUB` already says which program ran. It is a deliberate trade for the one guest whose program is a public Solana program anyway, not a change to the machine's default: an M4.4-style guest that keeps its ELF on the private tape and hashes it in-circuit is still expressible and still hides the program |
+| sBPF call: the instruction, the accounts and their post-state | hidden — the serialized instruction region is still a `READ_INPUT` value bound to the salted `H_IN`. The eight output words are a status word plus a 224-bit Poseidon2 digest over **two** SHA-256 digests (`input_hash`, `output_hash`; the third, `program_hash`, is gone). A verifier who already has the instruction can recompute both and confirm the run; one who does not learns only the status and which program it was |
 | sBPF call: the status word | public, three-valued and deliberately coarse — `1` the program returned `r0 == 0`, `0` it returned some `ProgramError`, `2` an exceptional halt. The **error code is not published** (the seven digest words are spoken for), and `0` and `2` both bind the *pre*-state as the post-state, so a failed call is indistinguishable from a call that did nothing |
-| sBPF call: how much work it did | leaked, to within a factor of two, by `sha256_log_height` and the tier — and more than for other guests, because M4.4 hashes the ELF in-circuit: `sha256_log_height` is essentially `log2(program size / 64)`, so it bounds the *size of the program that ran*. Note that this is the **cost of the binding being sound**, not an oversight: because `H_IN` is hiding (above), a `program_hash` the guest does not recompute would be bound to nothing at all, so the in-circuit hashing cannot simply be dropped (`docs/04-guests.md`, "What does *not* work"). Of the two sound remedies there, (A) baking the ELF into the guest's data segment removes this leak but replaces it with a larger one — `hc` then identifies the *program*, not just the interpreter — and (B) a public input segment publishes the ELF words outright. A hiding program commitment is the open item that would fix all three (`hc` is binding but not hiding, above) |
+| sBPF call: how much work it did | leaked, to within a factor of two, by `sha256_log_height`, `public_log_height` and the tier — but no longer by the *program's size* through the hash chip. M4.4 hashed the ELF in-circuit, which made `sha256_log_height` essentially `log2(program size / 64)` (18 for SPL Token); with the ELF in the public segment the guest hashes only the 837-byte canonical `input_hash` preimage and the two account walks, so `sha256_log_height` is 11 and says nothing about the program. `public_log_height` now bounds the ELF's length instead — which discloses nothing, since the words themselves are published. The remaining open item is unchanged and is about the *other* case: a **hiding** program commitment, for guests that want their program private and cheap at once (`hc` is binding but not hiding, above) |
 
 ## The delegated-proving boundary
 
