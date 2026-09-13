@@ -332,11 +332,31 @@ fn the_image_loader_rejects_a_malformed_container() {
     // misaligned bases
     assert_eq!(Program::from_flat_image(&Program::to_flat_image(0x1002, &text, 0x2000, &[1])), Err(LoadError::Base(0x1002)));
     assert_eq!(Program::from_flat_image(&Program::to_flat_image(0x1000, &text, 0x2002, &[1])), Err(LoadError::Base(0x2002)));
-    // a data segment whose last address does not fit a u32
+    // a data segment whose last address does not fit a u32 — its own variant, so it is not confused
+    // with a misaligned base
     assert_eq!(
         Program::from_flat_image(&Program::to_flat_image(0x1000, &text, 0xffff_fffc, &[1, 2])),
-        Err(LoadError::Base(0xffff_fffc))
+        Err(LoadError::Range { base: 0xffff_fffc, n_words: 2 })
     );
+    // a data segment written over the text's own addresses: the prologue's stores would land on
+    // addresses the guest's code and jump tables refer to. `mkimage.py` refuses to build such a
+    // container; the loader is the trust boundary that must refuse to load one.
+    let four = vec![0x0000_0013u32; 4]; // four NOPs at 0x1000..0x1010
+    for data_base in [0x1000, 0x1004, 0x100c] {
+        match Program::from_flat_image(&Program::to_flat_image(0x1000, &four, data_base, &[7, 7])) {
+            Err(LoadError::Overlap { text_end: 0x1010, data_base: got }) => assert_eq!(got, data_base),
+            other => panic!("expected Overlap at {data_base:#x}, got {other:?}"),
+        }
+    }
+    // one word *below* the text still overlaps it (the data's own last word lands on 0x1000) …
+    assert!(matches!(
+        Program::from_flat_image(&Program::to_flat_image(0x1000, &four, 0xffc, &[7, 7])),
+        Err(LoadError::Overlap { .. })
+    ));
+    // … while abutting the text on either side is fine, and is what the committed `evm.bin` does
+    // (its `.rodata` starts exactly at the end of its `.text`).
+    assert!(Program::from_flat_image(&Program::to_flat_image(0x1000, &four, 0x1010, &[7, 7])).is_ok());
+    assert!(Program::from_flat_image(&Program::to_flat_image(0x1000, &four, 0xff8, &[7, 7])).is_ok());
     // a text linked too low for its own prologue: 64 non-zero words need 3 instructions each
     match Program::from_flat_image(&Program::to_flat_image(0x40, &text, 0x2000, &[0xdead_beef; 64])) {
         Err(LoadError::PrologueRoom { text_base: 0x40, words }) => assert!(words > 16, "{words}"),

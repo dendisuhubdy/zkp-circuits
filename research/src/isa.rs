@@ -378,8 +378,17 @@ pub enum LoadError {
     Version(u32),
     /// The header's two segment lengths do not account for exactly the words that follow.
     Segments { n_text: usize, n_data: usize, words: usize },
-    /// A text or data base address that is not a multiple of 4, or an empty text segment.
+    /// A text or data base address that is not a multiple of 4.
     Base(u32),
+    /// A segment whose last address does not exist: `base + 4 · n_words` wraps `u32`. Reported for
+    /// whichever of the two segments wraps.
+    Range { base: u32, n_words: usize },
+    /// A data segment that would be written over the text's own address range. The two are
+    /// different spaces in this machine (the program is fetched, RAM is loaded), but the guest's
+    /// linker lays them out in one address space and its `lui`-based references assume that layout,
+    /// so a container claiming otherwise is malformed rather than merely odd — `mkimage.py` refuses
+    /// to build one and this is the same check at the loading end.
+    Overlap { text_end: u32, data_base: u32 },
     /// The synthesised data prologue does not fit below the text segment's load address: `words`
     /// instructions need `4 · words` bytes of program space before `text_base`.
     PrologueRoom { text_base: u32, words: usize },
@@ -500,9 +509,26 @@ impl Program {
         }
         if text_base % 4 != 0 { return Err(LoadError::Base(text_base)); }
         if data_base % 4 != 0 { return Err(LoadError::Base(data_base)); }
-        // The last data address has to exist: `data_base + 4·(n_data − 1)` is computed in `u32` when
-        // the prologue is built, and a header that wraps it would silently address the wrong RAM.
-        if data_base as u64 + 4 * n_data as u64 > u32::MAX as u64 { return Err(LoadError::Base(data_base)); }
+        // Both segments' last addresses have to exist. The data one matters because
+        // `data_base + 4·(n_data − 1)` is computed in `u32` when the prologue is built, and a header
+        // that wraps it would silently address the wrong RAM; the text one because its end bounds
+        // the overlap check just below. Hence `u64` arithmetic here, once, rather than a wrapping
+        // `u32` sum in either place.
+        let text_end = text_base as u64 + 4 * n_text as u64;
+        let data_end = data_base as u64 + 4 * n_data as u64;
+        if text_end > u32::MAX as u64 {
+            return Err(LoadError::Range { base: text_base, n_words: n_text });
+        }
+        if data_end > u32::MAX as u64 {
+            return Err(LoadError::Range { base: data_base, n_words: n_data });
+        }
+        // And the data has to lie outside the text: the prologue's stores would otherwise write
+        // over addresses the guest's own code and jump tables refer to. `data_base == text_end` is
+        // the normal case — the linker puts `.rodata` immediately after `.text`, which is exactly
+        // what the committed `evm.bin` does — so this is a strict overlap test, not an adjacency one.
+        if n_data > 0 && (data_base as u64) < text_end && (text_base as u64) < data_end {
+            return Err(LoadError::Overlap { text_end: text_end as u32, data_base });
+        }
         let (text, data) = body.split_at(n_text);
 
         let prologue = data_prologue(data_base, data);
