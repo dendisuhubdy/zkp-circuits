@@ -108,8 +108,9 @@ fn keccak_demo_proves_and_verifies_at_tier_10() {
 /// A keccak-free `guests::fib(10)` proof at `Tier(10)` and `FriProfile::Test`, measured.
 ///
 /// **The current figure is constraint set 6's**, which is why the constant is no longer named for
-/// M4.2 — it was `PRE_M4_2_TIER_10_TEST_PROFILE_BYTES` while it held M4.2's own baseline, and kept
-/// that name for one commit too long after it stopped doing so.
+/// M4.2 — it was `PRE_M4_2_TIER_10_TEST_PROFILE_BYTES` while it held the **pre**-M4.2 baseline, the
+/// size of this proof on the last commit *before* the keccak table existed, and it kept that name
+/// for one commit too long after it stopped holding that.
 ///
 /// The history, since the point of the constant is the comparison: M4.2 measured 275 916 on the
 /// branch base `b1d01d9` — the last commit before the keccak table — as the middle of three
@@ -881,6 +882,11 @@ fn measure_production_profile_evm_erc20_transfer() {
 // * **(B)** a **public, unsalted** segment in the input commitment, so a declared digest becomes
 //   checkable: the guest hashes nothing and the run reaches **tier 18** — a constraint-set change
 //   with its own spec addendum and plan, whose price is that the ELF words become public.
+//   [Measured 2026-09-13, after B was built as constraint set 6: **`Tier(20)`, 694 498 cycles**,
+//   not tier 18. The estimate above omitted the cost of *reading* 27 151 ELF words off the tape,
+//   which `READ_PUBLIC` pays at the same ~15.8 cycles/word `READ_INPUT` did (~430 K of the total).
+//   Tier 18 needs a bulk public-read syscall — spec §9.5's open item. See
+//   `compiled_sbpf_spl_token_transfer_proves_and_verifies` below and `docs/04-guests.md`.]
 //
 // `input_hash` over a canonical unpadded encoding (~290 K cycles) is legitimate and is deferred into
 // the same follow-up, because it changes the same binding "Public output" ruling.
@@ -937,10 +943,18 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
     // took the realloc padding out of the hashing, so the guest now **fits `Tier(20)`** and the
     // tripwire moves down a tier: the day it fits `Tier(18)`, re-measure and re-tier the proof.
     //
-    // Of the 694 498, ~116 000 are `check_region`'s scan over the 40 972 bytes the canonical
+    // Of the 694 498, ~116 000 are `check_region`'s scan over the **40 988** bytes the canonical
     // encoding does not hash — pinned to zero there, along with the flag bytes pinned to {0, 1} —
     // at ~2.8 cycles a byte. That is the price of binding them by pinning rather than by hashing: a
     // sixth of what hashing them cost.
+    //
+    // 40 988 is exactly 41 825 (the aligned region) minus 837 (the canonical preimage), which is
+    // the arithmetic check that every byte of an accepted region is either hashed or pinned. It
+    // decomposes as 40 960 realloc headroom (4 accounts x MAX_PERMITTED_DATA_INCREASE), 16 bytes of
+    // `original_data_len` slot (4 x 4), and 12 bytes of alignment padding before each entry's
+    // `rent_epoch` (3 + 3 + 0 + 6 for this fixture's 165/165/0/82-byte account data). An earlier
+    // note said 40 972: that figure counted the headroom and the padding but dropped the four
+    // `original_data_len` slots.
     assert!(
         exec.cycles() <= 720_000,
         "{} cycles, was 694 498 when the public segment landed (1 753 945 before it)",

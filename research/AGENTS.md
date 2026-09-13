@@ -22,10 +22,27 @@ indexed input vector bound to `H_PUB = pv::PUB0..PUB7`, which — unlike `H_IN` 
 is **unsalted**, so `Machine::verify_public(hc, public_words, proof)` recomputes
 it natively from words a caller supplies and compares. `pv::NUM` is 34,
 `tables::cpu::col::WIDTH` is 275, and `Machine::verifier_key` is a **6-tuple**
-(`tier, program, input, keccak, sha256, public`). The fullnode's
-`deploy/sync-zkvm.sh` anchors on that exact signature line **and** tracks
-`pv::NUM`, so both have to be updated in the same re-vendoring; this is a hard
-fork for proofs, and the node is not re-vendored here.
+(`tier, program, input, keccak, sha256, public`). This is a hard fork for
+proofs, and the node is **not** re-vendored here.
+
+Two things in `deploy/sync-zkvm.sh` will need editing when it is, and they are
+its only two patches (everything else rides along in the wholesale rsync —
+`pv::NUM` included, which needs no anchor of its own):
+
+1. the `log_ext_degrees_pub` wrapper is inserted against the **exact
+   `Machine::verifier_key` signature line**, and that line has gained three
+   parameters since the script was written (M4.2's `keccak_log_height`, M4.4's
+   `sha256_log_height`, and now `public_log_height`). The script `assert`s its
+   anchor and aborts the sync rather than silently no-op'ing, so this fails
+   loudly — but it does fail.
+2. the `crate::notes::domain::(HC|IN)` → `crate::hash::{HC_DOMAIN, IN_DOMAIN}`
+   inlining, which exists because `notes.rs` is not vendored. Constraint set 6
+   adds a **third** such reference, `crate::notes::domain::PUB` (= 15), in
+   `src/hash.rs` (`public_digest`'s header) and `src/tables/cpu.rs` (the
+   pubdigest region's in-circuit copy of the same constant). The existing
+   pattern does not cover it, and nothing asserts on it, so the next sync
+   compiles the node against a `notes` module that is not there. Extend the
+   inlining to `PUB_DOMAIN` in the same edit.
 
 ## Commands
 
@@ -36,7 +53,12 @@ fork for proofs, and the node is not re-vendored here.
   fullnode, so the figures are close to a best case rather than the upper
   bounds M4.3's own run reported; the M4.3 + M4.4 tree was 365 tests in 959 s
   and 22.4 GiB, and the public segment's mandatory instance is most of the
-  difference in both), `tests/e2e.rs` takes ~459 s — M4.3's tier-16 EVM-call
+  difference in both). **Both figures are plain `cargo test` — the debug
+  profile**, which is the command this file documents and the one the numbers
+  must be compared under: `--release` turns off `debug_assertions` and with it
+  the per-instance constraint checker `tests/cheating.rs`'s `rejects()` helper
+  depends on, so it is both much faster and a weaker run, and its timings are
+  not comparable with these. In this run `tests/e2e.rs` takes ~459 s — M4.3's tier-16 EVM-call
   proof dominates it (~438 s to prove and ~14 s to verify when run alone,
   overlapped here with the file's other tests) — `tests/bundle.rs` ~244 s (six
   proofs: four guest-level, plus one shared by every ledger-level test and one

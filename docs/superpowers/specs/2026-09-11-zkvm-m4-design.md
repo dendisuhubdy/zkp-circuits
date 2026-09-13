@@ -657,8 +657,11 @@ is the full one). The total lands within 1 % of ~699 000, but two terms moved
 after the reviews and roughly cancel: `input_hash` over the canonical encoding
 is **837 bytes / 14 compressions**, not the ~801 / 13 first estimated, because
 the review added the entry marker byte and `rent_epoch` to the preimage; and
-`check_region`'s scan — pinning to zero the 40 972 bytes the canonical encoding
-no longer hashes, and to `{0, 1}` the flag bytes — costs **~116 000 cycles** at
+`check_region`'s scan — pinning to zero the **40 988** bytes the canonical
+encoding no longer hashes (`41 825 − 837`: 40 960 realloc headroom + 16 bytes of
+`original_data_len` slot + 12 of alignment padding; Task 4's note said 40 972,
+dropping the four 4-byte slots), and to `{0, 1}` the flag bytes — costs
+**~116 000 cycles** at
 ~2.8 cycles a byte, which the projection did not have a line for at all
 (a sixth of what hashing those bytes used to cost, so it is still a clear win).
 The other measured figures: **8 317** program words (up 602, from a second
@@ -707,7 +710,11 @@ directions on the cycle count.
 
 and a new structural row for `public_log_height`, which is the same class of coarse leak
 `program_log_height`, `keccak_log_height` and `sha256_log_height` already are: it bounds `n_pub` to
-within a factor of two, and its minimum (2) means "this proof has no public segment".
+within a factor of two. **Corrected as built:** its minimum (2) does *not* mean "this proof has no
+public segment" the way `keccak_log_height = 0` means "no keccak table" — the table's `MIN_HEIGHT`
+is 4 and one row is always padding, so the floor covers every `n_pub` in `0..=3` alike and says only
+"at most three public words" (`machine.rs`'s `Proof::public_log_height` doc and
+`docs/03-privacy.md`'s leak table state it that way).
 
 Nothing else about the privacy model moves. `H_IN` stays salted and hiding, `hc` stays binding and
 not hiding, and the open item "a hiding program commitment" (§8, and `docs/03-privacy.md`) is
@@ -717,10 +724,22 @@ untouched — this addendum makes the *unhidden* case sound, it does not make th
 
 **This is constraint set 6 for the fullnode. Proofs from set 5 no longer verify** — `pv::NUM`
 changes, the batch's instance count changes, and `Proof` gains a field. The fullnode is **not**
-re-vendored by this plan. Note for whoever does: `deploy/sync-zkvm.sh` patches on an anchor that is
-the *exact* `verifier_key` signature line, and that signature gains a sixth parameter here; the
-script also tracks `pv::NUM`. Both must be updated in the same vendoring, and the script fails
-loudly rather than silently mispatching (it already carries the message for it).
+re-vendored by this plan. Note for whoever does — **corrected against the script as it actually
+stands**, since this paragraph was written from memory: `deploy/sync-zkvm.sh` makes exactly two
+patches, and both need extending.
+
+1. The `log_ext_degrees_pub` wrapper is inserted against the *exact* `verifier_key` signature line,
+   which gains a sixth parameter here. The script `assert`s that anchor and aborts the sync rather
+   than silently mispatching, so this one fails loudly (it already carries the message for it).
+2. The `crate::notes::domain::(HC|IN)` → `crate::hash::{HC_DOMAIN, IN_DOMAIN}` inlining, which
+   exists because `notes.rs` is not vendored. This set adds a **third** such reference,
+   `crate::notes::domain::PUB` (= 15), in `src/hash.rs` (`public_digest`'s header) and
+   `src/tables/cpu.rs` (the pubdigest region's copy of the same constant). Nothing asserts on this
+   one, so an un-extended script produces a node that does not compile.
+
+`pv::NUM` is **not** one of the script's anchors — it is a constant in a file the script rsyncs
+wholesale, so it needs no patch. It changes, and set-5 proofs stop verifying, but that is a
+consensus fact rather than a sync-script one.
 
 **The recursion VM (M5) is unaffected.** `docs/superpowers/specs/2026-09-13-zkvm-m5-recursion-vm-design.md`
 §2 "Witness, not input" states the rVM has no salted input commitment and does not want one, and §9

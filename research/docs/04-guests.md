@@ -566,9 +566,20 @@ the mint as a fourth read-only account:
 The 2.5× cycle saving is where the projection said it would be. Spec §9.5
 projected **~699 000** cycles from M4.4's own pc histogram; the measurement is
 694 498, inside 1 %. Of it, **~116 000** are `check_region`'s zero scan over the
-40 972 bytes the canonical encoding no longer hashes, at ~2.8 cycles a byte — the
-third-largest single cost in the guest, and the price of binding those bytes by
-pinning rather than by hashing.
+**40 988** bytes the canonical encoding no longer hashes, at ~2.8 cycles a byte —
+the third-largest single cost in the guest, and the price of binding those bytes
+by pinning rather than by hashing.
+
+40 988 is exactly `41 825 − 837`, the aligned region minus the canonical
+preimage, which is the arithmetic form of "every byte of an accepted region is
+either hashed or pinned". It decomposes as **40 960** bytes of realloc headroom
+(four accounts × `MAX_PERMITTED_DATA_INCREASE`), **16** bytes of
+`original_data_len` slot (four × 4), and **12** bytes of alignment padding before
+each entry's `rent_epoch` (3 + 3 + 0 + 6, following this fixture's 165/165/0/82-byte
+account data). The three flag bytes per entry are *not* in this figure: they are
+hashed, in normalised form, and pinned to `{0, 1}` by a separate scan. (Task 4's
+own note said 40 972, which counted the headroom and the padding but dropped the
+four `original_data_len` slots.)
 
 The binary grew by 602 program words in a change that only removed work, which is
 worth knowing for any guest on this target: `InputCursor<F>` is now instantiated
