@@ -3,7 +3,7 @@ use rand_zkvm::guests;
 use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::isa::*;
 
-fn run(p: &Program, inputs: &[u32]) -> Execution { execute(p, inputs, 1 << 16).unwrap() }
+fn run(p: &Program, inputs: &[u32]) -> Execution { execute(p, inputs, &[], 1 << 16).unwrap() }
 
 /// M3.2: the `POSEIDON2` syscall (`guests::poseidon2_demo`, which hashes its message in place
 /// and outputs the 8-word digest) must agree with `hash::sponge_hash` — the host-side
@@ -41,7 +41,7 @@ fn poseidon2_over_the_word_limit_is_rejected() {
     a.extend(li(8, 0x1000));
     a.extend(call_poseidon2(0x1000 / 4, (POSEIDON2_MAX_WORDS + 1) as usize));
     a.extend(halt());
-    let err = execute(&a.assemble(), &[], 1 << 16).unwrap_err();
+    let err = execute(&a.assemble(), &[], &[], 1 << 16).unwrap_err();
     assert_eq!(err, ExecError::Poseidon2WordCount(POSEIDON2_MAX_WORDS + 1));
 }
 
@@ -54,7 +54,7 @@ fn poseidon2_pointer_at_or_above_2_to_the_30_is_an_execution_error() {
     let mut a = Assembler::new(0);
     a.extend(call_poseidon2(1 << 30, 4)); // ptr words = 2^30
     a.extend(halt());
-    let err = execute(&a.assemble(), &[], 1 << 16).unwrap_err();
+    let err = execute(&a.assemble(), &[], &[], 1 << 16).unwrap_err();
     assert_eq!(err, ExecError::Poseidon2Ptr(1 << 30));
 
     let mut a = Assembler::new(0);
@@ -112,17 +112,17 @@ fn misaligned_half_load_and_store_are_rejected() {
     // `Misaligned` carries the actual byte address (`alu_out`), matching `errors_are_reported`'s
     // existing convention (`lw(6, 0, 2)` -> `Misaligned(2)`, not `Misaligned(0)`).
     let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.push(lh(6, 8, 1)); a.extend(halt());
-    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(0x1001));
+    assert_eq!(execute(&a.assemble(), &[], &[], 100).unwrap_err(), ExecError::Misaligned(0x1001));
     let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.extend(li(5, 1)); a.push(sh(8, 5, 1)); a.extend(halt());
-    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(0x1001));
+    assert_eq!(execute(&a.assemble(), &[], &[], 100).unwrap_err(), ExecError::Misaligned(0x1001));
 }
 
 #[test]
 fn misaligned_word_load_and_store_are_still_rejected() {
     let mut a = Assembler::new(0); a.push(lw(6, 0, 2)); a.extend(halt());
-    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(2));
+    assert_eq!(execute(&a.assemble(), &[], &[], 100).unwrap_err(), ExecError::Misaligned(2));
     let mut a = Assembler::new(0); a.extend(li(5, 1)); a.push(sw(0, 5, 2)); a.extend(halt());
-    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(2));
+    assert_eq!(execute(&a.assemble(), &[], &[], 100).unwrap_err(), ExecError::Misaligned(2));
 }
 
 #[test]
@@ -130,15 +130,15 @@ fn byte_and_half_loads_are_never_misaligned_except_half_on_an_odd_offset() {
     // lb/sb at every offset succeed; lh/sh only at offsets 0 and 2.
     for off in 0..4i32 {
         let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.push(lb(6, 8, off)); a.extend(halt());
-        execute(&a.assemble(), &[], 100).unwrap();
+        execute(&a.assemble(), &[], &[], 100).unwrap();
     }
     for off in [0i32, 2] {
         let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.push(lh(6, 8, off)); a.extend(halt());
-        execute(&a.assemble(), &[], 100).unwrap();
+        execute(&a.assemble(), &[], &[], 100).unwrap();
     }
     for off in [1i32, 3] {
         let mut a = Assembler::new(0); a.extend(li(8, 0x1000)); a.push(lh(6, 8, off)); a.extend(halt());
-        assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(0x1000 + off as u32));
+        assert_eq!(execute(&a.assemble(), &[], &[], 100).unwrap_err(), ExecError::Misaligned(0x1000 + off as u32));
     }
 }
 
@@ -210,13 +210,13 @@ fn sub_word_checksum_guest_matches_hand_computed_reference() {
 #[test]
 fn errors_are_reported() {
     let mut a = Assembler::new(0); a.push(lw(6, 0, 2)); a.extend(halt());
-    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::Misaligned(2));
+    assert_eq!(execute(&a.assemble(), &[], &[], 100).unwrap_err(), ExecError::Misaligned(2));
     let mut a = Assembler::new(0); a.push(addi(0, 0, 0));
-    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::BadPc(4));
+    assert_eq!(execute(&a.assemble(), &[], &[], 100).unwrap_err(), ExecError::BadPc(4));
     let mut a = Assembler::new(0); a.label("l"); a.jal(0, "l");
-    assert_eq!(execute(&a.assemble(), &[], 10).unwrap_err(), ExecError::OutOfCycles(10));
+    assert_eq!(execute(&a.assemble(), &[], &[], 10).unwrap_err(), ExecError::OutOfCycles(10));
     let mut a = Assembler::new(0); a.extend(write_output(0, 5)); a.extend(write_output(0, 5)); a.extend(halt());
-    assert_eq!(execute(&a.assemble(), &[], 100).unwrap_err(), ExecError::DoubleWrite(0));
+    assert_eq!(execute(&a.assemble(), &[], &[], 100).unwrap_err(), ExecError::DoubleWrite(0));
 }
 
 #[test]
@@ -369,11 +369,11 @@ fn a_keccak_pointer_past_the_provable_range_is_an_error() {
     };
     let limit = 0x3000_0000u32 - 50;
     assert!(matches!(
-        execute(&program(limit + 1), &[], 1 << 16),
+        execute(&program(limit + 1), &[], &[], 1 << 16),
         Err(ExecError::KeccakPtrOutOfRange(p)) if p == limit + 1
     ));
     // The largest still-permitted pointer runs (and permutes 50 words of untouched zeros).
-    let e = execute(&program(limit), &[], 1 << 16).unwrap();
+    let e = execute(&program(limit), &[], &[], 1 << 16).unwrap();
     assert_eq!(e.events.iter().filter(|ev| ev.keccak_row.is_some()).count(), 1);
 }
 
@@ -453,10 +453,56 @@ fn a_sha256_pointer_past_the_provable_range_is_an_error() {
     assert_eq!(SHA256_PTR_LIMIT, limit);
     assert_eq!(SHA256_WORDS, 24);
     assert!(matches!(
-        execute(&program(limit + 1), &[], 1 << 16),
+        execute(&program(limit + 1), &[], &[], 1 << 16),
         Err(ExecError::Sha256PtrOutOfRange(p)) if p == limit + 1
     ));
     // The largest still-permitted pointer runs (and compresses 24 words of untouched zeros).
-    let e = execute(&program(limit), &[], 1 << 16).unwrap();
+    let e = execute(&program(limit), &[], &[], 1 << 16).unwrap();
     assert_eq!(e.events.iter().filter(|ev| ev.sha256_row.is_some()).count(), 1);
+}
+
+/// The public segment (constraint set 6): `SYS_READ_PUBLIC` draws from a second, unsalted input
+/// space whose words are committed to `H_PUB` (`pv::PUB0..7`), and an index past its end is
+/// refused exactly as `READ_INPUT`'s is — an `ExecError`, not a zero word.
+#[test]
+fn read_public_returns_the_public_word_and_is_bound_by_its_own_length() {
+    use rand_zkvm::asm::{ops::*, Assembler};
+    use rand_zkvm::emulator::{execute, ExecError, Syscall};
+    let mut a = Assembler::new(0);
+    a.extend(read_public(1));
+    a.push(mv(5, REG_A0));
+    a.extend(read_input(0));
+    a.push(add(6, 5, REG_A0));
+    a.extend(write_output(0, 6));
+    a.extend(halt());
+    let p = a.assemble();
+
+    let e = execute(&p, &[100], &[7, 11], 10_000).unwrap();
+    assert_eq!(e.outputs[0], 111, "public[1] + input[0]");
+    assert!(
+        e.events.iter().any(|ev| matches!(ev.sys, Some(Syscall::ReadPublic { idx: 1, word: 11 }))),
+        "the read must show up as a ReadPublic event"
+    );
+
+    // Out of range is refused exactly as READ_INPUT's is: an ExecError, no trace at all.
+    assert!(matches!(execute(&p, &[100], &[7], 10_000), Err(ExecError::PublicIndex(1))));
+    assert!(matches!(execute(&p, &[100], &[], 10_000), Err(ExecError::PublicIndex(1))));
+}
+
+/// The private and public segments are indexed independently: index 0 of one has nothing to do
+/// with index 0 of the other.
+#[test]
+fn the_two_segments_are_independent_spaces() {
+    use rand_zkvm::asm::{ops::*, Assembler};
+    use rand_zkvm::emulator::execute;
+    let mut a = Assembler::new(0);
+    a.extend(read_input(0));
+    a.push(mv(5, REG_A0));
+    a.extend(read_public(0));
+    a.push(sub(6, 5, REG_A0));
+    a.extend(write_output(0, 6));
+    a.extend(halt());
+    let p = a.assemble();
+    // Same index, different spaces, different words.
+    assert_eq!(execute(&p, &[900], &[400], 10_000).unwrap().outputs[0], 500);
 }

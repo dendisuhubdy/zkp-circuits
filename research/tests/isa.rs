@@ -254,13 +254,13 @@ fn the_data_segment_is_in_ram_before_the_guest_entry_runs() {
     assert_eq!(p.words[p.words.len() - text.len()..], text[..], "the text is loaded verbatim");
     assert_eq!(p.base_pc + 4 * (p.words.len() - text.len()) as u32, 0x1_0000);
 
-    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(12).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(12).max_cycles()).unwrap();
     assert_eq!(exec.outputs[0], 0xdead_beef, "the data word was never written to RAM");
     assert_eq!(exec.outputs[1], 42);
 
     // and it proves and verifies — the data is part of the program, so `hc` binds it
     let m = rand_zkvm::machine::Machine::new(rand_zkvm::machine::FriProfile::Test);
-    let (proof, _) = m.prove(&p, &[], None).unwrap();
+    let (proof, _) = m.prove(&p, &[], &[], None).unwrap();
     m.verify(&p.digest(), &proof).unwrap();
     // a different data segment is a different program: `hc` changes
     let other = Program::from_flat_image(&Program::to_flat_image(0x1_0000, &text, data_base, &[1, 0, 42])).unwrap();
@@ -301,7 +301,7 @@ fn the_prologue_repoints_its_base_register_past_the_immediate_range() {
     a.extend(halt());
     let text = a.assemble().words;
     let p = Program::from_flat_image(&Program::to_flat_image(0x2_0000, &text, data_base, &data)).unwrap();
-    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(14).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(14).max_cycles()).unwrap();
     assert_eq!(exec.outputs[0], 0x100);
     assert_eq!(exec.outputs[1], 0x100 + n as u32 - 1);
 }
@@ -362,4 +362,33 @@ fn the_image_loader_rejects_a_malformed_container() {
         Err(LoadError::PrologueRoom { text_base: 0x40, words }) => assert!(words > 16, "{words}"),
         other => panic!("expected PrologueRoom, got {other:?}"),
     }
+}
+
+/// Constraint set 6: `H_PUB` is `H_IN`'s unsalted twin — `program_digest`'s header-and-chain
+/// shape over `domain::PUB`, with no salt block, so a verifier holding the words can recompute
+/// it (which is exactly what a salted `H_IN` cannot support).
+#[test]
+fn public_digest_is_the_unsalted_twin_of_the_program_digest() {
+    use rand_zkvm::hash::{public_digest, public_digest_row_count, public_digest_rows};
+    // Header-only: one permutation even for an empty segment, so H_PUB is never the all-zero digest.
+    assert_eq!(public_digest_row_count(0), 1);
+    assert_eq!(public_digest_rows(&[]).len(), 1);
+    assert_ne!(public_digest(&[]), [0u32; 8]);
+    // One block per four words, ceil.
+    assert_eq!(public_digest_row_count(1), 1);
+    assert_eq!(public_digest_row_count(4), 1);
+    assert_eq!(public_digest_row_count(5), 2);
+    // Unsalted: a pure function of the words. Two calls agree; H_IN's does not (it takes a salt).
+    assert_eq!(public_digest(&[1, 2, 3]), public_digest(&[1, 2, 3]));
+    // Length is in the capacity header, so trailing zeros are not a collision.
+    assert_ne!(public_digest(&[1, 2, 3]), public_digest(&[1, 2, 3, 0]));
+    // The domain separates it from H_IN's own space and from hc's.
+    assert_ne!(public_digest(&[1, 2, 3, 4]), rand_zkvm::hash::input_digest([0; 4], &[1, 2, 3, 4]));
+    // And the chain of blocks is the same overwrite-mode chain the other two digests use.
+    let blocks = public_digest_rows(&[1, 2, 3, 4, 5]);
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].left_before, 5);
+    assert_eq!(blocks[1].left_before, 1);
+    assert_eq!(blocks[1].active, [true, false, false, false]);
+    assert_eq!(rand_zkvm::hash::split_digest([blocks[1].state_out[0], blocks[1].state_out[1], blocks[1].state_out[2], blocks[1].state_out[3]]), public_digest(&[1, 2, 3, 4, 5]));
 }

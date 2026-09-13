@@ -1,31 +1,69 @@
 # AGENTS.md — `research` (rand_zkvm)
 
 The Rand reference zkVM: an RV32I subset under a zero-knowledge batch STARK
-(Plonky3 0.7, Goldilocks), proved as eight AIR tables plus either of two
-optional hash chips — nine with a keccak table, nine with a sha256 one, ten with
-both — exchanging facts over
-fourteen LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
+(Plonky3 0.7, Goldilocks), proved as nine AIR tables plus either of two
+optional hash chips — ten with a keccak table, ten with a sha256 one, eleven
+with both — exchanging facts over
+sixteen LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
 buses; M4.2 added `keccak` and the `KECCAK` bus, and made that one table
 optional per proof: `Proof::keccak_log_height = 0` means the batch has no
 keccak instance at all; M4.4 added `sha256` and the `SHA256` bus on exactly
-those terms and independently, `Proof::sha256_log_height = 0`), plus the M1.5
+those terms and independently, `Proof::sha256_log_height = 0`; constraint set 6
+added `public` and the `PUBLIC_DIGEST`/`PUBLIC_READ` pair — the **ninth
+mandatory** table, not a fourth optional one, since every proof commits to a
+public input segment even when it is empty), plus the M1.5
 viewing-key
 layer (notes, envelopes, scoped disclosure, simulated ledger). Design docs
 are `docs/01–06`; the README has the reading order.
 
+**Constraint set 6 in one paragraph**, because it is what most recently moved
+under everyone's feet: `SYS_READ_PUBLIC = 6` reads a second, independently
+indexed input vector bound to `H_PUB = pv::PUB0..PUB7`, which — unlike `H_IN` —
+is **unsalted**, so `Machine::verify_public(hc, public_words, proof)` recomputes
+it natively from words a caller supplies and compares. `pv::NUM` is 34,
+`tables::cpu::col::WIDTH` is 275, and `Machine::verifier_key` is a **6-tuple**
+(`tier, program, input, keccak, sha256, public`). This is a hard fork for
+proofs, and the node is **not** re-vendored here.
+
+Two things in `deploy/sync-zkvm.sh` will need editing when it is, and they are
+its only two patches (everything else rides along in the wholesale rsync —
+`pv::NUM` included, which needs no anchor of its own):
+
+1. the `log_ext_degrees_pub` wrapper is inserted against the **exact
+   `Machine::verifier_key` signature line**, and that line has gained three
+   parameters since the script was written (M4.2's `keccak_log_height`, M4.4's
+   `sha256_log_height`, and now `public_log_height`). The script `assert`s its
+   anchor and aborts the sync rather than silently no-op'ing, so this fails
+   loudly — but it does fail.
+2. the `crate::notes::domain::(HC|IN)` → `crate::hash::{HC_DOMAIN, IN_DOMAIN}`
+   inlining, which exists because `notes.rs` is not vendored. Constraint set 6
+   adds a **third** such reference, `crate::notes::domain::PUB` (= 15), in
+   `src/hash.rs` (`public_digest`'s header) and `src/tables/cpu.rs` (the
+   pubdigest region's in-circuit copy of the same constant). The existing
+   pattern does not cover it, and nothing asserts on it, so the next sync
+   compiles the node against a `notes` module that is not there. Extend the
+   inlining to `PUB_DOMAIN` in the same edit.
+
 ## Commands
 
-- `cargo test` — the whole suite (365 tests: 359 pass, 6 ignored).
+- `cargo test` — the whole suite (**395 tests: 389 pass, 6 ignored**).
   Everything uses `FriProfile::Test`; measured in one 2026-09-13 run of the
-  merged M4.3 + M4.4 tree (959 s wall — ~16 min — and 22.4 GiB peak resident,
-  on a machine that was otherwise quiet apart from a running fullnode, so the
-  figures are close to a best case rather than the upper bounds M4.3's own run
-  reported), `tests/e2e.rs` takes ~446 s — M4.3's tier-16 EVM-call proof
-  dominates it (~438 s to prove and ~14 s to verify when run alone, overlapped
-  here with the file's other tests) — `tests/bundle.rs` ~225 s (six proofs:
-  four guest-level, plus one shared by every ledger-level test and one for
-  the 1-real-1-dummy shape), `tests/viewing.rs` ~212 s, `tests/cheating.rs`
-  ~38 s, `tests/zk.rs` ~19 s, `tests/tables.rs` ~11 s, `tests/isa.rs` ~6 s
+  constraint-set-6 tree (**1 032 s wall — 17.2 min — and 23.1 GiB peak
+  resident**, on a machine that was otherwise quiet apart from a running
+  fullnode, so the figures are close to a best case rather than the upper
+  bounds M4.3's own run reported; the M4.3 + M4.4 tree was 365 tests in 959 s
+  and 22.4 GiB, and the public segment's mandatory instance is most of the
+  difference in both). **Both figures are plain `cargo test` — the debug
+  profile**, which is the command this file documents and the one the numbers
+  must be compared under: `--release` turns off `debug_assertions` and with it
+  the per-instance constraint checker `tests/cheating.rs`'s `rejects()` helper
+  depends on, so it is both much faster and a weaker run, and its timings are
+  not comparable with these. In this run `tests/e2e.rs` takes ~459 s — M4.3's tier-16 EVM-call
+  proof dominates it (~438 s to prove and ~14 s to verify when run alone,
+  overlapped here with the file's other tests) — `tests/bundle.rs` ~244 s (six
+  proofs: four guest-level, plus one shared by every ledger-level test and one
+  for the 1-real-1-dummy shape), `tests/viewing.rs` ~236 s, `tests/cheating.rs`
+  ~41 s, `tests/zk.rs` ~20 s, `tests/tables.rs` ~11 s, `tests/isa.rs` ~7 s
   (M4.3's image-container tests prove two small programs, one of which reads
   its own data segment back), `tests/keccak.rs` ~0.9 s (its chip-alone harness
   proves a 128-row table, so it is cheap despite 2 612 columns) and
@@ -35,10 +73,15 @@ are `docs/01–06`; the README has the reading order.
   (13), `tests/evm_interp.rs` (17), `tests/evm_abi.rs` (8) — run `evm-core`
   natively over `evm::HostRef`, and M4.4's four sBPF files —
   `tests/sbpf_isa.rs` (6), `sbpf_interp.rs` (20), `sbpf_elf.rs` (11),
-  `sbpf_abi.rs` (15), 52 tests — check the interpreter against `solana-sbpf`
+  `sbpf_abi.rs` (21), **58 tests** — check the interpreter against
+  `solana-sbpf`
   0.11.1 before anything reaches the machine, including loading the committed
   SPL Token ELF and running a real `Transfer` through it. `tests/emulator.rs`
-  (23) and `tests/asm.rs` (10) are the same kind of thing.
+  (25) and `tests/asm.rs` (11) are the same kind of thing. `tests/cheating.rs`
+  is the largest single file at 111, of which constraint set 6 added 17 against
+  the `public` table and its digest region. (The wall-clock and memory figures
+  above were measured on the 394-test tree, before the final review added the
+  last of those 17 — a ~2 s cheating test; nothing else about the run changed.)
 
   Of the six `#[ignore]`d tests, three are production-profile proof-size
   measurements, one is the sBPF cycle-breakdown measurement, and two are the
@@ -50,14 +93,22 @@ are `docs/01–06`; the README has the reading order.
   has the command and the ≥ 64 GB figure) — the in-suite EVM proof is a
   smaller call through the same binary at tier 16.
   `tests/e2e.rs::compiled_sbpf_spl_token_transfer_proves_and_verifies` is
-  M4.4's, and it **does not pass at any tier this machine has**: the guest is
-  correct but takes 1 753 945 cycles against `Tier(20)`'s 1 048 575 budget.
+  M4.4's, and since constraint set 6 it is `#[ignore]`d for **the same reason
+  as the EVM one** rather than its own: the guest went from 1 753 945 cycles
+  (above every tier) to **694 498**, which fits `Tier(20)` — but a tier-20
+  batch is four times the cpu rows of that tier-18 EVM proof, so it needs more
+  than the 48 GB here, not less. It was not attempted on this machine; run it
+  on a **≥ 64 GB** one with `-- --ignored`.
   Each ignore message carries its own measurement and `docs/04-guests.md` the
-  breakdowns; do not treat either as a flake to retry, and do not "fix" the
-  sBPF one by declaring `program_hash` rather than computing it — `H_IN` is
-  hiding, so a digest the guest does not recompute is bound to nothing
-  (`docs/03-privacy.md`). The two sound remedies, and which one buys tier 18,
-  are in `docs/04-guests.md` and the design spec's §5.1 item 8.
+  breakdowns; do not treat either as a flake to retry. **Do not "fix" the sBPF
+  one by declaring `program_hash` rather than computing it** — that was
+  unsound, because `H_IN` is hiding and a digest the guest does not recompute
+  is bound to nothing (`docs/03-privacy.md`) — and note that it is now *moot*
+  rather than merely forbidden: the public segment is how that was made sound.
+  The ELF is a public input, `H_PUB` binds it, `Machine::verify_public` checks
+  it, and the guest hashes no program at all (design spec §9,
+  `docs/04-guests.md`'s "The `sbpf` guest"). What is still open is the tier —
+  18 needs a bulk public-read syscall for the tape, spec §9.5.
 
   All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a
   keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with

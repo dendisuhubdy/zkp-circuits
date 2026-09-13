@@ -49,6 +49,11 @@ pub const SHA256_WORDS: u32 = 24;
 /// The ABI constant above and the host reference's own buffer width are the same number stated
 /// twice (`isa` is the syscall contract, `sha256` is the layout); keep them from drifting.
 const _: () = assert!(SHA256_WORDS as usize == crate::sha256::WORDS);
+/// M4.1's `READ_INPUT`, on the **public** segment: `a0 = idx` in, `a0 = word` out, no second
+/// argument, one cpu row. The words it draws from are committed to the unsalted `H_PUB`
+/// (`pv::PUB0..7`), which a verifier holding them recomputes — so a value read here is bound to
+/// something the chain can check, unlike a private input under the hiding `H_IN`.
+pub const SYS_READ_PUBLIC: u32 = 6;
 pub const NUM_OUTPUTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

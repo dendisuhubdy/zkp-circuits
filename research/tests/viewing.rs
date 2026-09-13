@@ -74,7 +74,7 @@ fn nullifier_is_bound_to_the_commitment() {
 #[test]
 fn note_commit_matches_the_host_reference() {
     let msg: [u32; Note::WORDS] = std::array::from_fn(|i| i as u32 + 1);
-    let e = execute(&guests::note_commit_probe(&msg), &[], 1 << 16).unwrap();
+    let e = execute(&guests::note_commit_probe(&msg), &[], &[], 1 << 16).unwrap();
     assert_eq!(e.outputs[..8], notes::hash(domain::CM, &msg));
 }
 
@@ -88,7 +88,7 @@ fn merkle_verify_matches_a_host_side_tree() {
     for cm in &leaves { tree.append(*cm); }
     for (i, leaf) in leaves.iter().enumerate() {
         let path = tree.path(i);
-        let e = execute(&guests::merkle_probe(*leaf, &path, i as u32), &[], 1 << 20).unwrap();
+        let e = execute(&guests::merkle_probe(*leaf, &path, i as u32), &[], &[], 1 << 20).unwrap();
         assert_eq!(e.outputs[..8], tree.root(), "leaf {i}");
     }
 }
@@ -104,7 +104,7 @@ fn merkle_verify_loop_matches_a_host_side_tree_for_random_leaves() {
     for cm in &leaves { tree.append(*cm); }
     for i in [0usize, 1, 17, 36] { // first, second, an interior, and the last-appended leaf
         let path = tree.path(i);
-        let e = execute(&guests::merkle_probe(leaves[i], &path, i as u32), &[], 1 << 20).unwrap();
+        let e = execute(&guests::merkle_probe(leaves[i], &path, i as u32), &[], &[], 1 << 20).unwrap();
         assert_eq!(e.outputs[..8], tree.root(), "leaf {i}");
     }
 }
@@ -145,7 +145,7 @@ fn transfer_guest_proves_membership_and_computes_the_reference_outputs() {
     ledger.advance(60);
     let (created, _, _, inputs, anchor, nf) = build_transfer(&alice, &spent, &bob.vk, ledger.now, &ledger);
     let program = guests::transfer();
-    let e = execute(&program, &inputs, 1 << 22).unwrap();
+    let e = execute(&program, &inputs, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_eq!(e.outputs, notes::expected_outputs(&alice.sk, &spent, &created, anchor));
     // The guest's own root computation agrees with the tree's actual root and the nullifier
@@ -183,7 +183,7 @@ fn transfer_guest_permutation_and_row_counts_are_measured() {
     ledger.advance(60);
     let (_, _, _, inputs, _, _) = build_transfer(&alice, &spent, &bob.vk, ledger.now, &ledger);
     let program = guests::transfer();
-    let e = execute(&program, &inputs, 1 << 22).unwrap();
+    let e = execute(&program, &inputs, &[], 1 << 22).unwrap();
     assert!(e.halted);
     let permutations = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. }))).count();
     let hash_calls = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(rand_zkvm::emulator::HashRow::Ecall { .. }))).count();
@@ -236,7 +236,7 @@ fn scenario() -> Scenario {
     ledger.advance(60);
     // Alice → Bob
     let (alice_created, env, alice_key, inputs, anchor, nf) = build_transfer(&alice, &alice_note, &bob.vk, ledger.now, &ledger);
-    let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
+    let (proof, _) = m.prove(&ledger.program, &inputs, &[], None).unwrap();
     assert_eq!(proof.tier, Tier(14));
     let (cm_out, time) = (alice_created.commitment(), alice_created.time);
     let tx = ledger.apply(&m, &proof, anchor, nf, cm_out, time, env.clone()).unwrap();
@@ -246,7 +246,7 @@ fn scenario() -> Scenario {
     ledger.advance(60);
     // Carol → Bob
     let (carol_created, env, _, inputs, anchor, nf) = build_transfer(&carol, &carol_note, &bob.vk, ledger.now, &ledger);
-    let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
+    let (proof, _) = m.prove(&ledger.program, &inputs, &[], None).unwrap();
     ledger.apply(&m, &proof, anchor, nf, carol_created.commitment(), carol_created.time, env).unwrap();
     Scenario { ledger, alice, bob, carol, bridge, alice_note, alice_key, alice_created }
 }
@@ -328,10 +328,10 @@ fn a_viewing_key_cannot_spend() {
     // The guest derives the address from the spend key it is given, so the leaf it feeds
     // MERKLE_VERIFY is not Alice's real `cm_in`: its root (and therefore the whole published
     // digest) does not match anything an honest witness for this anchor would produce.
-    let e = execute(&ledger.program, &inputs, 1 << 22).unwrap();
+    let e = execute(&ledger.program, &inputs, &[], 1 << 22).unwrap();
     assert!(e.halted);
     assert_ne!(e.outputs, notes::expected_outputs(&alice.sk, &note, &steal, anchor));
-    let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
+    let (proof, _) = m.prove(&ledger.program, &inputs, &[], None).unwrap();
     // Whatever plaintext (anchor, nf, cm_out, time) the thief tries to hand `apply`, it cannot
     // match the digest the proof actually attests to (the thief does not know the real `nk`,
     // so cannot even compute the honest `nf`) — a structural rejection, not a STARK failure.
@@ -342,7 +342,7 @@ fn a_viewing_key_cannot_spend() {
     // actually computed) is a constraint failure: the write-back rows pin `MEM_VAL` to what
     // the emulator put in RAM, and the public-value columns are pinned to that.
     let real = notes::expected_outputs(&alice.sk, &note, &note, anchor);
-    let mut t = build_traces_salted(&ledger.program, &inputs, [0u32; 4], &e, Tier(14)).unwrap();
+    let mut t = build_traces_salted(&ledger.program, &inputs, &[], [0u32; 4], &e, Tier(14)).unwrap();
     t.public_values[cpu::pv::OUT0] = F::from_u32(real[0]);
     assert!(rejects(|| { let p = m.prove_traces(&ledger.program, &t, Tier(14)); m.verify(&ledger.program.digest(), &p) }));
 }
@@ -364,9 +364,9 @@ fn a_transfer_with_a_wrong_merkle_path_is_rejected() {
     let mut bad_path = path;
     bad_path[0][0] ^= 1; // tamper the leaf's immediate sibling
     let inputs = notes::transfer_inputs(&alice.sk, &note, &created, &bad_path, index);
-    let e = execute(&ledger.program, &inputs, 1 << 22).unwrap();
+    let e = execute(&ledger.program, &inputs, &[], 1 << 22).unwrap();
     assert!(e.halted);
-    let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
+    let (proof, _) = m.prove(&ledger.program, &inputs, &[], None).unwrap();
     // The STARK itself verifies fine — the guest faithfully computed *a* root, just not the
     // real one.
     assert!(m.verify(&ledger.program.digest(), &proof).is_ok());
@@ -413,9 +413,9 @@ fn spending_a_note_by_truncating_its_amount_to_32_bits_is_rejected() {
     let lying_spent = Note { amount: 5, ..note };
     let created = Note::new(bob.vk.pk(), alice.vk.pk(), 5, note.asset, ledger.now);
     let inputs = notes::transfer_inputs(&alice.sk, &lying_spent, &created, &path, index);
-    let e = execute(&ledger.program, &inputs, 1 << 22).unwrap();
+    let e = execute(&ledger.program, &inputs, &[], 1 << 22).unwrap();
     assert!(e.halted);
-    let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
+    let (proof, _) = m.prove(&ledger.program, &inputs, &[], None).unwrap();
     // The STARK itself verifies fine — the guest faithfully ran with these (dishonest) inputs,
     // it just proved membership of the wrong leaf.
     assert!(m.verify(&ledger.program.digest(), &proof).is_ok());
@@ -440,7 +440,7 @@ fn a_stale_anchor_is_rejected_by_the_ledger() {
     ledger.advance(1);
     // Capture the witness and anchor now, while the note's tree position is still current.
     let (created, env, _, inputs, anchor, nf) = build_transfer(&alice, &note, &bob.vk, ledger.now, &ledger);
-    let (proof, _) = m.prove(&ledger.program, &inputs, None).unwrap();
+    let (proof, _) = m.prove(&ledger.program, &inputs, &[], None).unwrap();
     assert!(m.verify(&ledger.program.digest(), &proof).is_ok(), "the proof is valid math regardless of what the ledger does next");
     // Push the tree far enough that `anchor` falls out of the `Ledger::ANCHOR_WINDOW`-entry
     // recent-roots window (one root recorded per mint). `anchor` is the newest entry when the

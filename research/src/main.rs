@@ -28,14 +28,20 @@ fn main() {
 
     hr("Part 3 · Execute (prover side; nothing here is visible to the chain)");
     let t = Instant::now();
-    let exec = execute(&program, &inputs, 1 << 20).unwrap();
+    let exec = execute(&program, &inputs, &[], 1 << 20).unwrap();
     println!("inputs {:?} → outputs {:?} in {} cycles ({:?})", inputs, &exec.outputs[..2], exec.cycles(), t.elapsed());
 
-    hr("Part 4 · Arithmetize: eight tables on fourteen buses (nine or ten with a keccak/sha256 table)");
+    hr("Part 4 · Arithmetize: nine tables on sixteen buses (ten or eleven with a keccak/sha256 table)");
     // M3.4/M4.1: the cpu table's two digest-row prefixes (program `hc` and the salted `H_IN`)
     // count as cycles too — and the auto-tier pick fits the Poseidon2 permutation budget as
     // well as the cycle budget (audit ZH1, 2026-09-12).
-    let digest_rows = program.digest_rows() + rand_zkvm::hash::input_digest_row_count(inputs.len());
+    let digest_rows = program.digest_rows()
+        + rand_zkvm::hash::input_digest_row_count(inputs.len())
+        // Constraint set 6: and the public-input digest prefix, which every proof pays even with
+        // an empty segment (`public_digest_row_count(0) == 1`). Omitting it under-reported the
+        // cycle count by one row and could, at a tier boundary, have picked a tier
+        // `build_traces` then refuses.
+        + rand_zkvm::hash::public_digest_row_count(0);
     let cycles = exec.cycles() + digest_rows;
     // The permutation count is digest rows *plus* the guest's own `POSEIDON2` absorb rows — the
     // same sum `Machine::prove_salted` forms. `balance_check` makes no `POSEIDON2` call, so this
@@ -45,7 +51,7 @@ fn main() {
         .filter(|e| matches!(e.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. })))
         .count();
     let tier = Tier::for_workload(cycles, digest_rows + absorb_rows).unwrap();
-    let traces = build_traces(&program, &inputs, &exec, tier).unwrap();
+    let traces = build_traces(&program, &inputs, &[], &exec, tier).unwrap();
     println!("tier {} → cpu 2^{} rows (actual {cycles} cycles incl. {digest_rows} digest rows), padding hides the rest", tier.0, tier.0);
     println!("{:<10}{:>10}{:>8}   {}", "table", "rows", "cols", "role");
     for (name, h, w, role) in [
@@ -102,7 +108,7 @@ fn main() {
     println!("verified in {verify_ms:.1} ms with public values {:?}", proof.public_values);
 
     hr("Part 6 · Cheating provers");
-    let mut bad = build_traces(&program, &inputs, &exec, tier).unwrap();
+    let mut bad = build_traces(&program, &inputs, &[], &exec, tier).unwrap();
     bad.public_values[cpu::pv::OUT0] = F::from_u32(0);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let p = m.prove_traces(&program, &bad, tier); m.verify(&program.digest(), &p) }));
     println!("claim output 0 instead of 1        → {}", if matches!(r, Ok(Ok(()))) { "ACCEPTED (bug)" } else { "rejected" });
@@ -110,8 +116,8 @@ fn main() {
     println!("verify against a different program → {}", if m.verify(&other.digest(), &proof).is_ok() { "ACCEPTED (bug)" } else { "rejected" });
 
     hr("Part 7 · Zero knowledge and tier padding");
-    let (p1, _) = m.prove(&program, &inputs, None).unwrap();
-    let (p2, _) = m.prove(&program, &[1000, 0, 0, 0], None).unwrap();
+    let (p1, _) = m.prove(&program, &inputs, &[], None).unwrap();
+    let (p2, _) = m.prove(&program, &[1000, 0, 0, 0], &[], None).unwrap();
     println!("same output, different private inputs: public values differ only in the salted H_IN = {}, proof bytes equal = {}", {
         // M4.1: `pv::IN0..7` is a *salted*, hiding commitment (fresh OS entropy per proof), so
         // the two vectors are no longer equal — the ZK story is that the only words that may
@@ -120,7 +126,7 @@ fn main() {
         let diff: Vec<usize> = (0..p1.public_values.len()).filter(|&i| p1.public_values[i] != p2.public_values[i]).collect();
         diff == (cpu::pv::IN0..cpu::pv::IN0 + 8).collect::<Vec<_>>()
     }, p1.to_bytes() == p2.to_bytes());
-    let (p3, _) = m.prove(&program, &inputs, Some(Tier(12))).unwrap();
+    let (p3, _) = m.prove(&program, &inputs, &[], Some(Tier(12))).unwrap();
     println!("same run at tier 12: {} bytes (tier 10: {} bytes) — size reveals the tier, never the cycle count", p3.size(), p1.size());
 
     hr("Part 8 · Summary");
@@ -134,7 +140,7 @@ fn main() {
     println!("field Goldilocks · challenge F_p² · hash Poseidon2 · blowup 8 · ZK hiding FRI · tiers {TIERS:?}");
     println!("\nRead docs/02-tables-and-buses.md for the constraint list, docs/03-privacy.md for what leaks.");
     for (name, p, inp) in guests::all() {
-        let (pr, ex) = m.prove(&p, &inp, None).unwrap();
+        let (pr, ex) = m.prove(&p, &inp, &[], None).unwrap();
         m.verify(&p.digest(), &pr).unwrap();
         println!("{name:<16} cycles {:>6} tier {:>2} proof {:>7} B", ex.cycles(), pr.tier.0, pr.size());
     }
@@ -177,7 +183,7 @@ fn part9_viewing_keys() {
     let anchor = ledger.root();
     let inputs = notes::transfer_inputs(&alice_sk, &alice_note, &created, &path, index);
     let t = Instant::now();
-    let (proof, exec) = m.prove(&ledger.program, &inputs, None).unwrap();
+    let (proof, exec) = m.prove(&ledger.program, &inputs, &[], None).unwrap();
     println!("alice → bob: {} cycles, tier {}, proof {} B in {:?}; envelope {} B", exec.cycles(), proof.tier.0, proof.size(), t.elapsed(), envelope.kem_ct.len() + envelope.to_receiver.len() + envelope.to_sender.len() + envelope.body.len());
     let vk = alice;
     let nf = vk.nullifier(&alice_note.commitment());
@@ -214,12 +220,12 @@ fn part9_viewing_keys() {
     let (path, index) = ledger.path_for(&spent.commitment()).unwrap();
     let anchor = ledger.root();
     let inputs = notes::transfer_inputs(&thief, &spent, &steal, &path, index);
-    let (proof, exec) = m.prove(&ledger.program, &inputs, None).unwrap();
+    let (proof, exec) = m.prove(&ledger.program, &inputs, &[], None).unwrap();
     println!("someone holding alice's viewing key and her note, but not her spend key, tries to spend it:");
     println!("  the guest derives an address from the key it was given, so its Merkle leaf is not alice's real cm_in");
     let fake_nf = thief.viewing_key().nullifier(&spent.commitment()); // whatever the (wrong) witness happens to imply
     println!("  ledger → {}", match ledger.apply(&m, &proof, anchor, fake_nf, steal.commitment(), ledger.now, Envelope::seal(&alice, &bob.address(), &steal, &TxKey::random())) { Err(LedgerError::BadDigest) => "rejected: output-commitment digest mismatch", other => panic!("expected BadDigest, got {other:?}") });
-    let mut bad = build_traces(&ledger.program, &inputs, &exec, proof.tier).unwrap();
+    let mut bad = build_traces(&ledger.program, &inputs, &[], &exec, proof.tier).unwrap();
     bad.public_values[cpu::pv::OUT0] += F::ONE;
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let p = m.prove_traces(&ledger.program, &bad, proof.tier); m.verify(&ledger.program.digest(), &p) }));
     println!("  flipping one word of the published output-commitment digest → {}", if matches!(r, Ok(Ok(()))) { "ACCEPTED (bug)" } else { "rejected by the constraint system" });
