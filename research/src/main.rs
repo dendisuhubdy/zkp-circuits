@@ -35,7 +35,13 @@ fn main() {
     // M3.4/M4.1: the cpu table's two digest-row prefixes (program `hc` and the salted `H_IN`)
     // count as cycles too — and the auto-tier pick fits the Poseidon2 permutation budget as
     // well as the cycle budget (audit ZH1, 2026-09-12).
-    let digest_rows = program.digest_rows() + rand_zkvm::hash::input_digest_row_count(inputs.len());
+    let digest_rows = program.digest_rows()
+        + rand_zkvm::hash::input_digest_row_count(inputs.len())
+        // Constraint set 6: and the public-input digest prefix, which every proof pays even with
+        // an empty segment (`public_digest_row_count(0) == 1`). Omitting it under-reported the
+        // cycle count by one row and could, at a tier boundary, have picked a tier
+        // `build_traces` then refuses.
+        + rand_zkvm::hash::public_digest_row_count(0);
     let cycles = exec.cycles() + digest_rows;
     // The permutation count is digest rows *plus* the guest's own `POSEIDON2` absorb rows — the
     // same sum `Machine::prove_salted` forms. `balance_check` makes no `POSEIDON2` call, so this

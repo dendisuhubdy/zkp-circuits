@@ -252,7 +252,10 @@ pub fn public_digest_rows(public: &[u32]) -> Vec<DigestBlock> {
                 merged[k] = Val::from_u32(public[idx]);
             }
         }
-        let left_before = (n - (i * 4).min(n)) as u32;
+        // `i * 4 <= n` on every row this loop emits (`rows = ⌈n/4⌉` for `n > 0`, and the single
+        // `n == 0` row has `i = 0`), so this is `input_digest_rows`'s expression exactly — the
+        // `.min(n)` an earlier cut carried here could never bind.
+        let left_before = (n - i * 4) as u32;
         state = permute_state(merged);
         out.push(DigestBlock { idx: i as u32, left_before, words: block_words, active, state_in, state_out: state });
     }
