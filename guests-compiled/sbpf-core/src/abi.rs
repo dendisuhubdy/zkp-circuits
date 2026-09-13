@@ -32,7 +32,9 @@
 //! §9.4, not `sha256` of the aligned region, whose 10 240 bytes of realloc headroom per account
 //! were 98 % of what was hashed. What the encoding leaves out, [`check_region`] pins to zero at
 //! entry, so every byte the running program can read is either hashed or provably zero.
-//! `output_hash` is [`output_hash`] over the accounts. Each
+//! `output_hash` is [`output_hash`] over the accounts. The account list's *shape* is bound too: the
+//! preimage carries each entry's raw marker byte, so a duplicate entry and a repeated full entry
+//! are different calls even when every account field matches. Each
 //! 32-byte digest is packed into eight words as `word[i] = LE(bytes[4i..4i+4])`, and both go
 //! through the chip, which is what puts the SHA-256 table on the exit test's own path.
 //!
@@ -263,6 +265,13 @@ pub fn decode_input<FP: FnMut(u32) -> u32, FS: FnMut(u32) -> u32>(
 /// know which kind of entry it came from. `owner` immediately follows `key`.
 #[derive(Clone, Copy)]
 struct Entry {
+    /// The byte the entry physically carries at its own offset: [`NON_DUP_MARKER`] for a full
+    /// entry, the duplicated entry's ordinal for a duplicate. It belongs to the **position**, not
+    /// to the account, so a duplicate's copy carries its own marker rather than the original's —
+    /// which is the whole point of hashing it: `[A, A_dup(0)]` and a region with two full entries
+    /// of `A` hand the program different aliasing (one shared buffer versus two) while every
+    /// account field is identical.
+    marker: u8,
     /// `is_signer`, `is_writable`, `executable` — three consecutive bytes.
     flags_at: usize,
     /// `key` (32 bytes), immediately followed by `owner` (32 bytes).
@@ -275,8 +284,15 @@ struct Entry {
     rent_epoch: u64,
 }
 
-const ZERO_ENTRY: Entry =
-    Entry { flags_at: 0, key_at: 0, lamports: 0, data_at: 0, data_len: 0, rent_epoch: 0 };
+const ZERO_ENTRY: Entry = Entry {
+    marker: 0,
+    flags_at: 0,
+    key_at: 0,
+    lamports: 0,
+    data_at: 0,
+    data_len: 0,
+    rent_epoch: 0,
+};
 
 /// The one walk over the *aligned* serialized-instruction format
 /// (`solana_program::entrypoint::deserialize`'s layout). [`output_hash`] and
@@ -310,9 +326,10 @@ struct AccountWalk<'a> {
     /// Whether to check the bytes the runtime guarantees are zero. Only [`check_region`] asks for
     /// it: the scan is ~41 KB for a four-account region and the two hashing walks must not pay it.
     check_pinned: bool,
-    /// Set when a checking walk saw a non-zero byte where the format pins a zero. The walk does not
-    /// stop on it — the flag is the answer, so a caller that does not care is not affected.
-    pinned_nonzero: bool,
+    /// Set when a checking walk saw a byte the format does not admit: a non-zero where it pins a
+    /// zero, or a flag byte above 1. The walk does not stop on it — the flag is the answer, so a
+    /// caller that does not care is not affected.
+    pinned_invalid: bool,
 }
 
 impl<'a> AccountWalk<'a> {
@@ -336,7 +353,7 @@ impl<'a> AccountWalk<'a> {
             n_entries: 0,
             stopped: off == 0,
             check_pinned,
-            pinned_nonzero: false,
+            pinned_invalid: false,
         };
         (w, claimed)
     }
@@ -380,19 +397,33 @@ impl<'a> AccountWalk<'a> {
             let after = (data_end.checked_add(MAX_PERMITTED_DATA_INCREASE)?.checked_add(7)?) & !7;
             let rent_epoch = read_u64(input, after)?;
             if self.check_pinned {
-                // The `original_data_len` slot the entrypoint skips, and the realloc headroom plus
-                // the alignment padding: bytes the runtime writes as zeros and nothing hashes.
+                // The `original_data_len` slot and the realloc headroom plus the alignment padding:
+                // bytes the runtime writes as zeros and nothing hashes.
+                //
+                // Pinning the `original_data_len` slot to zero is right for an *input* region:
+                // agave's aligned serializer writes four zero bytes there, and it is the
+                // program-side entrypoint deserializer that later stores `original_data_len` into
+                // that slot — inside the guest's own memory, after the digest is taken. Nothing
+                // hands the guest a region with it already filled in (the host serializer writes
+                // zeros for exactly the same reason).
                 self.check_zeros(off + 4, off + 8);
                 self.check_zeros(data_end, after);
+                // The three flag bytes are booleans: the format admits 0 and 1, the program reads
+                // the raw byte, and the preimage hashes the normalised one — so anything else is
+                // refused rather than normalised away.
+                self.check_bools(flags_at, flags_at + 3);
             }
             self.off = after.checked_add(8)?;
-            Entry { flags_at, key_at, lamports, data_at, data_len, rent_epoch }
+            Entry { marker: dup, flags_at, key_at, lamports, data_at, data_len, rent_epoch }
         } else {
             // A duplicate: the index, then seven bytes of padding, and nothing else.
             if dup as usize >= self.n_entries {
                 return None;
             }
-            let entry = *self.seen.get(dup as usize)?;
+            let mut entry = *self.seen.get(dup as usize)?;
+            // The marker belongs to this position, not to the account being duplicated — including
+            // when the entry it points at is itself a duplicate.
+            entry.marker = dup;
             if self.check_pinned {
                 self.check_zeros(off + 1, off + 8);
             }
@@ -425,6 +456,17 @@ impl<'a> AccountWalk<'a> {
     /// ~41 KB for a four-account region, so its constant is the whole cost of the zero-pinning. It
     /// cannot use a wider *load*: the run starts at an offset the format does not align and
     /// `#![forbid(unsafe_code)]` rules out the realignment that would need.
+    /// Records whether every byte of `input[from..to]` is 0 or 1.
+    fn check_bools(&mut self, from: usize, to: usize) {
+        if let Some(bytes) = self.input.get(from..to) {
+            for &b in bytes {
+                if b > 1 {
+                    self.pinned_invalid = true;
+                }
+            }
+        }
+    }
+
     fn check_zeros(&mut self, from: usize, to: usize) {
         if let Some(bytes) = self.input.get(from..to) {
             let mut acc = 0u8;
@@ -436,7 +478,7 @@ impl<'a> AccountWalk<'a> {
                 acc |= b;
             }
             if acc != 0 {
-                self.pinned_nonzero = true;
+                self.pinned_invalid = true;
             }
         }
     }
@@ -444,7 +486,7 @@ impl<'a> AccountWalk<'a> {
 
 /// Whether a serialized instruction region is the canonical aligned encoding — the entry-time
 /// refusal `decode_input` applies, and the reason every byte of an accepted region is either hashed
-/// by [`canonical_input_hash`] or pinned to zero here.
+/// by [`canonical_input_hash`] or pinned to a fixed value here.
 ///
 /// The unhashed bytes matter because the *program* can read them: `original_data_len`, the realloc
 /// headroom and the alignment padding are all inside the region `r1` points at, so a prover free to
@@ -458,6 +500,8 @@ impl<'a> AccountWalk<'a> {
 ///   is always the count the walk produced;
 /// * a non-zero byte in the `original_data_len` slot, the realloc headroom, the alignment padding,
 ///   or a duplicate entry's seven padding bytes;
+/// * a flag byte (`is_signer`, `is_writable`, `executable`) above 1 — the program reads the raw
+///   byte, the preimage hashes the normalised one, so the two are kept equal by refusing the rest;
 /// * an account list that does not walk to its own end (a truncated or self-contradictory entry);
 /// * a tail that is not exactly `u64 instruction_data_len ‖ instruction data ‖ program_id(32)`,
 ///   ending at the region's last byte — trailing bytes are readable by the program too.
@@ -468,7 +512,7 @@ pub fn check_region(input: &[u8]) -> Result<(), ParseError> {
     }
     while w.next().is_some() {}
     let end = w.end().ok_or(ParseError::MalformedRegion)?;
-    if w.pinned_nonzero {
+    if w.pinned_invalid {
         return Err(ParseError::MalformedRegion);
     }
     let n = usize::try_from(read_u64(input, end).ok_or(ParseError::MalformedRegion)?)
@@ -505,8 +549,9 @@ fn entry_data<'a>(input: &'a [u8], e: &Entry) -> &'a [u8] {
     e.data_at.checked_add(e.data_len).and_then(|end| input.get(e.data_at..end)).unwrap_or(&[])
 }
 
-/// An entry's three flag bytes, normalised to 0 or 1 — the region's own bytes are prover-supplied
-/// and a serialized `true` is any non-zero value to `deserialize`'s `!= 0`.
+/// An entry's three flag bytes, normalised to 0 or 1 — `deserialize` reads them as `!= 0`, and this
+/// keeps the digest total over a region nobody checked. For an *accepted* region the normalised
+/// byte equals the raw one, because [`check_region`] refuses a flag byte above 1.
 fn entry_flags(input: &[u8], e: &Entry) -> [u8; 3] {
     let mut f = [0u8; 3];
     for (i, slot) in f.iter_mut().enumerate() {
@@ -555,10 +600,15 @@ pub fn output_hash<H: Host>(h: &mut H, input: &[u8]) -> [u8; 32] {
 ///
 /// ```text
 /// program_id(32) ‖ u64 n_accounts
-///   per entry, in entry order: key(32) ‖ owner(32) ‖ u64 lamports ‖ u64 data_len ‖ data
-///                              ‖ is_signer ‖ is_writable ‖ executable ‖ u64 rent_epoch
+///   per entry, in entry order: marker(1) ‖ key(32) ‖ owner(32) ‖ u64 lamports ‖ u64 data_len
+///                              ‖ data ‖ is_signer ‖ is_writable ‖ executable ‖ u64 rent_epoch
 /// ‖ u64 instruction_data_len ‖ instruction data
 /// ```
+///
+/// `marker` is the byte the entry physically carries — `0xff` for a full entry, the duplicated
+/// entry's ordinal for a duplicate — so the *shape* of the account list is bound, not just its
+/// contents: two entries that resolve to the same account fields alias one buffer if the second is
+/// a duplicate and two buffers if it is not, and the program can tell.
 ///
 /// The aligned region leaves [`MAX_PERMITTED_DATA_INCREASE`] = 10 240 bytes of realloc headroom
 /// after every account's data; for the SPL Token `Transfer` fixture that is 40 960 of 41 825 bytes,
@@ -572,9 +622,10 @@ pub fn output_hash<H: Host>(h: &mut H, input: &[u8]) -> [u8; 32] {
 /// count, never a clamped one: a region claiming more than [`MAX_ACCOUNTS`] is refused outright by
 /// [`check_region`], so the count in the preimage is always the count the walk produced.
 ///
-/// Together with [`check_region`]'s zero-pinning, every byte of an accepted region is either in
-/// this preimage or provably zero — including `rent_epoch`, which a running program reads through
-/// its `AccountInfo` and which nothing else binds.
+/// Together with [`check_region`]'s pinning, every byte of an accepted region is either in this
+/// preimage or provably a fixed value — including `rent_epoch`, which a running program reads
+/// through its `AccountInfo` and which nothing else binds. The three flag bytes are hashed
+/// normalised to 0/1, which loses nothing because [`check_region`] refuses any other value.
 ///
 /// The walk is [`output_hash`]'s, entry for entry, so the two digests can never disagree about
 /// which account a duplicate entry means.
@@ -584,6 +635,7 @@ pub fn canonical_input_hash<H: Host>(h: &mut H, input: &[u8], program_id: &[u8; 
     let (mut w, n_accounts) = AccountWalk::new(input);
     s.update(h, &n_accounts.to_le_bytes());
     while let Some(e) = w.next() {
+        s.update(h, &[e.marker]);
         s.update(h, entry_key_owner(input, &e));
         s.update(h, &e.lamports.to_le_bytes());
         s.update(h, &(e.data_len as u64).to_le_bytes());

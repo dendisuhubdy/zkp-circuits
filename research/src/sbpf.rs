@@ -197,6 +197,14 @@ pub fn deserialize_accounts(input: &[u8]) -> Vec<Account> {
 
 /// [`deserialize_accounts`], or `None` if the region does not parse.
 pub fn try_deserialize_accounts(input: &[u8]) -> Option<Vec<Account>> {
+    Some(try_deserialize_entries(input)?.into_iter().map(|(_, a)| a).collect())
+}
+
+/// [`try_deserialize_accounts`] plus the byte each entry physically carries — [`NON_DUP_MARKER`]
+/// for a full entry, the duplicated entry's ordinal for a duplicate. The canonical preimage hashes
+/// it, because the shape of the account list is something the program can observe (a duplicate
+/// aliases one buffer; a repeated full entry is two).
+pub fn try_deserialize_entries(input: &[u8]) -> Option<Vec<(u8, Account)>> {
     let claimed = u64::from_le_bytes(input.get(0..8)?.try_into().ok()?);
     // The guest refuses a count above its `MAX_ACCOUNTS` rather than clamping it
     // (`sbpf_core::abi::check_region`), so the host must refuse it too or the two would disagree
@@ -205,7 +213,7 @@ pub fn try_deserialize_accounts(input: &[u8]) -> Option<Vec<Account>> {
         return None;
     }
     let n = claimed as usize;
-    let mut out: Vec<Account> = Vec::with_capacity(n);
+    let mut out: Vec<(u8, Account)> = Vec::with_capacity(n);
     let mut off = 8usize;
     for _ in 0..n {
         let dup = *input.get(off)?;
@@ -215,9 +223,15 @@ pub fn try_deserialize_accounts(input: &[u8]) -> Option<Vec<Account>> {
             if input.get(off + 1..off + 8)?.iter().any(|&b| b != 0) {
                 return None;
             }
-            out.push(out.get(dup as usize)?.clone());
+            let account = out.get(dup as usize)?.1.clone();
+            out.push((dup, account));
             off += 8;
             continue;
+        }
+        // The flag bytes are booleans: the guest refuses anything but 0 or 1, because the program
+        // reads the raw byte while the digest hashes the normalised one.
+        if input.get(off + 1..off + 4)?.iter().any(|&b| b > 1) {
+            return None;
         }
         let is_signer = *input.get(off + 1)? != 0;
         let is_writable = *input.get(off + 2)? != 0;
@@ -242,16 +256,19 @@ pub fn try_deserialize_accounts(input: &[u8]) -> Option<Vec<Account>> {
         {
             return None;
         }
-        out.push(Account {
-            key,
-            owner,
-            lamports,
-            data,
-            is_signer,
-            is_writable,
-            executable,
-            rent_epoch,
-        });
+        out.push((
+            NON_DUP_MARKER,
+            Account {
+                key,
+                owner,
+                lamports,
+                data,
+                is_signer,
+                is_writable,
+                executable,
+                rent_epoch,
+            },
+        ));
         off = after + 8;
     }
     Some(out)
@@ -365,8 +382,8 @@ fn pack_bytes(bytes: &[u8]) -> Vec<u32> {
 ///
 /// ```text
 /// program_id(32) ‖ u64 n_accounts
-///   per entry, in entry order: key(32) ‖ owner(32) ‖ u64 lamports ‖ u64 data_len ‖ data
-///                              ‖ is_signer ‖ is_writable ‖ executable ‖ u64 rent_epoch
+///   per entry, in entry order: marker(1) ‖ key(32) ‖ owner(32) ‖ u64 lamports ‖ u64 data_len
+///                              ‖ data ‖ is_signer ‖ is_writable ‖ executable ‖ u64 rent_epoch
 /// ‖ u64 instruction_data_len ‖ instruction data
 /// ```
 ///
@@ -385,7 +402,7 @@ pub fn canonical_preimage(input: &[u8]) -> Vec<u8> {
 /// an account list that does not walk to its own end, or a tail that is not exactly
 /// `instruction_data_len ‖ instruction data ‖ program_id` ending at the region's last byte.
 pub fn try_canonical_preimage(input: &[u8]) -> Option<Vec<u8>> {
-    let accounts = try_deserialize_accounts(input)?;
+    let entries = try_deserialize_entries(input)?;
     // Safe now that the accounts walked: `accounts_span` re-walks the same entries.
     let end = accounts_span(input);
     let len_bytes = input.get(end..end.checked_add(8)?)?;
@@ -400,8 +417,9 @@ pub fn try_canonical_preimage(input: &[u8]) -> Option<Vec<u8>> {
 
     let mut out = Vec::new();
     out.extend_from_slice(program_id);
-    out.extend_from_slice(&(accounts.len() as u64).to_le_bytes());
-    for a in &accounts {
+    out.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+    for (marker, a) in &entries {
+        out.push(*marker);
         out.extend_from_slice(&a.key);
         out.extend_from_slice(&a.owner);
         out.extend_from_slice(&a.lamports.to_le_bytes());

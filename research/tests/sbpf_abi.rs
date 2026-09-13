@@ -364,7 +364,7 @@ fn canonical_input_hash_walks_duplicates_exactly_as_output_hash_does() {
         // length is the sum over *entries*, not over distinct accounts.
         let want: usize = 32
             + 8
-            + shape.iter().map(|x| 32 + 32 + 8 + 8 + x.data.len() + 3 + 8).sum::<usize>()
+            + shape.iter().map(|x| 1 + 32 + 32 + 8 + 8 + x.data.len() + 3 + 8).sum::<usize>()
             + 8
             + 7;
         assert_eq!(sbpf::canonical_preimage(&buf).len(), want);
@@ -471,6 +471,16 @@ fn a_region_with_a_non_zero_pinned_byte_is_refused_by_guest_and_host() {
             b[dup_at + 3] = 1;
             b
         }),
+        ("a flag byte above 1", {
+            let mut b = base.clone();
+            b[9] = 2; // is_signer
+            b
+        }),
+        ("the executable flag above 1", {
+            let mut b = base.clone();
+            b[11] = 3;
+            b
+        }),
         ("a byte past the program id", {
             let mut b = base.clone();
             b.push(0);
@@ -495,6 +505,70 @@ fn a_region_with_a_non_zero_pinned_byte_is_refused_by_guest_and_host() {
         let z = [0u8; 32];
         assert_eq!(out, abi::public_output(&mut HostRef, 2, &z, &z), "{what}");
     }
+}
+
+/// The *shape* of the account list is bound, not just its contents: a duplicate entry aliases the
+/// buffer it duplicates, a repeated full entry does not, and the program can tell the two apart. So
+/// two regions whose accounts deserialize identically must still hash differently when their entry
+/// markers differ — which is what hashing the raw marker byte per entry buys.
+#[test]
+fn a_duplicate_entry_and_a_repeated_full_entry_are_different_calls() {
+    let mut h = HostRef;
+    let a = account(5, 4);
+    let id = [7u8; 32];
+    // `serialize_aligned` deduplicates by key, so `[a, a]` is a full entry then a duplicate of it.
+    let with_dup = sbpf::serialize_aligned(&[a.clone(), a.clone()], b"ix", &id);
+    // The same two accounts as two *full* entries: serialize them with distinct keys, then patch
+    // the second entry's fields back so every account field matches the duplicate region's.
+    let mut two_full = sbpf::serialize_aligned(&[a.clone(), account(6, 4)], b"ix", &id);
+    let off1 = ((8 + 88 + a.data.len() + MAX_PERMITTED_DATA_INCREASE + 7) & !7) + 8;
+    assert_eq!(two_full[off1], 0xff, "the second entry must be a full one");
+    two_full[off1 + 8..off1 + 40].copy_from_slice(&a.key);
+    two_full[off1 + 40..off1 + 72].copy_from_slice(&a.owner);
+    two_full[off1 + 72..off1 + 80].copy_from_slice(&a.lamports.to_le_bytes());
+    two_full[off1 + 88..off1 + 88 + a.data.len()].copy_from_slice(&a.data);
+    two_full[off1 + 1] = u8::from(a.is_signer);
+    two_full[off1 + 2] = u8::from(a.is_writable);
+    two_full[off1 + 3] = u8::from(a.executable);
+
+    // Both are canonical, and both deserialize to the same two accounts…
+    assert_eq!(abi::check_region(&with_dup), Ok(()));
+    assert_eq!(abi::check_region(&two_full), Ok(()));
+    assert_eq!(
+        sbpf::deserialize_accounts(&with_dup),
+        sbpf::deserialize_accounts(&two_full),
+        "the fixture only proves something if the account fields match"
+    );
+    // …but they are not the same call, on the guest or on the host.
+    assert_ne!(
+        abi::canonical_input_hash(&mut h, &with_dup, &id),
+        abi::canonical_input_hash(&mut h, &two_full, &id),
+    );
+    assert_ne!(
+        sbpf::canonical_input_hash_of(&with_dup),
+        sbpf::canonical_input_hash_of(&two_full),
+    );
+    // The markers are what differ, and the host twin reports them.
+    let markers = |r: &[u8]| {
+        sbpf::try_deserialize_entries(r).unwrap().iter().map(|(m, _)| *m).collect::<Vec<u8>>()
+    };
+    assert_eq!(markers(&with_dup), vec![0xff, 0]);
+    assert_eq!(markers(&two_full), vec![0xff, 0xff]);
+
+    // And a duplicate *of a duplicate* is a third shape: `serialize_aligned` points every duplicate
+    // at the first entry with that key, so `[A, A, A]`'s last marker is 0; pointing it at entry 1
+    // instead resolves to the same account through a different chain, and is not the same region.
+    let mut chain = sbpf::serialize_aligned(&[a.clone(), a.clone(), a.clone()], b"ix", &id);
+    let last = chain.len() - 32 - 2 - 8 - 8;
+    assert_eq!(chain[last], 0, "the third entry duplicates the first");
+    let via_first = abi::canonical_input_hash(&mut h, &chain, &id);
+    assert_eq!(via_first, sbpf::canonical_input_hash_of(&chain));
+    chain[last] = 1;
+    assert_eq!(abi::check_region(&chain), Ok(()));
+    let via_second = abi::canonical_input_hash(&mut h, &chain, &id);
+    assert_eq!(sbpf::deserialize_accounts(&chain), vec![a.clone(), a.clone(), a.clone()]);
+    assert_ne!(via_first, via_second);
+    assert_eq!(via_second, sbpf::canonical_input_hash_of(&chain));
 }
 
 /// An account count above `MAX_ACCOUNTS` is refused, never clamped: clamping made a region claiming
@@ -934,14 +1008,14 @@ fn canonical_input_hash_is_the_unpadded_encoding_and_is_two_orders_smaller() {
     };
     let call = spl_transfer(250);
     let pre = canonical_preimage(&call.input);
-    // program id, u64 n_accounts, then per account key‖owner‖lamports‖data_len‖data‖3 flag bytes,
-    // then u64 instruction_data_len ‖ instruction data.
+    // program id, u64 n_accounts, then per entry marker‖key‖owner‖lamports‖data_len‖data‖3 flag
+    // bytes‖rent_epoch, then u64 instruction_data_len ‖ instruction data.
     assert_eq!(&pre[..32], &SPL_TOKEN_ID[..]);
     let accounts = deserialize_accounts(&call.input);
     assert_eq!(u64::from_le_bytes(pre[32..40].try_into().unwrap()), accounts.len() as u64);
     let want: usize = 32
         + 8
-        + accounts.iter().map(|a| 32 + 32 + 8 + 8 + a.data.len() + 3 + 8).sum::<usize>()
+        + accounts.iter().map(|a| 1 + 32 + 32 + 8 + 8 + a.data.len() + 3 + 8).sum::<usize>()
         + 8
         + call_instruction_data_len(&call.input);
     assert_eq!(pre.len(), want);

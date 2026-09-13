@@ -837,7 +837,7 @@ fn measure_production_profile_evm_erc20_transfer() {
 // **Superseded by the public input segment (constraint set 6), which took remedy (B) below.** The
 // ELF is now the *public* input vector, so `H_PUB` binds it and the guest neither carries it on the
 // private tape nor hashes it, and `input_hash` is over the canonical unpadded encoding rather than
-// the aligned region: 1 753 945 cycles became **690 908** and 2 368 SHA-256 compressions became
+// the aligned region: 1 753 945 cycles became **694 498** and 2 368 SHA-256 compressions became
 // **30**, which fits `Tier(20)`. The proof itself, the tier it lands at and the fate of the
 // `#[ignore]`d test below are the next task's measurement; everything from here down is M4.4's
 // record of *why* the segment exists, kept because it is the decision record.
@@ -918,7 +918,7 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
 
     let compressions = exec.events.iter().filter(|e| e.sha256_row.is_some()).count();
     // A pure function of the *canonical* encoding's length, which is what the public segment bought:
-    // 14 compressions over the 833-byte canonical `input_hash` preimage, plus the pre- and
+    // 14 compressions over the 837-byte canonical `input_hash` preimage, plus the pre- and
     // post-state account walks (8 each). The 1 698 for `program_hash` are gone entirely — the ELF is
     // public, so `H_PUB` binds it — and the 654 over the aligned region (98 % realloc padding) are
     // the 14.
@@ -935,12 +935,13 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
     // took the realloc padding out of the hashing, so the guest now **fits `Tier(20)`** and the
     // tripwire moves down a tier: the day it fits `Tier(18)`, re-measure and re-tier the proof.
     //
-    // Of the 690 908, ~116 000 are `check_region`'s zero-scan over the 40 972 bytes the canonical
-    // encoding no longer hashes (~2.8 cycles a byte). That is the price of binding them by pinning
-    // rather than by hashing — a sixth of what hashing them cost.
+    // Of the 694 498, ~116 000 are `check_region`'s scan over the 40 972 bytes the canonical
+    // encoding does not hash — pinned to zero there, along with the flag bytes pinned to {0, 1} —
+    // at ~2.8 cycles a byte. That is the price of binding them by pinning rather than by hashing: a
+    // sixth of what hashing them cost.
     assert!(
         exec.cycles() <= 720_000,
-        "{} cycles, was 690 908 when the public segment landed (1 753 945 before it)",
+        "{} cycles, was 694 498 when the public segment landed (1 753 945 before it)",
         exec.cycles()
     );
     assert!(

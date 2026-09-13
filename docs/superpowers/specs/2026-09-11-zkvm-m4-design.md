@@ -584,24 +584,33 @@ The guest stops carrying the ELF privately and stops hashing it.
 | `program_id` | 32 | |
 | `n_accounts` | 8 | little-endian `u64`, the count the walk actually used (clamped at `MAX_ACCOUNTS`) |
 | per account entry, in entry order — a duplicate entry re-encodes in full the account it duplicates, at the position it occupies, the same walk `output_hash` does: | | |
+| `marker` | 1 | the byte the entry physically carries: `0xff` for a full entry, the duplicated entry's ordinal for a duplicate. It binds the *shape* of the list: a duplicate aliases one buffer where a repeated full entry is two, and the program can tell |
 | `key` | 32 | |
 | `owner` | 32 | |
 | `lamports` | 8 | little-endian `u64` |
 | `data_len` | 8 | little-endian `u64` |
 | `data` | `data_len` | exactly — no realloc padding, no 8-byte alignment padding |
-| `is_signer`, `is_writable`, `executable` | 1 each | 0 or 1 |
+| `is_signer`, `is_writable`, `executable` | 1 each | 0 or 1 — **pinned**: a region with a flag byte above 1 is refused, so the normalised byte hashed here always equals the raw byte the program reads |
 | `rent_epoch` | 8 | little-endian `u64` — a running program reads it through its `AccountInfo`, so the digest binds it |
 | `instruction_data_len` | 8 | little-endian `u64` |
 | instruction data | `instruction_data_len` | |
 
-  **Every byte of the region is either in this preimage or pinned to zero.** The bytes the encoding
-  omits — the `original_data_len` slot, the 10 240-byte realloc headroom, the 8-byte alignment
-  padding, a duplicate entry's seven padding bytes, and anything after the trailing `program_id` —
-  are all inside the region `r1` points at and therefore readable by the running program, so leaving
-  them merely unhashed would let a prover vary them while the verifier's recomputed `input_hash`
-  still matched. The Solana runtime writes zeros there, so the guest **refuses** a region with a
-  non-zero byte in any of them, exactly as it refuses any other malformed input (status 2,
-  `ParseError::MalformedRegion`; `sbpf_core::abi::check_region`). For the same reason `n_accounts`
+  **Every byte of the region is either in this preimage or pinned to a fixed value.** The bytes the
+  encoding omits — the `original_data_len` slot, the 10 240-byte realloc headroom, the 8-byte
+  alignment padding, a duplicate entry's seven padding bytes, and anything after the trailing
+  `program_id` — are all inside the region `r1` points at and therefore readable by the running
+  program, so leaving them merely unhashed would let a prover vary them while the verifier's
+  recomputed `input_hash` still matched. The Solana runtime writes zeros there, so the guest
+  **refuses** a region with a non-zero byte in any of them, exactly as it refuses any other
+  malformed input (status 2, `ParseError::MalformedRegion`; `sbpf_core::abi::check_region`).
+  Pinning the `original_data_len` slot is right for an *input* region specifically: agave's aligned
+  serializer writes four zero bytes there, and it is the program-side entrypoint deserializer that
+  later stores `original_data_len` into that slot, inside the guest's own memory and after the
+  digest is taken.
+  The same rule covers the two fields that are *not* padding but were unbound: the flag bytes are
+  pinned to `{0, 1}` (refused otherwise) so that hashing the normalised value loses nothing, and the
+  per-entry marker byte is hashed rather than pinned, because it is the one byte of the region whose
+  legitimate values carry meaning. For the same reason `n_accounts`
   is the region's **exact** `u64` count and a region claiming more than `MAX_ACCOUNTS` is refused
   rather than clamped — a clamped count would make a region claiming 64 and one claiming 2^40 hash
   identically.
@@ -611,7 +620,7 @@ The guest stops carrying the ELF privately and stops hashing it.
   prefixes the concatenation is ambiguous between different account splits, and without the
   instruction data `input_hash` would not bind the instruction at all (for the exit fixture, not the
   transferred amount). Expected saving, per `docs/04-guests.md`: the fixture's 41 825-byte aligned
-  region (654 compressions, 640 of them hashing nothing but zeros) becomes 833 bytes, 14
+  region (654 compressions, 640 of them hashing nothing but zeros) becomes 837 bytes, 14
   compressions (measured) — **~290 K cycles**, against which the entry-time zero-check over the
   40 960 bytes the encoding no longer hashes is a byte-at-a-time scan, not a hash.
 * **The EVM guest (M4.3) is not changed by this plan.** It may adopt the public segment later — a
