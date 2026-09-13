@@ -37,7 +37,11 @@ are `docs/01–06`; the README has the reading order.
   M4.4's exit test, which **does not pass**: the guest is correct but takes
   1 753 945 cycles against `Tier(20)`'s 1 048 575 budget. Its ignore message
   carries the measurement and `docs/04-guests.md` the breakdown; do not treat
-  it as a flake to retry.
+  it as a flake to retry, and do not "fix" it by declaring `program_hash`
+  rather than computing it — `H_IN` is hiding, so a digest the guest does not
+  recompute is bound to nothing (`docs/03-privacy.md`). The two sound
+  remedies, and which one buys tier 18, are in `docs/04-guests.md` and the
+  design spec's §5.1 item 8.
   All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a
   keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with
   a batch's column count, so carrying it costs ~1.91 MB at the production

@@ -572,24 +572,39 @@ fn a_hash_call_whose_addresses_straddle_2_to_the_30_proves() {
 // cycles**, and the largest tier this machine has is 20, whose budget is 1 048 575
 // (`machine::TIERS`). The M4.4 plan requires tier ≤ 18 (262 143).
 //
-// The cause is one of the plan's own rulings, and it is structural rather than a matter of tuning
-// (measured breakdown in `docs/04-guests.md`):
+// Measured breakdown (`docs/04-guests.md`, from a pc histogram over the guest's symbols): SHA-256
+// 1 066 950 cycles (60.8 %), the input tape plus the interpreter 600 725 (34.2 %), the stack/heap
+// zeroing 51 535 (2.9 %), `elf::load` ~22 000 (1.3 %). The 2 368 compressions decompose exactly:
 //
-// * `program_hash = sha256(elf bytes)` is computed **inside the guest**, over all 108 600 bytes of
-//   the committed ELF. That is 1 698 of the 2 368 compressions (72 %) and 27 151 of the 37 609 input
-//   words (72 %) — about 1.20 M of the 1.75 M cycles — spent on a program the run otherwise reads a
-//   few thousand bytes of. The plan anticipated exactly this ("the ELF's ~1 600 compressions
-//   dominate the row count … a follow-up may bind the program by a cached digest instead") but still
-//   made tier ≤ 18 an exit criterion; for a 108 KB program the two cannot both hold.
-// * `input_hash` is over the *aligned* region, which is 40 960 of its 41 825 bytes of
-//   `MAX_PERMITTED_DATA_INCREASE` realloc padding — 98 % zeros. 640 of its 654 compressions hash
-//   nothing but those zeros.
+// * **1 698 for `program_hash` = sha256(elf bytes)** over all 108 600 committed bytes. The ELF is
+//   also 27 151 of the 37 609 input words, so carrying it and hashing it is ~1.20 M of the 1.75 M —
+//   spent on a program the run otherwise reads a few thousand bytes of and executes 143 instructions
+//   from.
+// * 654 for `input_hash` over the *aligned* region, of which 40 960 of 41 825 bytes are
+//   `MAX_PERMITTED_DATA_INCREASE` realloc padding — 98 % zeros, so 640 of those compressions hash
+//   nothing else.
+// * 8 + 8 for the pre- and post-state account walks.
 //
-// Together those two account for ~1.5 M of the 1.75 M. Neither can be fixed inside Task 6's remit:
-// the first needs the public-output ruling changed (a declared or cached program digest), the second
-// needs `input_hash` taken over a canonical unpadded encoding of the instruction. With both, the
-// remaining work is ~250 k cycles, i.e. tier 18 — which is the recommendation this task's report
-// carries.
+// **The obvious fix is unsound, so do not try it.** Declaring `program_hash` instead of recomputing
+// it does not work: `H_IN` is salted and *hiding* (M4.1, `docs/03-privacy.md`), so a verifier cannot
+// check a claimed digest of the input words against it, and a `program_hash` the guest does not
+// recompute is bound to nothing at all — a prover could run any ELF under a fresh salt and declare
+// the SPL Token hash. The in-circuit hashing *is* the binding.
+//
+// The two sound paths both reach past this file (design spec §5.1 item 8 is the decision record):
+//
+// * **(A)** bake the ELF into the guest's **data segment**, so `hc` binds it — the image container
+//   `Program::from_flat_image` makes the data part of `Program::words`. Estimated ~72-76 K prologue
+//   words for ~27 150 data words, minus the ELF's compressions and input words: ~0.6 M cycles, i.e.
+//   **tier 20**, provable only on much larger hardware, and one committed binary per Solana program.
+//   Note it is also ~20 % over the loaders' 65 535-word program cap (`HASH_LEFT` is 16 bits) until
+//   the prologue's repeated `lui` half is deduped.
+// * **(B)** a **public, unsalted** segment in the input commitment, so a declared digest becomes
+//   checkable: the guest hashes nothing and the run reaches **tier 18** — a constraint-set change
+//   with its own spec addendum and plan, whose price is that the ELF words become public.
+//
+// `input_hash` over a canonical unpadded encoding (~290 K cycles) is legitimate and is deferred into
+// the same follow-up, because it changes the same binding "Public output" ruling.
 
 /// M4.4's exit test, the executor half — this one passes. The compiled sBPF guest runs an SPL Token
 /// `Transfer` over the ELF fetched from the live program account, and the eight public output words
@@ -689,11 +704,15 @@ fn compiled_sbpf_spl_token_transfer_of_too_much_fails_cleanly() {
 ///
 /// `#[ignore]`d because it cannot pass on this machine — see the comment above
 /// `compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest` for the measured
-/// reason and what has to change. It is written out in full so that the moment a declared program
-/// digest or a canonical instruction encoding lands, un-ignoring this is the whole of the work.
+/// reason and the two sound remedies. It is written out in full so that the moment the ELF moves
+/// into the guest's data segment, or the input commitment gains a public segment, un-ignoring this
+/// is the whole of the work.
 #[test]
-#[ignore = "1 753 945 cycles: above Tier(20)'s 1 048 575 budget, let alone the plan's tier 18 — \
-            72 % of it is program_hash over the 108 600-byte ELF (docs/04-guests.md)"]
+#[ignore = "1 753 945 cycles: above Tier(20)'s 1 048 575 budget, let alone the plan's tier 18. \
+            72 % of it is program_hash over the 108 600-byte ELF, which cannot just be declared \
+            instead (H_IN is hiding, so a digest the guest does not recompute binds nothing). \
+            Needs the ELF in the guest's data segment (tier 20) or a public input segment \
+            (tier 18): docs/04-guests.md, design spec 5.1 item 8"]
 fn compiled_sbpf_spl_token_transfer_proves_and_verifies() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::compiled::sbpf();

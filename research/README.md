@@ -200,11 +200,15 @@ generating a bespoke circuit. Details, cycle-cost estimates, and what
 milestone 4 builds first: `docs/04-guests.md`.
 
 The Solana interpreter **runs** an SPL Token `Transfer` correctly in the
-machine's executor but does not yet **prove** it: 1 753 945 cycles against the
-largest tier's 1 048 575, 72 % of it spent hashing the 108 600-byte ELF
-in-circuit to produce `program_hash`. The fix is a ruling change, not
-optimisation — `docs/04-guests.md`'s "The `sbpf` guest" has the measured
-breakdown, and the design spec's §5.1 has the proposal.
+machine's executor but does not **prove** it: 1 753 945 cycles against the largest
+tier's 1 048 575, 72 % of it spent hashing the 108 600-byte ELF in-circuit to
+produce `program_hash`. That hashing cannot just be dropped — `H_IN` is hiding, so
+a digest the guest does not recompute is bound to nothing — and the two sound
+remedies both change more than the guest: baking the ELF into the guest's data
+segment so `hc` binds it (tier 20, and one binary per program), or a public input
+segment so a declared digest becomes checkable (tier 18, a constraint-set change).
+`docs/04-guests.md`'s "The `sbpf` guest" has the measured breakdown and both
+options; the design spec's §5.1 item 8 is the decision record.
 
 ## What leaks and what does not
 

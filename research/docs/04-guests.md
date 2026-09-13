@@ -266,24 +266,103 @@ count; a follow-up may bind the program by a cached digest instead") while also
 making tier ≤ 18 an exit criterion. For a 108 KB program those two cannot both hold,
 and no amount of guest-side care closes a 6.7× gap: the *floor* for reading 27 151
 words off the tape and compressing 1 698 blocks is several hundred thousand cycles
-even with one cycle per word and per byte. Two ruling changes would:
+even at one cycle per word and per byte.
 
-1. **Do not recompute `program_hash` in the guest.** It is a digest of a value the
-   verifier already has committed — `hc` binds the guest's own program, and the
-   ELF arrives through `H_IN`, so a *declared* `program_hash` checked against the
-   input commitment costs nothing in-circuit. Saves ~1.20 M cycles.
-2. **Hash a canonical instruction encoding, not the aligned region.** 40 960 of the
-   region's 41 825 bytes are `MAX_PERMITTED_DATA_INCREASE` realloc padding — 98 %
-   zeros — so 640 of `input_hash`'s 654 compressions hash nothing at all. Hashing
-   the accounts' real fields instead (which is what `output_hash` already does)
-   leaves ~14 blocks. Saves ~290 K cycles.
+### What does *not* work: declaring `program_hash` instead of computing it
 
-With both, the remaining work is ~250 K cycles: tier 18, as the plan asked. Neither
-is Task 6's to decide — both change the plan's "Public output" ruling — so
-`compiled_sbpf_spl_token_transfer_proves_and_verifies` is committed in full and
-`#[ignore]`d with the measurement in its ignore message, and the executor-level
-half of the exit test (which passes, and which checks the guest's eight output
-words against the native run byte for byte) is what pins the behaviour meanwhile.
+This was the first thing M4.4 proposed, and it is **unsound**. It is written down here
+because it is the obvious idea and the reason it fails is not obvious.
+
+`H_IN` has been **salted and hiding** since M4.1 (`docs/03-privacy.md`, "Private
+inputs are bound to `H_IN`"). The salt never leaves the prover and folds
+non-invertibly into the digest, precisely so that `H_IN` reveals nothing about the
+input words. That is also exactly why it cannot *check* anything about them: a
+verifier holding `H_IN` cannot test a claimed digest of the inputs against it. So a
+`program_hash` the guest does not recompute is bound to **nothing** — a prover could
+run any ELF at all, commit it under a fresh salt, and declare the SPL Token hash in
+the public output. The in-circuit recomputation is not redundancy with `H_IN`; it *is*
+the binding. Under the machine as it stands, an ELF that arrives as private input has
+to be hashed in-circuit for the output digest to mean anything.
+
+### The two sound paths, and what each costs
+
+**(A) Bake the ELF into the guest's data segment, so `hc` binds it.** The image
+container above makes a guest's data part of `Program::words`, and therefore part of
+`hc` — a binding the verifier already checks, with no salt and nothing prover-chosen,
+because the stored values are immediates in the prologue's own instructions. With the
+ELF in the data segment, `program_hash` need not be computed at all: `hc` says which
+program ran. The arithmetic, estimated from the breakdown above rather than measured:
+
+| | |
+|---|---|
+| ELF as data words | ~27 150 |
+| synthesised `li`/`sw` prologue, at the measured ~2.8 instructions per non-zero data word | ~**72–76 K program words**, and the same in cycles |
+| removed: the ELF's 1 698 compressions | ~−766 K cycles |
+| removed: the ELF's 27 151 input words | ~−430 K cycles |
+| estimated total | ~**0.6 M cycles — tier 20** |
+
+So A gets inside the machine's largest tier, and no further. A tier-20 batch still
+carrying a 466-column sha256 table is provable only on a machine far larger than the
+48 GB of the development hardware, so A converts "unprovable at any tier" into
+"provable on bigger iron" — worth having, but not the milestone's tier 18.
+
+**A does not fit today, for a second reason, and this is the part to check before
+committing to it.** A program is capped at **65 535 words** in *both* loaders
+(`LoadError::TooLong`), and the cap is not arbitrary: the program's word count is
+`HASH_LEFT` on the first digest row, a 16-bit value in the cpu AIR's `LEFT0..1` byte
+limbs, so a longer program cannot satisfy the constraints at any tier. A's prologue
+alone is ~72–76 K words, and with this guest's own 6 427 text words the image is
+~78–82 K — **over the cap by about 20 %**. Two things would have to happen together:
+the prologue lever the M4.4 plan noted but never needed (dedupe the `lui` half across
+consecutive data words, worth ~25 % of prologue words) brings it to ~60–63 K, which
+fits with only a couple of thousand words of margin; anything less, or a program much
+larger than SPL Token's 108 KB, needs `HASH_LEFT` widened, which is itself a
+constraint-set change. So A is not the "no machine change" option it looks like — it is
+a machine change deferred by one program size.
+
+A also makes the guest **program-specific**: one committed binary per Solana program,
+which is a real departure from this document's opening claim that publishing a contract
+means registering `hc` for the *interpreter* plus a commitment to the bytecode.
+
+**(B) Change the machine: a public, unsalted segment in the input commitment.** If the
+chain itself sees the ELF words — or hashes them natively, outside the guest — then a
+*declared* `program_hash` checked against that segment **is** sound, the guest hashes
+nothing, and the run lands at **tier 18** as the plan intends, with the chip still
+carrying `input_hash`, `output_hash` and any `sol_sha256` the program calls. This is a
+constraint-set change (a second input commitment or a split `H_IN`, new public values,
+verifier changes) with its own spec addendum and implementation plan; it is not an
+M4.4 edit. Its price is the mirror of its soundness: a public segment makes the ELF
+words public, so the program is no longer hidden — `docs/03-privacy.md`'s leak row
+goes from "bounds the size of the program that ran" to "publishes the program".
+
+**Deferred into the same follow-up:** `input_hash` over a **canonical, unpadded**
+encoding of the instruction (the accounts' real fields, as `output_hash` already does)
+rather than over the aligned region. 40 960 of the region's 41 825 bytes are
+`MAX_PERMITTED_DATA_INCREASE` realloc padding — 98 % zeros — so 640 of `input_hash`'s
+654 compressions hash nothing at all, and hashing the real fields instead leaves ~14
+blocks: ~290 K cycles. Cheap and legitimate, but it changes the same binding "Public
+output" ruling A and B do, so it is decided with them rather than slipped in.
+
+Until A or B is taken, `compiled_sbpf_spl_token_transfer_proves_and_verifies` is
+committed in full and `#[ignore]`d with the measurement in its ignore message, and the
+executor-level half of the exit test — which checks the guest's eight output words
+against the native run and tripwires in both directions on the cycle count — is what
+pins the behaviour. The design spec's §5.1 item 8 is the decision record.
+
+### Where M4's exit criterion actually stands
+
+"An ERC-20 `transfer` and an SPL `Transfer` each prove under `R_exec`" is met on
+neither side as an actually-produced proof on the development hardware, and for two
+different reasons:
+
+* **EVM (M4.3)** — the interpreter proves and verifies at **tier 16** for a storage
+  call through the same committed binary. The tier-18 ERC-20 `transfer` proof was
+  **not produced** here; the run did not complete on this machine. The path is
+  demonstrated; the specific exit artefact is outstanding for want of hardware.
+* **SPL (M4.4)** — the interpreter **runs** a real `Transfer` and binds its outputs,
+  and the eight public words match the native interpreter byte for byte. It is
+  **unprovable at any tier this machine has**, and no guest-side work changes that: it
+  needs A or B.
 
 Two smaller things the measurement bought, both fixed in `sbpf-core` and both worth
 knowing for any future guest on this target:
