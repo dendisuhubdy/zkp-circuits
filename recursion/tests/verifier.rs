@@ -83,7 +83,7 @@ fn the_host_transcript_replay_reproduces_machine_verifys_acceptance() {
     assert_eq!(r.betas.len(), shape.log_arities.len());
     assert_eq!(
         r.log_global_max_height,
-        shape.log_arities.iter().sum::<usize>() + 3 /* log_blowup */
+        shape.log_arities.iter().sum::<usize>() + recursion::shape::LOG_BLOWUP
     );
     // The replay is the transcript, so its zeta must also satisfy the quotient identity the
     // native verifier checked: accumulator * inv_vanishing == quotient, per instance.
@@ -121,7 +121,7 @@ fn the_program_reproduces_the_lookup_challenges_alpha_and_zeta() {
 fn a_tampered_lookup_terminal_is_refused_at_the_terminal_sum_checkpoint() {
     let (p, shape, key) = one_test_proof();
     let vp = verify_rv32(&shape, &key, Checkpoints::Off);
-    let mut tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
     let (_, start, len) = *tape
         .segments
         .iter()
@@ -141,7 +141,6 @@ fn a_tampered_lookup_terminal_is_refused_at_the_terminal_sum_checkpoint() {
         }
     }
     // And the untampered tape still runs, so the refusal is about the tamper.
-    tape.words[start] += F::ZERO;
     execute(&vp.program, &tape.words, 100_000_000).expect("the honest tape is accepted");
 }
 
@@ -253,27 +252,26 @@ fn the_query_segments_are_sized_by_the_round_geometry() {
     let seg = |s: recursion::witness::Segment| {
         tape.segments.iter().find(|(x, _, _)| *x == s).unwrap().2
     };
-    use recursion::witness::{levels_for, Segment};
+    use recursion::dsl::DIGEST_ELEMS;
+    use recursion::witness::{open_stride, path_stride, per_query_levels, per_query_rows, Segment};
 
     // `coms_to_verify`' five rounds: random, main, quotient_chunks, preprocessed, permutation.
     assert_eq!(r.input_rounds.len(), 5);
-    let per_query_rows: usize =
-        r.input_rounds.iter().flat_map(|g| g.dims.iter()).map(|d| d.width + 4).sum();
-    let per_query_levels: usize = r.input_rounds.iter().map(|g| levels_for(&g.dims)).sum();
-    assert_eq!(seg(Segment::InputOpenings), shape.num_queries * per_query_rows);
-    assert_eq!(seg(Segment::InputPaths), shape.num_queries * per_query_levels * 4);
+    let rows = per_query_rows(&r.input_rounds);
+    let levels = per_query_levels(&r.input_rounds);
+    assert_eq!(seg(Segment::InputOpenings), shape.num_queries * rows);
+    assert_eq!(seg(Segment::InputPaths), shape.num_queries * levels * DIGEST_ELEMS);
 
-    // The commit phase: `arity − 1` extension siblings a round, and one path per round.
-    // `arity − 1` extension siblings (two words each) plus the four salts of the query's own row.
-    let siblings: usize = r.log_arities.iter().map(|&a| ((1usize << a) - 1) * 2 + 4).sum();
-    assert_eq!(seg(Segment::CommitPhaseOpenings), shape.num_queries * siblings);
-    let mut log_current = r.log_global_max_height;
-    let mut commit_levels = 0usize;
-    for &a in &r.log_arities {
-        log_current -= a;
-        commit_levels += log_current.saturating_sub(2); // cap_height = 2
-    }
-    assert_eq!(seg(Segment::CommitPhasePaths), shape.num_queries * commit_levels * 4);
+    // The commit phase: `arity − 1` extension siblings (two words each) plus the four salts of the
+    // query's own row, and one path per round.
+    assert_eq!(
+        seg(Segment::CommitPhaseOpenings),
+        shape.num_queries * open_stride(&r.log_arities)
+    );
+    assert_eq!(
+        seg(Segment::CommitPhasePaths),
+        shape.num_queries * path_stride(r.log_global_max_height, &r.log_arities)
+    );
 }
 
 /// The strongest claim about the tape this task can make: the `CommitPhaseOpenings` and
@@ -308,14 +306,9 @@ fn a_commit_phase_leaf_and_its_restored_path_recompute_the_rounds_commitment() {
     // Round 0: the tallest commit-phase tree, and the first round of every query's stride.
     let log_arity = r.log_arities[0];
     let arity = 1usize << log_arity;
-    let levels = (r.log_global_max_height - log_arity) - 2 /* cap_height */;
-    let open_stride: usize = r.log_arities.iter().map(|&a| ((1usize << a) - 1) * 2 + 4).sum();
-    let mut path_stride = 0usize;
-    let mut h = r.log_global_max_height;
-    for &a in &r.log_arities {
-        h -= a;
-        path_stride += h.saturating_sub(2) * 4;
-    }
+    let levels = (r.log_global_max_height - log_arity) - recursion::shape::CAP_HEIGHT;
+    let open_stride = recursion::witness::open_stride(&r.log_arities);
+    let path_stride = recursion::witness::path_stride(r.log_global_max_height, &r.log_arities);
 
     let mut b = Builder::new(Checkpoints::Off);
     let mut want: Vec<F> = Vec::new();
@@ -325,8 +318,8 @@ fn a_commit_phase_leaf_and_its_restored_path_recompute_the_rounds_commitment() {
         let row: Vec<EF> = r.commit_rows[0][q][0].clone();
         assert_eq!(row.len(), arity);
         let mut msg: Vec<F> = <EF as BasedVectorSpace<F>>::flatten_to_base(row);
-        let salt_at = opens + q * open_stride + (arity - 1) * 2;
-        msg.extend_from_slice(&tape.words[salt_at..salt_at + 4]);
+        let salt_at = opens + q * open_stride + (arity - 1) * <EF as BasedVectorSpace<F>>::DIMENSION;
+        msg.extend_from_slice(&tape.words[salt_at..salt_at + recursion::witness::SALT_ELEMS]);
 
         let src = b.alloc(msg.len() as u64);
         for (i, v) in msg.iter().enumerate() {
@@ -397,7 +390,7 @@ fn an_input_rounds_leaf_group_and_restored_path_recompute_the_preprocessed_cap()
     // at. `sorted_by_key(Reverse(height))` is stable, so matrices of equal height keep dims order —
     // which is the order their rows sit in on the tape.
     let tallest = dims.iter().map(|d| d.height).max().unwrap();
-    let words_of = |m: usize| dims[m].width + 4; // the row and its four salts
+    let words_of = |m: usize| dims[m].width + recursion::witness::SALT_ELEMS;
     let offset_in_round = |m: usize| (0..m).map(words_of).sum::<usize>();
     let leaf_group: Vec<usize> = (0..dims.len()).filter(|&m| dims[m].height == tallest).collect();
     let short: Vec<usize> = (0..dims.len()).filter(|&m| dims[m].height != tallest).collect();
@@ -411,18 +404,14 @@ fn an_input_rounds_leaf_group_and_restored_path_recompute_the_preprocessed_cap()
     assert_eq!(short, vec![0, 1]);
     let short_cells: usize = short.iter().map(|&m| words_of(m)).sum();
 
-    let per_query_rows: usize =
-        r.input_rounds.iter().flat_map(|g| g.dims.iter()).map(|d| d.width + 4).sum();
-    let round_at = |q: usize| {
-        opens
-            + q * per_query_rows
-            + r.input_rounds[..PRE].iter().flat_map(|g| g.dims.iter()).map(|d| d.width + 4).sum::<usize>()
-    };
-    let per_query_levels: usize = r.input_rounds.iter().map(|g| levels_for(&g.dims)).sum();
+    use recursion::dsl::DIGEST_ELEMS;
+    use recursion::witness::{per_query_levels, per_query_rows};
+    let round_at =
+        |q: usize| opens + q * per_query_rows(&r.input_rounds) + per_query_rows(&r.input_rounds[..PRE]);
     let path_at = |q: usize| {
         paths
-            + q * per_query_levels * 4
-            + r.input_rounds[..PRE].iter().map(|g| levels_for(&g.dims)).sum::<usize>() * 4
+            + (q * per_query_levels(&r.input_rounds) + per_query_levels(&r.input_rounds[..PRE]))
+                * DIGEST_ELEMS
     };
 
     let mut b = Builder::new(Checkpoints::Off);

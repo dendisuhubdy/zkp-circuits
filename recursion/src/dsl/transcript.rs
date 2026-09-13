@@ -214,7 +214,7 @@ impl DslChallenger {
 
     /// One permutation of the sponge (`duplex_challenger.rs:88-114`).
     fn duplex(&mut self, b: &mut Builder) {
-        let buf: Vec<Felt> = self.buffered.drain(..).collect();
+        let buf: Vec<Felt> = std::mem::take(&mut self.buffered);
         let k = buf.len();
         for (i, v) in buf.into_iter().enumerate() {
             b.store(self.state, i as i64, v);

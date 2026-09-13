@@ -74,7 +74,7 @@ fn extension_instructions_match_binomial_extension_field() {
     ]);
     let e = execute(&p, &[], 1000).unwrap();
     let got: Vec<EF> =
-        e.public.chunks_exact(2).map(|c| EF::from_basis_coefficients_slice(c).unwrap()).collect();
+        e.public.as_chunks::<2>().0.iter().map(|c| EF::from_basis_coefficients_slice(c).unwrap()).collect();
     assert_eq!(got, vec![x + y, x - y, x * y, x * F::from_u64(7), x.inverse()]);
 }
 

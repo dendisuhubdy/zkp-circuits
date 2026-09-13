@@ -154,8 +154,8 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
     // level reads it from there and writes the next level's `left` back over it, so a level costs no
     // copy at all.
     b.copy_cells(st, 0, leaf.0, 0, DIGEST_ELEMS);
-    for l in 0..levels {
-        select_children(b, st, siblings, (l * DIGEST_ELEMS) as i64, index_bits[l]);
+    for (l, &bit) in index_bits.iter().enumerate().take(levels) {
+        select_children(b, st, siblings, (l * DIGEST_ELEMS) as i64, bit);
         b.poseidon2(st);
         for inj in injections.iter().filter(|i| i.after_level == l) {
             // `sponge` needs the eight lanes, so the running digest steps aside into the first

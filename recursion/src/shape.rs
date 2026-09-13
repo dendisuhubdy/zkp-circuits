@@ -112,6 +112,12 @@ pub enum ShapeError {
     /// The machine's preprocessed commitment is not a four-digest cap, so this crate's
     /// `CAP_HEIGHT` no longer matches `research`'s.
     CapShape(usize),
+    /// The derived FRI schedule does not roll in every distinct input height, so it is not the
+    /// schedule `p3_fri::prover::commit_phase` would build for these degree bits — and a program
+    /// built from it would read a commit-phase round the proof does not have. A shape error rather
+    /// than an assertion because [`InnerShape::try_of`] is the fallible entry a node calls with
+    /// numbers it did not choose.
+    FriSchedule { rolled_in: usize, heights: usize },
 }
 
 impl InnerShape {
@@ -238,7 +244,7 @@ impl InnerShape {
             })
             .collect();
 
-        let log_arities = fri_schedule(&degree_bits);
+        let log_arities = fri_schedule(&degree_bits)?;
 
         Ok(InnerShape {
             tier: tier.0,
@@ -366,7 +372,7 @@ pub(crate) fn proof_log_arities(proof: &Proof) -> Vec<usize> {
 /// at the distinct input log-heights `degree_bits[i] + LOG_BLOWUP`, descending, and each round folds
 /// by `compute_log_arity_for_round(current, next_input, final, max)` — the very function the prover
 /// calls, so this is the reference schedule and not a second guess at it.
-fn fri_schedule(degree_bits: &[usize]) -> Vec<usize> {
+fn fri_schedule(degree_bits: &[usize]) -> Result<Vec<usize>, ShapeError> {
     let mut heights: Vec<usize> = degree_bits.iter().map(|d| d + LOG_BLOWUP).collect();
     heights.sort_unstable_by(|a, b| b.cmp(a));
     heights.dedup();
@@ -388,8 +394,10 @@ fn fri_schedule(degree_bits: &[usize]) -> Vec<usize> {
             next += 1;
         }
     }
-    assert_eq!(next, heights.len(), "every input height is rolled in by the schedule");
-    out
+    if next != heights.len() {
+        return Err(ShapeError::FriSchedule { rolled_in: next, heights: heights.len() });
+    }
+    Ok(out)
 }
 
 impl InnerKey {

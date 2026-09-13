@@ -47,9 +47,17 @@ fn cache_path(profile: FriProfile, k: usize) -> std::path::PathBuf {
 }
 
 /// The cached `(hc, proof)` pair, or `None` when there is no usable file. A file that fails to
-/// decode is treated as absent rather than as an error: the encoding is `postcard` over a type
-/// this repository changes, so a stale cache must never be a test failure.
-fn load_cached(profile: FriProfile, k: usize) -> Option<BundleProof> {
+/// decode — *or that no longer verifies* — is treated as absent rather than as an error: the
+/// encoding is `postcard` over a type this repository changes, so a stale cache must never be a test
+/// failure, it must be a reprove.
+///
+/// The re-verification is the point of doing it here rather than only on the proving path
+/// (`bundle_proofs` already asserts it for a freshly proved one). Every test in this crate is a
+/// differential claim against `Machine::verify`, so a cached proof that the *current* machine
+/// refuses would make every one of them vacuous — and the cache lives under `target/`, across
+/// commits that change the constraint set or the profile. It costs ~0.2 s per proof against the
+/// tens of seconds a reprove costs.
+fn load_cached(m: &Machine, profile: FriProfile, k: usize) -> Option<BundleProof> {
     let bytes = std::fs::read(cache_path(profile, k)).ok()?;
     if bytes.len() < 32 {
         return None;
@@ -59,6 +67,7 @@ fn load_cached(profile: FriProfile, k: usize) -> Option<BundleProof> {
         *w = u32::from_le_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap());
     }
     let proof: Proof = postcard::from_bytes(&bytes[32..]).ok()?;
+    m.verify(&hc, &proof).ok()?;
     Some(BundleProof { proof, hc })
 }
 
@@ -78,7 +87,7 @@ pub fn bundle_proofs(profile: FriProfile, n: usize) -> Vec<BundleProof> {
     let m = Machine::new(profile);
     (0..n)
         .map(|k| {
-            if let Some(p) = load_cached(profile, k) {
+            if let Some(p) = load_cached(&m, profile, k) {
                 return p;
             }
             let (alice, bob, bridge) = (Party::new(), Party::new(), Party::new());

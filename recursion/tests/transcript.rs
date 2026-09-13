@@ -296,15 +296,15 @@ fn observe_digest_and_observe_cap_match_p3_challengers_digest_and_cap_absorbs() 
     let mut b = Builder::new(Checkpoints::Off);
     let mut ch = DslChallenger::new(&mut b);
     let dp = recursion::dsl::Digest(b.alloc(4));
-    for k in 0..4 {
-        let h = b.constant(d[k]);
+    for (k, v) in d.iter().enumerate() {
+        let h = b.constant(*v);
         b.store(dp.0, k as i64, h);
     }
     ch.observe_digest(&mut b, dp);
     let capp: [recursion::dsl::Digest; 4] = core::array::from_fn(|j| {
         let p = recursion::dsl::Digest(b.alloc(4));
-        for k in 0..4 {
-            let h = b.constant(cap_digests[j][k]);
+        for (k, v) in cap_digests[j].iter().enumerate() {
+            let h = b.constant(*v);
             b.store(p.0, k as i64, h);
         }
         p
@@ -405,8 +405,8 @@ fn a_restored_merkle_path_verifies_in_the_dsl_exactly_where_p3_verifies_it() {
 
         let sib = b.alloc((paths[q].siblings.len() * 4) as u64);
         for (l, s) in paths[q].siblings.iter().enumerate() {
-            for k in 0..4 {
-                let hv = b.constant(s[k]);
+            for (k, hw) in s.iter().enumerate() {
+                let hv = b.constant(*hw);
                 b.store(sib, (l * 4 + k) as i64, hv);
             }
         }
@@ -422,7 +422,7 @@ fn a_restored_merkle_path_verifies_in_the_dsl_exactly_where_p3_verifies_it() {
 
         // `cap_height = 2`, so the walk stops two levels below the root and the surviving digest
         // is compared with `commit[index >> levels]` (`mmcs/batch.rs:267`).
-        assert_eq!(levels, 6 - 2 + 0, "log2(64) - cap_height");
+        assert_eq!(levels, 6 - 2, "log2(64) - cap_height");
         assert_eq!(run(b, &[]), commit.roots()[*idx >> levels].to_vec(), "query {q}");
     }
 }
@@ -499,8 +499,8 @@ fn an_injected_shorter_matrix_group_verifies_in_the_dsl_exactly_where_p3_verifie
         assert_eq!(levels, 4, "log2(64) - cap_height");
         let sib = b.alloc((levels * 4) as u64);
         for (l, s) in paths[q].siblings.iter().enumerate() {
-            for k in 0..4 {
-                let hv = b.constant(s[k]);
+            for (k, hw) in s.iter().enumerate() {
+                let hv = b.constant(*hw);
                 b.store(sib, (l * 4 + k) as i64, hv);
             }
         }

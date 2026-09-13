@@ -20,7 +20,7 @@
 //!   and does the same walk, so it costs the host no extra hashing.
 
 use crate::isa::{EF, F};
-use crate::reference::{replay, ReplayError};
+use crate::reference::{replay, InputRound, ReplayError};
 use crate::shape::{InnerKey, InnerShape, CAP_HEIGHT};
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use p3_matrix::Dimensions;
@@ -397,9 +397,58 @@ impl WitnessTape {
 /// How many Merkle levels a round of this geometry walks: `log2(padded max height) − cap_height`,
 /// the loop count in `MerkleTreeMmcs::verify_batch` (`p3-merkle-tree-0.7.0/src/mmcs/batch.rs`).
 ///
-/// Not used by the tape (a restored path's siblings are self-describing), but Task 6's program needs
-/// it and it belongs next to the geometry it describes.
+/// Not used by the tape (a restored path's siblings are self-describing), but the program's query
+/// phase needs it and it belongs next to the geometry it describes.
+///
+/// Both bounds are asserted rather than clamped. A round with no matrices, or one whose tallest tree
+/// is shorter than the cap, is not a round this machine's PCS can produce (`cap_height = 2` and
+/// every committed matrix is at least `2^(LOG_BLOWUP + 1)` rows tall) — and silently clamping to
+/// zero levels would turn that into a walk that checks nothing.
 pub fn levels_for(dims: &[Dimensions]) -> usize {
-    let max_height = dims.iter().map(|d| d.height).max().unwrap_or(1);
-    log2_ceil_usize(max_height).saturating_sub(CAP_HEIGHT)
+    let max_height =
+        dims.iter().map(|d| d.height).max().expect("a committed round has at least one matrix");
+    let log_max = log2_ceil_usize(max_height);
+    assert!(
+        log_max >= CAP_HEIGHT,
+        "a round whose tallest tree is 2^{log_max} rows is shorter than the {CAP_HEIGHT}-level cap"
+    );
+    log_max - CAP_HEIGHT
+}
+
+/// The words one query occupies in [`Segment::InputOpenings`]: per round, per matrix, the opened row
+/// and its four salts. The rounds are `coms_to_verify`' own order, so `&rounds[..k]` gives the offset
+/// of round `k` inside a query's run.
+pub fn per_query_rows(rounds: &[InputRound]) -> usize {
+    rounds.iter().flat_map(|g| g.dims.iter()).map(|d| d.width + SALT_ELEMS).sum()
+}
+
+/// The Merkle levels one query walks across `rounds` — so `4 · per_query_levels(..)` is the words it
+/// occupies in [`Segment::InputPaths`], and `&rounds[..k]` again gives round `k`'s offset.
+pub fn per_query_levels(rounds: &[InputRound]) -> usize {
+    rounds.iter().map(|g| levels_for(&g.dims)).sum()
+}
+
+/// The words one query occupies in [`Segment::CommitPhaseOpenings`]: per round, the `arity − 1`
+/// sibling *extension* values (two words each) and then the query row's four salts.
+pub fn open_stride(log_arities: &[usize]) -> usize {
+    log_arities
+        .iter()
+        .map(|&a| ((1usize << a) - 1) * <EF as BasedVectorSpace<Val>>::DIMENSION + SALT_ELEMS)
+        .sum()
+}
+
+/// The words one query occupies in [`Segment::CommitPhasePaths`]: four per Merkle level, over every
+/// commit-phase round's own folded height.
+pub fn path_stride(log_global_max_height: usize, log_arities: &[usize]) -> usize {
+    let mut log_current = log_global_max_height;
+    let mut words = 0usize;
+    for &a in log_arities {
+        log_current -= a;
+        assert!(
+            log_current >= CAP_HEIGHT,
+            "a commit-phase round folded to 2^{log_current} rows, inside the {CAP_HEIGHT}-level cap"
+        );
+        words += (log_current - CAP_HEIGHT) * crate::dsl::DIGEST_ELEMS;
+    }
+    words
 }
