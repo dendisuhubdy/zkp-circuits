@@ -68,6 +68,13 @@ pub mod domain {
     /// guest ever writes a nonzero `bad` word, which is exactly what makes a dishonest witness's
     /// digest fail to match any plaintext the ledger could reconstruct.
     pub const BUNDLE: u32 = 11;
+    /// M4.4: the sBPF guest's public-output digest,
+    /// `[program_hash(8), input_hash(8), output_hash(8)]` (24 words) — three SHA-256 digests, each
+    /// packed `word[i] = LE(bytes[4i..4i+4])`, binding the program, the serialized instruction it
+    /// was given and the accounts' post-state (`sbpf_core::abi::public_output`, mirrored there as
+    /// `SBPF_OUT_DOMAIN`). 12 and 13 are M4.3's (`STORAGE_LEAF`, `EVM_OUT`) and are left free so
+    /// the two milestones' domains do not collide when both land.
+    pub const SBPF_OUT: u32 = 14;
     pub const TEST: u32 = 0xff;
 }
 

@@ -7,6 +7,7 @@ pub mod machine;
 pub mod hash;
 pub mod keccak;
 pub mod sha256;
+pub mod sbpf;
 pub mod notes;
 pub mod viewing;
 pub mod ledger;

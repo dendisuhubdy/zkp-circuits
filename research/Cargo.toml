@@ -33,10 +33,21 @@ postcard = { version = "1", features = ["alloc"] }
 ml-kem = "=0.3.2"
 chacha20poly1305 = "=0.11.0"
 rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
+# The sBPF interpreter core (M4.4): a no_std library with its own workspace root, compiled into the
+# `sbpf` guest on riscv32im and run natively here. A normal dependency, not a dev-dependency,
+# because `src/sbpf.rs` (the host side: `HostRef`, the aligned serializer, `SbpfCall`) is part of
+# the library — `tests/sbpf_*.rs` link `rand_zkvm` as an external crate, so a dev-dependency could
+# not appear in its public API.
+sbpf-core = { path = "../guests-compiled/sbpf-core" }
 
 [dev-dependencies]
 hex = "0.4"
 sha2 = { version = "=0.10.9", features = ["compress"] }
+# The differential oracle for `sbpf-core`'s interpreter and ELF loader (M4.4 Task 5) — host tests
+# only, never in a guest; it lives in `tests/common/sbpf_oracle.rs`. `default-features = false`
+# drops the crate's default `jit` feature, which is x86_64-only and irrelevant here: what is
+# compared is interpreter against interpreter.
+solana-sbpf = { version = "=0.11.1", default-features = false }
 
 [features]
 default = []
