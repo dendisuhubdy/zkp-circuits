@@ -305,11 +305,11 @@ impl Tier {
 }
 
 #[derive(Clone)]
-pub enum Chip { Program(ProgramAir), Cpu(CpuAir), Memory(MemoryAir), Alu(AluAir), Range(RangeAir), Nibble(NibbleAir), Poseidon2(Poseidon2Air, usize), Input(crate::tables::input::InputAir), Keccak(KeccakAir, usize), Sha256(Sha256Air, usize) }
+pub enum Chip { Program(ProgramAir), Cpu(CpuAir), Memory(MemoryAir), Alu(AluAir), Range(RangeAir), Nibble(NibbleAir), Poseidon2(Poseidon2Air, usize), Input(crate::tables::input::InputAir), Keccak(KeccakAir, usize), Sha256(Sha256Air, usize), Public(crate::tables::public::PublicAir) }
 
 impl BaseAir<Val> for Chip {
     fn width(&self) -> usize {
-        match self { Chip::Program(a) => BaseAir::<Val>::width(a), Chip::Cpu(a) => BaseAir::<Val>::width(a), Chip::Memory(a) => BaseAir::<Val>::width(a), Chip::Alu(a) => BaseAir::<Val>::width(a), Chip::Range(a) => BaseAir::<Val>::width(a), Chip::Nibble(a) => BaseAir::<Val>::width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::width(a), Chip::Input(a) => BaseAir::<Val>::width(a), Chip::Keccak(a, _) => BaseAir::<Val>::width(a), Chip::Sha256(a, _) => BaseAir::<Val>::width(a) }
+        match self { Chip::Program(a) => BaseAir::<Val>::width(a), Chip::Cpu(a) => BaseAir::<Val>::width(a), Chip::Memory(a) => BaseAir::<Val>::width(a), Chip::Alu(a) => BaseAir::<Val>::width(a), Chip::Range(a) => BaseAir::<Val>::width(a), Chip::Nibble(a) => BaseAir::<Val>::width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::width(a), Chip::Input(a) => BaseAir::<Val>::width(a), Chip::Keccak(a, _) => BaseAir::<Val>::width(a), Chip::Sha256(a, _) => BaseAir::<Val>::width(a), Chip::Public(a) => BaseAir::<Val>::width(a) }
     }
     fn preprocessed_width(&self) -> usize {
         match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Range(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Nibble(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::preprocessed_width(a), Chip::Keccak(a, _) => BaseAir::<Val>::preprocessed_width(a), Chip::Sha256(a, _) => BaseAir::<Val>::preprocessed_width(a), _ => 0 }
@@ -340,7 +340,7 @@ where
     AB: AirBuilder<F = Val> + PermutationAirBuilder + InteractionBuilder,
 {
     fn eval(&self, b: &mut AB) {
-        match self { Chip::Program(a) => a.eval(b), Chip::Cpu(a) => a.eval(b), Chip::Memory(a) => a.eval(b), Chip::Alu(a) => a.eval(b), Chip::Range(a) => a.eval(b), Chip::Nibble(a) => a.eval(b), Chip::Poseidon2(a, _) => a.eval(b), Chip::Input(a) => a.eval(b), Chip::Keccak(a, _) => a.eval(b), Chip::Sha256(a, _) => a.eval(b) }
+        match self { Chip::Program(a) => a.eval(b), Chip::Cpu(a) => a.eval(b), Chip::Memory(a) => a.eval(b), Chip::Alu(a) => a.eval(b), Chip::Range(a) => a.eval(b), Chip::Nibble(a) => a.eval(b), Chip::Poseidon2(a, _) => a.eval(b), Chip::Input(a) => a.eval(b), Chip::Keccak(a, _) => a.eval(b), Chip::Sha256(a, _) => a.eval(b), Chip::Public(a) => a.eval(b) }
     }
 }
 
@@ -374,6 +374,14 @@ where
 /// independent, so this returns eight, nine or ten chips — and because both optional instances
 /// are at the end, in a fixed order (keccak then sha256), a batch that carries only the sha256
 /// table still has it at the *ninth* position with no other index disturbed.
+///
+/// Constraint set 6 appends `Chip::Public` **after both of them**, and it is mandatory — every
+/// proof carries a public table, even an empty one (four rows). Last, rather than beside
+/// `Chip::Input` where it structurally belongs, for the reason every chip since M4.2 has gone
+/// last: `i == 1` (`Cpu`) is the public-values slot `prove_traces`/`verify` hard-code and
+/// `i == 2` (`Memory`) is indexed directly by `tests/cheating.rs`, and inserting in the middle
+/// would move both. Its own index is therefore `8 + (klh != 0) + (slh != 0)` — 8, 9 or 10 — and
+/// the batch carries nine, ten or eleven instances.
 pub fn chips(tier: Tier, keccak_log_height: u8, sha256_log_height: u8) -> Vec<Chip> {
     let mut v = vec![
         Chip::Program(ProgramAir),
@@ -391,6 +399,7 @@ pub fn chips(tier: Tier, keccak_log_height: u8, sha256_log_height: u8) -> Vec<Ch
     if sha256_log_height != 0 {
         v.push(Chip::Sha256(Sha256Air, 1usize << sha256_log_height));
     }
+    v.push(Chip::Public(crate::tables::public::PublicAir));
     v
 }
 
@@ -428,6 +437,12 @@ pub struct Traces {
     /// like the four above, but with a tier-derived *floor* the others have no analogue
     /// of (`Tier::min_mem_log_height`). See `Proof::mem_log_height`.
     pub mem_log_height: u8,
+    /// Constraint set 6: the public-input table. Mandatory — unlike `keccak`/`sha256` there is
+    /// no `None`, because every proof commits to a public segment even when it is empty.
+    pub public: RowMajorMatrix<Val>,
+    /// Constraint set 6: the public table's height, as a base-2 log — `program_log_height`'s
+    /// rule again, applied to `tables::public::public_log_height`.
+    pub public_log_height: u8,
 }
 impl Traces {
     /// The traces in `chips()` order — eight entries, plus one per optional hash table this proof
@@ -439,6 +454,9 @@ impl Traces {
         let mut v = vec![&self.program, &self.cpu, &self.memory, &self.alu, &self.range, &self.nibble, &self.poseidon2, &self.input];
         if let Some(keccak) = &self.keccak { v.push(keccak); }
         if let Some(sha256) = &self.sha256 { v.push(sha256); }
+        // Constraint set 6: last, matching `chips()` — see that function's doc comment for why
+        // the mandatory public table is appended after the two optional ones.
+        v.push(&self.public);
         v
     }
     pub fn heights(&self) -> Vec<usize> { self.as_slice().iter().map(|m| m.height()).collect() }
@@ -455,6 +473,9 @@ pub enum ProveError {
     /// M4.1: the input table's own analogue of `ProgramTooLarge` — `inputs.len()`'s declared
     /// `tables::input::input_log_height` exceeds `tables::input::MAX_LOG_HEIGHT`.
     InputTooLarge { len: usize, log_height: u8 },
+    /// Constraint set 6: the public table's analogue of `InputTooLarge` — `public.len()`'s
+    /// declared `tables::public::public_log_height` exceeds `tables::public::MAX_LOG_HEIGHT`.
+    PublicTooLarge { len: usize, log_height: u8 },
     /// M4.2: the keccak table's analogue — more `KECCAK` calls than the enforced ceiling
     /// `min(Tier::max_keccak_log_height(), tables::keccak::MAX_LOG_HEIGHT)` (`t + 5` capped at
     /// 20, the same bound `check_declared_heights` applies) allows. Unreachable from an `Execution`
@@ -512,6 +533,11 @@ pub enum VerifyError {
     /// M4.1: the input table's own analogue of `ProgramHeight` — `proof.input_log_height` is
     /// outside `[tables::input::MIN_LOG_HEIGHT, tables::input::MAX_LOG_HEIGHT]`.
     InputHeight,
+    /// Constraint set 6: the public table's own analogue of `InputHeight` —
+    /// `proof.public_log_height` is outside `[tables::public::MIN_LOG_HEIGHT,
+    /// tables::public::MAX_LOG_HEIGHT]`. A plain range check with no `0` escape, because the
+    /// public table is mandatory.
+    PublicHeight,
     /// M4.2: the keccak table's own analogue of `ProgramHeight`/`InputHeight` —
     /// `proof.keccak_log_height` is non-zero and outside `[tables::keccak::MIN_LOG_HEIGHT,
     /// tables::keccak::MAX_LOG_HEIGHT]`. Checked before the declared height is used to size a
@@ -566,6 +592,7 @@ pub fn check_declared_heights(
     input_log_height: u8,
     keccak_log_height: u8,
     sha256_log_height: u8,
+    public_log_height: u8,
     mem_log_height: u8,
 ) -> Result<(), VerifyError> {
     // `tier` is deserialized from untrusted bytes: an attacker-supplied out-of-range tier
@@ -622,6 +649,11 @@ pub fn check_declared_heights(
         if sha256_log_height > tier.max_sha256_log_height() {
             return Err(VerifyError::Sha256HeightExceedsTier);
         }
+    }
+    // The public table is mandatory — unlike the two hash chips there is no "0 means absent"
+    // value — so this is a plain range check, `tables::input`'s exactly.
+    if !(crate::tables::public::MIN_LOG_HEIGHT..=crate::tables::public::MAX_LOG_HEIGHT).contains(&public_log_height) {
+        return Err(VerifyError::PublicHeight);
     }
     // M4.2 (controller ruling 1): `mem_log_height` is untrusted the same way. The floor is the
     // tier's own `2^(t+2)` (so the declaration reveals nothing the tier did not already), the
@@ -681,13 +713,18 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
     if input_log_height > crate::tables::input::MAX_LOG_HEIGHT {
         return Err(ProveError::InputTooLarge { len: inputs.len(), log_height: input_log_height });
     }
+    // Constraint set 6: and the public table's, on identical terms.
+    let public_log_height = crate::tables::public::public_log_height(public.len());
+    if public_log_height > crate::tables::public::MAX_LOG_HEIGHT {
+        return Err(ProveError::PublicTooLarge { len: public.len(), log_height: public_log_height });
+    }
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
     // M4.2: one `KeccakEvent` per `KECCAK` row, in execution order — the same order the cpu
     // table's `SYS_KECCAK` rows claim them in. `clk` is the cpu table's own (digest-prefix
     // shifted) clock, because that is what both sides of the `KECCAK` bus carry and what the
     // chip's memory timestamps (`4·CLK`, `4·CLK + 1`) are built from.
-    let clk_offset = (program.digest_rows() + input_digest_rows) as u32;
+    let clk_offset = (program.digest_rows() + input_digest_rows + public_digest_rows) as u32;
     let keccak_events: Vec<KeccakEvent> = exec.events.iter()
         .filter_map(|e| e.keccak_row.as_ref().map(|r| KeccakEvent { clk: clk_offset + e.clk, ptr: r.ptr, input: r.input }))
         .collect();
@@ -723,7 +760,7 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
     // No compressions, no table: `sha256_log_height == 0` and `sha256 == None` are set here
     // together and travel together from this point on.
     let sha256_t = (sha256_log_height != 0).then(|| sha256_trace(&sha256_events, sha256_log_height));
-    let cpu = cpu_trace(program, inputs, salt, &exec.events, tier.cpu_height(), &mut range, &mut nibble);
+    let cpu = cpu_trace(program, inputs, public, salt, &exec.events, tier.cpu_height(), &mut range, &mut nibble);
     // M4.2 (controller ruling 1): the memory table's height is declared, not derived. Count the
     // rows `memory_trace` will actually hold — one per `accesses` entry and one per
     // `keccak_accesses` entry, which is every row it pushes (read it: the two chained iterators
@@ -749,6 +786,10 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
     let program_t = program_trace(program, &exec.events, 1usize << program_log_height);
     let read_counts = crate::tables::input::read_counts(inputs.len(), &exec.events);
     let input_t = crate::tables::input::input_trace(inputs, &read_counts, 1usize << input_log_height);
+    // Constraint set 6: the public table, `input`'s twin — `MULT_READ` counted off the
+    // `SYS_READ_PUBLIC` events the same way.
+    let public_read_counts = crate::tables::public::read_counts(public.len(), &exec.events);
+    let public_t = crate::tables::public::public_trace(public, &public_read_counts, 1usize << public_log_height);
     // M3.4: the digest prefix's own permutations, in the same row order `tables::cpu`'s
     // `IS_DIGEST` rows issue them (`fill_digest_rows`) — these come *first*, since the digest
     // rows precede every ordinary cycle in the cpu table.
@@ -781,7 +822,15 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
         }
         _ => None,
     }).collect();
-    let all_hash_events: Vec<Poseidon2Event> = digest_events.into_iter().chain(indigest_events).chain(hash_events).collect();
+    // Constraint set 6: the public-input-digest prefix's own permutations, after the indigest
+    // ones and before the absorb ones — matching the row order `IS_PUBDIGEST` rows occupy.
+    let pubdigest_blocks = crate::hash::public_digest_rows(public);
+    let pubdigest_events: Vec<Poseidon2Event> = pubdigest_blocks.iter().map(|blk| {
+        let mut input = blk.state_in;
+        for k in 0..4 { if blk.active[k] { input[k] = Val::from_u32(blk.words[k]); } }
+        Poseidon2Event { input, output: blk.state_out }
+    }).collect();
+    let all_hash_events: Vec<Poseidon2Event> = digest_events.into_iter().chain(indigest_events).chain(pubdigest_events).chain(hash_events).collect();
     let poseidon2_t = poseidon2_trace(&all_hash_events, tier.poseidon2_height());
     let hc = program.digest();
     let hin = crate::hash::input_digest(salt, inputs);
@@ -790,8 +839,9 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
         program: program_t, cpu, memory, alu, range: range_t, nibble: nibble_t, poseidon2: poseidon2_t, input: input_t,
         keccak: keccak_t,
         sha256: sha256_t,
+        public: public_t,
         public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc, &hin, &hpub),
-        program_log_height, input_log_height, keccak_log_height, sha256_log_height, mem_log_height,
+        program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height, mem_log_height,
     })
 }
 
@@ -832,6 +882,17 @@ pub struct Proof {
     /// 466 + 10 columns against keccak's 2 612 + 99, and every FRI query opens a leaf of the
     /// batch's full width whether the table holds 64 rows or 65 536.
     pub sha256_log_height: u8,
+    /// Constraint set 6: the public table's height, declared by the prover —
+    /// `tables::public::public_log_height`, range-checked against
+    /// `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` by `check_declared_heights`. Mandatory: unlike the two
+    /// hash heights there is no `0` "no such table" value.
+    ///
+    /// What it leaks is `n_pub` to within a factor of two — the same coarse, structural class of
+    /// leak `program_log_height` and `input_log_height` already are (`docs/03-privacy.md`'s
+    /// "What a proof leaks"), and a far smaller one here, since the public segment's *words* are
+    /// published with the transaction anyway (that is what `Machine::verify_public` checks).
+    /// `MIN_LOG_HEIGHT` means "this proof has no public segment".
+    pub public_log_height: u8,
     /// M4.2 (controller ruling 1): the memory table's height, declared by the prover as
     /// `max(t + 2, log2_ceil(accesses + 1))`. `verify` checks only
     /// `t + 2 ≤ mem_log_height ≤ MAX_MEM_LOG_HEIGHT`.
@@ -930,7 +991,7 @@ const KEY_CACHE_CAPACITY: usize = 64;
 /// batch — a distinct fourth-component value rather than an impossible one, and it must be,
 /// since its `CommonData` has eight `lookups` entries and no keccak preprocessed columns).
 /// The memory table's own declared height (M4.2, controller
-/// ruling 1) is deliberately *not* a fifth component — see `Machine::verifier_key` for why the
+/// ruling 1) is deliberately *not* a component of its own — see `Machine::verifier_key` for why the
 /// `CommonData` this caches is invariant to it. Bounded by
 /// `TIERS.len() * (program::MAX_LOG_HEIGHT − program::MIN_LOG_HEIGHT + 1) *
 /// (input::MAX_LOG_HEIGHT − input::MIN_LOG_HEIGHT + 1) *
@@ -942,14 +1003,14 @@ const KEY_CACHE_CAPACITY: usize = 64;
 /// a real policy again, not just defense in depth.
 #[derive(Default)]
 struct KeyCache {
-    map: HashMap<(usize, u8, u8, u8, u8), Arc<CommonData<Config>>>,
-    order: VecDeque<(usize, u8, u8, u8, u8)>,
+    map: HashMap<(usize, u8, u8, u8, u8, u8), Arc<CommonData<Config>>>,
+    order: VecDeque<(usize, u8, u8, u8, u8, u8)>,
 }
 impl KeyCache {
-    fn get(&self, key: &(usize, u8, u8, u8, u8)) -> Option<Arc<CommonData<Config>>> {
+    fn get(&self, key: &(usize, u8, u8, u8, u8, u8)) -> Option<Arc<CommonData<Config>>> {
         self.map.get(key).cloned()
     }
-    fn insert(&mut self, key: (usize, u8, u8, u8, u8), value: Arc<CommonData<Config>>) {
+    fn insert(&mut self, key: (usize, u8, u8, u8, u8, u8), value: Arc<CommonData<Config>>) {
         if self.map.contains_key(&key) {
             return;
         }
@@ -968,10 +1029,11 @@ pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<Ke
 impl Machine {
     pub fn new(profile: FriProfile) -> Self { Self { config: make_config(profile), profile, keys: Mutex::new(KeyCache::default()) } }
 
-    fn log_ext_degrees(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, mem_log_height: u8) -> Vec<usize> {
+    fn log_ext_degrees(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, public_log_height: u8, mem_log_height: u8) -> Vec<usize> {
         let zk = self.config.is_zk();
         // Order matches `chips()`: program, cpu, memory, alu, range, nibble, poseidon2, input,
-        // and — only when this proof declares a keccak table — keccak.
+        // then — only when this proof declares them — keccak and sha256, and finally the
+        // mandatory public table.
         // M4.2 (controller ruling 1): the memory entry is the *declared*
         // `mem_log_height`, not a tier-derived one — `build_traces_salted` sizes the memory
         // trace with exactly the value it puts in `Traces`/`Proof`, so the two cannot drift,
@@ -995,18 +1057,25 @@ impl Machine {
         if sha256_log_height != 0 {
             v.push(sha256_log_height as usize + zk);
         }
+        // Constraint set 6: the public table is mandatory and last, so its entry is
+        // unconditional and always the final one — see `chips()`.
+        v.push(public_log_height as usize + zk);
         v
     }
 
     /// The preprocessed commitment (range + nibble tables + Poseidon2 round constants, plus
     /// the degree-bit bookkeeping every instance needs including `program`'s and `input`'s)
-    /// for `(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height)`,
+    /// for `(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height,
+    /// public_log_height)`,
     /// cached — see
     /// `KeyCache`. M4.2 (Task 6): `keccak_log_height = 0` is a perfectly ordinary key value —
     /// it selects a batch whose preprocessed commitment omits the keccak table's
     /// 99 periodic columns entirely, so it genuinely is a *different* key, not a missing one.
     /// M4.4: `sha256_log_height` is the fifth component and says the same thing about that
     /// chip's 10 periodic columns; the two are independent, so all four combinations are keys.
+    /// Constraint set 6: `public_log_height` is the sixth, for the reason `input_log_height` is
+    /// the third — the public table declares no preprocessed columns either, but its declared
+    /// height is part of the batch's per-instance degree-bit bookkeeping.
     /// **The arity change is vendoring-visible** — the fullnode's `deploy/sync-zkvm.sh` anchors
     /// on this signature — so re-vendoring this constraint set has to update that script (not
     /// done here; this plan does not re-vendor the node).
@@ -1031,8 +1100,8 @@ impl Machine {
     /// and nibble tables' Merkle trees every time), which is the cost this cache exists to
     /// amortize across repeated `verify` calls at the same `(tier, program_log_height,
     /// input_log_height)`.
-    pub fn verifier_key(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8) -> Arc<CommonData<Config>> {
-        let key = (tier.0, program_log_height, input_log_height, keccak_log_height, sha256_log_height);
+    pub fn verifier_key(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, public_log_height: u8) -> Arc<CommonData<Config>> {
+        let key = (tier.0, program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height);
         if let Some(hit) = self.keys.lock().unwrap().get(&key) {
             return hit;
         }
@@ -1040,13 +1109,13 @@ impl Machine {
         // the canonical one, and using it makes this function's result independent of which
         // proof happened to miss the cache first.
         let mem_log_height = tier.min_mem_log_height();
-        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier, keccak_log_height, sha256_log_height), &self.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height, mem_log_height)).common);
+        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier, keccak_log_height, sha256_log_height), &self.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height, mem_log_height)).common);
         self.keys.lock().unwrap().insert(key, common.clone());
         common
     }
 
     /// Number of `(tier, program_log_height, input_log_height, keccak_log_height,
-    /// sha256_log_height)` verifier keys
+    /// sha256_log_height, public_log_height)` verifier keys
     /// currently cached.
     pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().map.len() }
 
@@ -1128,9 +1197,9 @@ impl Machine {
         // parameters, which `key_config` and `make_config` share via `build_config`); their
         // RNG state can differ freely.
         let key_cfg = key_config(self.profile);
-        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.mem_log_height));
+        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.public_log_height, traces.mem_log_height));
         let batch = prove_batch(&self.config, &instances, &prover_data);
-        Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, keccak_log_height: traces.keccak_log_height, sha256_log_height: traces.sha256_log_height, mem_log_height: traces.mem_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }
+        Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, keccak_log_height: traces.keccak_log_height, sha256_log_height: traces.sha256_log_height, public_log_height: traces.public_log_height, mem_log_height: traces.mem_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }
     }
 
     /// Prove on `backend`. `Backend::Cpu` is exactly `prove`; the other backends run the same
@@ -1223,14 +1292,14 @@ impl Machine {
         // That is invariant, not a leak: every backend config (`reference_cfg`, `cuda_cfg`) is
         // built on `HidingFriPcs` just as `make_config` is, so `is_zk()` is `true` for all of
         // them and the degree bits agree with what `verify` recomputes.
-        let prover_data = ProverData::from_airs_and_degrees(key_cfg, &airs, &self.log_ext_degrees(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.mem_log_height));
+        let prover_data = ProverData::from_airs_and_degrees(key_cfg, &airs, &self.log_ext_degrees(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.public_log_height, traces.mem_log_height));
         // The engines panic (rather than return) on a device failure — `CudaHashEngine::ok`
         // and friends — so a backend fault must not take the caller's process down with it.
         let batch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_batch(cfg, &instances, &prover_data)))
             .map_err(|p| ProveError::Backend(panic_message(p)))?;
         let bytes = postcard::to_allocvec(&batch).map_err(|e| ProveError::Backend(format!("proof serialise: {e}")))?;
         let batch: BatchProof<Config> = postcard::from_bytes(&bytes).map_err(|e| ProveError::Backend(format!("proof convert: {e}")))?;
-        Ok((Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, keccak_log_height: traces.keccak_log_height, sha256_log_height: traces.sha256_log_height, mem_log_height: traces.mem_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }, exec))
+        Ok((Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, keccak_log_height: traces.keccak_log_height, sha256_log_height: traces.sha256_log_height, public_log_height: traces.public_log_height, mem_log_height: traces.mem_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }, exec))
     }
 
     /// M3.4: takes `hc`, not the program — the verifier no longer holds the program at all
@@ -1269,6 +1338,7 @@ impl Machine {
             proof.input_log_height,
             proof.keccak_log_height,
             proof.sha256_log_height,
+            proof.public_log_height,
             proof.mem_log_height,
         )?;
         // M4.2 (Task 6): a `Vec` comparison, so this is simultaneously the check that
@@ -1276,12 +1346,29 @@ impl Machine {
         // with one — and the check that every declared height matches. A proof that claims
         // `keccak_log_height = 0` while carrying nine instances (or vice versa) fails here,
         // before `chips` builds anything.
-        if proof.batch.degree_bits != self.log_ext_degrees(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.sha256_log_height, proof.mem_log_height) { return Err(VerifyError::Tier); }
+        if proof.batch.degree_bits != self.log_ext_degrees(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.sha256_log_height, proof.public_log_height, proof.mem_log_height) { return Err(VerifyError::Tier); }
         let airs = chips(proof.tier, proof.keccak_log_height, proof.sha256_log_height);
         let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
         let pvs: Vec<Vec<Val>> = (0..airs.len()).map(|i| if i == 1 { pv_vals.clone() } else { vec![] }).collect();
-        let common = self.verifier_key(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.sha256_log_height);
+        let common = self.verifier_key(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.sha256_log_height, proof.public_log_height);
         verify_batch(&self.config, &airs, &proof.batch, &pvs, &common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
+    }
+
+    /// `verify`, plus the check the public segment exists for: `hash::public_digest(public_words)`
+    /// recomputed natively and compared against `pv::PUB0..7`. This is what a chain calls — it
+    /// publishes the words with the transaction and checks that the proof committed to exactly
+    /// them. `verify` alone leaves `pv::PUB0..7` unchecked against anything outside the proof
+    /// (it is still pinned *in-circuit* to whatever the `public` table supplied, so the guest's
+    /// reads and the digest agree; what `verify` cannot know is which words those were).
+    pub fn verify_public(&self, hc: &[u32; 8], public_words: &[u32], proof: &Proof) -> Result<(), VerifyError> {
+        self.verify(hc, proof)?;
+        let want = crate::hash::public_digest(public_words);
+        for i in 0..8 {
+            if proof.public_values[crate::tables::cpu::pv::PUB0 + i] != want[i] as u64 {
+                return Err(VerifyError::PublicValues);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1300,12 +1387,12 @@ impl Machine {
 /// table's degree is pinned to a specific number there, with a comment on *why*; a change
 /// here should come with a matching update to those assertions and to
 /// `docs/02-tables-and-buses.md`.
-pub fn max_constraint_degrees(tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, mem_log_height: u8) -> Vec<usize> {
+pub fn max_constraint_degrees(tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, public_log_height: u8, mem_log_height: u8) -> Vec<usize> {
     let machine = Machine::new(FriProfile::Test);
     let key_cfg = key_config(machine.profile);
     let airs = chips(tier, keccak_log_height, sha256_log_height);
     let is_zk = machine.config.is_zk();
-    let ext_degrees = machine.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height, mem_log_height);
+    let ext_degrees = machine.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height, mem_log_height);
     let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &ext_degrees);
     let lookup_gadget = p3_lookup::LogUpGadget::new();
     airs.iter()

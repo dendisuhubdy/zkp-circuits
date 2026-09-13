@@ -94,8 +94,9 @@ fn keccak_demo_proves_and_verifies_at_tier_10() {
     let (proof, _) = m.prove_salted(&p, &[], &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
     let prove_time = t0.elapsed();
     assert_eq!(proof.keccak_log_height, 5, "one permutation fits the minimum block");
-    // M4.2 (Task 6): a proof that *does* call `KECCAK` carries the ninth instance.
-    assert_eq!(proof.batch.degree_bits.len(), 9, "nine tables when the keccak table is present");
+    // M4.2 (Task 6): a proof that *does* call `KECCAK` carries the keccak instance — the ninth
+    // of the ten this batch has since constraint set 6 appended the mandatory `public` one.
+    assert_eq!(proof.batch.degree_bits.len(), 10, "ten tables when the keccak table is present");
     let t1 = std::time::Instant::now();
     m.verify(&p.digest(), &proof).unwrap();
     eprintln!(
@@ -104,22 +105,31 @@ fn keccak_demo_proves_and_verifies_at_tier_10() {
     );
 }
 
-/// Measured on the branch base `b1d01d9` — the last commit before the keccak table — with
-/// `guests::fib(10)` at `Tier(10)` and `FriProfile::Test`, three consecutive proofs:
-/// 274 156 / 275 916 / 276 684 bytes (the hiding PCS's fresh per-proof entropy moves the
-/// postcard encoding by a few hundred bytes run to run). This constant is the middle of that
-/// spread; `SIZE_BAND_PCT` is the tolerance around it.
-const PRE_M4_2_TIER_10_TEST_PROFILE_BYTES: usize = 275_916;
+/// A keccak-free `guests::fib(10)` proof at `Tier(10)` and `FriProfile::Test`, measured.
+///
+/// M4.2 measured this on the branch base `b1d01d9` — the last commit before the keccak table —
+/// over three consecutive proofs: 274 156 / 275 916 / 276 684 bytes (the hiding PCS's fresh
+/// per-proof entropy moves the postcard encoding by a few hundred bytes run to run), and took
+/// the middle, 275 916.
+///
+/// **Re-measured for constraint set 6**, which grew the same proof by ~8%: 297 223 / 298 791 /
+/// 299 143 / 299 783 over four consecutive proofs, middle 298 791. The growth is the public
+/// segment's structural cost and is expected — the cpu table gained 51 columns (the
+/// `SYS_READ_PUB`/`IS_PUBDIGEST`/`PUBDIGEST_LAST` selectors, `IPOUT0..7`, and the
+/// `PHVL0..31`/`PHIMAX0..3`/`PINV0..3` final-encoding block) and the batch gained a mandatory
+/// ninth instance, the 4-column `public` table; every FRI query opens a leaf of the batch's
+/// full width. `SIZE_BAND_PCT` is the tolerance around the current figure.
+const PRE_M4_2_TIER_10_TEST_PROFILE_BYTES: usize = 298_791;
 
 /// Tolerance, in percent, on the size assertion in `a_keccak_free_proof_carries_no_keccak_table`.
 ///
-/// Derived, not picked: the three measured proofs above span 274 156..276 684, i.e. ±0.5% around
-/// the constant, so 5% is ~10x the per-proof entropy noise — room for the odd extra
+/// Derived, not picked: the four measured proofs above span 297 223..299 783, i.e. ±0.6% around
+/// the constant, so 5% is ~8x the per-proof entropy noise — room for the odd extra
 /// declared-height byte or an upstream postcard tweak. The thing the assertion exists to detect
 /// is an order of magnitude beyond it: a 2 612-column keccak table adds roughly +450 KB at this
 /// profile (+1.91 MB at the production one), i.e. +160%, so the band would have to be ~32x wider
 /// before the regression could hide inside it. The load-bearing check is the
-/// `degree_bits.len() == 8` assertion; this one is the size corroboration.
+/// `degree_bits.len() == 9` assertion; this one is the size corroboration.
 const SIZE_BAND_PCT: usize = 5;
 
 /// M4.2 (Task 6): the keccak table is **optional per proof**. A guest that never executes a
@@ -137,7 +147,7 @@ fn a_keccak_free_proof_carries_no_keccak_table() {
     let p = guests::fib(10);
     let (proof, _) = m.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.keccak_log_height, 0, "no KECCAK call, no keccak table");
-    assert_eq!(proof.batch.degree_bits.len(), 8, "eight instances, not nine");
+    assert_eq!(proof.batch.degree_bits.len(), 9, "nine instances, not ten");
     m.verify(&p.digest(), &proof).unwrap();
 
     let size = proof.to_bytes().len();
@@ -145,10 +155,10 @@ fn a_keccak_free_proof_carries_no_keccak_table() {
     let hi = PRE_M4_2_TIER_10_TEST_PROFILE_BYTES * (100 + SIZE_BAND_PCT) / 100;
     assert!(
         (lo..=hi).contains(&size),
-        "keccak-free proof should be back within {SIZE_BAND_PCT}% of the pre-M4.2 size \
+        "keccak-free proof should be within {SIZE_BAND_PCT}% of the measured keccak-free size \
          ({PRE_M4_2_TIER_10_TEST_PROFILE_BYTES} bytes): got {size}"
     );
-    eprintln!("keccak-free fib(10) at tier 10, Test profile: {size} bytes (pre-M4.2: {PRE_M4_2_TIER_10_TEST_PROFILE_BYTES})");
+    eprintln!("keccak-free fib(10) at tier 10, Test profile: {size} bytes (measured baseline: {PRE_M4_2_TIER_10_TEST_PROFILE_BYTES})");
 }
 
 /// M4.2 (controller ruling 1): the memory table's height is **proof-declared**, floored at the
@@ -268,10 +278,10 @@ fn sha256_demo_proves_and_verifies_with_one_sha256_block() {
     assert_eq!(proof.tier, Tier(10));
     assert_eq!(proof.sha256_log_height, 6, "one compression fills the minimum block exactly");
     assert_eq!(proof.keccak_log_height, 0, "and it calls no KECCAK, so that table is absent");
-    // Nine instances: the eight every proof carries plus the sha256 chip. The keccak chip is
-    // the one that is absent here — the sha256 entry is the *tenth* slot in `chips()` order, so
-    // a batch can carry either, both or neither.
-    assert_eq!(proof.batch.degree_bits.len(), 9, "eight tables plus sha256");
+    // Ten instances: the nine every proof carries (constraint set 6's mandatory `public` table
+    // included) plus the sha256 chip. The keccak chip is the one that is absent here — sha256
+    // takes its slot in `chips()` order, so a batch can carry either, both or neither.
+    assert_eq!(proof.batch.degree_bits.len(), 10, "nine mandatory tables plus sha256");
     let t1 = std::time::Instant::now();
     m.verify(&p.digest(), &proof).unwrap();
     eprintln!(
@@ -292,7 +302,7 @@ fn a_sha256_free_proof_carries_no_sha256_table() {
     let (proof, _) = m.prove_salted(&p, &[], &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.sha256_log_height, 0, "no SHA256 call, no sha256 table");
     assert_eq!(proof.keccak_log_height, 0, "and no KECCAK call either");
-    assert_eq!(proof.batch.degree_bits.len(), 8, "the eight tables every proof carries");
+    assert_eq!(proof.batch.degree_bits.len(), 9, "the nine tables every proof carries");
     m.verify(&p.digest(), &proof).unwrap();
 }
 
@@ -432,24 +442,24 @@ fn verifier_key_is_cached_after_first_verify() {
     // cache separately and hand back two different keys.
     assert_eq!(proof.keccak_log_height, 0, "fib is keccak-free");
     assert_eq!(proof.sha256_log_height, 0, "and sha256-free");
-    let (t, plh, ilh) = (proof.tier, proof.program_log_height, proof.input_log_height);
-    let bare = m.verifier_key(t, plh, ilh, 0, 0);
+    let (t, plh, ilh, plub) = (proof.tier, proof.program_log_height, proof.input_log_height, proof.public_log_height);
+    let bare = m.verifier_key(t, plh, ilh, 0, 0, plub);
     assert_eq!(m.cached_keys(), 1, "the hash-table-free key is the one `verify` already cached");
-    let with_keccak = m.verifier_key(t, plh, ilh, 5, 0);
+    let with_keccak = m.verifier_key(t, plh, ilh, 5, 0, plub);
     assert_eq!(m.cached_keys(), 2, "`keccak_log_height = 5` is a different cache key from `0`");
     assert!(!std::sync::Arc::ptr_eq(&bare, &with_keccak));
     // M4.4: `sha256_log_height` is the key's fifth component, and independent of the fourth —
     // the four combinations of "declares a keccak table" x "declares a sha256 table" are four
     // different chip sets and therefore four different `CommonData`s.
-    let with_sha256 = m.verifier_key(t, plh, ilh, 0, 6);
+    let with_sha256 = m.verifier_key(t, plh, ilh, 0, 6, plub);
     assert_eq!(m.cached_keys(), 3, "`sha256_log_height = 6` is a different cache key again");
-    let with_both = m.verifier_key(t, plh, ilh, 5, 6);
+    let with_both = m.verifier_key(t, plh, ilh, 5, 6, plub);
     assert_eq!(m.cached_keys(), 4, "and both together is a fourth");
     assert!(!std::sync::Arc::ptr_eq(&with_keccak, &with_sha256));
-    assert_eq!(bare.lookups.len(), 8, "eight instances");
-    assert_eq!(with_keccak.lookups.len(), 9, "nine instances");
-    assert_eq!(with_sha256.lookups.len(), 9, "nine instances — sha256 in keccak's place");
-    assert_eq!(with_both.lookups.len(), 10, "ten instances");
+    assert_eq!(bare.lookups.len(), 9, "nine instances");
+    assert_eq!(with_keccak.lookups.len(), 10, "ten instances");
+    assert_eq!(with_sha256.lookups.len(), 10, "ten instances — sha256 in keccak's place");
+    assert_eq!(with_both.lookups.len(), 11, "eleven instances");
 }
 
 #[test]
@@ -1023,4 +1033,42 @@ fn sbpf_cycle_breakdown_by_pc() {
     }
     std::fs::write(&path, out).unwrap();
     eprintln!("{} distinct pcs, {} cycles -> {}", hist.len(), exec.cycles(), path.display());
+}
+
+/// The public segment end to end: a guest reads it, `H_PUB` is pinned in the public values, and a
+/// verifier who holds the words recomputes the digest and accepts — which is the whole point of an
+/// unsalted segment, and exactly what `H_IN` cannot do.
+#[test]
+fn public_echo_proves_and_verify_public_checks_the_words() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::public_echo();
+    let public = [11u32, 22, 33, 44];
+    let (proof, exec) = m.prove(&p, &[], &public, None).unwrap();
+    assert_eq!(exec.outputs[0], 11 + 22 + 33 + 44 + 22); // public[1] is read twice
+    m.verify(&p.digest(), &proof).unwrap();
+    m.verify_public(&p.digest(), &public, &proof).unwrap();
+    // pv::PUB0..7 is the native digest of exactly these words.
+    let want = rand_zkvm::hash::public_digest(&public);
+    for i in 0..8 {
+        assert_eq!(proof.public_values[rand_zkvm::tables::cpu::pv::PUB0 + i], want[i] as u64);
+    }
+    // A verifier handed different words rejects, while the STARK itself still verifies.
+    assert!(m.verify_public(&p.digest(), &[11, 22, 33, 45], &proof).is_err());
+    assert!(m.verify_public(&p.digest(), &[11, 22, 33], &proof).is_err());
+    assert_eq!(proof.public_log_height, rand_zkvm::tables::public::public_log_height(4));
+}
+
+/// Every pre-existing guest keeps proving with an empty segment, and `H_PUB` is then the fixed
+/// digest of the empty vector — so `verify_public(hc, &[], proof)` accepts.
+#[test]
+fn an_empty_public_segment_still_has_a_digest_and_costs_four_rows() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (proof, _) = m.prove(&p, &[], &[], None).unwrap();
+    m.verify_public(&p.digest(), &[], &proof).unwrap();
+    assert_eq!(proof.public_log_height, rand_zkvm::tables::public::MIN_LOG_HEIGHT);
+    let want = rand_zkvm::hash::public_digest(&[]);
+    for i in 0..8 {
+        assert_eq!(proof.public_values[rand_zkvm::tables::cpu::pv::PUB0 + i], want[i] as u64);
+    }
 }

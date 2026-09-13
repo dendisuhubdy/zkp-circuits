@@ -1831,12 +1831,15 @@ fn a_keccak_height_past_the_tiers_ceiling_is_rejected_before_any_verifier_key_is
     let p = guests::keccak_demo(b"hi");
     let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.keccak_log_height, 5);
-    assert_eq!(proof.batch.degree_bits.len(), 9);
+    assert_eq!(proof.batch.degree_bits.len(), 10, "eight mandatory tables, the keccak one, and the public one");
     assert_eq!(Tier(10).max_keccak_log_height(), 15);
     // `t + 6`, with `degree_bits` adjusted to match (the keccak instance is last in `chips()`
     // order; `+ 1` is the hiding config's `is_zk`).
     proof.keccak_log_height = 16;
-    let last = proof.batch.degree_bits.len() - 1;
+    // Constraint set 6: the optional hash instance is no longer the last entry — the
+    // mandatory `public` one is appended after it (`machine::chips`), so it is second to
+    // last.
+    let last = proof.batch.degree_bits.len() - 2;
     proof.batch.degree_bits[last] = 16 + 1;
     let verifier = Machine::new(FriProfile::Test);
     assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::KeccakHeightExceedsTier)));
@@ -1855,7 +1858,10 @@ fn a_nonzero_keccak_height_below_one_block_is_rejected_before_any_verifier_key_i
     let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.keccak_log_height, 5);
     proof.keccak_log_height = 3;
-    let last = proof.batch.degree_bits.len() - 1;
+    // Constraint set 6: the optional hash instance is no longer the last entry — the
+    // mandatory `public` one is appended after it (`machine::chips`), so it is second to
+    // last.
+    let last = proof.batch.degree_bits.len() - 2;
     proof.batch.degree_bits[last] = 3 + 1;
     let verifier = Machine::new(FriProfile::Test);
     assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::KeccakHeight)));
@@ -1900,23 +1906,23 @@ fn a_keccak_height_past_the_absolute_cap_is_rejected_where_the_tier_bound_would_
     assert_eq!(keccak::MAX_LOG_HEIGHT, 20);
     for klh in [21, 24, 25, u8::MAX] {
         assert!(
-            matches!(check_declared_heights(Tier(20), plh, ilh, klh, 0, mlh), Err(VerifyError::KeccakHeight)),
+            matches!(check_declared_heights(Tier(20), plh, ilh, klh, 0, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh), Err(VerifyError::KeccakHeight)),
             "klh = {klh} is past the absolute cap and must be refused by the range check",
         );
     }
     // The cap itself, and everything under it, still passes the declared-shape checks at a tier
     // whose own bound is looser — this is a ceiling, not a narrowing of what tier 20 may declare.
     for klh in [0, keccak::MIN_LOG_HEIGHT, 19, keccak::MAX_LOG_HEIGHT] {
-        assert!(check_declared_heights(Tier(20), plh, ilh, klh, 0, mlh).is_ok(), "klh = {klh} is legal at tier 20");
+        assert!(check_declared_heights(Tier(20), plh, ilh, klh, 0, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh).is_ok(), "klh = {klh} is legal at tier 20");
     }
     // And where the tier is the tighter of the two, the tier variant is still what a forgery
     // earns: at tier 10 anything in `16..=20` is flat-legal but past `t + 5`.
     assert!(matches!(
-        check_declared_heights(Tier(10), plh, ilh, 16, 0, Tier(10).min_mem_log_height()),
+        check_declared_heights(Tier(10), plh, ilh, 16, 0, rand_zkvm::tables::public::MIN_LOG_HEIGHT, Tier(10).min_mem_log_height()),
         Err(VerifyError::KeccakHeightExceedsTier)
     ));
     assert!(matches!(
-        check_declared_heights(Tier(10), plh, ilh, 21, 0, Tier(10).min_mem_log_height()),
+        check_declared_heights(Tier(10), plh, ilh, 21, 0, rand_zkvm::tables::public::MIN_LOG_HEIGHT, Tier(10).min_mem_log_height()),
         Err(VerifyError::KeccakHeight),
     ), "past both bounds is reported by the range check, which runs first");
 }
@@ -1933,7 +1939,10 @@ fn a_keccak_height_past_the_absolute_cap_is_rejected_before_any_verifier_key_is_
     let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     assert_eq!(proof.keccak_log_height, 5);
     proof.keccak_log_height = 25;
-    let last = proof.batch.degree_bits.len() - 1;
+    // Constraint set 6: the optional hash instance is no longer the last entry — the
+    // mandatory `public` one is appended after it (`machine::chips`), so it is second to
+    // last.
+    let last = proof.batch.degree_bits.len() - 2;
     proof.batch.degree_bits[last] = 25 + 1;
     let verifier = Machine::new(FriProfile::Test);
     assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::KeccakHeight)));
@@ -1959,8 +1968,8 @@ fn a_memory_height_past_the_ceiling_is_rejected_before_any_verifier_key_is_built
     // The same bound at a tier where it is reachable in principle (tier 20's floor is 22), so
     // the ceiling is doing its own work rather than standing behind the tier floor.
     let (plh, ilh, klh) = (program::MIN_LOG_HEIGHT, rand_zkvm::tables::input::MIN_LOG_HEIGHT, 0);
-    assert!(check_declared_heights(Tier(20), plh, ilh, klh, 0, 24).is_ok());
-    assert!(matches!(check_declared_heights(Tier(20), plh, ilh, klh, 0, 25), Err(VerifyError::MemoryHeight)));
+    assert!(check_declared_heights(Tier(20), plh, ilh, klh, 0, rand_zkvm::tables::public::MIN_LOG_HEIGHT, 24).is_ok());
+    assert!(matches!(check_declared_heights(Tier(20), plh, ilh, klh, 0, rand_zkvm::tables::public::MIN_LOG_HEIGHT, 25), Err(VerifyError::MemoryHeight)));
 }
 
 // ── M4.2 controller ruling 3: the cubic pointer rule on a SYS_KECCAK cpu row ──
@@ -2185,7 +2194,10 @@ fn sha256_height_above_the_tier_cap_is_rejected() {
     // `t + 7`, with `degree_bits` adjusted to match (the sha256 instance is last in `chips()`
     // order; `+ 1` is the hiding config's `is_zk`).
     proof.sha256_log_height = 17;
-    let last = proof.batch.degree_bits.len() - 1;
+    // Constraint set 6: the optional hash instance is no longer the last entry — the
+    // mandatory `public` one is appended after it (`machine::chips`), so it is second to
+    // last.
+    let last = proof.batch.degree_bits.len() - 2;
     proof.batch.degree_bits[last] = 17 + 1;
     let verifier = Machine::new(FriProfile::Test);
     assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::Sha256HeightExceedsTier)));
@@ -2203,7 +2215,10 @@ fn a_nonzero_sha256_height_below_one_block_is_rejected() {
     let p = guests::sha256_demo();
     let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
     proof.sha256_log_height = 5;
-    let last = proof.batch.degree_bits.len() - 1;
+    // Constraint set 6: the optional hash instance is no longer the last entry — the
+    // mandatory `public` one is appended after it (`machine::chips`), so it is second to
+    // last.
+    let last = proof.batch.degree_bits.len() - 2;
     proof.batch.degree_bits[last] = 5 + 1;
     let verifier = Machine::new(FriProfile::Test);
     assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::Sha256Height)));
@@ -2227,28 +2242,28 @@ fn declared_sha256_heights_outside_the_range_or_past_the_tier_are_refused() {
     assert_eq!(Tier(20).max_sha256_log_height(), 20, "the flat cap, not `ℓ + 6 = 26`");
     for slh in [21, 25, u8::MAX] {
         assert!(
-            matches!(check_declared_heights(Tier(20), plh, ilh, 0, slh, mlh20), Err(VerifyError::Sha256Height)),
+            matches!(check_declared_heights(Tier(20), plh, ilh, 0, slh, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh20), Err(VerifyError::Sha256Height)),
             "slh = {slh} is past the absolute cap and must be refused by the range check",
         );
     }
     for slh in [1, 5] {
         assert!(
-            matches!(check_declared_heights(Tier(20), plh, ilh, 0, slh, mlh20), Err(VerifyError::Sha256Height)),
+            matches!(check_declared_heights(Tier(20), plh, ilh, 0, slh, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh20), Err(VerifyError::Sha256Height)),
             "slh = {slh} is a table too short to hold one block",
         );
     }
     for slh in [0, sha256::MIN_LOG_HEIGHT, 19, sha256::MAX_LOG_HEIGHT] {
-        assert!(check_declared_heights(Tier(20), plh, ilh, 0, slh, mlh20).is_ok(), "slh = {slh} is legal at tier 20");
+        assert!(check_declared_heights(Tier(20), plh, ilh, 0, slh, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh20).is_ok(), "slh = {slh} is legal at tier 20");
     }
     // And where the tier is the tighter of the two, the tier variant is what a forgery earns.
     let mlh10 = Tier(10).min_mem_log_height();
     assert_eq!(Tier(10).max_sha256_log_height(), 16);
     assert!(matches!(
-        check_declared_heights(Tier(10), plh, ilh, 0, 17, mlh10),
+        check_declared_heights(Tier(10), plh, ilh, 0, 17, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh10),
         Err(VerifyError::Sha256HeightExceedsTier)
     ));
     assert!(matches!(
-        check_declared_heights(Tier(10), plh, ilh, 0, 21, mlh10),
+        check_declared_heights(Tier(10), plh, ilh, 0, 21, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh10),
         Err(VerifyError::Sha256Height),
     ), "past both bounds is reported by the range check, which runs first");
 }

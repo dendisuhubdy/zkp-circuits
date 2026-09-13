@@ -167,6 +167,23 @@ pub fn balance_check(threshold: u32) -> Program {
     a.assemble()
 }
 
+/// Reads the four public words, sums them, and reads `public[1]` a second time — so one proof
+/// exercises a multi-word digest region, a `MULT_READ` of 2, and the `PUBLIC_READ` bus.
+pub fn public_echo() -> Program {
+    let mut a = Assembler::new(0);
+    a.extend(read_public(0));
+    a.push(mv(T0, REG_A0));
+    for i in [1u32, 2, 3] {
+        a.extend(read_public(i));
+        a.push(add(T0, T0, REG_A0));
+    }
+    a.extend(read_public(1));
+    a.push(add(T0, T0, REG_A0));
+    a.extend(write_output(0, T0));
+    a.extend(halt());
+    a.assemble()
+}
+
 /// Exercises every `AluOp` variant and `JALR` through a register-computed target.
 ///
 /// `out0` is an XOR checksum over the results of the bitwise, shift and arithmetic ops (plus

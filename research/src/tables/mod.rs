@@ -7,6 +7,7 @@ pub mod alu;
 pub mod cpu;
 pub mod poseidon2;
 pub mod input;
+pub mod public;
 pub mod keccak;
 pub mod sha256;
 
@@ -33,6 +34,14 @@ pub mod bus {
     /// provides with count `IS_REAL * MULT_READ` — a free but LogUp-balance-checked witness
     /// value, unrelated to `INPUT_DIGEST`'s own count now that the two are split.
     pub const INPUT_READ: LookupBus<'static> = LookupBus::new("INPUT_READ");
+    /// cpu (real `IS_PUBDIGEST` rows) → public: (idx, word), count 1 per absorbed word. The
+    /// public table provides with count `IS_REAL`. Split from `PUBLIC_READ` for the reason
+    /// `INPUT_DIGEST` is split from `INPUT_READ` (M4.1 review round 1, C1): LogUp balances per
+    /// (idx, word) key, not per consumer class, so one bus would let a prover shrink the
+    /// digest's absorbed set while a genuine read of the dropped index still succeeded.
+    pub const PUBLIC_DIGEST: LookupBus<'static> = LookupBus::new("PUBLIC_DIGEST");
+    /// cpu (`SYS_READ_PUB` rows) → public: (idx, word), count `MULT_READ` per real row.
+    pub const PUBLIC_READ: LookupBus<'static> = LookupBus::new("PUBLIC_READ");
     /// cpu ↔ memory: (space, addr, ts, value, is_write). Multiset equality.
     pub const MEMORY: PermutationCheckBus<'static> = PermutationCheckBus::new("MEMORY");
     /// cpu → alu: (op, a, b, c). Alu provides.
