@@ -356,6 +356,61 @@ pub enum LoadError {
     BasePc(u32),
     TooLong(usize),
     Decode { index: usize, word: u32, err: DecodeError },
+    /// M4.3's image container: the first word is not [`IMAGE_MAGIC`].
+    Magic(u32),
+    /// A container version this loader does not know.
+    Version(u32),
+    /// The header's two segment lengths do not account for exactly the words that follow.
+    Segments { n_text: usize, n_data: usize, words: usize },
+    /// A text or data base address that is not a multiple of 4, or an empty text segment.
+    Base(u32),
+    /// The synthesised data prologue does not fit below the text segment's load address: `words`
+    /// instructions need `4 · words` bytes of program space before `text_base`.
+    PrologueRoom { text_base: u32, words: usize },
+}
+
+/// The first word of an M4.3 image container: `b"RAND"` read little-endian.
+pub const IMAGE_MAGIC: u32 = 0x444e_4152;
+/// The only container layout this loader knows.
+pub const IMAGE_VERSION: u32 = 1;
+/// `[magic, version, text_base, n_text, data_base, n_data]`.
+pub const IMAGE_HEADER_WORDS: usize = 6;
+
+/// The two registers the synthesised data prologue uses — `t0` (the value) and `t1` (the window
+/// base). It runs before the guest's `_start`, which sets `sp` and calls `main` itself, so no
+/// register it touches is live (`guest-sdk`'s entry block).
+const PROLOGUE_VAL: u32 = 5;
+const PROLOGUE_BASE: u32 = 6;
+
+/// The instructions that write `data` (loaded at `data_base`) into RAM: for each **non-zero** word,
+/// `li t0, word` and an `sw` through a base register `t1` re-pointed every 2 KiB so the store's
+/// offset always fits RISC-V's signed 12-bit S-type immediate (AGENTS.md invariant 3).
+///
+/// A zero word is skipped, not stored: the memory AIR constrains the first access to a fresh
+/// address, when it is a read, to carry value 0 — `IS_REAL · ADDR_CHANGED · (1 − IS_WRITE) · VALUE`
+/// on the transition and the same product on the first row (`tables::memory`) — so RAM already
+/// holds exactly what the image says for those words, and not by the trace builder's goodwill. That
+/// is what makes the prologue proportional to a guest's *non-zero* data rather than to its whole
+/// `.rodata`.
+fn data_prologue(data_base: u32, data: &[u32]) -> Vec<Instr> {
+    use crate::asm::ops::{li, sw};
+    let mut out = Vec::new();
+    let mut window: Option<u32> = None;
+    for (i, &word) in data.iter().enumerate() {
+        if word == 0 {
+            continue;
+        }
+        let addr = data_base + 4 * i as u32;
+        // A new window whenever the offset would leave the immediate's range (2044 keeps the
+        // store word-aligned as well as in range).
+        if window.is_none_or(|base| addr - base > 2044) {
+            out.extend(li(PROLOGUE_BASE, addr as i32));
+            window = Some(addr);
+        }
+        out.extend(li(PROLOGUE_VAL, word as i32));
+        out.push(sw(PROLOGUE_BASE, PROLOGUE_VAL, (addr - window.unwrap()) as i32));
+    }
+    out
 }
 
 impl Program {
@@ -368,6 +423,10 @@ impl Program {
     /// limbs), so a longer program can never satisfy the AIR no matter the tier — rejecting it
     /// here keeps that from surfacing as an opaque constraint failure deep inside `prove_batch`
     /// (`machine::ProveError::ProgramTooLong` is the same bound on the `Machine::prove` path).
+    ///
+    /// This is the loader for a guest with **no data segment**; a compiled guest that has one
+    /// (`.rodata`: jump tables, string literals, any constant LLVM chose to materialise) is
+    /// packaged as an image container and loaded by [`from_flat_image`](Program::from_flat_image).
     pub fn from_flat_binary(base_pc: u32, bytes: &[u8]) -> Result<Program, LoadError> {
         if bytes.is_empty() { return Err(LoadError::Empty); }
         if bytes.len() % 4 != 0 { return Err(LoadError::Length(bytes.len())); }
@@ -375,6 +434,73 @@ impl Program {
         let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         let max_words = u16::MAX as usize;
         if words.len() > max_words { return Err(LoadError::TooLong(words.len())); }
+        for (index, &word) in words.iter().enumerate() {
+            if let Err(err) = Instr::decode(word) { return Err(LoadError::Decode { index, word, err }); }
+        }
+        Ok(Program::new(base_pc, words))
+    }
+
+    /// The M4.3 image loader: a guest's `.text` **and its data segment** in one file, with the
+    /// data written into RAM by a prologue this function synthesises.
+    ///
+    /// Until M4.3 a compiled guest had to have an empty `.rodata`/`.data`, because the flat image
+    /// populated the instruction space only and RAM starts zero (`docs/01-isa.md`). That is fine
+    /// for a hand-written sponge loop and impossible for a real compiler output: LLVM puts a
+    /// `match`'s jump table, every panic `Location` and any constant it decides not to
+    /// rematerialise into `.rodata`, and a guest whose data is missing does not fail — it reads
+    /// zeros and computes the wrong answer, or jumps to `pc 0`.
+    ///
+    /// The fix needs nothing from the machine: the loader emits `li`/`sw` pairs that write the
+    /// data words to their link addresses, places them **immediately before** the text so control
+    /// falls through into the guest's own `_start` with no jump, and reports the whole thing as one
+    /// `Program`. The data is therefore part of the program, so `hc` binds it exactly as it binds
+    /// the code, and a verifier that accepts `hc` has accepted the constants too. The guest keeps
+    /// its link addresses (its `lui`-based absolute references to `.bss`, and its jump tables'
+    /// absolute entries, would not survive being moved), which is why the prologue goes below
+    /// `text_base` and why a guest with a data segment must be linked with enough room there
+    /// (`guests-compiled/evm/evm.ld` raises `ORIGIN` to `0x10000`; `LoadError::PrologueRoom` is
+    /// the check).
+    ///
+    /// Container layout, all words little-endian:
+    ///
+    /// ```text
+    /// [IMAGE_MAGIC, IMAGE_VERSION, text_base, n_text, data_base, n_data, text…, data…]
+    /// ```
+    ///
+    /// `n_data = 0` is a first-class case: the prologue is empty, `base_pc = text_base`, and the
+    /// `Program` is word-for-word the one [`from_flat_binary`](Program::from_flat_binary) builds
+    /// from the same text — same words, same `hc` (`tests/isa.rs`).
+    pub fn from_flat_image(bytes: &[u8]) -> Result<Program, LoadError> {
+        if bytes.is_empty() { return Err(LoadError::Empty); }
+        if bytes.len() % 4 != 0 { return Err(LoadError::Length(bytes.len())); }
+        let all: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        if all.len() < IMAGE_HEADER_WORDS { return Err(LoadError::Length(bytes.len())); }
+        if all[0] != IMAGE_MAGIC { return Err(LoadError::Magic(all[0])); }
+        if all[1] != IMAGE_VERSION { return Err(LoadError::Version(all[1])); }
+        let (text_base, n_text, data_base, n_data) = (all[2], all[3] as usize, all[4], all[5] as usize);
+        let body = &all[IMAGE_HEADER_WORDS..];
+        if n_text == 0 || n_text.checked_add(n_data) != Some(body.len()) {
+            return Err(LoadError::Segments { n_text, n_data, words: body.len() });
+        }
+        if text_base % 4 != 0 { return Err(LoadError::Base(text_base)); }
+        if data_base % 4 != 0 { return Err(LoadError::Base(data_base)); }
+        // The last data address has to exist: `data_base + 4·(n_data − 1)` is computed in `u32` when
+        // the prologue is built, and a header that wraps it would silently address the wrong RAM.
+        if data_base as u64 + 4 * n_data as u64 > u32::MAX as u64 { return Err(LoadError::Base(data_base)); }
+        let (text, data) = body.split_at(n_text);
+
+        let prologue = data_prologue(data_base, data);
+        // The prologue lives below `text_base`, so it needs that much program space to exist.
+        if 4 * prologue.len() as u64 > text_base as u64 {
+            return Err(LoadError::PrologueRoom { text_base, words: prologue.len() });
+        }
+        let mut words: Vec<u32> = prologue.iter().map(Instr::encode).collect();
+        let base_pc = text_base - 4 * words.len() as u32;
+        words.extend_from_slice(text);
+        if words.len() > u16::MAX as usize { return Err(LoadError::TooLong(words.len())); }
+        // Only the text needs checking — every prologue word came from `Instr::encode` — but the
+        // whole vector is checked anyway, at the same cost, so the invariant "every word of a
+        // loaded program decodes" holds by construction of this function rather than by argument.
         for (index, &word) in words.iter().enumerate() {
             if let Err(err) = Instr::decode(word) { return Err(LoadError::Decode { index, word, err }); }
         }
@@ -389,4 +515,16 @@ impl Program {
         for w in &self.words { out.extend_from_slice(&w.to_le_bytes()); }
         out
     }
+
+    /// The image container [`from_flat_image`](Program::from_flat_image) reads, for tests and for
+    /// `guests-compiled/mkimage.py`'s reference: header, text words, data words.
+    pub fn to_flat_image(text_base: u32, text: &[u32], data_base: u32, data: &[u32]) -> Vec<u8> {
+        let mut words = vec![IMAGE_MAGIC, IMAGE_VERSION, text_base, text.len() as u32, data_base, data.len() as u32];
+        words.extend_from_slice(text);
+        words.extend_from_slice(data);
+        let mut out = Vec::with_capacity(words.len() * 4);
+        for w in &words { out.extend_from_slice(&w.to_le_bytes()); }
+        out
+    }
 }
+

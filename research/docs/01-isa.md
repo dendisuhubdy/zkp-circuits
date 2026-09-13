@@ -178,13 +178,70 @@ it is initialised by the guest's own `_start` code to a linker-provided
 0x1000`, lays `.text`/`.rodata`/`.data`/`.bss` there, and defines
 `__stack_top` after a fixed-size stack region). The flat image the loader
 decodes populates the instruction space only — RAM starts zero and nothing
-copies the image's `.rodata`/`.data` bytes into it — so a compiled guest
-must keep those sections empty (loading data into RAM is future work,
-needed before M4.3). `_start` (`guest-sdk`'s
+copies the image's `.rodata`/`.data` bytes into it — so a guest loaded *this
+way* must keep those sections empty; a guest that has data uses the image
+container below, which M4.3 added for exactly this reason. `_start` (`guest-sdk`'s
 `global_asm!` block) does `la sp, __stack_top; call main`, then falls
 through to its own `li a7,0; ecall` (a `HALT`) as defense in depth if
 `main` ever returns instead of calling `guest_sdk::halt()` itself — this
 machine has no OS to return *to*.
+
+## The image container: a guest with a data segment (M4.3)
+
+A hand-written sponge loop has no `.rodata`. A real compiler output always
+does: LLVM puts a `match`'s jump table there, every panic `Location` and its
+file-name string, and any constant it decides not to rematerialise. M4.3's
+EVM interpreter guest is 66 KB of text and ~1 KB of `.rodata`, and with the
+flat loader that data had nowhere to go — the image would not even load
+(every word of it has to decode as an instruction), and dropping the section
+was worse than useless: the guest reads zeros where `U256::MAX` should be and
+computes the wrong answer, or reads a zeroed jump table and jumps to `pc 0`.
+RAM is zero and *stays* zero until something writes it.
+
+`Program::from_flat_image(bytes) -> Result<Program, LoadError>` is the loader
+for such a guest. The container is six little-endian header words followed by
+the two segments:
+
+```text
+[0x444e_4152 ("RAND"), version 1, text_base, n_text, data_base, n_data, text…, data…]
+```
+
+and the loader **synthesises the code that loads the data**: for every
+non-zero data word, an `li`/`sw` pair through a base register it re-points
+every 2 KiB (so the store's offset always fits the signed 12-bit S-type
+immediate — AGENTS.md invariant 3). Zero words are skipped, because the
+memory table constrains the first read of a fresh address to return 0, so RAM
+already holds what the image says for them; the prologue is proportional to a
+guest's *non-zero* data (~1 KB of `.rodata` → 578 instructions for the M4.3
+guest).
+
+Three properties make this the whole feature:
+
+- **`hc` binds the data.** The prologue is part of `Program::words`, so the
+  program digest covers the constants exactly as it covers the code. There is
+  no second commitment, no new public value, and nothing for a prover to
+  choose: `MEM_VAL` on those stores is pinned by the instructions themselves.
+- **The text keeps its link addresses.** The prologue is placed
+  *immediately below* `text_base` (`base_pc = text_base - 4 · prologue_words`)
+  and control falls through into the guest's own `_start` with no jump, so
+  every `lui`-based absolute reference to `.bss` and every jump-table entry
+  still points where the linker put it. A guest with data therefore needs
+  program space below its text: `guests-compiled/evm/evm.ld` is
+  `guest-sdk/guest.ld` with `ORIGIN` raised to `0x10000`, and
+  `LoadError::PrologueRoom` is the check that it was raised enough.
+- **A guest with no data is unchanged.** `n_data = 0` gives an empty prologue,
+  `base_pc = text_base`, and word-for-word the `Program`
+  `from_flat_binary` builds — same `hc`
+  (`tests/isa.rs::an_empty_data_segment_gives_exactly_the_flat_binary_program_and_hc`,
+  over the committed `keccak256.bin`). `fib` and `keccak256` keep their flat
+  `.bin` files and their loader call untouched.
+
+`guests-compiled/mkimage.py` builds a container from a linked ELF (`.text`
+as the text segment, every other allocated `PROGBITS` section as one
+contiguous data segment, `.bss` excluded because it is `NOBITS`), and the
+guest Makefile calls it instead of `llvm-objcopy -O binary`. `LoadError` gains
+`Magic`, `Version`, `Segments`, `Base` and `PrologueRoom` for a container that
+is not one.
 
 **Unsupported instructions.** `FENCE`, `EBREAK`, CSR instructions, and the
 A/C extensions are never emitted by `Instr::decode`'s recognized encodings,
