@@ -25,7 +25,7 @@ growing its own proof system.
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 223 tests (222 pass, 1 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, viewing keys, shielded-pool bundles
+cargo test              # 275 tests (272 pass, 3 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, viewing keys, shielded-pool bundles, and the EVM guest's four host suites
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -184,7 +184,7 @@ running under the same relation, not separate circuits:
 | Target | Path into `R_exec` | Coprocessor tables it will want |
 |---|---|---|
 | RISC-V | native | none |
-| Solidity | `solc` → EVM bytecode → a `no_std` EVM interpreter compiled to RV32IM, bytecode as private input | Keccak-256, 256-bit `ADDMOD`/`MULMOD`/`EXP`, `ECRECOVER` (secp256k1), Merkle-witness syscalls for `SLOAD`/`SSTORE` |
+| Solidity | **done (M4.3)**: `solc` → EVM bytecode → `evm-core`, a `no_std` EVM interpreter compiled to RV32IM, bytecode and storage witnesses as private input. An ERC-20 `transfer` executes and binds its state-root transition, measured at `Tier(18)`; the same guest proves and verifies in-suite on a smaller call at `Tier(16)` | Keccak-256 **(done, M4.2)**; a looped `MERKLE_VERIFY`-style storage syscall or a wider sponge rate (the measured top cost); then 256-bit `ADDMOD`/`MULMOD`/`EXP` and `ECRECOVER` (secp256k1) |
 | Solana / SVM | sBPF ELF → an sBPF interpreter compiled to RV32IM | SHA-256, Ed25519 verify, 64-bit multiply; a direct sBPF→RV32 translator is a natural later optimisation |
 
 Publishing a contract under this model means registering a hash, never

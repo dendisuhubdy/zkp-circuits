@@ -12,14 +12,22 @@ are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (223 tests: 222 pass, 1 ignored).
+- `cargo test` — the whole suite (275 tests: 272 pass, 3 ignored).
   Everything uses `FriProfile::Test`; measured in one run at the end of the
   2026-09-12 audit-port wave, `tests/bundle.rs` takes ~213 s (six proofs:
   four guest-level, plus one shared by every ledger-level test and one for
-  the 1-real-1-dummy shape), `tests/viewing.rs` ~208 s, `tests/e2e.rs`
-  ~99 s, `tests/cheating.rs` ~47 s, `tests/zk.rs` ~18 s,
-  `tests/tables.rs` ~10 s and `tests/keccak.rs` ~1 s (its chip-alone
-  harness proves a 128-row table, so it is cheap despite 2 612 columns).
+  the 1-real-1-dummy shape), `tests/viewing.rs` ~199 s, `tests/e2e.rs`
+  ~417 s wall — M4.3's tier-16 EVM-call proof dominates it (421 s to prove and
+  15 s to verify when run alone, overlapped here with the file's other tests),
+  and the ERC-20 transfer's tier-18 proof is `#[ignore]`d because it needs
+  ~25 GB of RAM (`docs/04-guests.md`), `tests/cheating.rs` ~60 s, `tests/zk.rs` ~18 s,
+  `tests/tables.rs` ~10 s, `tests/isa.rs` ~6 s (M4.3's image-container tests
+  prove two small programs), `tests/keccak.rs` ~1 s (its chip-alone
+  harness proves a 128-row table, so it is cheap despite 2 612 columns), and
+  the four EVM host suites — `tests/evm_u256.rs` (6), `tests/evm_storage.rs`
+  (11), `tests/evm_interp.rs` (17), `tests/evm_abi.rs` (8) — well under a
+  second between them, because they prove nothing: they run `evm-core`
+  natively over `evm::HostRef`.
   All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a
   keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with
   a batch's column count, so carrying it costs ~1.91 MB at the production
@@ -70,6 +78,30 @@ first of all:
 
 The emulator (`src/emulator.rs`) is the reference semantics: if the AIR and
 the emulator disagree, the AIR is wrong.
+
+## `evm-core` is tested on the host and compiled into the guest
+
+`guests-compiled/evm-core` (M4.3) is a `no_std` library with its own
+workspace root, generic over a two-method `Host` trait (the Keccak-f[1600]
+permutation and the Poseidon2 sponge). It is a **normal dependency** of this
+crate, not a dev-dependency, because `src/evm.rs` — the host side: `HostRef`,
+`SparseTree`, `EvmCall`, the ERC-20 fixtures — is part of the library's public
+API, and `tests/evm_*.rs` link `rand_zkvm` as an external crate.
+
+The rule that follows: **every change to `evm-core` is tested natively here
+and only then rebuilt into the guest.** `tests/evm_{u256,storage,interp,abi}.rs`
+run the same code the committed `guests-compiled/bin/evm.bin` contains, over
+`HostRef`'s reference primitives, differentially against `revm 43.0.2` and
+`num-bigint`. An interpreter cannot be debugged through proofs; if a host test
+and the guest disagree, the difference is the target build, not the semantics.
+
+After editing `evm-core`, run `make -C guests-compiled/evm install` — `install`,
+not `all`: `all` leaves the new image in the guest crate's own `bin/`, and
+`src/guests.rs` includes `guests-compiled/bin/evm.bin`, so without it the tests
+measure the *previous* binary (which has happened). The guest is built with its
+own linker script (`evm.ld`, `ORIGIN` raised for the loader's data prologue) and
+with the rustflags in its `Makefile` rather than in `.cargo/config.toml`, since
+one of them needs the checkout's absolute path — see that Makefile's header.
 
 ## Testing and docs discipline
 

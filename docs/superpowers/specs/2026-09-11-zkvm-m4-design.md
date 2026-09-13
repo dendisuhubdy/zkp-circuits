@@ -179,6 +179,47 @@ table over the opcode byte instead of a compare chain).
 **Solidity source.** The test contract is compiled with `solc` once and the bytecode committed as
 a hex file with the compiler version; no `solc` in the build.
 
+### 4.1 Amendment to §4 (proposed by the M4.3 plan 2026-09-12, **pending the user's approval**; supersedes §4 where they differ)
+
+Implementing §4 settled four things it left open or specified differently. None of them changes
+the machine: M4.3 added no table, bus, syscall or public value.
+
+1. **The public output is a digest, not a truncated root.** §4 gives `out1..3` = 96 bits of the
+   post-state root and `out4..7` = the Keccak of the return data. 96 bits of a state root is 2^48
+   collision work, below the proof's own ~86-bit floor, and §4 binds the *pre*-state root not at
+   all (`H_IN` is hiding, so the roots the call ran against are invisible to a verifier). **As
+   implemented:** `out0` = status (1 success, 0 `REVERT`, **2 exceptional halt** — a chain has to
+   tell "the contract said no", whose revert data is meaningful, from "the run was invalid"), and
+   `out1..out7` = words 0..6 of
+   `hash(EVM_OUT, [codehash(8) ‖ pre_root(8) ‖ post_root(8) ‖ return_hash(8) ‖ logs_hash(8)])` —
+   40 words through the domain-tagged Poseidon2 sponge, a 224-bit binding of the contract, **both**
+   roots, the return data and the logs' topics. A chain verifying a call already holds all five
+   fields and recomputes the digest, so nothing is lost and the pre-root is bound too. A status
+   other than 1 binds `post_root = pre_root` and an empty log set; status 2 binds empty return data
+   as well. One function, `evm_core::abi::public_output`, is the whole rule.
+2. **The storage index convention.** §4 says "keyed by `keccak256(slot)` prefix bits, depth 32"
+   without saying *which* bits. **As implemented:** the leaf position is the **top 32 bits,
+   big-endian**, of `keccak256(slot as 32 big-endian bytes)`, read as a `u32` whose bit `i` (LSB
+   first) chooses left/right at level `i` — `asm::emit_merkle_verify`'s own convention. The leaf is
+   `hash(STORAGE_LEAF, [slot ‖ value])` and canonical in the value (a zero value hashes to one
+   fixed leaf whatever the slot), so the root is history-independent and the empty tree has a
+   well-defined root. `STORAGE_LEAF = 12` and `EVM_OUT = 13` are the two new `notes::domain` tags.
+   Known limitation: a 32-bit index is grindable at ~2^32, and a collision makes the *other* slot
+   of the pair unwitnessable — fail-closed griefing, never forgery; the remedy is a deeper index
+   (`research/docs/04-guests.md`).
+3. **`SLOAD`/`SSTORE` are guest code, not a syscall.** §4 says membership "uses the existing
+   `MERKLE_VERIFY` routine". That routine is an `asm.rs` *guest-level* helper, not a syscall, and
+   `evm-core` is compiled Rust: it walks the path itself over `POSEIDON2`. Multi-slot updates
+   refresh the sibling every other witness holds at the level where its path diverges from the
+   updated one, which §4 does not mention and which independent witnesses require.
+4. **The cycle budget was optimistic by an order of magnitude.** §4 estimates ~400 opcodes at
+   5–20 cycles → 8 000–12 000 cycles → tier 14. Measured: **121 630 executed cycles (126 357 with the digest prefixes), `Tier(18)`**.
+   The estimate's error is not the dispatch loop (§4's predicted culprit): it is that each of the
+   four 32-level Merkle walks is 33 `POSEIDON2` calls (~27 300 cycles in all) and that a software
+   256-bit interpreter costs ~200 cycles an opcode, not 5–20. The dispatch loop *is* now a real
+   target, but after a storage syscall or a wider sponge rate — the ordering is in
+   `research/docs/05-roadmap.md`'s deviation 7 and `docs/04-guests.md`'s measured breakdown.
+
 ## 5. M4.4 — sBPF and SHA-256 (interfaces only)
 
 - `SYS_SHA256 = 5`: `a0 = ptr` to a 24-word block (16 message words + 8 state words), one

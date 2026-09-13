@@ -159,6 +159,23 @@ At `FriProfile::Test` the same comparison is 275 916 bytes at the base
 so a keccak table silently creeping back into keccak-free proofs fails the
 suite rather than quietly costing every proof on the chain.
 
+**An EVM call proof (M4.3) is the first real workload that carries the table.**
+`guests::compiled::evm` on a storage read-modify-write proves at `Tier(16)` with
+`keccak_log_height = 7` and measures 776 248 bytes at
+`FriProfile::Test` (421 s to prove, 14.8 s to verify); the ERC-20
+`transfer` is the same guest at tier 18, whose proof the development machine could
+not build (~25 GB resident, OOM-killed on 48 GB — `docs/04-guests.md`).
+At the production profile a tier-18 EVM proof is about **3.2 MB**: ~1.25 MB
+for the eight ordinary tables at that tier plus the keccak table's ~1.91 MB,
+which is a width cost and does not shrink with the row count. The fullnode's
+`MAX_PROOF_BYTES` is 2 MiB (constraint set 5), so the vendoring that carries
+M4.3 has to raise the cap to 4 MiB — and revisit the block cap with it
+(`fullnode/docs/block-space.md`). Two consequences worth stating plainly: any
+guest that touches `KECCAK256` pays ~1.91 MB, so a contract that avoids Keccak
+(no mappings, no ABI hashing) is materially cheaper on chain than one that does
+not; and the size difference is itself a structural leak of exactly the kind
+`keccak_log_height` already is.
+
 A second, smaller number in the same measurement is M4.2's own controller
 ruling 1. The first cut of the milestone sized the memory table
 `log2_ceil(2^(ℓ+2) + 100·2^(klh−5))`, which doubled it for every proof in
@@ -482,6 +499,9 @@ refused by `build_traces`, not silently truncated.
 | Shielded transfer (`guests::transfer`): the output-commitment digest `H(anchor, nf, cm_out, time)` | public (the eight output words); the ledger is separately handed the plaintext `anchor`/`nf`/`cm_out`/`time` alongside the proof and checks them against the digest — `docs/06-viewing-keys.md`'s "Public outputs" |
 | Shielded transfer: the spent commitment `cm_in` | hidden — proved in-circuit (`MERKLE_VERIFY`) against `anchor`, a commitment-tree root, never published itself; only `anchor` (one of the ledger's last 64 roots, `Ledger::ANCHOR_WINDOW`) and `nf` (a one-way function of `cm_in`) are public, so the link from a note's creation to its spend is not visible on chain |
 | Shielded transfer: sender, receiver, amount, asset, note randomness | hidden from the chain; opened by the receiver's or sender's viewing key, or by the transaction key (`docs/06-viewing-keys.md`) |
+| EVM call (`guests::compiled::evm`, M4.3): the contract's bytecode, the calldata, the caller, the call value, the storage witnesses | hidden — all of it is the private input vector, bound only to the salted, hiding `H_IN`. The *bytecode* included: a confidential contract is an interpreter's `hc` plus a commitment to bytecode nobody publishes |
+| EVM call: the status word, `codehash`, both state roots, the return-data hash, the logs' topics | public **by construction of the verifier**, not by the proof — `out1..out7` is a 224-bit digest of `(codehash, pre_root, post_root, return_hash, logs_hash)`, which reveals nothing by itself, but a chain that means to *use* the call recomputes that digest from the contract and roots it already holds, so it must know them. What the digest is for is binding the transition the chain applies to the one the guest proved |
+| EVM call: which slots were touched, which opcodes ran, the gas used, the log *data* | hidden — the witness count is bounded by `MAX_WITNESSES` and the cycle count by the tier, and the public digest binds the roots rather than the path between them. A log's topics are hashed into the digest; its data is dropped entirely |
 
 ## The delegated-proving boundary
 
