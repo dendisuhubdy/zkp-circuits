@@ -515,7 +515,7 @@ tier).
 | 18 | 262 144 | 524 288 | 1 048 576 | 8 388 608 | 1 048 576 | 262 143 |
 | 20 | 1 048 576 | 2 097 152 | 4 194 304 | 33 554 432 | 1 048 576 | 1 048 575 |
 
-The `sha256` column flattens at `2^20` from tier 16 up because
+The `sha256` column flattens at `2^20` from tier 14 up because
 `Tier::max_sha256_log_height` folds the flat `tables::sha256::MAX_LOG_HEIGHT = 20`
 into the tier relation: 16 384 compressions is ~1 MiB of hashed message, past
 anything this crate proves, and an untrusted `u8` must not be able to make a

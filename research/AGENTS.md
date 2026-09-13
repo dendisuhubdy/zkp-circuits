@@ -57,9 +57,17 @@ are `docs/01–06`; the README has the reading order.
   a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile`
   and its `#[ignore]`d production twin). Both tables are optional and
   independent, so a guest pays for the hash it actually calls.
-- `cargo run --release` — the narrated demo, 5–6 min wall time (one
-  production-profile proof). The test suite covers everything it shows; don't
-  run it casually.
+- `cargo +1.98.1 test --features reference-backend --test backend` — the CPU-twin
+  backend suite, feature-gated and so invisible to the default `cargo test`.
+  `backend_proof_has_the_same_shape_as_a_cpu_proof` has been unpassable since
+  H_IN was salted per proving call in M4.1: it asserts `a.public_values ==
+  b.public_values` across two independently-salted proving calls (`prove_with`
+  and `prove` on the same guest), and each draws its own salt, so the equality
+  fails by construction. This is a pre-existing failure, not a regression, and
+  not this milestone's to fix.
+- `cargo run --release` — the narrated demo, ~6-7 minutes wall time (thirteen
+  proofs — one production-profile proof). The test suite covers everything it
+  shows; don't run it casually.
 - The toolchain is pinned by `rust-toolchain.toml`; let `rustup` pick it up.
 
 ## Invariants that have actually been broken here

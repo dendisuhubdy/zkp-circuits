@@ -709,10 +709,11 @@ fn compiled_sbpf_spl_token_transfer_of_too_much_fails_cleanly() {
 /// is the whole of the work.
 #[test]
 #[ignore = "1 753 945 cycles: above Tier(20)'s 1 048 575 budget, let alone the plan's tier 18. \
-            72 % of it is program_hash over the 108 600-byte ELF, which cannot just be declared \
-            instead (H_IN is hiding, so a digest the guest does not recompute binds nothing). \
-            Needs the ELF in the guest's data segment (tier 20) or a public input segment \
-            (tier 18): docs/04-guests.md, design spec 5.1 item 8"]
+            The 108 600-byte ELF is 1 698 of the 2 368 compressions (72 %); carrying and hashing \
+            it in-circuit as program_hash is about 1.20 M of the 1.75 M cycles (69 %), which \
+            cannot just be declared instead (H_IN is hiding, so a digest the guest does not \
+            recompute binds nothing). Needs the ELF in the guest's data segment (tier 20) or a \
+            public input segment (tier 18): docs/04-guests.md, design spec 5.1 item 8"]
 fn compiled_sbpf_spl_token_transfer_proves_and_verifies() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::compiled::sbpf();

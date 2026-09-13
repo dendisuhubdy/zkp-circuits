@@ -201,8 +201,10 @@ milestone 4 builds first: `docs/04-guests.md`.
 
 The Solana interpreter **runs** an SPL Token `Transfer` correctly in the
 machine's executor but does not **prove** it: 1 753 945 cycles against the largest
-tier's 1 048 575, 72 % of it spent hashing the 108 600-byte ELF in-circuit to
-produce `program_hash`. That hashing cannot just be dropped — `H_IN` is hiding, so
+tier's 1 048 575; the 108 600-byte ELF is 1 698 of the run's 2 368 compressions
+(72 %), and carrying it on the input tape and hashing it in-circuit to produce
+`program_hash` is about 1.20 M of those cycles (69 %). That hashing cannot just be
+dropped — `H_IN` is hiding, so
 a digest the guest does not recompute is bound to nothing — and the two sound
 remedies both change more than the guest: baking the ELF into the guest's data
 segment so `hc` binds it (tier 20, and one binary per program), or a public input
