@@ -2474,10 +2474,12 @@ fn a_public_read_disagreeing_with_the_committed_word_is_rejected() {
 }
 
 /// (3) A read of a dropped index: clear a real row's `IS_REAL` while the guest still reads it.
-/// Two independent rules catch it — the prefix rule, and `PUBLIC_DIGEST`'s unclaimed demand.
-/// This is also the C1-shaped attack from the `public` table's own side: shrinking the table's
-/// real prefix cannot buy a read at the dropped index, because `PUBLIC_READ`'s count carries the
-/// same `IS_REAL` factor and so vanishes with it.
+/// Two independent buses catch it — `PUBLIC_READ`, whose count carries the same `IS_REAL`
+/// factor and so leaves the guest's `READ_PUBLIC(3)` with no provider at all, and
+/// `PUBLIC_DIGEST`, whose demand for index 3 is likewise unclaimed. (Not the monotone-prefix
+/// rule: row 3 is the *last* real row, so clearing it leaves a shorter prefix, not a hole —
+/// that case is test (8).) Because the read dies with the row, this witness would be rejected
+/// by an unsplit single-bus design too; the split's own property is tests (13)/(14).
 #[test]
 fn a_read_of_a_dropped_public_index_is_rejected() {
     use rand_zkvm::tables::public::col;
@@ -2554,7 +2556,9 @@ fn a_public_read_whose_table_is_padded_away_is_rejected() {
 }
 
 /// (8) A hole in the real-row prefix — the monotone-prefix rule, and independently the digest's
-/// unclaimed demand at the hole's index.
+/// unclaimed demand at the hole's index. `WORD` and `MULT_READ` go to zero with `IS_REAL` so
+/// that the two padding pins (`#4`/`#5`) stay satisfied and the prefix rule (`#1`) is the only
+/// local constraint this witness violates.
 #[test]
 fn a_hole_in_the_public_tables_real_prefix_is_rejected() {
     use rand_zkvm::tables::public::col;
@@ -2562,6 +2566,8 @@ fn a_hole_in_the_public_tables_real_prefix_is_rejected() {
     let w = col::WIDTH;
     assert_eq!(t.public.values[2 * w + col::IS_REAL], F::ONE, "row 2 is real, so clearing row 1 leaves a hole");
     t.public.values[w + col::IS_REAL] = F::ZERO;
+    t.public.values[w + col::WORD] = F::ZERO;
+    t.public.values[w + col::MULT_READ] = F::ZERO;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
@@ -2578,6 +2584,11 @@ fn a_skipped_public_table_index_is_rejected() {
 
 /// (10) Two reads of the same public index returning different words — `public_echo` reads
 /// `public[1]` twice, so the second read's row is there to tamper.
+///
+/// What actually rejects it is the `MEMORY` bus, not `PUBLIC_READ`: a `SYS_READ_PUB` row's `C`
+/// is both the word `PUBLIC_READ` looks up *and* the value written back to `rd` (`defines_c`
+/// includes `SYS_READ_PUB`), and the register write is checked first. `PUBLIC_READ`'s own
+/// unclaimed demand for `(1, 23)` stands behind it either way.
 #[test]
 fn two_public_reads_of_the_same_index_returning_different_words_is_rejected() {
     let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
@@ -2825,5 +2836,103 @@ fn an_indigest_region_leaking_hash_left_into_the_public_digest_region_is_rejecte
     for k in 0..8 { t.public_values[cpu::pv::IN0 + k] = F::from_u32(hin[k]); }
     shift_range8(&mut t, &edits);
     rebuild_digest_permutations(&mut t, &p, &blocks, &hash::public_digest_rows(&public));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// ---- the digest side of the C1 split (review round 1) --------------------------------------------
+//
+// Everything above tampers the `public` *table*. The attack `tables::public`'s module doc names —
+// the one the mandatory `PUBLIC_DIGEST`/`PUBLIC_READ` split exists to stop — comes from the other
+// side: shrink the **digest's** own declared `n_pub` so it stops demanding index `k`, and leave
+// the table's real row `k` (and its `MULT_READ`) alone so a genuine `READ_PUBLIC(k)` still
+// succeeds. These are the public duals of `declaring_n_in_smaller_than_the_reads_is_rejected` and
+// `the_c1_witness_shrinking_n_in_while_still_reading_the_dropped_word_is_rejected`.
+
+/// Rewrites `t`'s pubdigest region in place as if `H_PUB` had only ever committed to
+/// `new_public` — a prefix of the vector `t` was built with, short enough to need the *same*
+/// number of pubdigest rows (`hash::public_digest_row_count`) — while leaving the `public`
+/// witness table, and hence the guest's own reads, completely untouched. `shrink_declared_n_in`'s
+/// pubdigest twin, and a far shorter one: the pubdigest region has no salt row, and the helpers
+/// above already carry the `HASH_LEFT` limb, `H` encoding, RANGE8 and permutation bookkeeping.
+fn shrink_declared_n_pub(t: &mut Traces, p: &rand_zkvm::isa::Program, new_public: &[u32]) {
+    use rand_zkvm::hash;
+    let w = cpu::col::WIDTH;
+    let offset = p.digest_rows() + hash::input_digest_row_count(0);
+    let blocks = hash::public_digest_rows(new_public);
+    let n = blocks.len();
+    let mut edits: Vec<(u32, u32)> = Vec::new();
+    for (i, blk) in blocks.iter().enumerate() {
+        let r = (offset + i) * w;
+        t.cpu.values[r + cpu::col::HASH_N] = F::from_u32(new_public.len() as u32);
+        set_hash_left(t, offset + i, blk.left_before, &mut edits);
+        for k in 0..8 { t.cpu.values[r + cpu::col::HS0 + k] = blk.state_in[k]; }
+        for k in 0..4 {
+            t.cpu.values[r + cpu::col::ACT0 + k] = F::from_bool(blk.active[k]);
+            // An inactive lane carries the entering state forward instead of absorbing a word.
+            t.cpu.values[r + cpu::col::HV0 + k] = if blk.active[k] { F::from_u32(blk.words[k]) } else { blk.state_in[k] };
+        }
+    }
+    let last = *blocks.last().expect("public_digest_rows always returns at least one block");
+    // The first ordinary instruction row carries the region's own permutation output.
+    for k in 0..8 { t.cpu.values[(offset + n) * w + cpu::col::HS0 + k] = last.state_out[k]; }
+    let hpub = set_digest_encoding(t, offset + n - 1, last.state_out, cpu::col::PHVL0, cpu::col::PHIMAX0, cpu::col::PINV0, &mut edits);
+    for k in 0..8 { t.public_values[cpu::pv::PUB0 + k] = F::from_u32(hpub[k]); }
+    shift_range8(t, &edits);
+    rebuild_digest_permutations(t, p, &hash::input_digest_rows(TEST_SALT, &[]), &blocks);
+}
+
+/// (13) The pubdigest dual of `declaring_n_in_smaller_than_the_reads_is_rejected`: shrink *only*
+/// the digest's declared `n_pub` (4 → 3, recomputing everything the digest itself is responsible
+/// for so no other check trips first) and leave the `public` table exactly as built. Index 3's
+/// real row then supplies `PUBLIC_DIGEST` one unit nothing demands any more, while its
+/// `MULT_READ = 1` keeps the guest's genuine `READ_PUBLIC(3)` perfectly balanced on
+/// `PUBLIC_READ` — so `PUBLIC_DIGEST`, and only `PUBLIC_DIGEST`, is what rejects this.
+///
+/// This is the property brief test (3) cannot show: there the read dies with the row it drops.
+#[test]
+fn declaring_n_pub_smaller_than_the_reads_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    shrink_declared_n_pub(&mut t, &p, &[11, 22, 33]);
+    let w = col::WIDTH;
+    assert_eq!(t.public.values[3 * w + col::IS_REAL], F::ONE, "index 3's row is left real — the orphaned PUBLIC_DIGEST supply");
+    assert_eq!(t.public.values[3 * w + col::MULT_READ], F::ONE, "and its read multiplicity is left alone, so PUBLIC_READ stays balanced");
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (14) The literal C1 witness against the pre-split single-bus design, and the dual of
+/// `the_c1_witness_shrinking_n_in_while_still_reading_the_dropped_word_is_rejected`: (1) shrink
+/// the digest's declared `n_pub` as in (13), then (2) additionally zero the orphaned row's
+/// `MULT_READ` to "pay for" its now-unclaimed mandatory-copy slot.
+///
+/// Under a *single* bus counting `IS_REAL * (1 + MULT_READ)` this is exactly the witness that
+/// verifies: row 3 would supply `1 + 0 = 1` against a demand of 1 (the surviving
+/// `READ_PUBLIC(3)`), balanced — and `H_PUB` would commit to fewer words than the guest actually
+/// read. Split, step (2) is powerless *and* self-defeating: `MULT_READ` does not feed
+/// `PUBLIC_DIGEST` at all, so row 3's `IS_REAL = 1` supply there stays unclaimed regardless,
+/// and zeroing it merely strands the read's own demand on `PUBLIC_READ` as well.
+#[test]
+fn the_c1_witness_shrinking_n_pub_while_still_reading_the_dropped_word_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    shrink_declared_n_pub(&mut t, &p, &[11, 22, 33]);
+    let w = col::WIDTH;
+    t.public.values[3 * w + col::MULT_READ] = F::ZERO;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (15) `MULT_READ` inflated on a *real* row (index 0, read once, claimed twice) — the witness
+/// `tables::public::col::MULT_READ`'s "needs no range check of its own" argument rests on. `IDX`
+/// is pinned to the row's own position, so an over-claim can only ever inflate this one row's
+/// `PUBLIC_READ` supply; it cannot be spread across rows to hide an over-count, and `PUBLIC_READ`
+/// balancing against the true `SYS_READ_PUBLIC` demand catches it however large it is.
+/// `PUBLIC_DIGEST` is untouched by this tamper — its count is `IS_REAL` alone — which is the
+/// other half of the same argument.
+#[test]
+fn an_inflated_mult_read_on_a_real_public_row_is_rejected() {
+    use rand_zkvm::tables::public::col;
+    let (m, p, mut t) = setup_with_public(&[11, 22, 33, 44]);
+    assert_eq!(t.public.values[col::MULT_READ], F::ONE, "public_echo reads public[0] exactly once");
+    t.public.values[col::MULT_READ] = F::from_u32(2);
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
