@@ -33,5 +33,12 @@ rand_zkvm = { path = "../research" }
 [dev-dependencies]
 hex = "0.4"
 
+# `research`'s profiles, verbatim. This crate is its own package root, so cargo reads *these*
+# tables and not `research/`'s — and without the dependency override every p3 crate and
+# `rand_zkvm` itself would build at `opt-level = 0` under `cargo test`, which makes proving a
+# fixture bundle proof (the only proofs this crate's tests verify) take hours instead of seconds.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.test]
 opt-level = 1

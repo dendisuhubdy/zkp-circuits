@@ -1029,7 +1029,15 @@ pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<Ke
 impl Machine {
     pub fn new(profile: FriProfile) -> Self { Self { config: make_config(profile), profile, keys: Mutex::new(KeyCache::default()) } }
 
-    fn log_ext_degrees(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, mem_log_height: u8) -> Vec<usize> {
+    /// Each instance's extended trace degree bits, in `chips()` order — a pure function of the
+    /// tier and the declared heights, which is why it can be `pub`: the free function
+    /// [`max_constraint_degrees`] already computes the same thing publicly, and `verify` checks
+    /// `proof.batch.degree_bits` against it rather than trusting the proof.
+    ///
+    /// `pub` for M5.1's `recursion` crate: its `InnerShape` must derive `degree_bits` from the
+    /// machine rather than from the proof — the whole point of a *shape* is that it is not
+    /// proof-supplied — and this is where the machine says what they are.
+    pub fn log_ext_degrees(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, mem_log_height: u8) -> Vec<usize> {
         let zk = self.config.is_zk();
         // Order matches `chips()`: program, cpu, memory, alu, range, nibble, poseidon2, input,
         // and — only when this proof declares a keccak table — keccak.

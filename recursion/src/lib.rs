@@ -15,9 +15,22 @@
 //!   allocator that spills to memory, with named assertion traps so "the program refused at *this*
 //!   step" is a checked claim.
 //!
+//! - [`shape`] is what a verifier program is specialised to: the inner proof's declared heights and
+//!   every per-instance number the batch transcript needs, plus the inner preprocessed commitment,
+//!   which the program carries as a constant rather than recomputing (3.1 M permutations).
+//! - [`reference`] replays the very same transcript on the host with every intermediate exposed, so
+//!   each phase of the program is checked against a value `p3-challenger`/`p3-fri` computed.
+//! - [`witness`] flattens one `Proof` into the tape the program reads with `HINT`, in consumption
+//!   order, with a pinned segment table.
+//! - [`programs`] holds the programs themselves — in M5.1, the RV32-machine verifier.
+//!
 //! The rule inherited from `research/AGENTS.md` holds here too: the emulator is the reference
 //! semantics — if an AIR and the emulator disagree, the AIR is wrong.
 
 pub mod dsl;
 pub mod emulator;
 pub mod isa;
+pub mod programs;
+pub mod reference;
+pub mod shape;
+pub mod witness;
