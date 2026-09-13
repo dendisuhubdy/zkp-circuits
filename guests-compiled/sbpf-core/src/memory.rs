@@ -19,13 +19,29 @@ pub const REGION_HEAP: u64 = 0x3_0000_0000;
 /// program's effect on the world lands, and what the public output's `output_hash` covers.
 pub const REGION_INPUT: u64 = 0x4_0000_0000;
 
-/// Bytes per stack frame. Solana's own number is 4 KiB, but 64 frames of that is 256 KiB, which
-/// does not fit a 1 MiB guest: the M4.4 plan allocates 512 bytes and traps on a deeper frame.
-pub const STACK_FRAME: usize = 512;
+/// Bytes per stack frame: **Solana's own 4 KiB**, not the M4.4 plan's 512.
+///
+/// Measured, in Task 6, against the real SPL Token ELF: with 512-byte frames the program faults
+/// immediately at `0x1_ffff_f9e8` — 1 560 bytes *below* the stack region's base — because the
+/// release build inlines `entrypoint::deserialize`, `Processor::process` and `process_transfer`
+/// into one function whose single frame is around 2 KiB. A frame size is not a budget the host may
+/// choose: it is part of the ABI the program was compiled against, and a program whose frame does
+/// not fit does not run slowly, it does not run at all.
+///
+/// The plan's 32 KiB *stack* is kept; what gives way is the depth. See [`MAX_CALL_DEPTH`].
+pub const STACK_FRAME: usize = 4096;
 /// Frames. The push that would make the depth this is refused, as `solana-sbpf`'s
 /// `max_call_depth` does.
-pub const MAX_CALL_DEPTH: usize = 64;
-/// The whole static stack: 32 KiB.
+///
+/// **8, not Solana's 64** — the one place this crate is deliberately smaller than the real runtime,
+/// because 64 × 4 KiB is 256 KiB and a 1 MiB guest that also carries a 256 KiB ELF buffer, a 48 KiB
+/// instruction region and a 32 KiB heap cannot spare it (and `abi::run_call_with` zeroes the stack
+/// before every run, so those bytes are RV32 store cycles as well as address space). SPL Token's
+/// `Transfer` nests **0** calls deep — measured, `tests/sbpf_abi.rs` — so the headroom here is
+/// eight frames against a workload that uses one. A program that nests deeper gets
+/// [`Halt::CallDepth`], and this constant plus `STACK_BYTES` is the whole fix.
+pub const MAX_CALL_DEPTH: usize = 8;
+/// The whole static stack: 32 KiB, the M4.4 plan's number.
 pub const STACK_BYTES: usize = STACK_FRAME * MAX_CALL_DEPTH;
 /// The whole heap: 32 KiB, Solana's default.
 pub const HEAP_BYTES: usize = 32_768;

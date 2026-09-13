@@ -2,11 +2,12 @@
 //! over test buffers, and 500 random ALU/jump programs run through both `Vm` and
 //! `solana_sbpf::vm::EbpfVm` — the differential oracle pinned at 0.11.1.
 //!
-//! A note on versions: what the M4.4 plan calls "SBPF v1" (fixed 512-byte stack frames, `lddw`,
+//! A note on versions: what the M4.4 plan calls "SBPF v1" (**fixed**-size stack frames, `lddw`,
 //! `le`/`be`, `neg`, no `BPF_PQR` class) is what `solana-sbpf` 0.11.1's enum calls
 //! `SBPFVersion::V0` — the format a non-upgradeable BPFLoader2 program like SPL Token is built
-//! for. `common::sbpf_oracle`'s `config()` pins that version, a 512-byte frame and 64 frames with
-//! no gaps, so the oracle and `sbpf-core` model the same machine.
+//! for. `common::sbpf_oracle`'s `config()` pins that version and reads the frame geometry from
+//! `sbpf_core::memory` (Task 6 measured it: Solana's own 4 KiB frames, 8 of them), with no gaps,
+//! so the oracle and `sbpf-core` model the same machine.
 
 mod common;
 use common::sbpf_oracle as oracle;
@@ -14,7 +15,9 @@ use rand::RngExt;
 use rand_zkvm::sbpf::{self, asm, insn, lddw};
 use sbpf_core::interp::{Halt, MAX_INSTRUCTIONS};
 use sbpf_core::isa::opc;
-use sbpf_core::memory::{HEAP_BYTES, REGION_HEAP, REGION_INPUT, REGION_PROGRAM, REGION_STACK};
+use sbpf_core::memory::{
+    HEAP_BYTES, REGION_HEAP, REGION_INPUT, REGION_PROGRAM, REGION_STACK, STACK_FRAME,
+};
 
 /// `exit` — every program ends with one.
 fn exit() -> [u8; 8] {
@@ -283,7 +286,7 @@ fn calls_push_frames_and_exit_pops() {
     // Slot 5 is both the callee's return and, after the `ja`, the program's exit.
     assert_eq!(r0(&p), Ok(7));
 
-    // r10 moves up by one 512-byte frame per call, and r6..r9 are callee-saved.
+    // r10 moves up by one frame per call, and r6..r9 are callee-saved.
     let p = asm(&[
         insn(opc::MOV64_IMM, 6, 0, 0, 11),
         insn(opc::MOV64_REG, 1, 10, 0, 0),
@@ -295,8 +298,8 @@ fn calls_push_frames_and_exit_pops() {
         insn(opc::MOV64_REG, 0, 10, 0, 0), // and reports its own r10
         exit(),
     ]);
-    // r0 = 512 (one frame) + 11 (r6 restored), so the callee's clobber did not escape.
-    assert_eq!(r0(&p), Ok(512 + 11));
+    // r0 = one frame + 11 (r6 restored), so the callee's clobber did not escape.
+    assert_eq!(r0(&p), Ok(STACK_FRAME as u64 + 11));
 
     // A `call` to a slot outside the text is a bad jump.
     let p = asm(&[insn(opc::CALL_IMM, 0, 0, 0, 1000), exit()]);
@@ -313,8 +316,9 @@ fn calls_push_frames_and_exit_pops() {
     p.push(exit());
     assert_eq!(r0(&asm(&p)), Ok(8));
 
-    // Depth 65 — the 64th nested frame — is `CallDepth`: a self-recursive function that never
-    // returns. 64 frames of 512 bytes is exactly the 32 KiB static stack.
+    // The push that would exceed `MAX_CALL_DEPTH` is `CallDepth`: a self-recursive function that
+    // never returns. `MAX_CALL_DEPTH` frames of `STACK_FRAME` bytes is exactly the 32 KiB static
+    // stack (Task 6: 8 × 4 KiB, Solana's own frame size — see `sbpf_core::memory`).
     let p = asm(&[insn(opc::CALL_IMM, 0, 0, 0, -1), exit()]);
     assert_eq!(r0(&p), Err(Halt::CallDepth));
 }
@@ -535,7 +539,7 @@ fn the_initial_register_state_matches_solana_sbpf() {
     let p = asm(&[insn(opc::MOV64_REG, 0, 1, 0, 0), exit()]);
     assert_eq!(r0(&p), Ok(REGION_INPUT));
     let p = asm(&[insn(opc::MOV64_REG, 0, 10, 0, 0), exit()]);
-    assert_eq!(r0(&p), Ok(REGION_STACK + 512));
+    assert_eq!(r0(&p), Ok(REGION_STACK + STACK_FRAME as u64));
     for reg in [2u8, 3, 4, 5, 6, 7, 8, 9] {
         let p = asm(&[insn(opc::MOV64_REG, 0, reg, 0, 0), exit()]);
         assert_eq!(r0(&p), Ok(0), "r{reg}");

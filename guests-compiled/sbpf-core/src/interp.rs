@@ -92,6 +92,7 @@ pub struct Vm<'a, H: Host> {
     saved_scratch: [[u64; 4]; MAX_CALL_DEPTH],
     saved_fp: [u64; MAX_CALL_DEPTH],
     depth: usize,
+    max_depth: usize,
     meter: u64,
 }
 
@@ -113,6 +114,7 @@ impl<'a, H: Host> Vm<'a, H> {
             saved_scratch: [[0; 4]; MAX_CALL_DEPTH],
             saved_fp: [0; MAX_CALL_DEPTH],
             depth: 0,
+            max_depth: 0,
             meter: 0,
         }
     }
@@ -122,9 +124,17 @@ impl<'a, H: Host> Vm<'a, H> {
         self.meter
     }
 
-    /// The current call depth, for Task 6's frame high-water measurement.
+    /// The current call depth: 0 once a run has returned normally.
     pub fn call_depth(&self) -> usize {
         self.depth
+    }
+
+    /// The deepest the frame stack ever got during the run — the number the 8 × 4 KiB stack has to
+    /// be big enough for, and the one the M4.4 plan asks Task 6 to *measure* rather than assume
+    /// (`docs/04-guests.md`: an SPL Token `Transfer` nests 0 calls deep). Counted on the way in, so
+    /// a run refused at [`MAX_CALL_DEPTH`] reports that depth rather than the last one that fitted.
+    pub fn max_call_depth(&self) -> usize {
+        self.max_depth
     }
 
     /// Runs to `exit` at depth 0, and returns `r0` — or the [`Halt`] that stopped it.
@@ -160,6 +170,9 @@ impl<'a, H: Host> Vm<'a, H> {
         self.saved_fp[self.depth] = self.regs[10];
         self.ret_pc[self.depth] = return_pc;
         self.depth += 1;
+        if self.depth > self.max_depth {
+            self.max_depth = self.depth;
+        }
         if self.depth == MAX_CALL_DEPTH {
             return Err(Halt::CallDepth);
         }

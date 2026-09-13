@@ -562,3 +562,186 @@ fn a_hash_call_whose_addresses_straddle_2_to_the_30_proves() {
     assert_eq!(exec.outputs[0], 7);
     m.verify(&p.digest(), &proof).unwrap();
 }
+
+// ---- M4.4's exit test: an SPL Token `Transfer` through the compiled sBPF guest ------------------
+//
+// **The proving half of this exit test does not pass, and is `#[ignore]`d with the measurement that
+// says why.** The guest is correct — `compiled_sbpf_spl_token_transfer_executes_and_publishes_the_
+// bound_digest` below runs it in the machine's own executor and gets the eight words `sbpf-core`
+// produces natively, over the real SPL Token ELF fetched from mainnet — but it takes **1 753 945
+// cycles**, and the largest tier this machine has is 20, whose budget is 1 048 575
+// (`machine::TIERS`). The M4.4 plan requires tier ≤ 18 (262 143).
+//
+// The cause is one of the plan's own rulings, and it is structural rather than a matter of tuning
+// (measured breakdown in `docs/04-guests.md`):
+//
+// * `program_hash = sha256(elf bytes)` is computed **inside the guest**, over all 108 600 bytes of
+//   the committed ELF. That is 1 698 of the 2 368 compressions (72 %) and 27 151 of the 37 609 input
+//   words (72 %) — about 1.20 M of the 1.75 M cycles — spent on a program the run otherwise reads a
+//   few thousand bytes of. The plan anticipated exactly this ("the ELF's ~1 600 compressions
+//   dominate the row count … a follow-up may bind the program by a cached digest instead") but still
+//   made tier ≤ 18 an exit criterion; for a 108 KB program the two cannot both hold.
+// * `input_hash` is over the *aligned* region, which is 40 960 of its 41 825 bytes of
+//   `MAX_PERMITTED_DATA_INCREASE` realloc padding — 98 % zeros. 640 of its 654 compressions hash
+//   nothing but those zeros.
+//
+// Together those two account for ~1.5 M of the 1.75 M. Neither can be fixed inside Task 6's remit:
+// the first needs the public-output ruling changed (a declared or cached program digest), the second
+// needs `input_hash` taken over a canonical unpadded encoding of the instruction. With both, the
+// remaining work is ~250 k cycles, i.e. tier 18 — which is the recommendation this task's report
+// carries.
+
+/// M4.4's exit test, the executor half — this one passes. The compiled sBPF guest runs an SPL Token
+/// `Transfer` over the ELF fetched from the live program account, and the eight public output words
+/// it publishes are exactly the ones `sbpf-core` produces natively: `out0 = 1` (the program returned
+/// `r0 == 0`) and `out1..7` the Poseidon2 digest over the program, the instruction and the accounts'
+/// post-state, all three bound through SHA-256 and therefore through the M4.4 chip.
+///
+/// Every number the M4.4 plan asks Task 6 to record is printed here and pinned below.
+#[test]
+fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
+    use rand_zkvm::sbpf::{deserialize_accounts, spl_transfer, TOKEN_AMOUNT_AT};
+    let p = guests::compiled::sbpf();
+    let call = spl_transfer(250);
+    let inputs = call.input_words();
+    let (want, r0, post) = call.expected();
+    assert_eq!(r0, Ok(0));
+    assert_eq!(want[0], 1);
+
+    // The transfer really moved the balance, in the fixture's own terms.
+    let pre = deserialize_accounts(&call.input);
+    let bal =
+        |d: &[u8]| u64::from_le_bytes(d[TOKEN_AMOUNT_AT..TOKEN_AMOUNT_AT + 8].try_into().unwrap());
+    assert_eq!(bal(&pre[0].data) - 250, bal(&post[0].data));
+    assert_eq!(bal(&pre[1].data) + 250, bal(&post[1].data));
+
+    // The cap is not a tier's budget: see the comment above this test. It is a bound that fails
+    // loudly if the guest ever runs away, rather than the tier the plan asked for.
+    const CYCLE_CAP: usize = 4_000_000;
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, CYCLE_CAP).unwrap();
+    assert_eq!(exec.outputs, want, "the in-circuit guest and the native run must agree");
+
+    let compressions = exec.events.iter().filter(|e| e.sha256_row.is_some()).count();
+    // A pure function of the two input lengths: ceil-with-padding over 108 600 ELF bytes (1 698) and
+    // 41 825 instruction-region bytes (654), plus the pre- and post-state account walks (8 each).
+    assert_eq!(compressions, 2_368, "1698 program + 654 input + 2x8 accounts");
+    assert_eq!(
+        rand_zkvm::tables::sha256::sha256_log_height(compressions),
+        18,
+        "2 368 blocks of 64 rows",
+    );
+    // Two bounds, in both directions, and neither is decoration. The upper one catches a runaway;
+    // the lower one is the tripwire that says the milestone's blocker has been lifted — if the guest
+    // ever fits `Tier(20)`, the real exit test can be un-ignored and this assertion is the thing
+    // that will tell whoever did it.
+    assert!(
+        exec.cycles() <= 1_800_000,
+        "{} cycles, was 1 753 945 when M4.4 measured it",
+        exec.cycles()
+    );
+    assert!(
+        exec.cycles() > Tier(20).max_cycles(),
+        "{} cycles now fits Tier(20): un-ignore \
+         compiled_sbpf_spl_token_transfer_proves_and_verifies and re-measure the docs",
+        exec.cycles()
+    );
+    // The sBPF instruction count is the interpreter's own meter, which only the native run can
+    // report — the executor counts RV32 cycles, not sBPF instructions.
+    let native = rand_zkvm::sbpf::run_elf(&mut call.elf.clone(), &mut call.input.clone());
+    assert_eq!(native.result, Ok(0));
+    eprintln!(
+        "sbpf spl transfer: {} program words, {} input words, {} cycles, {} sBPF instructions, \
+         frame high-water {}, {} sha256 compressions, sha256_log_height {}, needs a tier above {} \
+         (max {:?})",
+        p.len(),
+        inputs.len(),
+        exec.cycles(),
+        native.instructions,
+        native.max_depth,
+        compressions,
+        rand_zkvm::tables::sha256::sha256_log_height(compressions),
+        Tier(20).max_cycles(),
+        Tier(20),
+    );
+}
+
+/// A transfer exceeding the source balance returns `TokenError::InsufficientFunds` (`r0 != 0`):
+/// status 0, and the pre-state bound as the post-state. The executor agrees with the native run, so
+/// the failure path is in-circuit code too — and it is the rule that stops a partial effect being
+/// published.
+#[test]
+fn compiled_sbpf_spl_token_transfer_of_too_much_fails_cleanly() {
+    let p = guests::compiled::sbpf();
+    let call = rand_zkvm::sbpf::spl_transfer(u64::MAX / 2);
+    let (want, r0, post) = call.expected();
+    assert!(matches!(r0, Ok(code) if code != 0));
+    assert_eq!(want[0], 0);
+    assert_eq!(post, rand_zkvm::sbpf::deserialize_accounts(&call.input));
+    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), 4_000_000).unwrap();
+    assert_eq!(exec.outputs, want);
+    // Status 0 is not the only difference from the success case: the digest words differ too,
+    // because a successful transfer's post-state is not its pre-state.
+    let ok = rand_zkvm::sbpf::spl_transfer(250).expected().0;
+    assert_ne!(&want[1..], &ok[1..], "the two runs must not publish the same digest");
+}
+
+/// M4.4's exit test as the plan wrote it: the `Transfer` proves and verifies at tier 18 or lower.
+///
+/// `#[ignore]`d because it cannot pass on this machine — see the comment above
+/// `compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest` for the measured
+/// reason and what has to change. It is written out in full so that the moment a declared program
+/// digest or a canonical instruction encoding lands, un-ignoring this is the whole of the work.
+#[test]
+#[ignore = "1 753 945 cycles: above Tier(20)'s 1 048 575 budget, let alone the plan's tier 18 — \
+            72 % of it is program_hash over the 108 600-byte ELF (docs/04-guests.md)"]
+fn compiled_sbpf_spl_token_transfer_proves_and_verifies() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::compiled::sbpf();
+    let call = rand_zkvm::sbpf::spl_transfer(250);
+    let inputs = call.input_words();
+    let (want, _r0, _post) = call.expected();
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, Tier(18).max_cycles()).unwrap();
+    assert_eq!(exec.outputs, want);
+    let (proof, _) = m.prove_salted(&p, &inputs, [13, 14, 15, 16], None).unwrap();
+    eprintln!(
+        "sbpf spl transfer: {} program words, {} input words, {} cycles, {} sha256 compressions, \
+         tier {}, sha256_log_height {}, mem_log_height {}, proof {} bytes",
+        p.len(),
+        inputs.len(),
+        exec.cycles(),
+        exec.events.iter().filter(|e| e.sha256_row.is_some()).count(),
+        proof.tier.0,
+        proof.sha256_log_height,
+        proof.mem_log_height,
+        proof.size(),
+    );
+    m.verify(&p.digest(), &proof).unwrap();
+    assert!(proof.tier.0 <= 18, "M4.4 requires tier <= 18");
+    assert!(proof.sha256_log_height >= 6);
+}
+
+/// Where the sBPF guest's cycles go, as a pc histogram mapped onto the guest binary's symbols — the
+/// breakdown the M4.4 plan asks for whenever the exit test lands above tier 16, and the measurement
+/// `docs/04-guests.md`'s cost table is built from. Writes `sbpf-pc-histogram.txt` into the
+/// temporary directory; pair it with
+/// `llvm-nm -n --defined-only guests-compiled/sbpf/target/riscv32im-unknown-none-elf/release/sbpf-guest`.
+/// `#[ignore]`d because it is a measurement, not an assertion.
+#[test]
+#[ignore = "measurement: writes a pc histogram for docs/04-guests.md"]
+fn sbpf_cycle_breakdown_by_pc() {
+    use std::collections::BTreeMap;
+    let p = guests::compiled::sbpf();
+    let call = rand_zkvm::sbpf::spl_transfer(250);
+    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), 4_000_000).unwrap();
+    let mut hist: BTreeMap<u32, usize> = BTreeMap::new();
+    for e in &exec.events {
+        *hist.entry(e.pc).or_default() += 1;
+    }
+    let path = std::env::temp_dir().join("sbpf-pc-histogram.txt");
+    let mut out = String::new();
+    for (pc, n) in &hist {
+        out.push_str(&format!("{pc} {n}\n"));
+    }
+    std::fs::write(&path, out).unwrap();
+    eprintln!("{} distinct pcs, {} cycles -> {}", hist.len(), exec.cycles(), path.display());
+}

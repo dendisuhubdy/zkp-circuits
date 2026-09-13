@@ -24,13 +24,14 @@
 //! * `R_BPF_64_32` (10): a `call` target. A defined `STT_FUNC` symbol inside `.text` becomes a
 //!   slot-relative call (`src` left at 0); anything else is a syscall, and the murmur3 hash of its
 //!   name goes in the immediate with `src` set to 1. See [`crate::interp`] for why the convention
-//!   lives in the instruction rather than in a function registry.
+//!   lives in the instruction rather than in a function registry, and the `call imm` pass in
+//!   [`load`] for how the file's own `BPF_PSEUDO_CALL` marker is normalised into it first.
 //!
 //! Every offset, length and index in the file is attacker-chosen: nothing here indexes without a
 //! check, and every malformed file is [`Halt::BadElf`].
 
 use crate::interp::Halt;
-use crate::isa::{self, opc};
+use crate::isa::opc;
 use crate::memory::REGION_PROGRAM;
 use crate::syscalls::murmur3_32;
 
@@ -254,18 +255,41 @@ pub fn load<'a>(elf: &'a mut [u8]) -> Result<Program<'a>, Halt> {
     }
     let entry_pc = idx(entry_off / 8)?;
 
-    // ---- `call` slots must not already carry the loader's own marker -------------------------
-    // `src` on a `call imm` is how a relocated syscall is told from a slot-relative call, so a
-    // file that already sets it is refused rather than reinterpreted.
+    // ---- `call imm`: the file's `BPF_PSEUDO_CALL` marker, normalised to this crate's ----------
+    //
+    // The toolchain marks **every** `call imm` it emits with `src = 1` — eBPF's
+    // `BPF_PSEUDO_CALL`, "the immediate is a slot-relative target" — and leaves a syscall's
+    // immediate at `-1` for `R_BPF_64_32` to fill in. All 158 call sites in the committed SPL
+    // Token ELF are `src = 1`: 141 real pc-relative calls with no relocation, and 17 relocated
+    // syscalls. `solana-sbpf` ignores `src` entirely on v1 and tells the two apart by the
+    // relocation alone.
+    //
+    // This crate instead carries the distinction *in the instruction*, so the interpreter needs no
+    // function registry (see [`crate::interp`]): `src = 0` is a slot-relative call, `src = 1` a
+    // syscall whose immediate is the name's murmur3 hash. The file's marker is therefore cleared
+    // here — the immediate under it is already exactly the slot-relative form the interpreter
+    // wants — which leaves the relocation pass below as the only thing that ever sets `src = 1`,
+    // and it sets it only where a relocation named the site. A `call imm` with any other `src` is
+    // not something either toolchain emits, and is refused rather than reinterpreted.
+    //
+    // Only two bytes of each slot are read: the opcode, and the register byte whose high nibble is
+    // `src`. Decoding the whole `u64` here cost 430 000 cycles of the SPL Token exit test's first
+    // 3.85 M — 11 % of the run — because `u64_at`'s eight bounds-checked byte loads are paid on all
+    // 12 826 slots while nothing but the opcode is wanted on 12 668 of them.
     {
         let mut i = text_start;
         while i + 8 <= text_end {
-            let slot = u64_at(elf, i)?;
-            let ins = isa::decode(slot);
-            if ins.opc == opc::CALL_IMM && ins.src != 0 {
-                return Err(Halt::BadElf);
+            let op = *elf.get(i).ok_or(Halt::BadElf)?;
+            if op == opc::CALL_IMM {
+                let regs = elf.get_mut(i + 1).ok_or(Halt::BadElf)?;
+                match *regs >> 4 {
+                    0 => {}
+                    // `src` is the high nibble of the byte after the opcode.
+                    1 => *regs &= 0x0f,
+                    _ => return Err(Halt::BadElf),
+                }
             }
-            i += if ins.opc == opc::LD_DW_IMM { 16 } else { 8 };
+            i += if op == opc::LD_DW_IMM { 16 } else { 8 };
         }
     }
 

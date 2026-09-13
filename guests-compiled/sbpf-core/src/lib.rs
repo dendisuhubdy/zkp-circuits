@@ -86,18 +86,43 @@ impl Sha256 {
     }
 
     /// Absorbs `bytes`, compressing every whole block it completes.
+    ///
+    /// A block that is already aligned in `bytes` is packed **straight out of the caller's slice**
+    /// rather than copied into `self.block` first. That is not a micro-optimisation: on
+    /// `riscv32im-unknown-none-elf` the copy goes through `compiler_builtins::mem::memcpy`, whose
+    /// byte-at-a-time loop measured **9.5 cycles per byte** — 1.45 M of the SPL Token exit test's
+    /// first 3.85 M cycles, 38 % of the whole run, to move bytes that are then read once
+    /// (`docs/04-guests.md`). The partial-block path below is unchanged and still the one
+    /// `sol_sha256` and `output_hash` take for their short, scattered pieces.
     pub fn update<H: Host>(&mut self, h: &mut H, bytes: &[u8]) {
         self.len = self.len.wrapping_add(bytes.len() as u64);
         let mut off = 0;
-        while off < bytes.len() {
-            let take = core::cmp::min(64 - self.fill, bytes.len() - off);
-            self.block[self.fill..self.fill + take].copy_from_slice(&bytes[off..off + take]);
+        // Fill out a partial block first, so the fast path below always starts block-aligned.
+        if self.fill != 0 {
+            let take = core::cmp::min(64 - self.fill, bytes.len());
+            self.block[self.fill..self.fill + take].copy_from_slice(&bytes[..take]);
             self.fill += take;
-            off += take;
+            off = take;
             if self.fill == 64 {
                 self.compress(h);
                 self.fill = 0;
             }
+        }
+        // Whole blocks, packed from `bytes` with no intermediate copy. The `else { break }` is what
+        // makes the impossible branch total rather than silent: `pack` must never be skipped while
+        // the compression still runs, or a block would be hashed twice and the digest would be
+        // quietly wrong. (This crate cannot `unwrap`: a panicking guest produces no proof at all.)
+        while off + 64 <= bytes.len() {
+            let Ok(block) = <&[u8; 64]>::try_from(&bytes[off..off + 64]) else { break };
+            self.pack(block);
+            h.sha256_compress(&mut self.buf);
+            off += 64;
+        }
+        // The tail, which stays in `self.block` until a later `update` or `finish` completes it.
+        let rest = bytes.len() - off;
+        if rest != 0 {
+            self.block[..rest].copy_from_slice(&bytes[off..]);
+            self.fill = rest;
         }
     }
 
@@ -121,17 +146,23 @@ impl Sha256 {
         out
     }
 
-    /// Packs `self.block`'s 64 bytes into `buf[0..16]` big-endian — the word order `SYS_SHA256`
-    /// reads them in — and compresses in place.
-    fn compress<H: Host>(&mut self, h: &mut H) {
+    /// Packs a 64-byte block into `buf[0..16]` big-endian — the word order `SYS_SHA256` reads them
+    /// in. Takes the block as a fixed-size **array** reference rather than a slice so both index
+    /// bounds are static: with a `&[u8]` the compiler cannot fold the 64 byte-index checks or the 16
+    /// writes to `buf`, and on RV32 (where `-unaligned-scalar-mem` is off, so every word comes from
+    /// four `lbu`s) those checks are most of the instruction count. [`Sha256::update`] hands the
+    /// caller's own bytes straight in.
+    fn pack(&mut self, block: &[u8; 64]) {
         for i in 0..16 {
-            self.buf[i] = u32::from_be_bytes([
-                self.block[4 * i],
-                self.block[4 * i + 1],
-                self.block[4 * i + 2],
-                self.block[4 * i + 3],
-            ]);
+            self.buf[i] =
+                u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
         }
+    }
+
+    /// Packs `self.block` and compresses in place.
+    fn compress<H: Host>(&mut self, h: &mut H) {
+        let block = self.block;
+        self.pack(&block);
         h.sha256_compress(&mut self.buf);
     }
 }

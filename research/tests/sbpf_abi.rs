@@ -4,6 +4,7 @@
 
 mod common;
 use common::sbpf_elf_builder::build_elf;
+use common::sbpf_oracle as oracle;
 
 use rand_zkvm::notes;
 use rand_zkvm::sbpf::{self, asm, insn, lddw, Account, HostRef};
@@ -559,4 +560,127 @@ fn a_workspace_can_be_reused_without_carrying_state_over() {
             assert_eq!(out, fresh.0);
         }
     }
+}
+
+/// The exit-test fixture, run natively before anything is proved: the committed SPL Token ELF
+/// really does execute a `Transfer` under `sbpf-core`, the balances move, and the eight public
+/// output words are the documented function of the pre- and post-state. This is also where the
+/// numbers the M4.4 plan asks Task 6 to *measure* rather than assume come from — the sBPF
+/// instruction count and the frame-depth high-water mark against the 8 × 4 KiB stack.
+#[test]
+fn the_spl_token_transfer_fixture_runs_natively() {
+    use rand_zkvm::sbpf::{
+        deserialize_accounts, deserialize_instruction, spl_transfer, SPL_TOKEN_ELF, SPL_TOKEN_ID,
+        SPL_TRANSFER_DEST_BALANCE, SPL_TRANSFER_SOURCE_BALANCE, TOKEN_AMOUNT_AT, TRANSFER_TAG,
+    };
+    let amount = 250u64;
+    let call = spl_transfer(amount);
+    assert_eq!(call.elf, SPL_TOKEN_ELF);
+    assert!(call.input.len() <= abi::MAX_INPUT_BYTES, "{} bytes", call.input.len());
+
+    // The region really is the instruction it claims to be.
+    let (data, id) = deserialize_instruction(&call.input);
+    assert_eq!(id, SPL_TOKEN_ID);
+    assert_eq!(data[0], TRANSFER_TAG);
+    assert_eq!(u64::from_le_bytes(data[1..9].try_into().unwrap()), amount);
+    let pre = deserialize_accounts(&call.input);
+    assert_eq!(pre.len(), 4);
+    assert!(pre[0].is_writable && pre[1].is_writable && pre[2].is_signer && !pre[3].is_writable);
+
+    let (out, r0, post) = call.expected();
+    assert_eq!(r0, Ok(0), "the transfer must succeed");
+    assert_eq!(out[0], 1, "status 1");
+
+    // The only thing that changed is the two balances.
+    let bal = |a: &Account| u64::from_le_bytes(a.data[TOKEN_AMOUNT_AT..TOKEN_AMOUNT_AT + 8].try_into().unwrap());
+    assert_eq!(bal(&pre[0]), SPL_TRANSFER_SOURCE_BALANCE);
+    assert_eq!(bal(&pre[1]), SPL_TRANSFER_DEST_BALANCE);
+    assert_eq!(bal(&post[0]), SPL_TRANSFER_SOURCE_BALANCE - amount);
+    assert_eq!(bal(&post[1]), SPL_TRANSFER_DEST_BALANCE + amount);
+    for i in 0..4 {
+        assert_eq!(post[i].lamports, pre[i].lamports, "account {i}'s lamports must not move");
+        assert_eq!(post[i].key, pre[i].key);
+        assert_eq!(post[i].owner, pre[i].owner);
+        assert_eq!(post[i].data.len(), pre[i].data.len());
+        if i >= 2 {
+            assert_eq!(post[i].data, pre[i].data, "account {i} is not written by Transfer");
+        }
+    }
+    // Everything but the amounts is byte-identical in the two token accounts too.
+    for i in 0..2 {
+        let (mut a, mut b) = (pre[i].data.clone(), post[i].data.clone());
+        a[TOKEN_AMOUNT_AT..TOKEN_AMOUNT_AT + 8].fill(0);
+        b[TOKEN_AMOUNT_AT..TOKEN_AMOUNT_AT + 8].fill(0);
+        assert_eq!(a, b, "account {i}: something other than the amount changed");
+    }
+
+    // The eight output words are the documented function of the digests, recomputed here from the
+    // post-state region rather than taken from the run.
+    // The post-state region is the post accounts re-serialized: the same bytes the run left behind.
+    let mut h = HostRef;
+    let post_region = sbpf::serialize_aligned(&post, &data, &id);
+    let program_hash = sbpf_core::sha256(&mut h, SPL_TOKEN_ELF);
+    let input_hash = sbpf_core::sha256(&mut h, &call.input);
+    let out_hash = abi::output_hash(&mut h, &post_region);
+    let want = abi::public_output(&mut h, 1, &program_hash, &input_hash, &out_hash);
+    assert_eq!(out, want);
+    assert_ne!(out[1..], [0u32; 7], "the digest words must not be zero");
+
+    // ---- the differential: `solana-sbpf` 0.11.1 on the same ELF and the same region -----------
+    //
+    // The whole run, not a hand-built program: 143 instructions is a surprisingly small number for
+    // a full SPL Token transfer (the release build inlines `deserialize`, `Processor::process` and
+    // `process_transfer` into one frame), so "it produced the right balances" is checked against
+    // the reference interpreter rather than against this crate's own idea of the semantics.
+    let (their_r0, their_region) = oracle::run_elf(SPL_TOKEN_ELF, &call.input);
+    assert_eq!(their_r0, Ok(0), "solana-sbpf must run the transfer too");
+    assert_eq!(
+        their_region.len(),
+        post_region.len(),
+        "the oracle's input region changed length"
+    );
+    assert_eq!(their_region, post_region, "the two interpreters left different bytes behind");
+
+    // Measured, for `docs/04-guests.md` and the task report.
+    let o = sbpf::run_elf(&mut call.elf.clone(), &mut call.input.clone());
+    assert_eq!(o.result, Ok(0));
+    assert!(
+        o.max_depth < sbpf_core::memory::MAX_CALL_DEPTH,
+        "frame high-water {} against MAX_CALL_DEPTH {}",
+        o.max_depth,
+        sbpf_core::memory::MAX_CALL_DEPTH
+    );
+    eprintln!(
+        "spl transfer (native): input {} bytes, {} sBPF instructions, frame high-water {} of {} ({} B frames)",
+        call.input.len(),
+        o.instructions,
+        o.max_depth,
+        sbpf_core::memory::MAX_CALL_DEPTH,
+        sbpf_core::memory::STACK_FRAME,
+    );
+}
+
+/// The same fixture with an amount above the source's balance: `TokenError::InsufficientFunds`, a
+/// non-zero `r0`, status 0, and the **pre**-state bound as the post-state — nothing moved.
+#[test]
+fn an_spl_token_transfer_of_too_much_changes_nothing() {
+    use rand_zkvm::sbpf::{deserialize_accounts, spl_transfer};
+    let call = spl_transfer(u64::MAX / 2);
+    let (out, r0, post) = call.expected();
+    // The same answer from `solana-sbpf`, including that the region is untouched.
+    let (their_r0, their_region) =
+        oracle::run_elf(rand_zkvm::sbpf::SPL_TOKEN_ELF, &call.input);
+    assert_eq!(their_r0.map(|c| c != 0), Ok(true), "solana-sbpf must also return non-zero");
+    assert_eq!(their_region, call.input, "a failed transfer must leave the region alone");
+    match r0 {
+        Ok(code) => assert_ne!(code, 0, "InsufficientFunds is a non-zero return, not a fault"),
+        Err(e) => panic!("the program must return cleanly, not halt: {e:?}"),
+    }
+    assert_eq!(out[0], 0, "status 0");
+    assert_eq!(post, deserialize_accounts(&call.input), "nothing may have moved");
+
+    // And the digest really is the pre-state's: the same eight words a *zero*-amount-effect run
+    // would publish, but with status 0 rather than 1 — which is what makes the failure legible.
+    let ok = spl_transfer(0);
+    assert_ne!(ok.expected().0, out);
 }

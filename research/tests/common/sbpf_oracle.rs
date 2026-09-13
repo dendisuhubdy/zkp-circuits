@@ -5,8 +5,9 @@
 //!
 //! The oracle is pinned to the same machine `sbpf-core` models: `SBPFVersion::V0` — which is what
 //! the M4.4 plan calls "SBPF v1", the fixed-frame format a non-upgradeable BPFLoader2 program is
-//! built for; the crate's own `V1` is SIMD-0166's *dynamic* frames, which came later — with 512-byte
-//! frames, 64 of them, no gaps between them, and the 200 000-instruction meter.
+//! built for; the crate's own `V1` is SIMD-0166's *dynamic* frames, which came later. The geometry
+//! comes from `sbpf_core::memory` rather than being written down twice — `STACK_FRAME` times
+//! `MAX_CALL_DEPTH`, no gaps between frames — plus the 200 000-instruction meter.
 //!
 //! Only the interpreter is used, never the JIT (`default-features = false` keeps it out of the
 //! build entirely), so the comparison is interpreter against interpreter.

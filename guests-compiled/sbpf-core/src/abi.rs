@@ -36,7 +36,7 @@
 //!
 //! # The guest pattern
 //!
-//! The whole run's state — the decoded input (272 KiB) plus the 32 KiB stack and 32 KiB heap — is
+//! The whole run's state — the decoded input (304 KiB) plus the 32 KiB stack and 32 KiB heap — is
 //! one [`Workspace`], which the guest keeps in `.bss` and lends out. Nothing here is ever a stack
 //! local: the guest's stack is 64 KiB (`guest-sdk/guest.ld`) and a `Workspace` is five times that.
 //! This crate is `#![forbid(unsafe_code)]`, so the `static mut` cell is the guest binary's (M4.3's
@@ -66,7 +66,16 @@ use crate::{dhash, hash_words, sha256, Host, Sha256};
 /// The largest ELF the input vector may carry (the plan's number).
 pub const MAX_ELF_BYTES: usize = 262_144;
 /// The largest serialized instruction the input vector may carry.
-pub const MAX_INPUT_BYTES: usize = 16_384;
+///
+/// **Measured, not the plan's 16 KiB** (Task 6). The aligned format leaves
+/// [`MAX_PERMITTED_DATA_INCREASE`] = 10 240 bytes of realloc headroom after *every* account's data,
+/// and the entrypoint's deserializer skips exactly that much unconditionally, so it cannot be
+/// trimmed: an account costs ~10 336 bytes plus its data whatever the data is. The plan's own exit
+/// test — an SPL Token `Transfer`, three accounts — is 31 401 bytes, so 16 384 could not have held
+/// it. 49 152 (48 KiB) holds four accounts (41 825 bytes for a Transfer plus the mint) with room
+/// over. The cap costs `.bss` only: `decode_input` copies `n_input` bytes and the interpreter is
+/// handed `input[..input_len]`, so a generous cap is not a cycle.
+pub const MAX_INPUT_BYTES: usize = 49_152;
 /// `notes::domain::SBPF_OUT`, mirrored here so the guest and the host agree without a dependency.
 pub const SBPF_OUT_DOMAIN: u32 = 14;
 
@@ -76,7 +85,7 @@ pub const MAX_ACCOUNTS: usize = 64;
 
 /// Bytes of realloc headroom the aligned format leaves after every account's data
 /// (`solana_program::entrypoint::MAX_PERMITTED_DATA_INCREASE`).
-const MAX_PERMITTED_DATA_INCREASE: usize = 10_240;
+pub const MAX_PERMITTED_DATA_INCREASE: usize = 10_240;
 
 /// The marker byte of an account that is not a duplicate of an earlier one.
 const NON_DUP_MARKER: u8 = 0xff;
@@ -131,15 +140,26 @@ impl<F: FnMut(u32) -> u32> InputCursor<F> {
     /// `out[..n]`. Returns `n`, or `None` when `n > out.len()` — a cap the caller maps to its own
     /// [`ParseError`], and which is checked *before* any word of the string is read, so an absurd
     /// length costs nothing.
+    ///
+    /// The whole-word bulk is split from the 1–3 byte tail so the copy's width is a **constant** 4:
+    /// a `copy_from_slice` whose length is only known at run time compiles to a
+    /// `compiler_builtins::mem::memcpy` call on `riscv32im`, and its byte-at-a-time loop costs
+    /// ~9.5 cycles a byte. Reading the SPL Token exit test's 37 609-word vector through the old
+    /// single loop took 978 000 cycles, 25 % of the whole run (`docs/04-guests.md`).
     pub fn bytes(&mut self, out: &mut [u8]) -> Option<usize> {
         let n = self.word() as usize;
         if n > out.len() {
             return None;
         }
-        for i in 0..n.div_ceil(4) {
+        let full = n / 4;
+        for i in 0..full {
             let w = self.word().to_le_bytes();
-            let chunk = &mut out[4 * i..core::cmp::min(4 * i + 4, n)];
-            chunk.copy_from_slice(&w[..chunk.len()]);
+            out[4 * i..4 * i + 4].copy_from_slice(&w);
+        }
+        let rest = n - 4 * full;
+        if rest != 0 {
+            let w = self.word().to_le_bytes();
+            out[4 * full..n].copy_from_slice(&w[..rest]);
         }
         Some(n)
     }
@@ -151,7 +171,7 @@ impl<F: FnMut(u32) -> u32> InputCursor<F> {
 }
 
 /// One call's decoded input: the ELF and the serialized instruction, in static buffers. Part of the
-/// guest's [`Workspace`], never a value on the stack (272 KiB).
+/// guest's [`Workspace`], never a value on the stack (304 KiB).
 pub struct CallInput {
     pub elf: [u8; MAX_ELF_BYTES],
     pub elf_len: usize,
@@ -170,7 +190,7 @@ impl CallInput {
 }
 
 /// All the static state one call needs: the decoded input, the sBPF stack and the sBPF heap — about
-/// 336 KiB in one place. The guest keeps exactly one in `.bss` and passes `&mut` into [`run_call`];
+/// 368 KiB in one place. The guest keeps exactly one in `.bss` and passes `&mut` into [`run_call`];
 /// a host test boxes one. Reusing a workspace is sound: [`decode_input`] resets the two lengths and
 /// [`run_call_with`] zeroes the stack and heap, so nothing carries over from a previous call.
 pub struct Workspace {

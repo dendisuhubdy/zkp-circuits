@@ -33,6 +33,23 @@ pub mod compiled {
         const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/keccak256.bin");
         Program::from_flat_binary(0x1000, BIN).expect("keccak256.bin is a committed, known-good build")
     }
+
+    /// M4.4's exit guest: an **sBPF interpreter**, compiled from `guests-compiled/sbpf` (see that
+    /// Makefile's header for the exact `rustc +1.98.1` build) and committed as
+    /// `guests-compiled/bin/sbpf.bin`. The input vector is `[n_elf, elf bytes…, n_input, input
+    /// bytes…]` (`rand_zkvm::sbpf::SbpfCall::input_words`); the output is a status word plus a
+    /// 224-bit digest over the program, the instruction and the accounts' post-state
+    /// (`sbpf_core::abi`).
+    ///
+    /// This is an **image**, not a flat binary: a real compiler output has a `.rodata` (the
+    /// interpreter's `Halt::Trap` literals, panic locations and the opcode dispatch's jump tables),
+    /// which the flat loader cannot carry. `from_flat_image` synthesises the `li`/`sw` prologue that
+    /// writes the data into RAM and reports it as part of the program, so `hc` binds the constants
+    /// exactly as it binds the code (`docs/01-isa.md`).
+    pub fn sbpf() -> Program {
+        const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/sbpf.bin");
+        Program::from_flat_image(BIN).expect("sbpf.bin is a committed, known-good build")
+    }
 }
 
 /// out0 = fib(n) mod 2^32, computed with a counted loop.
