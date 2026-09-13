@@ -53,6 +53,23 @@ pub mod compiled {
         const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/evm.bin");
         Program::from_flat_image(BIN).expect("evm.bin is a committed, known-good build")
     }
+
+    /// M4.4's exit guest: an **sBPF interpreter**, compiled from `guests-compiled/sbpf` (see that
+    /// Makefile's header for the exact `rustc +1.98.1` build) and committed as
+    /// `guests-compiled/bin/sbpf.bin`. The input vector is `[n_elf, elf bytes…, n_input, input
+    /// bytes…]` (`rand_zkvm::sbpf::SbpfCall::input_words`); the output is a status word plus a
+    /// 224-bit digest over the program, the instruction and the accounts' post-state
+    /// (`sbpf_core::abi`).
+    ///
+    /// This is an **image**, not a flat binary: a real compiler output has a `.rodata` (the
+    /// interpreter's `Halt::Trap` literals, panic locations and the opcode dispatch's jump tables),
+    /// which the flat loader cannot carry. `from_flat_image` synthesises the `li`/`sw` prologue that
+    /// writes the data into RAM and reports it as part of the program, so `hc` binds the constants
+    /// exactly as it binds the code (`docs/01-isa.md`).
+    pub fn sbpf() -> Program {
+        const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/sbpf.bin");
+        Program::from_flat_image(BIN).expect("sbpf.bin is a committed, known-good build")
+    }
 }
 
 /// out0 = fib(n) mod 2^32, computed with a counted loop.
@@ -335,6 +352,58 @@ pub fn keccak_demo(msg: &[u8]) -> Program {
     a.assemble()
 }
 
+/// The message `sha256_demo` hashes: 55 bytes, the longest message whose
+/// `0x80 ‖ zeros ‖ be64(bit length)` padding still fits a single 512-bit block, so the guest needs
+/// exactly one `SHA256` call and no Merkle–Damgård loop at all. Exported so
+/// `tests/e2e.rs` can check the published digest against `sha256::sha256` of the very same bytes
+/// rather than a copy that could drift.
+pub const SHA256_DEMO_MSG: &[u8; 55] = b"The quick brown fox jumps over the lazy dog............";
+
+/// M4.4 demo: `sha256(SHA256_DEMO_MSG)` with the padding done at assembly time and the
+/// compression done by the chip — one `SYS_SHA256` call, whose 8 output words are the digest.
+///
+/// The syscall's buffer is 24 words at `HEAP`: words `0..16` are the padded block as sixteen
+/// **big-endian-valued** words (word `i` is `u32::from_be_bytes` of the block's bytes `4i..4i+4`,
+/// `sha256::bytes_to_words`' layout), words `16..24` the chaining state, which starts at the FIPS
+/// 180-4 `IV` and is overwritten in place with `IV + f(IV, block)` — the digest, big-endian per
+/// word, published as `out0..7` in that order.
+///
+/// One block means the whole of SHA-256 is this one call: `guest_sdk::sha256` is where the general
+/// Merkle–Damgård loop and the runtime padding live (`keccak256`'s sponge is the analogue), and a
+/// compiled guest over that loop is M4.4's later business. This guest exists to anchor the
+/// syscall path end to end at the smallest possible size.
+///
+/// The buffer's base address is held in a register (`S0`) rather than folded into each `sw`'s
+/// immediate: `HEAP` itself is far outside a 12-bit signed I-type field, and AGENTS.md invariant 3
+/// is exactly the silent wrap that would cause. The per-word offsets (`0..=92`) are well inside it.
+pub fn sha256_demo() -> Program {
+    use crate::sha256::{bytes_to_words, IV};
+    let msg = SHA256_DEMO_MSG;
+    // `msg ‖ 0x80 ‖ zeros ‖ be64(8·55)`, the one-block padding of `sha256::sha256`.
+    let mut block = [0u8; 64];
+    block[..msg.len()].copy_from_slice(msg);
+    block[msg.len()] = 0x80;
+    block[56..].copy_from_slice(&(8 * msg.len() as u64).to_be_bytes());
+    let words = bytes_to_words(&block);
+    let mut a = Assembler::new(0);
+    a.extend(li(S0, HEAP));
+    for (i, w) in words.iter().enumerate() {
+        a.extend(li(T0, *w as i32));
+        a.push(sw(S0, T0, 4 * i as i32));
+    }
+    for (i, h) in IV.iter().enumerate() {
+        a.extend(li(T0, *h as i32));
+        a.push(sw(S0, T0, 4 * (crate::sha256::BLOCK_WORDS + i) as i32));
+    }
+    a.extend(call_sha256(HEAP as u32 / 4));
+    for k in 0..8 {
+        a.push(lw(T0, S0, 4 * (crate::sha256::BLOCK_WORDS + k) as i32));
+        a.extend(write_output(k as u32, T0));
+    }
+    a.extend(halt());
+    a.assemble()
+}
+
 /// (name, program, private inputs)
 pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
     vec![
@@ -347,6 +416,7 @@ pub fn all() -> Vec<(&'static str, Program, Vec<u32>)> {
         ("muldiv", muldiv(), vec![]),
         ("poseidon2_demo", poseidon2_demo(&[1, 2, 3, 4, 5]), vec![]),
         ("keccak_demo", keccak_demo(b"hello"), vec![]),
+        ("sha256_demo", sha256_demo(), vec![]),
     ]
 }
 

@@ -1,37 +1,64 @@
 # AGENTS.md — `research` (rand_zkvm)
 
 The Rand reference zkVM: an RV32I subset under a zero-knowledge batch STARK
-(Plonky3 0.7, Goldilocks), proved as eight AIR tables — nine when a proof
-declares a keccak table — exchanging facts over
-thirteen LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
+(Plonky3 0.7, Goldilocks), proved as eight AIR tables plus either of two
+optional hash chips — nine with a keccak table, nine with a sha256 one, ten with
+both — exchanging facts over
+fourteen LogUp buses (M4.1 added `input` and the `INPUT_DIGEST`/`INPUT_READ`
 buses; M4.2 added `keccak` and the `KECCAK` bus, and made that one table
 optional per proof: `Proof::keccak_log_height = 0` means the batch has no
-keccak instance at all), plus the M1.5 viewing-key
+keccak instance at all; M4.4 added `sha256` and the `SHA256` bus on exactly
+those terms and independently, `Proof::sha256_log_height = 0`), plus the M1.5
+viewing-key
 layer (notes, envelopes, scoped disclosure, simulated ledger). Design docs
 are `docs/01–06`; the README has the reading order.
 
 ## Commands
 
-- `cargo test` — the whole suite (277 tests: 274 pass, 3 ignored).
-  Everything uses `FriProfile::Test`; measured in one 2026-09-13 run (~17 min
-  wall, 27 GB peak resident — a run that shared the laptop with another
-  worktree's suite, so every figure here is an upper bound rather than a quiet
-  best case), `tests/bundle.rs` takes ~270 s (six proofs:
+- `cargo test` — the whole suite (365 tests: 359 pass, 6 ignored).
+  Everything uses `FriProfile::Test`; measured in one 2026-09-13 run of the
+  merged M4.3 + M4.4 tree (959 s wall — ~16 min — and 22.4 GiB peak resident,
+  on a machine that was otherwise quiet apart from a running fullnode, so the
+  figures are close to a best case rather than the upper bounds M4.3's own run
+  reported), `tests/e2e.rs` takes ~446 s — M4.3's tier-16 EVM-call proof
+  dominates it (~438 s to prove and ~14 s to verify when run alone, overlapped
+  here with the file's other tests) — `tests/bundle.rs` ~225 s (six proofs:
   four guest-level, plus one shared by every ledger-level test and one for
-  the 1-real-1-dummy shape), `tests/viewing.rs` ~207 s, `tests/e2e.rs`
-  ~452 s wall — M4.3's tier-16 EVM-call proof dominates it (~438 s to prove and
-  ~14 s to verify when run alone, overlapped here with the file's other tests),
-  and the ERC-20 transfer's tier-18 proof is `#[ignore]`d because it needs more
-  memory than a 48 GB machine grants (≥ 28.5 GB resident at SIGKILL over three
-  attempts; `docs/04-guests.md` has the command and the ≥ 64 GB figure),
-  `tests/cheating.rs` ~37 s, `tests/zk.rs` ~19 s,
-  `tests/tables.rs` ~10 s, `tests/isa.rs` ~6 s (M4.3's image-container tests
-  prove two small programs), `tests/keccak.rs` ~1 s (its chip-alone
-  harness proves a 128-row table, so it is cheap despite 2 612 columns), and
-  the four EVM host suites — `tests/evm_u256.rs` (6), `tests/evm_storage.rs`
-  (13), `tests/evm_interp.rs` (17), `tests/evm_abi.rs` (8) — well under a
-  second between them, because they prove nothing: they run `evm-core`
-  natively over `evm::HostRef`.
+  the 1-real-1-dummy shape), `tests/viewing.rs` ~212 s, `tests/cheating.rs`
+  ~38 s, `tests/zk.rs` ~19 s, `tests/tables.rs` ~11 s, `tests/isa.rs` ~6 s
+  (M4.3's image-container tests prove two small programs, one of which reads
+  its own data segment back), `tests/keccak.rs` ~0.9 s (its chip-alone harness
+  proves a 128-row table, so it is cheap despite 2 612 columns) and
+  `tests/sha256.rs` ~0.4 s (same trick, a 64-row block). The ten host-only
+  files cost well under a second between them, because they prove nothing:
+  M4.3's four EVM suites — `tests/evm_u256.rs` (6), `tests/evm_storage.rs`
+  (13), `tests/evm_interp.rs` (17), `tests/evm_abi.rs` (8) — run `evm-core`
+  natively over `evm::HostRef`, and M4.4's four sBPF files —
+  `tests/sbpf_isa.rs` (6), `sbpf_interp.rs` (20), `sbpf_elf.rs` (11),
+  `sbpf_abi.rs` (15), 52 tests — check the interpreter against `solana-sbpf`
+  0.11.1 before anything reaches the machine, including loading the committed
+  SPL Token ELF and running a real `Transfer` through it. `tests/emulator.rs`
+  (23) and `tests/asm.rs` (10) are the same kind of thing.
+
+  Of the six `#[ignore]`d tests, three are production-profile proof-size
+  measurements, one is the sBPF cycle-breakdown measurement, and two are the
+  milestones' exit proofs, **neither of which passes on this hardware, for two
+  different reasons**:
+  `tests/e2e.rs::compiled_evm_erc20_transfer_proves_at_tier_18` is M4.3's, and
+  it needs more memory than a 48 GB machine grants (≥ 28.5 GB resident at
+  SIGKILL over three attempts, resident set still growing; `docs/04-guests.md`
+  has the command and the ≥ 64 GB figure) — the in-suite EVM proof is a
+  smaller call through the same binary at tier 16.
+  `tests/e2e.rs::compiled_sbpf_spl_token_transfer_proves_and_verifies` is
+  M4.4's, and it **does not pass at any tier this machine has**: the guest is
+  correct but takes 1 753 945 cycles against `Tier(20)`'s 1 048 575 budget.
+  Each ignore message carries its own measurement and `docs/04-guests.md` the
+  breakdowns; do not treat either as a flake to retry, and do not "fix" the
+  sBPF one by declaring `program_hash` rather than computing it — `H_IN` is
+  hiding, so a digest the guest does not recompute is bound to nothing
+  (`docs/03-privacy.md`). The two sound remedies, and which one buys tier 18,
+  are in `docs/04-guests.md` and the design spec's §5.1 item 8.
+
   All green is the bar before any commit. A proof that *does* call `KECCAK` is markedly larger than a
   keccak-free one — the chip is 2 612 + 99 columns and FRI openings scale with
   a batch's column count, so carrying it costs ~1.91 MB at the production
@@ -40,9 +67,24 @@ are `docs/01–06`; the README has the reading order.
   measurement). That is a known cost of
   using the syscall, not a regression to chase; a guest that makes no `KECCAK`
   call does not pay it, because the table is left out of the batch entirely.
-- `cargo run --release` — the narrated demo, 5–6 min wall time (one
-  production-profile proof). The test suite covers everything it shows; don't
-  run it casually.
+  M4.4's `SHA256` costs the same way and a quarter as much — the chip is
+  466 + 10 columns, measured at +92 307 bytes at `FriProfile::Test` and
+  +400 563 at the production profile (same guest, same tier, instance in versus
+  out: `tests/e2e.rs::
+  a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile`
+  and its `#[ignore]`d production twin). Both tables are optional and
+  independent, so a guest pays for the hash it actually calls.
+- `cargo +1.98.1 test --features reference-backend --test backend` — the CPU-twin
+  backend suite, feature-gated and so invisible to the default `cargo test`.
+  `backend_proof_has_the_same_shape_as_a_cpu_proof` has been unpassable since
+  H_IN was salted per proving call in M4.1: it asserts `a.public_values ==
+  b.public_values` across two independently-salted proving calls (`prove_with`
+  and `prove` on the same guest), and each draws its own salt, so the equality
+  fails by construction. This is a pre-existing failure, not a regression, and
+  not this milestone's to fix.
+- `cargo run --release` — the narrated demo, ~6-7 minutes wall time (thirteen
+  proofs — one production-profile proof). The test suite covers everything it
+  shows; don't run it casually.
 - The toolchain is pinned by `rust-toolchain.toml`; let `rustup` pick it up.
 
 ## Invariants that have actually been broken here

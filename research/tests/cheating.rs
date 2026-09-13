@@ -927,6 +927,8 @@ fn rogue_write_out(fin: bool, pc: u32, next_pc: u32, ptr: u32, words: [u32; 4], 
         hash_row: Some(HashRow::WriteOut { fin, words, state }),
         keccak_row: None,
         keccak_accesses: Vec::new(),
+        sha256_row: None,
+        sha256_accesses: Vec::new(),
     }
 }
 
@@ -1024,6 +1026,8 @@ fn a_free_standing_absorb_group_with_a_forged_state_is_rejected() {
                 hash_row: Some(HashRow::Absorb { idx: 0, left_before: 4, words: [digest[0], digest[1], digest[2], digest[3]], active: [true; 4], state_in: [Val::ZERO; 8], state_out }),
                 keccak_row: None,
                 keccak_accesses: Vec::new(),
+                sha256_row: None,
+                sha256_accesses: Vec::new(),
             });
             events.push(rogue_write_out(false, pc, pc, 0x40, [rehashed[0], rehashed[1], rehashed[2], rehashed[3]], state_out));
             events.push(rogue_write_out(true, pc, pc + 4, 0x40, [rehashed[4], rehashed[5], rehashed[6], rehashed[7]], state_out));
@@ -1896,23 +1900,23 @@ fn a_keccak_height_past_the_absolute_cap_is_rejected_where_the_tier_bound_would_
     assert_eq!(keccak::MAX_LOG_HEIGHT, 20);
     for klh in [21, 24, 25, u8::MAX] {
         assert!(
-            matches!(check_declared_heights(Tier(20), plh, ilh, klh, mlh), Err(VerifyError::KeccakHeight)),
+            matches!(check_declared_heights(Tier(20), plh, ilh, klh, 0, mlh), Err(VerifyError::KeccakHeight)),
             "klh = {klh} is past the absolute cap and must be refused by the range check",
         );
     }
     // The cap itself, and everything under it, still passes the declared-shape checks at a tier
     // whose own bound is looser — this is a ceiling, not a narrowing of what tier 20 may declare.
     for klh in [0, keccak::MIN_LOG_HEIGHT, 19, keccak::MAX_LOG_HEIGHT] {
-        assert!(check_declared_heights(Tier(20), plh, ilh, klh, mlh).is_ok(), "klh = {klh} is legal at tier 20");
+        assert!(check_declared_heights(Tier(20), plh, ilh, klh, 0, mlh).is_ok(), "klh = {klh} is legal at tier 20");
     }
     // And where the tier is the tighter of the two, the tier variant is still what a forgery
     // earns: at tier 10 anything in `16..=20` is flat-legal but past `t + 5`.
     assert!(matches!(
-        check_declared_heights(Tier(10), plh, ilh, 16, Tier(10).min_mem_log_height()),
+        check_declared_heights(Tier(10), plh, ilh, 16, 0, Tier(10).min_mem_log_height()),
         Err(VerifyError::KeccakHeightExceedsTier)
     ));
     assert!(matches!(
-        check_declared_heights(Tier(10), plh, ilh, 21, Tier(10).min_mem_log_height()),
+        check_declared_heights(Tier(10), plh, ilh, 21, 0, Tier(10).min_mem_log_height()),
         Err(VerifyError::KeccakHeight),
     ), "past both bounds is reported by the range check, which runs first");
 }
@@ -1955,8 +1959,8 @@ fn a_memory_height_past_the_ceiling_is_rejected_before_any_verifier_key_is_built
     // The same bound at a tier where it is reachable in principle (tier 20's floor is 22), so
     // the ceiling is doing its own work rather than standing behind the tier floor.
     let (plh, ilh, klh) = (program::MIN_LOG_HEIGHT, rand_zkvm::tables::input::MIN_LOG_HEIGHT, 0);
-    assert!(check_declared_heights(Tier(20), plh, ilh, klh, 24).is_ok());
-    assert!(matches!(check_declared_heights(Tier(20), plh, ilh, klh, 25), Err(VerifyError::MemoryHeight)));
+    assert!(check_declared_heights(Tier(20), plh, ilh, klh, 0, 24).is_ok());
+    assert!(matches!(check_declared_heights(Tier(20), plh, ilh, klh, 0, 25), Err(VerifyError::MemoryHeight)));
 }
 
 // ── M4.2 controller ruling 3: the cubic pointer rule on a SYS_KECCAK cpu row ──
@@ -2059,6 +2063,253 @@ fn a_relocated_keccak_pointer_inside_the_bound_still_proves() {
 #[test]
 fn a_keccak_pointer_with_hp3_hi_equal_to_three_is_rejected() {
     let (m, p, t) = keccak_ptr_traces(0x3000_0000);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// ───────────────────────────── M4.4: the SHA256 syscall ─────────────────────────────
+//
+// `guests::sha256_demo()` is one `SYS_SHA256` cpu row plus one real 64-row sha256 block, at
+// tier 10. The block sits first in the sha256 table (blocks are filled in event order), so its
+// rows are `0..BLOCK` and every later block is padding.
+
+/// The sha256-side twin of `setup_keccak`.
+fn setup_sha256() -> (Machine, rand_zkvm::isa::Program, Traces) {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::sha256_demo();
+    let e = execute(&p, &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    assert_eq!(t.sha256_log_height, 6, "one compression fills the minimum block exactly");
+    (m, p, t)
+}
+
+/// A sha256 table that actually has a padding block to forge on: `setup_sha256`'s single
+/// compression fills its one block exactly, so the forgery needs a guest whose block count is
+/// not a power of two. Three compressions are 192 rows rounded up to `2^8 = 256`, i.e. four
+/// blocks — blocks 0..=2 real, **block 3 padding**.
+fn setup_sha256_with_a_padding_block() -> (Machine, rand_zkvm::isa::Program, Traces) {
+    const BUF: i32 = 0x1000;
+    let m = Machine::new(FriProfile::Test);
+    let mut a = Assembler::new(0);
+    a.extend(li(8, BUF));
+    for _ in 0..3 {
+        a.extend(call_sha256(BUF as u32 / 4));
+    }
+    a.extend(halt());
+    let p = a.assemble();
+    let e = execute(&p, &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    assert_eq!(t.sha256_log_height, 8, "three blocks rounded up to four");
+    (m, p, t)
+}
+
+/// The cpu-table row index of the one `SYS_SHA256` ecall row.
+fn sha256_cpu_row(t: &Traces) -> usize {
+    let w = cpu::col::WIDTH;
+    (0..t.cpu.height())
+        .find(|&r| t.cpu.values[r * w + cpu::col::SYS_SHA256] == F::ONE)
+        .expect("a SYS_SHA256 row")
+}
+
+/// A flipped working-variable bit inside the compression is pinned several ways at once (this
+/// row's `Σ0`/`Maj` read it, the previous row's `ANEW_BITS` transition pinned it, and the final
+/// add's tail rows read the a-chain back out) and, past those, changes the digest the chip
+/// writes back to RAM.
+#[test]
+fn sha256_round_bit_flip_is_rejected() {
+    use rand_zkvm::tables::sha256;
+    let (m, p, mut t) = setup_sha256();
+    let w = sha256::col::WIDTH;
+    let cell = 7 * w + sha256::col::A_BITS + 11;
+    let st = t.sha256.as_mut().expect("sha256_demo declares a sha256 table");
+    st.values[cell] = F::ONE - st.values[cell];
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// The write-backs are sent from the block's last row, and `HOUT` is what they carry. Changing
+/// one there breaks both the `TAIL_COPY` carry-down from row 62 (rule 10) and the `MEMORY`
+/// permutation against what the guest's later `lw` reads.
+#[test]
+fn sha256_write_back_tamper_is_rejected() {
+    use rand_zkvm::tables::sha256;
+    let (m, p, mut t) = setup_sha256();
+    let w = sha256::col::WIDTH;
+    let st = t.sha256.as_mut().expect("sha256_demo declares a sha256 table");
+    st.values[(sha256::BLOCK - 1) * w + sha256::col::HOUT + 3] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// A tampered schedule word on a round past 16, where `W[t]` is computed rather than read:
+/// `WNEW` is pinned to its own bits and to `W[t−16] + σ0 + W[t−7] + σ1` (rule 7), and it feeds
+/// this round's `T1`.
+#[test]
+fn sha256_schedule_tamper_is_rejected() {
+    use rand_zkvm::tables::sha256;
+    let (m, p, mut t) = setup_sha256();
+    let w = sha256::col::WIDTH;
+    let st = t.sha256.as_mut().expect("sha256_demo declares a sha256 table");
+    st.values[20 * w + sha256::col::WNEW] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// M4.4 (the M4.2 Task 6 argument again): the cpu table is unchanged by making the sha256 table
+/// optional — it is the *bus* that does the work. Take `sha256_demo`'s honest traces, drop the
+/// sha256 table entirely (exactly the shape a sha256-free proof has) and leave the real
+/// `SYS_SHA256` cpu row in place: the `SHA256` bus now has a consumer and no provider at all,
+/// so it cannot balance. This is the check that makes "no sha256 table" safe rather than merely
+/// smaller.
+#[test]
+fn sha256_row_without_a_sha256_table_is_rejected() {
+    let (m, p, mut t) = setup_sha256();
+    let w = cpu::col::WIDTH;
+    let row = sha256_cpu_row(&t);
+    assert_eq!(t.cpu.values[row * w + cpu::col::SYS_SHA256], F::ONE, "the syscall row stays");
+    t.sha256 = None;
+    t.sha256_log_height = 0;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// `proof.sha256_log_height` is prover-declared and untrusted, and it sizes both the sha256
+/// table's own AIR instance and (before it) the verifier key. A compression costs a cycle and
+/// occupies one 64-row block, so a tier-`ℓ` proof can honestly need at most `ℓ + 6`; `ℓ + 7` is a
+/// request for a table with more compression slots than the tier has cycles. The check runs
+/// before `log_ext_degrees` and before `verifier_key`, which `cached_keys() == 0` is the
+/// observable proof of.
+#[test]
+fn sha256_height_above_the_tier_cap_is_rejected() {
+    use rand_zkvm::machine::VerifyError;
+    let prover = Machine::new(FriProfile::Test);
+    let p = guests::sha256_demo();
+    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    assert_eq!(proof.sha256_log_height, 6);
+    assert_eq!(Tier(10).max_sha256_log_height(), 16);
+    // `t + 7`, with `degree_bits` adjusted to match (the sha256 instance is last in `chips()`
+    // order; `+ 1` is the hiding config's `is_zk`).
+    proof.sha256_log_height = 17;
+    let last = proof.batch.degree_bits.len() - 1;
+    proof.batch.degree_bits[last] = 17 + 1;
+    let verifier = Machine::new(FriProfile::Test);
+    assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::Sha256HeightExceedsTier)));
+    assert_eq!(verifier.cached_keys(), 0, "the range check must precede the verifier key");
+}
+
+/// A non-zero height below one full 64-row block is nonsense in the other direction — a table
+/// too short to hold the compression it claims — and, like keccak's, is refused by the flat
+/// range check before it can size anything. (`0` is not a height at all: it is "no sha256
+/// table", and legal.)
+#[test]
+fn a_nonzero_sha256_height_below_one_block_is_rejected() {
+    use rand_zkvm::machine::VerifyError;
+    let prover = Machine::new(FriProfile::Test);
+    let p = guests::sha256_demo();
+    let (mut proof, _) = prover.prove_salted(&p, &[], [0; 4], Some(Tier(10))).unwrap();
+    proof.sha256_log_height = 5;
+    let last = proof.batch.degree_bits.len() - 1;
+    proof.batch.degree_bits[last] = 5 + 1;
+    let verifier = Machine::new(FriProfile::Test);
+    assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::Sha256Height)));
+    assert_eq!(verifier.cached_keys(), 0, "the range check must precede the verifier key");
+}
+
+/// The declared-shape checks on `sha256_log_height`, at tiers no test could afford to prove at.
+/// `Tier::max_sha256_log_height` folds the flat `tables::sha256::MAX_LOG_HEIGHT` into the tier
+/// relation (`min(ℓ + 6, 20)`), which is the difference from keccak's spelling and the reason a
+/// tier-20 header cannot ask this verifier to build a 2^26-row preprocessed sha256 trace: at
+/// tier 20 the tier bound *is* the cap, so everything past it is refused, and the flat range
+/// check — which runs first — is what names the failure.
+#[test]
+fn declared_sha256_heights_outside_the_range_or_past_the_tier_are_refused() {
+    use rand_zkvm::machine::{check_declared_heights, VerifyError};
+    use rand_zkvm::tables::sha256;
+    let (plh, ilh) = (program::MIN_LOG_HEIGHT, rand_zkvm::tables::input::MIN_LOG_HEIGHT);
+    let mlh20 = Tier(20).min_mem_log_height();
+    assert_eq!(sha256::MIN_LOG_HEIGHT, 6);
+    assert_eq!(sha256::MAX_LOG_HEIGHT, 20);
+    assert_eq!(Tier(20).max_sha256_log_height(), 20, "the flat cap, not `ℓ + 6 = 26`");
+    for slh in [21, 25, u8::MAX] {
+        assert!(
+            matches!(check_declared_heights(Tier(20), plh, ilh, 0, slh, mlh20), Err(VerifyError::Sha256Height)),
+            "slh = {slh} is past the absolute cap and must be refused by the range check",
+        );
+    }
+    for slh in [1, 5] {
+        assert!(
+            matches!(check_declared_heights(Tier(20), plh, ilh, 0, slh, mlh20), Err(VerifyError::Sha256Height)),
+            "slh = {slh} is a table too short to hold one block",
+        );
+    }
+    for slh in [0, sha256::MIN_LOG_HEIGHT, 19, sha256::MAX_LOG_HEIGHT] {
+        assert!(check_declared_heights(Tier(20), plh, ilh, 0, slh, mlh20).is_ok(), "slh = {slh} is legal at tier 20");
+    }
+    // And where the tier is the tighter of the two, the tier variant is what a forgery earns.
+    let mlh10 = Tier(10).min_mem_log_height();
+    assert_eq!(Tier(10).max_sha256_log_height(), 16);
+    assert!(matches!(
+        check_declared_heights(Tier(10), plh, ilh, 0, 17, mlh10),
+        Err(VerifyError::Sha256HeightExceedsTier)
+    ));
+    assert!(matches!(
+        check_declared_heights(Tier(10), plh, ilh, 0, 21, mlh10),
+        Err(VerifyError::Sha256Height),
+    ), "past both bounds is reported by the range check, which runs first");
+}
+
+/// The sha256 chip has no `MULT` witness — the `SHA256` count *is* `IS_REAL · IS_FIRST` — so the
+/// keccak table's "real but unpaid block" forgery has to be spelled as flipping a padding
+/// block's `IS_REAL`. That block then provides a `(CLK, PTR)` entry at `(0, 0)` no cpu row looks
+/// up (and `IS_REAL` is block-constant by rule 1, so setting it on the first row alone breaks
+/// that too).
+#[test]
+fn sha256_padding_block_with_a_count_is_rejected() {
+    use rand_zkvm::tables::sha256;
+    let (m, p, mut t) = setup_sha256_with_a_padding_block();
+    let w = sha256::col::WIDTH;
+    let row = 3 * sha256::BLOCK; // block 3's first row, where `IS_FIRST` provides the entry
+    let st = t.sha256.as_mut().expect("this guest declares a sha256 table");
+    assert_eq!(st.values[row * w + sha256::col::IS_REAL], F::ZERO, "block 3 is padding");
+    st.values[row * w + sha256::col::IS_REAL] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// `SYS_SHA256` joins the `SELECTORS` padding-row gate (AGENTS.md invariant 2 for the new row
+/// kind) — and, set on an all-zero padding row, also asks the `SHA256` bus for an entry at
+/// `(0, 0)` that nothing provides, since a sha256-free guest carries no sha256 table at all.
+#[test]
+fn bumping_sys_sha256_on_a_padding_row_is_rejected() {
+    let (m, p, mut t) = setup();
+    assert_eq!(t.sha256_log_height, 0, "a sha256-free guest carries no sha256 table");
+    let w = cpu::col::WIDTH;
+    let pad = t.cpu.height() - 1;
+    assert_eq!(t.cpu.values[pad * w + cpu::col::IS_REAL], F::ZERO, "last cpu row is padding");
+    t.cpu.values[pad * w + cpu::col::SYS_SHA256] = F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// `an_unbounded_keccak_ptr_is_rejected`'s `SYS_SHA256` twin: the chip does field addition
+/// `PTR + w` for `w < 24` and nothing in the *chip* bounds `PTR`, so the cpu row's `HASH_PTR`
+/// limb decomposition (`HP0..3`/`HP3_HI`, gated on `SYS_HASH + SYS_KECCAK + SYS_SHA256`) is what
+/// keeps the address off any other `MEMORY` key. Leaving the limbs at their honest values makes
+/// this trip the recomposition equation directly.
+#[test]
+fn an_unbounded_sha256_ptr_is_rejected() {
+    let (m, p, mut t) = setup_sha256();
+    let w = cpu::col::WIDTH;
+    let row = sha256_cpu_row(&t);
+    t.cpu.values[row * w + cpu::col::HASH_PTR] = F::from_u32(REG_A0) - F::from_u64(1u64 << 30);
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// The `SHA256` bus in the other direction: a syscall row whose compression is not in the
+/// sha256 table at all (the real block demoted to padding) has no provider for its lookup — and
+/// the 32 `MEMORY` messages the block no longer sends leave that bus unbalanced too.
+#[test]
+fn a_sha256_call_whose_compression_is_missing_is_rejected() {
+    use rand_zkvm::tables::sha256;
+    let (m, p, mut t) = setup_sha256();
+    let w = sha256::col::WIDTH;
+    let st = t.sha256.as_mut().expect("sha256_demo declares a sha256 table");
+    for r in 0..sha256::BLOCK {
+        st.values[r * w + sha256::col::IS_REAL] = F::ZERO;
+    }
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 

@@ -236,6 +236,144 @@ fn enough_keccak_permutations_raise_the_declared_memory_height_past_the_floor() 
     m.verify(&p.digest(), &proof).unwrap();
 }
 
+/// M4.4: the end-to-end anchor for the whole `SHA256` path — the guest's own padding, the
+/// `SYS_SHA256` cpu row, the sha256 chip's 64 rounds and its own 32 `MEMORY` accesses, the
+/// proof-declared sha256 height — checked against the host `sha256::sha256` for the same
+/// message. One 55-byte message is one padded 512-bit block, i.e. exactly one compression, so
+/// `sha256_log_height` sits at its floor of 6 (one 64-row block).
+#[test]
+fn sha256_demo_proves_and_verifies_with_one_sha256_block() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::sha256_demo();
+    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    // 55 bytes: the largest message whose `0x80 ‖ zeros ‖ be64(bitlen)` padding still fits one
+    // 64-byte block. `guests::SHA256_DEMO_MSG` is the same literal the guest hashes; the length
+    // assertion is what keeps the two from drifting into a two-block message, which
+    // `sha256_demo` (a single `SHA256` call, no Merkle–Damgård loop) could not hash.
+    let msg = b"The quick brown fox jumps over the lazy dog............";
+    assert_eq!(msg.len(), 55, "one padded block");
+    assert_eq!(msg, guests::SHA256_DEMO_MSG, "the test and the guest hash the same message");
+    let want = rand_zkvm::sha256::sha256(msg);
+    for k in 0..8 {
+        assert_eq!(
+            exec.outputs[k],
+            u32::from_be_bytes(want[4 * k..4 * k + 4].try_into().unwrap()),
+            "digest word {k}",
+        );
+    }
+    assert_eq!(exec.events.iter().filter(|e| e.sha256_row.is_some()).count(), 1, "one compression");
+    let t0 = std::time::Instant::now();
+    let (proof, _) = m.prove_salted(&p, &[], [1, 2, 3, 4], None).unwrap();
+    let prove_time = t0.elapsed();
+    assert_eq!(proof.tier, Tier(10));
+    assert_eq!(proof.sha256_log_height, 6, "one compression fills the minimum block exactly");
+    assert_eq!(proof.keccak_log_height, 0, "and it calls no KECCAK, so that table is absent");
+    // Nine instances: the eight every proof carries plus the sha256 chip. The keccak chip is
+    // the one that is absent here — the sha256 entry is the *tenth* slot in `chips()` order, so
+    // a batch can carry either, both or neither.
+    assert_eq!(proof.batch.degree_bits.len(), 9, "eight tables plus sha256");
+    let t1 = std::time::Instant::now();
+    m.verify(&p.digest(), &proof).unwrap();
+    eprintln!(
+        "sha256_demo(55 bytes): tier {:?}, {} cycles, proof {} bytes, prove {:?}, verify {:?}",
+        proof.tier, exec.cycles(), proof.size(), prove_time, t1.elapsed()
+    );
+}
+
+/// The sha256 table is optional per proof exactly as the keccak table is (M4.2 Task 6's
+/// pattern, applied to a 466-column chip): a guest that never executes `SHA256` declares
+/// `sha256_log_height = 0` and the batch has no sha256 instance at all, which is what makes a
+/// cpu row claiming `SYS_SHA256` unprovable there (`tests/cheating.rs::
+/// sha256_row_without_a_sha256_table_is_rejected`).
+#[test]
+fn a_sha256_free_proof_carries_no_sha256_table() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (proof, _) = m.prove_salted(&p, &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
+    assert_eq!(proof.sha256_log_height, 0, "no SHA256 call, no sha256 table");
+    assert_eq!(proof.keccak_log_height, 0, "and no KECCAK call either");
+    assert_eq!(proof.batch.degree_bits.len(), 8, "the eight tables every proof carries");
+    m.verify(&p.digest(), &proof).unwrap();
+}
+
+/// What one declared sha256 table costs a proof, measured the way M4.2 measured keccak's: the
+/// **same guest**, the same tier, the same declared heights, differing only in whether the batch
+/// carries the sha256 instance. `fib(10)` makes no `SHA256` call, so its honest sha256 table is a
+/// single all-padding block — which is a perfectly provable witness (AGENTS.md invariant 2: with
+/// `IS_REAL = 0` every bus count on every row is zero, so the block sends no memory traffic and
+/// provides no `SHA256` entry), and that is exactly the shape a non-optional chip would have
+/// forced on every proof in existence. Both proofs verify; the delta between them is the number
+/// `docs/03-privacy.md` carries.
+///
+/// The assertions are deliberately loose (the hiding PCS moves each encoding ~1% run to run);
+/// what they pin is the order of magnitude, i.e. that the instance is neither free nor
+/// keccak-sized.
+#[test]
+fn a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile() {
+    use rand_zkvm::machine::build_traces_salted;
+    use rand_zkvm::tables::sha256;
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let mut t = build_traces_salted(&p, &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
+    assert_eq!(t.sha256_log_height, 0, "fib makes no SHA256 call");
+    let free = m.prove_traces(&p, &t, Tier(10));
+    m.verify(&p.digest(), &free).unwrap();
+
+    t.sha256 = Some(sha256::sha256_trace(&[], sha256::MIN_LOG_HEIGHT));
+    t.sha256_log_height = sha256::MIN_LOG_HEIGHT;
+    let carried = m.prove_traces(&p, &t, Tier(10));
+    m.verify(&p.digest(), &carried).unwrap();
+
+    let (a, b) = (free.size(), carried.size());
+    eprintln!(
+        "Test profile, tier 10, fib(10): sha256 table absent {a} bytes, one padding block {b} bytes, delta {} bytes",
+        b as i64 - a as i64,
+    );
+    assert!(b > a + 50_000, "a 466 + 10-column instance is not free: {a} -> {b}");
+    assert!(b < a + 200_000, "nor is it keccak-sized: {a} -> {b}");
+}
+
+/// The same comparison at the profile that actually ships (80 queries, blowup 8, 20 PoW bits) —
+/// the number `docs/03-privacy.md`'s profile table needs, and the one that says whether a guest
+/// calling `SHA256` still fits the node's proof cap. Ignored for the same reason
+/// `measure_production_profile_at_tier_10_and_12` is: two production-profile proofs are ~13 s.
+#[test]
+#[ignore]
+fn measure_the_sha256_table_cost_at_the_production_profile() {
+    use rand_zkvm::machine::build_traces_salted;
+    use rand_zkvm::tables::sha256;
+    let m = Machine::new(FriProfile::Production);
+    let p = guests::fib(10);
+    let exec = rand_zkvm::emulator::execute(&p, &[], Tier(10).max_cycles()).unwrap();
+    let mut t = build_traces_salted(&p, &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
+    let t0 = std::time::Instant::now();
+    let free = m.prove_traces(&p, &t, Tier(10));
+    let free_prove = t0.elapsed();
+    m.verify(&p.digest(), &free).unwrap();
+    t.sha256 = Some(sha256::sha256_trace(&[], sha256::MIN_LOG_HEIGHT));
+    t.sha256_log_height = sha256::MIN_LOG_HEIGHT;
+    let t1 = std::time::Instant::now();
+    let carried = m.prove_traces(&p, &t, Tier(10));
+    let carried_prove = t1.elapsed();
+    m.verify(&p.digest(), &carried).unwrap();
+    println!(
+        "Production profile, tier 10, fib(10): sha256 absent {} bytes ({:?} to prove), one block {} bytes ({:?}), delta {} bytes",
+        free.size(), free_prove, carried.size(), carried_prove,
+        carried.size() as i64 - free.size() as i64,
+    );
+    // And a guest that genuinely hashes, for the whole-proof number.
+    let d = guests::sha256_demo();
+    let t2 = std::time::Instant::now();
+    let (proof, dexec) = m.prove_salted(&d, &[], [1, 2, 3, 4], Some(Tier(10))).unwrap();
+    let demo_prove = t2.elapsed();
+    m.verify(&d.digest(), &proof).unwrap();
+    println!(
+        "Production profile, tier 10, sha256_demo: {} words, {} cycles, slh {}, mem 2^{}, {} bytes ({:?} to prove)",
+        d.words.len(), dexec.cycles(), proof.sha256_log_height, proof.mem_log_height, proof.size(), demo_prove,
+    );
+}
+
 #[test]
 fn tier_padding_hides_cycle_count() {
     let m = Machine::new(FriProfile::Test);
@@ -293,14 +431,25 @@ fn verifier_key_is_cached_after_first_verify() {
     // (same tier, same declared program/input heights), asking for both must miss the
     // cache separately and hand back two different keys.
     assert_eq!(proof.keccak_log_height, 0, "fib is keccak-free");
+    assert_eq!(proof.sha256_log_height, 0, "and sha256-free");
     let (t, plh, ilh) = (proof.tier, proof.program_log_height, proof.input_log_height);
-    let keccak_free = m.verifier_key(t, plh, ilh, 0);
-    assert_eq!(m.cached_keys(), 1, "the keccak-free key is the one `verify` already cached");
-    let with_keccak = m.verifier_key(t, plh, ilh, 5);
+    let bare = m.verifier_key(t, plh, ilh, 0, 0);
+    assert_eq!(m.cached_keys(), 1, "the hash-table-free key is the one `verify` already cached");
+    let with_keccak = m.verifier_key(t, plh, ilh, 5, 0);
     assert_eq!(m.cached_keys(), 2, "`keccak_log_height = 5` is a different cache key from `0`");
-    assert!(!std::sync::Arc::ptr_eq(&keccak_free, &with_keccak));
-    assert_eq!(keccak_free.lookups.len(), 8, "eight instances");
+    assert!(!std::sync::Arc::ptr_eq(&bare, &with_keccak));
+    // M4.4: `sha256_log_height` is the key's fifth component, and independent of the fourth —
+    // the four combinations of "declares a keccak table" x "declares a sha256 table" are four
+    // different chip sets and therefore four different `CommonData`s.
+    let with_sha256 = m.verifier_key(t, plh, ilh, 0, 6);
+    assert_eq!(m.cached_keys(), 3, "`sha256_log_height = 6` is a different cache key again");
+    let with_both = m.verifier_key(t, plh, ilh, 5, 6);
+    assert_eq!(m.cached_keys(), 4, "and both together is a fourth");
+    assert!(!std::sync::Arc::ptr_eq(&with_keccak, &with_sha256));
+    assert_eq!(bare.lookups.len(), 8, "eight instances");
     assert_eq!(with_keccak.lookups.len(), 9, "nine instances");
+    assert_eq!(with_sha256.lookups.len(), 9, "nine instances — sha256 in keccak's place");
+    assert_eq!(with_both.lookups.len(), 10, "ten instances");
 }
 
 #[test]
@@ -671,4 +820,207 @@ fn measure_production_profile_evm_erc20_transfer() {
         "evm erc20 transfer at the production profile: tier {}, keccak_log_height {}, proof {} bytes, prove {:?}, verify {:?}",
         proof.tier.0, proof.keccak_log_height, proof.to_bytes().len(), prove_time, t1.elapsed()
     );
+}
+
+// ---- M4.4's exit test: an SPL Token `Transfer` through the compiled sBPF guest ------------------
+//
+// **The proving half of this exit test does not pass, and is `#[ignore]`d with the measurement that
+// says why.** The guest is correct — `compiled_sbpf_spl_token_transfer_executes_and_publishes_the_
+// bound_digest` below runs it in the machine's own executor and gets the eight words `sbpf-core`
+// produces natively, over the real SPL Token ELF fetched from mainnet — but it takes **1 753 945
+// cycles**, and the largest tier this machine has is 20, whose budget is 1 048 575
+// (`machine::TIERS`). The M4.4 plan requires tier ≤ 18 (262 143).
+//
+// Measured breakdown (`docs/04-guests.md`, from a pc histogram over the guest's symbols): SHA-256
+// 1 066 950 cycles (60.8 %), the input tape plus the interpreter 600 725 (34.2 %), the stack/heap
+// zeroing 51 535 (2.9 %), `elf::load` ~22 000 (1.3 %). The 2 368 compressions decompose exactly:
+//
+// * **1 698 for `program_hash` = sha256(elf bytes)** over all 108 600 committed bytes. The ELF is
+//   also 27 151 of the 37 609 input words, so carrying it and hashing it is ~1.20 M of the 1.75 M —
+//   spent on a program the run otherwise reads a few thousand bytes of and executes 143 instructions
+//   from.
+// * 654 for `input_hash` over the *aligned* region, of which 40 960 of 41 825 bytes are
+//   `MAX_PERMITTED_DATA_INCREASE` realloc padding — 98 % zeros, so 640 of those compressions hash
+//   nothing else.
+// * 8 + 8 for the pre- and post-state account walks.
+//
+// **The obvious fix is unsound, so do not try it.** Declaring `program_hash` instead of recomputing
+// it does not work: `H_IN` is salted and *hiding* (M4.1, `docs/03-privacy.md`), so a verifier cannot
+// check a claimed digest of the input words against it, and a `program_hash` the guest does not
+// recompute is bound to nothing at all — a prover could run any ELF under a fresh salt and declare
+// the SPL Token hash. The in-circuit hashing *is* the binding.
+//
+// The two sound paths both reach past this file (design spec §5.1 item 8 is the decision record):
+//
+// * **(A)** bake the ELF into the guest's **data segment**, so `hc` binds it — the image container
+//   `Program::from_flat_image` makes the data part of `Program::words`. Estimated ~72-76 K prologue
+//   words for ~27 150 data words, minus the ELF's compressions and input words: ~0.6 M cycles, i.e.
+//   **tier 20**, provable only on much larger hardware, and one committed binary per Solana program.
+//   Note it is also ~20 % over the loaders' 65 535-word program cap (`HASH_LEFT` is 16 bits) until
+//   the prologue's repeated `lui` half is deduped.
+// * **(B)** a **public, unsalted** segment in the input commitment, so a declared digest becomes
+//   checkable: the guest hashes nothing and the run reaches **tier 18** — a constraint-set change
+//   with its own spec addendum and plan, whose price is that the ELF words become public.
+//
+// `input_hash` over a canonical unpadded encoding (~290 K cycles) is legitimate and is deferred into
+// the same follow-up, because it changes the same binding "Public output" ruling.
+
+/// M4.4's exit test, the executor half — this one passes. The compiled sBPF guest runs an SPL Token
+/// `Transfer` over the ELF fetched from the live program account, and the eight public output words
+/// it publishes are exactly the ones `sbpf-core` produces natively: `out0 = 1` (the program returned
+/// `r0 == 0`) and `out1..7` the Poseidon2 digest over the program, the instruction and the accounts'
+/// post-state, all three bound through SHA-256 and therefore through the M4.4 chip.
+///
+/// Every number the M4.4 plan asks Task 6 to record is printed here and pinned below.
+#[test]
+fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
+    use rand_zkvm::sbpf::{deserialize_accounts, spl_transfer, TOKEN_AMOUNT_AT};
+    let p = guests::compiled::sbpf();
+    let call = spl_transfer(250);
+    let inputs = call.input_words();
+    let (want, r0, post) = call.expected();
+    assert_eq!(r0, Ok(0));
+    assert_eq!(want[0], 1);
+
+    // The transfer really moved the balance, in the fixture's own terms.
+    let pre = deserialize_accounts(&call.input);
+    let bal =
+        |d: &[u8]| u64::from_le_bytes(d[TOKEN_AMOUNT_AT..TOKEN_AMOUNT_AT + 8].try_into().unwrap());
+    assert_eq!(bal(&pre[0].data) - 250, bal(&post[0].data));
+    assert_eq!(bal(&pre[1].data) + 250, bal(&post[1].data));
+
+    // The cap is not a tier's budget: see the comment above this test. It is a bound that fails
+    // loudly if the guest ever runs away, rather than the tier the plan asked for.
+    const CYCLE_CAP: usize = 4_000_000;
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, CYCLE_CAP).unwrap();
+    assert_eq!(exec.outputs, want, "the in-circuit guest and the native run must agree");
+
+    let compressions = exec.events.iter().filter(|e| e.sha256_row.is_some()).count();
+    // A pure function of the two input lengths: ceil-with-padding over 108 600 ELF bytes (1 698) and
+    // 41 825 instruction-region bytes (654), plus the pre- and post-state account walks (8 each).
+    assert_eq!(compressions, 2_368, "1698 program + 654 input + 2x8 accounts");
+    assert_eq!(
+        rand_zkvm::tables::sha256::sha256_log_height(compressions),
+        18,
+        "2 368 blocks of 64 rows",
+    );
+    // Two bounds, in both directions, and neither is decoration. The upper one catches a runaway;
+    // the lower one is the tripwire that says the milestone's blocker has been lifted — if the guest
+    // ever fits `Tier(20)`, the real exit test can be un-ignored and this assertion is the thing
+    // that will tell whoever did it.
+    assert!(
+        exec.cycles() <= 1_800_000,
+        "{} cycles, was 1 753 945 when M4.4 measured it",
+        exec.cycles()
+    );
+    assert!(
+        exec.cycles() > Tier(20).max_cycles(),
+        "{} cycles now fits Tier(20): un-ignore \
+         compiled_sbpf_spl_token_transfer_proves_and_verifies and re-measure the docs",
+        exec.cycles()
+    );
+    // The sBPF instruction count is the interpreter's own meter, which only the native run can
+    // report — the executor counts RV32 cycles, not sBPF instructions.
+    let native = rand_zkvm::sbpf::run_elf(&mut call.elf.clone(), &mut call.input.clone());
+    assert_eq!(native.result, Ok(0));
+    eprintln!(
+        "sbpf spl transfer: {} program words, {} input words, {} cycles, {} sBPF instructions, \
+         frame high-water {}, {} sha256 compressions, sha256_log_height {}, needs a tier above {} \
+         (max {:?})",
+        p.len(),
+        inputs.len(),
+        exec.cycles(),
+        native.instructions,
+        native.max_depth,
+        compressions,
+        rand_zkvm::tables::sha256::sha256_log_height(compressions),
+        Tier(20).max_cycles(),
+        Tier(20),
+    );
+}
+
+/// A transfer exceeding the source balance returns `TokenError::InsufficientFunds` (`r0 != 0`):
+/// status 0, and the pre-state bound as the post-state. The executor agrees with the native run, so
+/// the failure path is in-circuit code too — and it is the rule that stops a partial effect being
+/// published.
+#[test]
+fn compiled_sbpf_spl_token_transfer_of_too_much_fails_cleanly() {
+    let p = guests::compiled::sbpf();
+    let call = rand_zkvm::sbpf::spl_transfer(u64::MAX / 2);
+    let (want, r0, post) = call.expected();
+    assert!(matches!(r0, Ok(code) if code != 0));
+    assert_eq!(want[0], 0);
+    assert_eq!(post, rand_zkvm::sbpf::deserialize_accounts(&call.input));
+    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), 4_000_000).unwrap();
+    assert_eq!(exec.outputs, want);
+    // Status 0 is not the only difference from the success case: the digest words differ too,
+    // because a successful transfer's post-state is not its pre-state.
+    let ok = rand_zkvm::sbpf::spl_transfer(250).expected().0;
+    assert_ne!(&want[1..], &ok[1..], "the two runs must not publish the same digest");
+}
+
+/// M4.4's exit test as the plan wrote it: the `Transfer` proves and verifies at tier 18 or lower.
+///
+/// `#[ignore]`d because it cannot pass on this machine — see the comment above
+/// `compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest` for the measured
+/// reason and the two sound remedies. It is written out in full so that the moment the ELF moves
+/// into the guest's data segment, or the input commitment gains a public segment, un-ignoring this
+/// is the whole of the work.
+#[test]
+#[ignore = "1 753 945 cycles: above Tier(20)'s 1 048 575 budget, let alone the plan's tier 18. \
+            The 108 600-byte ELF is 1 698 of the 2 368 compressions (72 %); carrying and hashing \
+            it in-circuit as program_hash is about 1.20 M of the 1.75 M cycles (69 %), which \
+            cannot just be declared instead (H_IN is hiding, so a digest the guest does not \
+            recompute binds nothing). Needs the ELF in the guest's data segment (tier 20) or a \
+            public input segment (tier 18): docs/04-guests.md, design spec 5.1 item 8"]
+fn compiled_sbpf_spl_token_transfer_proves_and_verifies() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::compiled::sbpf();
+    let call = rand_zkvm::sbpf::spl_transfer(250);
+    let inputs = call.input_words();
+    let (want, _r0, _post) = call.expected();
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, Tier(18).max_cycles()).unwrap();
+    assert_eq!(exec.outputs, want);
+    let (proof, _) = m.prove_salted(&p, &inputs, [13, 14, 15, 16], None).unwrap();
+    eprintln!(
+        "sbpf spl transfer: {} program words, {} input words, {} cycles, {} sha256 compressions, \
+         tier {}, sha256_log_height {}, mem_log_height {}, proof {} bytes",
+        p.len(),
+        inputs.len(),
+        exec.cycles(),
+        exec.events.iter().filter(|e| e.sha256_row.is_some()).count(),
+        proof.tier.0,
+        proof.sha256_log_height,
+        proof.mem_log_height,
+        proof.size(),
+    );
+    m.verify(&p.digest(), &proof).unwrap();
+    assert!(proof.tier.0 <= 18, "M4.4 requires tier <= 18");
+    assert!(proof.sha256_log_height >= 6);
+}
+
+/// Where the sBPF guest's cycles go, as a pc histogram mapped onto the guest binary's symbols — the
+/// breakdown the M4.4 plan asks for whenever the exit test lands above tier 16, and the measurement
+/// `docs/04-guests.md`'s cost table is built from. Writes `sbpf-pc-histogram.txt` into the
+/// temporary directory; pair it with
+/// `llvm-nm -n --defined-only guests-compiled/sbpf/target/riscv32im-unknown-none-elf/release/sbpf-guest`.
+/// `#[ignore]`d because it is a measurement, not an assertion.
+#[test]
+#[ignore = "measurement: writes a pc histogram for docs/04-guests.md"]
+fn sbpf_cycle_breakdown_by_pc() {
+    use std::collections::BTreeMap;
+    let p = guests::compiled::sbpf();
+    let call = rand_zkvm::sbpf::spl_transfer(250);
+    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), 4_000_000).unwrap();
+    let mut hist: BTreeMap<u32, usize> = BTreeMap::new();
+    for e in &exec.events {
+        *hist.entry(e.pc).or_default() += 1;
+    }
+    let path = std::env::temp_dir().join("sbpf-pc-histogram.txt");
+    let mut out = String::new();
+    for (pc, n) in &hist {
+        out.push_str(&format!("{pc} {n}\n"));
+    }
+    std::fs::write(&path, out).unwrap();
+    eprintln!("{} distinct pcs, {} cycles -> {}", hist.len(), exec.cycles(), path.display());
 }

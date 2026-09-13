@@ -203,12 +203,25 @@ pub mod col {
     /// hash-group column (`HASH_N`/`HASH_LEFT`/`HASH_IDX`/`HS0..7`) to zero, since nothing
     /// routes a keccak row into a hash row-group (`continues` keys off `SYS_HASH` alone).
     pub const SYS_KECCAK: usize = IINV0 + 4;
-    pub const WIDTH: usize = SYS_KECCAK + 1;
+    /// M4.4: the `SHA256` ecall row — `SYS_KECCAK`'s shape exactly, one column later. One row,
+    /// never a row group: the chip (`tables::sha256`) proves the 64 rounds and sends the
+    /// compression's own 32 `MEMORY` messages (24 reads, 8 write-backs); this row only dispatches
+    /// the call, bounds the pointer, and claims the chip's block on the `SHA256` bus. Appended at
+    /// the end of the column list for the same reason `SYS_KECCAK` was: column *indices* are
+    /// load-bearing for the vendored fullnode at re-vendoring time, and appending keeps every
+    /// pre-M4.4 index where it was.
+    ///
+    /// It reuses the `SYS_HASH` group's `HASH_PTR`/`HP0..3`/`HP3_HI` columns for its own
+    /// (bounded) copy of `a0` — see the "CRITICAL 1" block in `eval` — and pins every *other*
+    /// hash-group column (`HASH_N`/`HASH_LEFT`/`HASH_IDX`/`HS0..7`) to zero, since nothing routes
+    /// a sha256 row into a hash row-group (`continues` keys off `SYS_HASH` alone).
+    pub const SYS_SHA256: usize = SYS_KECCAK + 1;
+    pub const WIDTH: usize = SYS_SHA256 + 1;
     /// Columns that must be zero on padding rows.
-    pub const SELECTORS: [usize; 27] = [
+    pub const SELECTORS: [usize; 28] = [
         IS_ALU, IS_IMM, IS_BRANCH, IS_LB, IS_LH, IS_LW, IS_SB, IS_SH, IS_SW, SIGNED,
         IS_JAL, IS_JALR, IS_LUI, IS_AUIPC, IS_ECALL, WRITES_RD, SYS_HALT, SYS_WRITE, SYS_READ, BR_NEG,
-        SYS_HASH, IS_HASH, IS_HASH_OUT, HASH_FIN, IS_DIGEST, IS_INDIGEST, SYS_KECCAK,
+        SYS_HASH, IS_HASH, IS_HASH_OUT, HASH_FIN, IS_DIGEST, IS_INDIGEST, SYS_KECCAK, SYS_SHA256,
     ];
 }
 pub mod pv {
@@ -398,6 +411,7 @@ where
         b.assert_zero(off_cpu.clone() * v(SYS_WRITE));
         b.assert_zero(off_cpu.clone() * v(SYS_READ));
         b.assert_zero(off_cpu.clone() * v(SYS_KECCAK));
+        b.assert_zero(off_cpu.clone() * v(SYS_SHA256));
         b.assert_zero(off_cpu.clone() * v(A));
         b.assert_zero(off_cpu.clone() * v(B));
         b.assert_zero(off_cpu.clone() * v(MEM_VAL));
@@ -606,7 +620,7 @@ where
         bus::MEMORY.send(b, [slot_w_space, slot_w_addr, ts(SLOT_W), slot_w_val, slot_w_is_write], Count::bounded(count3, 1));
 
         // syscalls: a = number, b = arg0, mem_val = arg1
-        let sys_sum = v(SYS_HALT) + v(SYS_WRITE) + v(SYS_READ) + v(SYS_HASH) + v(SYS_KECCAK);
+        let sys_sum = v(SYS_HALT) + v(SYS_WRITE) + v(SYS_READ) + v(SYS_HASH) + v(SYS_KECCAK) + v(SYS_SHA256);
         b.assert_zero(v(IS_ECALL) * (sys_sum.clone() - one.clone()));
         b.assert_zero((one.clone() - v(IS_ECALL)) * sys_sum);
         b.assert_zero(v(SYS_HALT) * (v(A) - AB::Expr::from_u32(SYS_NUM_HALT)));
@@ -650,7 +664,12 @@ where
         // then some: the keccak chip does plain field addition `PTR + w` for `w < 50` and has
         // nothing of its own that bounds `PTR` (Task 3 review, Important #1). The two selectors
         // are mutually exclusive (the one-hot-on-ecall rule above), so the count stays ≤ 1.
-        let hp_gate = v(SYS_HASH) + v(SYS_KECCAK);
+        //
+        // M4.4: and `SYS_SHA256`, for exactly the same reason — the sha256 chip addresses
+        // `PTR .. PTR + 23` by plain field addition and bounds nothing itself. All three
+        // selectors are pairwise exclusive under the same one-hot rule, so the count is still ≤ 1
+        // and the shared limb columns still carry one well-defined pointer per row.
+        let hp_gate = v(SYS_HASH) + v(SYS_KECCAK) + v(SYS_SHA256);
         {
             let mut hp = AB::Expr::ZERO;
             for i in 0..4 { hp += v(HP0 + i) * AB::Expr::from_u32(1 << (8 * i)); }
@@ -691,6 +710,47 @@ where
             // table's own (digest-prefix-shifted) clock, which is also what the chip's memory
             // timestamps `4·CLK`/`4·CLK + 1` are built from.
             bus::KECCAK.lookup_key(b, [v(CLK), v(HASH_PTR)], Count::bounded(v(SYS_KECCAK), 1));
+        }
+
+        // M4.4: the `SHA256` ecall row, `SYS_KECCAK`'s twin. `a0` (in `B`, read on every ecall
+        // row) is the word address of the 24-word buffer — the 512-bit message block in words
+        // `0..16` and the chaining state in `16..24`; there is no second argument (the widths are
+        // fixed), and the whole syscall is this one row, since `continues` keys off `SYS_HASH`
+        // alone.
+        //
+        // `MEM_VAL` is deliberately *not* pinned here (the `SYS_KECCAK` row does not pin it
+        // either). It is the `a1` register value every ecall row reads over `MEMORY`
+        // (`count2`'s `IS_ECALL` term, `MEM_ADDR = ECALL_MEM_REG`), so it is bound to the
+        // register file whether or not the syscall reads it — AGENTS.md invariant 1 is satisfied
+        // by that send, not by a zero pin. Forcing it to zero would instead make an honest run
+        // unprovable whenever the guest happens to hold a non-zero `a1` at the call, which
+        // `call_sha256` (which sets only `a7` and `a0`) says nothing about.
+        {
+            b.assert_zero(v(SYS_SHA256) * (v(A) - AB::Expr::from_u32(crate::isa::SYS_SHA256)));
+            b.assert_zero(v(SYS_SHA256) * (v(HASH_PTR) - v(B)));
+            // The rest of the hash group's shared columns stay zero here, for the reason the
+            // keccak block above gives: they are meaningless on a sha256 row, and pinning them
+            // keeps a witness from smuggling a half-formed hash claim through a row that no
+            // hash-group rule gates on.
+            b.assert_zero(v(SYS_SHA256) * v(HASH_N));
+            b.assert_zero(v(SYS_SHA256) * v(HASH_LEFT));
+            b.assert_zero(v(SYS_SHA256) * v(HASH_IDX));
+            for i in 0..8 { b.assert_zero(v(SYS_SHA256) * v(HS0 + i)); }
+            // The cubic pointer rule, again: the `AND4[HP3_HI, 0xC, 0]` lookup above already
+            // forces `HP3_HI < 4`, i.e. `ptr < 2^30`. A sha256 row needs `ptr + 23 < 2^30` (the
+            // chip addresses `PTR .. PTR + 23`), so tighten the top nibble to `{0, 1, 2}`: then
+            // `ptr <= 0x2fff_ffff` and `ptr + 23 < 2^30` with room to spare. Degree 4 on a
+            // selector-gated product of one column — under this table's degree-8 ceiling, which
+            // comes from the packed lookups, not row logic.
+            let hi = v(HP3_HI);
+            b.assert_zero(
+                v(SYS_SHA256) * hi.clone() * (hi.clone() - one.clone()) * (hi - AB::Expr::TWO),
+            );
+            // The chip's side of the handshake: one entry per real 64-row block, keyed by the
+            // pair that makes the cpu's row and the chip's block the same event. `CLK` is this
+            // table's own (digest-prefix-shifted) clock, which is also what the chip's memory
+            // timestamps `4·CLK`/`4·CLK + 1` are built from.
+            bus::SHA256.lookup_key(b, [v(CLK), v(HASH_PTR)], Count::bounded(v(SYS_SHA256), 1));
         }
         {
             let mut t = b.when_transition();
@@ -754,7 +814,9 @@ where
             // M4.2 case these gates must get right — a `SYS_KECCAK` row, which is an ecall row
             // of the *ordinary* shape (one row, `continues` keys off `SYS_HASH` alone), so like
             // `SYS_WRITE` or any other instruction it may not be followed by a hash row. Only
-            // `SYS_HASH` opens a row-group.
+            // `SYS_HASH` opens a row-group. M4.4's `SYS_SHA256` row is that same shape and is
+            // covered by these same gates for the same reason: neither selector appears in
+            // either whitelist, so `n(IS_HASH)`/`n(IS_HASH_OUT)` are forced to zero after both.
             //
             // All three are products of two degree-1 selectors: degree 2, well under this
             // table's pinned degree 8 (`tests/tables.rs`'s degree pin).
@@ -1353,6 +1415,22 @@ pub fn cpu_trace(program: &Program, inputs: &[u32], salt: [u32; 4], events: &[Cy
             // belongs to the keccak chip, not to this row.
             Some(Syscall::Keccak { ptr }) => {
                 r[SYS_KECCAK] = F::ONE;
+                r[HASH_PTR] = F::from_u32(ptr);
+                let hpl = limbs(ptr);
+                for k in 0..4 { r[HP0 + k] = hpl[k]; range.range8((ptr >> (8 * k)) & 0xff); }
+                let hp3 = (ptr >> 24) & 0xff;
+                let (hp3_lo, hp3_hi) = (hp3 & 0xf, hp3 >> 4);
+                r[HP3_HI] = F::from_u32(hp3_hi);
+                nibble.and4(hp3_lo, 0);
+                nibble.and4(hp3_hi, 0xC);
+            }
+            // M4.4: one row, and the pointer's own bounded byte decomposition — the same
+            // `HP0..3`/`HP3_HI` columns (and the same `RANGE8`/`AND4` receipts) a `SYS_HASH` or
+            // `SYS_KECCAK` ecall row fills, since the AIR's "CRITICAL 1" bound is gated on all
+            // three selectors. Everything else about the call — the 64 rounds and the 32 memory
+            // accesses — belongs to the sha256 chip, not to this row.
+            Some(Syscall::Sha256 { ptr }) => {
+                r[SYS_SHA256] = F::ONE;
                 r[HASH_PTR] = F::from_u32(ptr);
                 let hpl = limbs(ptr);
                 for k in 0..4 { r[HP0 + k] = hpl[k]; range.range8((ptr >> (8 * k)) & 0xff); }

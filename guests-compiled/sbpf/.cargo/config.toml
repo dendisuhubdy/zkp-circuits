@@ -1,0 +1,14 @@
+[build]
+target = "riscv32im-unknown-none-elf"
+
+# As `guests-compiled/evm` does, and for the same reason: the rustflags for this guest live in the
+# **Makefile**, not here, because one of them cannot be written down statically. `-C
+# remap-path-prefix` needs this checkout's absolute path, and without it the panic `Location`
+# strings LLVM puts in `.rodata` — which the M4.3 image container carries into the guest's RAM
+# (`research/docs/01-isa.md`) — would embed the build machine's directories and the committed
+# `bin/sbpf.bin` would not reproduce anywhere else. `make` passes the whole set through
+# `cargo --config`, so this file stays the place the *target* is pinned and the Makefile stays the
+# one place the flags are written.
+#
+# A bare `cargo build` here therefore builds for the right target but without the linker script or
+# the remap: use `make`, which is what produced the committed image and its `.sha256`.

@@ -76,6 +76,13 @@ pub mod domain {
     /// M4.3: the EVM guest's public-output digest,
     /// `[codehash(8), pre_root(8), post_root(8), return_hash(8), logs_hash(8)]` (40 words).
     pub const EVM_OUT: u32 = 13;
+    /// M4.4: the sBPF guest's public-output digest,
+    /// `[program_hash(8), input_hash(8), output_hash(8)]` (24 words) — three SHA-256 digests, each
+    /// packed `word[i] = LE(bytes[4i..4i+4])`, binding the program, the serialized instruction it
+    /// was given and the accounts' post-state (`sbpf_core::abi::public_output`, mirrored there as
+    /// `SBPF_OUT_DOMAIN`). 12 and 13 are M4.3's (`STORAGE_LEAF`, `EVM_OUT`) and are left free so
+    /// the two milestones' domains do not collide when both land.
+    pub const SBPF_OUT: u32 = 14;
     pub const TEST: u32 = 0xff;
 }
 

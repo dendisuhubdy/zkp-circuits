@@ -89,6 +89,20 @@ pub mod ops {
         v.push(ecall());
         v
     }
+    /// M4.4: one SHA-256 compression of the `SHA256_WORDS` words at word address `ptr_words`
+    /// (`a0`) — the message block in words `0..16`, the chaining state in `16..24`, the new state
+    /// written back over `16..24` in place. No second argument.
+    ///
+    /// `u32`, not `call_keccak`'s `i32`: a word address is never negative, and the callers that
+    /// probe the bound pass `emulator::SHA256_PTR_LIMIT`, itself a `u32`. The emulator refuses
+    /// every pointer past that limit (`0x3000_0000 - 24`), so the `as i32` below can only ever
+    /// see a value well below `2^31` — it never changes the constant `li` materializes.
+    pub fn call_sha256(ptr_words: u32) -> Vec<Instr> {
+        let mut v = li(REG_A7, SYS_SHA256 as i32);
+        v.extend(li(REG_A0, ptr_words as i32));
+        v.push(ecall());
+        v
+    }
 }
 
 // ───────────────────────── M3.3: note-layer guest routines ─────────────────────────

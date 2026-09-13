@@ -6,6 +6,8 @@ pub mod tables;
 pub mod machine;
 pub mod hash;
 pub mod keccak;
+pub mod sha256;
+pub mod sbpf;
 pub mod notes;
 pub mod evm;
 pub mod viewing;

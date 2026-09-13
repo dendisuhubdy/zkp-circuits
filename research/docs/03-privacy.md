@@ -78,7 +78,10 @@ count does not touch.
 tier-10 proof is already ~1.20 MB, past the 1 MiB cap the full node applies
 to a submitted proof, and a proof carrying the keccak table measures
 3 106 757 bytes at tier 10 (a +1.91 MB delta over keccak-free, the 80-query
-restatement of the +705 KB M4.2 measured at 27 queries). The cap is the
+restatement of the +705 KB M4.2 measured at 27 queries). A proof carrying
+M4.4's *sha256* table instead measures 1 603 907 bytes at tier 10 (+400 563 over
+the same hash-table-free baseline of 1 203 344, and 1 615 520 for `sha256_demo`,
+a guest that genuinely hashes). The cap is the
 node's constant, not this crate's, but it has to be raised in the same change
 that ships this profile or no production proof will be accepted.
 
@@ -176,6 +179,30 @@ guest that touches `KECCAK256` pays ~1.91 MB, so a contract that avoids Keccak
 (no mappings, no ABI hashing) is materially cheaper on chain than one that does
 not; and the size difference is itself a structural leak of exactly the kind
 `keccak_log_height` already is.
+
+**M4.4's own measurement, at both profiles.** The sha256 chip was built to be
+optional from the start, so there is no "every proof pays" row to report — instead
+the delta is measured directly, the same guest (`guests::fib(10)`, which makes no
+`SHA256` call) at the same tier and the same declared heights, with the instance
+in and out. `fib`'s honest sha256 table in the "in" case is one all-padding block,
+which is a provable witness (invariant 2: `IS_REAL = 0` zeroes every bus count on
+every row) and exactly the shape a non-optional chip would have forced on every
+proof:
+
+| tier 10, `fib(10)` | sha256 table absent | one (padding) block | delta |
+|---|---|---|---|
+| `FriProfile::Test` | 278 670 bytes | 370 977 bytes | **+92 307 bytes** |
+| `FriProfile::Production` (80 queries) | 1 203 344 bytes | 1 603 907 bytes | **+400 563 bytes** |
+
+Prove time barely moves (6.130 s → 6.795 s at the production profile), locating the
+cost where keccak's is: opening a 476-column leaf at each of 80 FRI queries, not
+committing a 64-row trace. +0.40 MB against keccak's +1.91 MB is a ratio of 0.21,
+close to the 476/2 711 column ratio — the arithmetic `docs/04-guests.md` asked this
+chip to plan against. `tests/e2e.rs::
+a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile` keeps
+the Test-profile number honest in the suite;
+`measure_the_sha256_table_cost_at_the_production_profile` (`#[ignore]`d) is where
+the production row comes from.
 
 A second, smaller number in the same measurement is M4.2's own controller
 ruling 1. The first cut of the milestone sized the memory table
@@ -372,18 +399,27 @@ built, which
 `tests/cheating.rs::a_keccak_height_past_the_tiers_ceiling_is_rejected_
 before_any_verifier_key_is_built` and its `..._past_the_absolute_cap_...`
 sibling assert by observing `cached_keys() == 0` after the rejection);
+`proof.sha256_log_height` gets the identical treatment (M4.4,
+`VerifyError::Sha256Height` / `Sha256HeightExceedsTier`) — `0` means "no sha256
+table", any other value must lie in `[tables::sha256::MIN_LOG_HEIGHT,
+tables::sha256::MAX_LOG_HEIGHT] = [6, 20]` and be no larger than
+`Tier::max_sha256_log_height`, which is `min(tier + 6, 20)` since a compression
+costs a cycle and fills one 64-row block; that method folds the flat cap in
+rather than leaving it to each caller, which is the one place M4.4 deliberately
+spells a bound differently from M4.2;
 `proof.mem_log_height` is within
 `[tier + 2, MAX_MEM_LOG_HEIGHT]` (M4.2 — the memory table's height is
 proof-declared now, see "Tiers: what padding hides" below; both ends are
 pinned by `tests/cheating.rs`, the ceiling since the Task 5 review); the
-proof's degree bits match the heights that tier (and the four declared
-heights) imply for all eight tables — nine when `keccak_log_height != 0`, and
+proof's degree bits match the heights that tier (and the five declared
+heights) imply for all eight tables — nine or ten when `keccak_log_height` and
+`sha256_log_height` are non-zero — and
 since that comparison is of whole lists it is simultaneously the check that
 the batch has the right *number* of instances for what the proof declares;
 and finally the batch
 STARK itself, against a verifier key recomputed from the tier and the
 declared heights — `Machine::verifier_key(tier, program_log_height,
-input_log_height, keccak_log_height)`, which includes
+input_log_height, keccak_log_height, sha256_log_height)`, which includes
 the range and nibble tables' preprocessed commitments (256 rows each, since
 M2.3 split the 2^16-row byte table in two) and the Poseidon2 chip's
 round-constant table. M3.4:
@@ -391,14 +427,21 @@ round-constant table. M3.4:
 `base_pc` to check it against — it is read out of the proof and bound only
 in-circuit, to the digest group's own `pc` (and, indirectly, to `hc` itself,
 since `Program::digest` absorbs `base_pc`). `Machine::verifier_key` caches
-this by `(tier, program_log_height, input_log_height, keccak_log_height)`
-now (M4.1 grew the 2-tuple to a 3-tuple and M4.2's keccak table to a
-4-tuple — independent, unrelated height parameters, so a folded single
+this by `(tier, program_log_height, input_log_height, keccak_log_height,
+sha256_log_height)`
+now (M4.1 grew the 2-tuple to a 3-tuple, M4.2's keccak table to a
+4-tuple and M4.4's sha256 table to a 5-tuple — independent, unrelated height
+parameters, so a folded single
 value would obscure rather than simplify). `keccak_log_height = 0` is an
 ordinary value of that fourth component and a genuinely distinct key: it
 selects the eight-chip batch, whose preprocessed commitment omits the keccak
-table's 99 periodic columns entirely. `mem_log_height` is deliberately *not* a
-fifth key component — nor, since the M4.2 review, a parameter at all: the
+table's 99 periodic columns entirely; `sha256_log_height` is the same story for
+the 10 periodic columns of M4.4's chip, and the two are independent, so the four
+combinations are four keys. **The arity change is a vendoring-visible one:** the
+fullnode's `deploy/sync-zkvm.sh` anchors on this function's signature, so
+re-vendoring this constraint set has to update it (that update is not made here —
+this plan does not re-vendor the node). `mem_log_height` is deliberately *not* a
+sixth key component — nor, since the M4.2 review, a parameter at all: the
 memory table declares neither preprocessed nor periodic columns, so the
 `CommonData` this caches is identical at every declared memory height
 (`docs/02`'s degree-budget section has the argument), and the function feeds
@@ -434,11 +477,15 @@ it to `cpu_height()`, unsafe — see `docs/02-tables-and-buses.md`'s
 "Height" section under the program table); `keccak` (M4.2) is **absent entirely** unless the guest calls `KECCAK`, and
 otherwise pads to
 `1 << Proof::keccak_log_height`, one 32-row block per permutation, floored
-at one block and ceilinged at `2^(ℓ+5)`; `memory` (M4.2, controller ruling
-1) is proof-declared too — `max(ℓ + 2, log2_ceil(accesses + 1))`, so a guest
-whose `KECCAK` calls push it past the tier's four-per-cycle budget grows the
-table instead of failing, and every other guest pays exactly the `2^(ℓ+2)`
-it always did; `range` and `nibble` are each
+at one block and ceilinged at `2^(ℓ+5)`; `sha256` (M4.4) is absent or present on
+exactly those terms, padding to `1 << Proof::sha256_log_height`, one 64-row block
+per compression, floored at one block and ceilinged at `min(2^(ℓ+6), 2^20)`;
+`memory` (M4.2, controller ruling
+1) is proof-declared too — `max(ℓ + 2, log2_ceil(accesses + 1))`, where the
+access count is `4·cycles + 100·n_keccak + 32·n_sha256`, so a guest
+whose `KECCAK` or `SHA256` calls push it past the tier's four-per-cycle budget
+grows the table instead of failing, and every other guest pays exactly the
+`2^(ℓ+2)` it always did; `range` and `nibble` are each
 always the fixed 256 rows. Padding rows carry `is_real = 0` (or, for
 `program`, `valid = 0`) and emit nothing on any bus.
 
@@ -460,6 +507,14 @@ between a shielded bundle proof fitting the node's 1 MiB cap and not.
 Through the first cut of M4.2 the height floored at 5 and "zero" and "one"
 were indistinguishable; that indistinguishability cost every proof on the
 chain the full table, and was traded away knowingly.
+`sha256_log_height` (M4.4) says all of that again for `SHA256` compressions, at
+a quarter of the price: the chip is 466 + 10 columns against keccak's 2 612 + 99,
+so the table it lets a non-hashing guest drop is worth ~92 KB at
+`FriProfile::Test` and ~400 KB at the production profile (measured, same guest,
+same tier, instance in versus out — `docs/02`'s `sha256` section has the table).
+The two declarations are independent, so a proof publishes which of the two hash
+syscalls its program uses, each to within a factor of two above zero and exactly
+at zero.
 `mem_log_height`'s tier floor plays the same role for memory traffic: below
 `2^(ℓ+2)` accesses the declaration is constant at `ℓ + 2` and says nothing
 the tier did not already, and it only starts tracking the real count once a
@@ -469,14 +524,20 @@ count against the tier's cycle budget just like ordinary instructions do
 (`Program::digest_rows()` added to `Execution::cycles()` before choosing a
 tier).
 
-| Tier `ℓ` | `cpu` rows | `alu` rows | `memory` rows (floor) | max `keccak` rows | max cycles |
-|---|---|---|---|---|---|
-| 10 | 1 024 | 2 048 | 4 096 | 32 768 | 1 023 |
-| 12 | 4 096 | 8 192 | 16 384 | 131 072 | 4 095 |
-| 14 | 16 384 | 32 768 | 65 536 | 524 288 | 16 383 |
-| 16 | 65 536 | 131 072 | 262 144 | 2 097 152 | 65 535 |
-| 18 | 262 144 | 524 288 | 1 048 576 | 8 388 608 | 262 143 |
-| 20 | 1 048 576 | 2 097 152 | 4 194 304 | 33 554 432 | 1 048 575 |
+| Tier `ℓ` | `cpu` rows | `alu` rows | `memory` rows (floor) | max `keccak` rows | max `sha256` rows | max cycles |
+|---|---|---|---|---|---|---|
+| 10 | 1 024 | 2 048 | 4 096 | 32 768 | 65 536 | 1 023 |
+| 12 | 4 096 | 8 192 | 16 384 | 131 072 | 262 144 | 4 095 |
+| 14 | 16 384 | 32 768 | 65 536 | 524 288 | 1 048 576 | 16 383 |
+| 16 | 65 536 | 131 072 | 262 144 | 2 097 152 | 1 048 576 | 65 535 |
+| 18 | 262 144 | 524 288 | 1 048 576 | 8 388 608 | 1 048 576 | 262 143 |
+| 20 | 1 048 576 | 2 097 152 | 4 194 304 | 33 554 432 | 1 048 576 | 1 048 575 |
+
+The `sha256` column flattens at `2^20` from tier 14 up because
+`Tier::max_sha256_log_height` folds the flat `tables::sha256::MAX_LOG_HEIGHT = 20`
+into the tier relation: 16 384 compressions is ~1 MiB of hashed message, past
+anything this crate proves, and an untrusted `u8` must not be able to make a
+verifier build more (`docs/02`'s `sha256` section).
 
 A run that needs more than `tier.max_cycles()` cycles for its chosen tier is
 refused by `build_traces`, not silently truncated.
@@ -490,6 +551,7 @@ refused by `build_traces`, not silently truncated.
 | Entry point `pc_entry` | public |
 | Gas tier `ℓ` | public per proof (the proof's own size already reveals its trace height, so hiding the tier index buys nothing at the single-proof level; a batch-level histogram, as the whitepaper describes, is a property of the aggregation layer, not of one proof) |
 | `keccak_log_height` (M4.2) | public — an upper bound on the number of `KECCAK` permutations, rounded up to a power of two, exactly as `program_log_height` is for program size: above zero it reveals the count to within a factor of two. `0` is exact and means "this program made no `KECCAK` call" (M4.2, Task 6 — the proof then carries no keccak table at all, which is what makes it ~1.91 MB smaller at the production profile, ~705 KB at the 27 queries M4.2 measured); the same class of structural, program-shaped leak `program_log_height` is |
+| `sha256_log_height` (M4.4) | public — the same thing for `SHA256` compressions (64-row blocks, so `6` covers 1, `7` covers 2, `8` covers 3–4, …). `0` is exact and means "this program made no `SHA256` call", and is what lets the proof drop the 466-column sha256 table: ~92 KB at `FriProfile::Test`, ~400 KB at the production profile. Independent of `keccak_log_height`, so the pair says which of the two hash syscalls the program uses |
 | `mem_log_height` (M4.2) | public — the memory table's declared height, floored at the tier's own `2^(ℓ+2)`. Constant, and so uninformative, for every guest whose memory traffic fits what the tier already budgets; above that it bounds the access count to within a factor of two |
 | Eight output words | public |
 | Private inputs (`READ_INPUT` values) | hidden — witness only; bound (M4.1) to a salted, hiding commitment `H_IN = pv::IN0..IN7` so repeated reads of the same index agree and out-of-range reads are unsatisfiable, but `H_IN` itself opens nothing without the salt (never published) |
@@ -504,6 +566,9 @@ refused by `build_traces`, not silently truncated.
 | EVM call: the status word, `codehash`, both state roots, the return-data hash, the logs' topics | public **by construction of the verifier**, not by the proof — `out1..out7` is a 224-bit digest of `(codehash, pre_root, post_root, return_hash, logs_hash)`, which reveals nothing by itself, but a chain that means to *use* the call recomputes that digest from the contract and roots it already holds, so it must know them. What the digest is for is binding the transition the chain applies to the one the guest proved — and that is *all* it is for: it says the transition is a correct execution of that code, not that whoever submitted it was allowed to cause it (the `caller` row above) |
 | EVM call: `caller`, `address`, `callvalue` | hidden **and unbound** — the proof does not authorise the call. No public output commits to them and `H_IN` is hiding, so a verified proof attests only *"there exists some `(caller, calldata)` under which `codehash` maps `pre_root` to `post_root`"*. Any prover holding the witnesses can pick `caller` and prove an ERC-20 `transfer` out of any holder; `logs_hash` binds the `Transfer` topics, but a topic is only what the bytecode emitted, and no signature is checked in the guest. Authorisation is the consuming chain's job — the spend authority on the bundle, an in-guest signature check, or a caller field in a later `EVM_OUT` — and it is an open item, not something M4.3 provides (`docs/04-guests.md`'s known limitations, spec §8) |
 | EVM call: which slots were touched, which opcodes ran, the gas used, the log *data* | hidden — the witness count is bounded by `MAX_WITNESSES` and the cycle count by the tier, and the public digest binds the roots rather than the path between them. A log's topics are hashed into the digest; its data is dropped entirely |
+| sBPF call (`guests::compiled::sbpf`, M4.4): the Solana program, the instruction, the accounts and their post-state | hidden — the ELF and the serialized instruction are `READ_INPUT` values bound to `H_IN`, and the eight output words are a status word plus a 224-bit Poseidon2 digest over three SHA-256 digests (`program_hash`, `input_hash`, `output_hash`), so the chain learns neither which program ran nor over what. A verifier who *already has* the program and the instruction can recompute all three and confirm the run; one who does not learns only the status |
+| sBPF call: the status word | public, three-valued and deliberately coarse — `1` the program returned `r0 == 0`, `0` it returned some `ProgramError`, `2` an exceptional halt. The **error code is not published** (the seven digest words are spoken for), and `0` and `2` both bind the *pre*-state as the post-state, so a failed call is indistinguishable from a call that did nothing |
+| sBPF call: how much work it did | leaked, to within a factor of two, by `sha256_log_height` and the tier — and more than for other guests, because M4.4 hashes the ELF in-circuit: `sha256_log_height` is essentially `log2(program size / 64)`, so it bounds the *size of the program that ran*. Note that this is the **cost of the binding being sound**, not an oversight: because `H_IN` is hiding (above), a `program_hash` the guest does not recompute would be bound to nothing at all, so the in-circuit hashing cannot simply be dropped (`docs/04-guests.md`, "What does *not* work"). Of the two sound remedies there, (A) baking the ELF into the guest's data segment removes this leak but replaces it with a larger one — `hc` then identifies the *program*, not just the interpreter — and (B) a public input segment publishes the ELF words outright. A hiding program commitment is the open item that would fix all three (`hc` is binding but not hiding, above) |
 
 ## The delegated-proving boundary
 

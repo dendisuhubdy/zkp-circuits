@@ -24,8 +24,8 @@ growing its own proof system.
 ```
 cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
-cargo run --release     # the narrated demo, ~5-6 minutes wall time (twelve proofs, one at production FRI parameters)
-cargo test              # 277 tests (274 pass, 3 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, viewing keys, shielded-pool bundles, and the EVM guest's four host suites
+cargo run --release     # the narrated demo, ~6-7 minutes wall time (thirteen proofs — M4.4's sha256_demo is the newest guest in the closing sweep — one of them the narrated production-profile one)
+cargo test              # 365 tests (359 pass, 6 ignored): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, sha256, the EVM guest's four host suites, the sBPF interpreter + the real SPL Token program, viewing keys, shielded-pool bundles
 ```
 
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
@@ -41,10 +41,11 @@ you can see the parameter effect directly.
 
 ## The machine in one picture
 
-The relation is proved as one batch of eight AIR tables — nine when a proof
-declares a keccak table (M4.2) — under a single
+The relation is proved as one batch of eight AIR tables, plus either of two
+optional hash chips — nine with a keccak table (M4.2), nine with a sha256 one
+(M4.4), ten with both — under a single
 commitment and a single FRI opening. Tables never call each other directly;
-they exchange facts through thirteen named LogUp buses, and the batch verifier
+they exchange facts through fourteen named LogUp buses, and the batch verifier
 checks that every bus balances globally.
 
 ```
@@ -82,17 +83,24 @@ checks that every bus balances globally.
                         │   KECCAK    │  Keccak-f[1600], one row per round;
                         └─────────────┘  provides KECCAK (clk, ptr) and sends
                                          its own 100 MEMORY accesses (M4.2)
+                        ┌─────────────┐
+                        │   SHA256    │  SHA-256 compression, one row per round;
+                        └─────────────┘  provides SHA256 (clk, ptr) and sends
+                                         its own 32 MEMORY accesses (M4.4)
 ```
 
 `range` and `nibble` are preprocessed (committed once, independent of any
 witness, and of any program — since M3.4 that's true of every preprocessed
-table); `program`, `cpu`, `memory`, `alu`, `poseidon2`, `input` and `keccak`
-are main traces, rebuilt per execution (`poseidon2`'s and `keccak`'s own
-round-constant/row-kind columns are preprocessed too, but their state columns
-are not; `program`'s decoder columns are all main now — M3.4 retired its
-preprocessed half entirely). `keccak` is the one **optional** table: a proof
-whose guest never calls `KECCAK` declares `keccak_log_height = 0` and leaves
-the instance out of the batch altogether.
+table); `program`, `cpu`, `memory`, `alu`, `poseidon2`, `input`, `keccak` and `sha256`
+are main traces, rebuilt per execution (`poseidon2`'s, `keccak`'s and
+`sha256`'s own round-constant/row-kind columns are preprocessed too, but their
+state columns are not; `program`'s decoder columns are all main now — M3.4
+retired its preprocessed half entirely). `keccak` and `sha256` are the two
+**optional** tables, independently so: a proof whose guest never calls `KECCAK`
+declares `keccak_log_height = 0` and leaves that instance out of the batch
+altogether, and likewise `sha256_log_height = 0` for `SHA256` — which is worth
+~1.91 MB and ~0.40 MB respectively at the production profile, since FRI openings
+scale with a batch's column count.
 Full column lists and constraints: `docs/02-tables-and-buses.md`.
 
 ## How confidential arbitrary computation works
@@ -185,26 +193,41 @@ running under the same relation, not separate circuits:
 |---|---|---|
 | RISC-V | native | none |
 | Solidity | **done (M4.3)**: `solc` → EVM bytecode → `evm-core`, a `no_std` EVM interpreter compiled to RV32IM, bytecode and storage witnesses as private input. An ERC-20 `transfer` executes and binds its state-root transition, measured at `Tier(18)`; the same guest proves and verifies in-suite on a smaller call at `Tier(16)` | Keccak-256 **(done, M4.2)**; a looped `MERKLE_VERIFY`-style storage syscall or a wider sponge rate (the measured top cost); then 256-bit `ADDMOD`/`MULMOD`/`EXP` and `ECRECOVER` (secp256k1) |
-| Solana / SVM | sBPF ELF → an sBPF interpreter compiled to RV32IM | SHA-256, Ed25519 verify, 64-bit multiply; a direct sBPF→RV32 translator is a natural later optimisation |
+| Solana / SVM | sBPF ELF → an sBPF interpreter compiled to RV32IM — **built, M4.4** (`guests-compiled/sbpf-core` + `guests-compiled/sbpf`, differentially tested against `solana-sbpf` 0.11.1; it runs the real SPL Token program, fetched from mainnet and committed) | SHA-256 (**done, M4.4** — the `sha256` chip behind `SYS_SHA256`), Ed25519 verify, 64-bit multiply; a direct sBPF→RV32 translator is a natural later optimisation |
 
 Publishing a contract under this model means registering a hash, never
 generating a bespoke circuit. Details, cycle-cost estimates, and what
 milestone 4 builds first: `docs/04-guests.md`.
 
+The Solana interpreter **runs** an SPL Token `Transfer` correctly in the
+machine's executor but does not **prove** it: 1 753 945 cycles against the largest
+tier's 1 048 575; the 108 600-byte ELF is 1 698 of the run's 2 368 compressions
+(72 %), and carrying it on the input tape and hashing it in-circuit to produce
+`program_hash` is about 1.20 M of those cycles (69 %). That hashing cannot just be
+dropped — `H_IN` is hiding, so
+a digest the guest does not recompute is bound to nothing — and the two sound
+remedies both change more than the guest: baking the ELF into the guest's data
+segment so `hc` binds it (tier 20, and one binary per program), or a public input
+segment so a declared digest becomes checkable (tier 18, a constraint-set change).
+`docs/04-guests.md`'s "The `sbpf` guest" has the measured breakdown and both
+options; the design spec's §5.1 item 8 is the decision record.
+
 ## What leaks and what does not
 
 | Data | Status |
 |---|---|
-| The code hash `hc`, entry point `pc_entry`, gas tier, eight output words, and the declared program / input / keccak / memory table heights | public |
+| The code hash `hc`, entry point `pc_entry`, gas tier, eight output words, and the declared program / input / keccak / sha256 / memory table heights | public |
 | The program itself (M3.4 — `verify` takes only `hc`), private inputs, every register/memory value, every branch, the exact cycle count, which syscalls ran | hidden |
 
 `hc` is binding but not hiding: a verifier who can guess the program can
 confirm the guess against a published `hc`. The declared heights are coarse
 power-of-two bounds: every guest whose memory traffic fits the tier's own
-budget declares the same `mem_log_height`, and `keccak_log_height` reveals the
+budget declares the same `mem_log_height`, and `keccak_log_height` (with M4.4's
+`sha256_log_height` beside it) reveals the
 permutation count only to within a factor of two. Its one exact disclosure is
 `0` — "this program made no `KECCAK` call at all", which is also what lets the
-proof drop the 2 612-column keccak table and stay the size it was before M4.2
+proof drop the 2 612-column keccak table (or the 466-column sha256 one) and stay
+the size it was before M4.2
 (`docs/03-privacy.md`).
 
 Full detail, including the tier-to-row-count table and the delegated-proving

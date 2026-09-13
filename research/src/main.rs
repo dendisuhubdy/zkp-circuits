@@ -5,7 +5,7 @@ use rand_zkvm::emulator::execute;
 use rand_zkvm::guests;
 use rand_zkvm::isa::Instr;
 use rand_zkvm::machine::{build_traces, FriProfile, Machine, Tier, TIERS};
-use rand_zkvm::tables::{alu, cpu, input, keccak, memory, nibble, poseidon2, program, range, F};
+use rand_zkvm::tables::{alu, cpu, input, keccak, memory, nibble, poseidon2, program, range, sha256, F};
 use std::time::Instant;
 
 fn hr(title: &str) { println!("\n══ {title} {}", "═".repeat(70usize.saturating_sub(title.len()))); }
@@ -31,7 +31,7 @@ fn main() {
     let exec = execute(&program, &inputs, 1 << 20).unwrap();
     println!("inputs {:?} → outputs {:?} in {} cycles ({:?})", inputs, &exec.outputs[..2], exec.cycles(), t.elapsed());
 
-    hr("Part 4 · Arithmetize: eight tables on thirteen buses (nine with a keccak table)");
+    hr("Part 4 · Arithmetize: eight tables on fourteen buses (nine or ten with a keccak/sha256 table)");
     // M3.4/M4.1: the cpu table's two digest-row prefixes (program `hc` and the salted `H_IN`)
     // count as cycles too — and the auto-tier pick fits the Poseidon2 permutation budget as
     // well as the cycle budget (audit ZH1, 2026-09-12).
@@ -71,10 +71,21 @@ fn main() {
         // measured; `docs/03-privacy.md`).
         None => println!("{:<10}{:>10}{:>8}   {}", "keccak", "—", "—", "absent: this guest makes no KECCAK call"),
     }
-    println!("buses: PROGRAM PROGRAM_WORD MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 POSEIDON2 INPUT_DIGEST INPUT_READ KECCAK (LogUp, verified globally)");
-    println!("declared heights: program 2^{} · input 2^{} · keccak {} · memory 2^{}",
+    // M4.4: the sha256 table is optional on exactly the same terms, and independently — this
+    // guest calls neither syscall, so the batch is the eight-chip one.
+    match &traces.sha256 {
+        Some(sh) => println!(
+            "{:<10}{:>10}{:>8}   {}",
+            "sha256", sh.height(), sha256::col::WIDTH + sha256::pre::WIDTH,
+            "SHA-256 compression, one row per round; sends its own memory traffic",
+        ),
+        None => println!("{:<10}{:>10}{:>8}   {}", "sha256", "—", "—", "absent: this guest makes no SHA256 call"),
+    }
+    println!("buses: PROGRAM PROGRAM_WORD MEMORY ALU RANGE8 AND4 OR4 XOR4 POW2 POSEIDON2 INPUT_DIGEST INPUT_READ KECCAK SHA256 (LogUp, verified globally)");
+    println!("declared heights: program 2^{} · input 2^{} · keccak {} · sha256 {} · memory 2^{}",
         traces.program_log_height, traces.input_log_height,
         if traces.keccak_log_height == 0 { "absent".to_string() } else { format!("2^{}", traces.keccak_log_height) },
+        if traces.sha256_log_height == 0 { "absent".to_string() } else { format!("2^{}", traces.sha256_log_height) },
         traces.mem_log_height);
 
     hr("Part 5 · Prove and verify (production FRI: blowup 8, 80 queries, 20 PoW bits, ZK on)");
