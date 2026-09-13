@@ -261,3 +261,14 @@ and M4.3 is a constraint-set change and therefore a hard fork when vendored.
   bridge, no owner yet.
 - 256-bit modular arithmetic chip (`ADDMOD`/`MULMOD`/`EXP`) if software limbs prove too slow.
 - Recursion to aggregate many interpreter proofs into one; not before M4.3 is measured.
+- **Caller authorisation — the M4.3 output binds no caller.** `caller`, `address` and `callvalue`
+  are private inputs and no public output commits to them (`H_IN` is salted and hiding by the M4.1
+  ruling), so a verified EVM-call proof attests only that *some* `(caller, calldata)` maps
+  `pre_root` to `post_root` under `codehash` — not that the caller was entitled to it. Concretely:
+  a prover holding the storage witnesses can prove an ERC-20 `transfer` out of any holder by
+  choosing `caller`. §4's "`(hc_evm, H_IN)` identifies these inputs" is therefore not true for a
+  *verifier*. Nothing downstream may treat the `EVM_OUT` digest as authorisation: **the chain must
+  bind the caller** — the spend authority on the bundle that carries the proof, an in-guest
+  signature check, or the shielded pool's nullifier model — **or `EVM_OUT` gains a caller field in
+  a later constraint set.** No owner yet; M4.3's exit criterion does not ask for it, and
+  `research/docs/{03-privacy,04-guests}.md` now state the gap where a reader would look for it.

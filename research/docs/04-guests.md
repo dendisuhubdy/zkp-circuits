@@ -263,6 +263,30 @@ distinct. The remedy for the collision itself, when it matters, is a deeper
 index (the full 256-bit slot hash over a depth-256 tree, or a sparse index with
 64+ bits), which is a tree-shape change, not a protocol one.
 
+**Known limitation (the output binds no caller).** `caller`, `address` and
+`callvalue` are private inputs, and nothing in the eight public outputs commits
+to them: `out1..out7` digests `(codehash, pre_root, post_root, return_hash,
+logs_hash)` and no more, and `H_IN` is salted and hiding (M4.1), so it opens
+nothing to a verifier. What a verified proof therefore attests is *"there exists
+a `(caller, address, callvalue, calldata)` under which `codehash` maps
+`pre_root` to `post_root`, producing this return data and these log topics"* —
+and nothing about who was entitled to it. For the ERC-20 that is concrete: a
+prover who holds the witnesses can set `caller` to any holder and produce an
+accepted `transfer` out of that holder's balance. `logs_hash` binds the
+`Transfer` event's `from`/`to` topics, but a topic is only what the bytecode
+emitted; no signature is checked anywhere in the guest. The same applies to
+`ADDRESS` and `CALLVALUE`: a contract keying on `address(this)` or `msg.value`
+gets whatever the prover supplied.
+
+This is not a defect the guest can close on its own, and M4.3 does not claim to:
+**authorisation has to come from the chain that consumes the proof** — the spend
+authority on the bundle that carries it, an in-guest signature check, or the
+shielded pool's nullifier model — or from a later constraint set in which
+`EVM_OUT` gains a caller field. Until one of those exists, nothing downstream
+may treat this digest as authorisation for the transition it binds; it is
+evidence that the transition is a correct execution, not that it was allowed.
+The open item is recorded in the spec's §8.
+
 **Traps.** `Halt` is `Stop`, `Return`, `Revert`, `OutOfGas`, `StackUnderflow`,
 `StackOverflow` (1024), `BadJump`, `Invalid` (`0xfe`), `Trap(op)` for anything
 outside the subset, `NoWitness`, `BadWitness`, and `OutOfBounds` (a memory
