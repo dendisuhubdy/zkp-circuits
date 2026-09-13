@@ -13,7 +13,10 @@
 //!
 //! **Why scratch registers exist.** Both operands of an extension binary operation can be spilled,
 //! which is two consecutive registers each; `assert_eq` needs a third for its difference. Four is
-//! the measured worst case, and [`Builder::take_scratch`] asserts it rather than silently aliasing.
+//! the worst case among the handle-level operations. Six are reserved, because the DSL's own hash
+//! layer emits raw sequences (see the `raw_*` hooks below) whose deepest one — the Merkle walk's
+//! child select — needs a reloaded index bit, two reloaded base addresses and three working
+//! registers at once. [`Builder::take_scratch`] asserts the bound rather than silently aliasing.
 //!
 //! **Discipline the code below depends on.** A handle's defining instruction is emitted immediately
 //! after the handle is created, with nothing in between that could allocate — otherwise the
@@ -37,14 +40,15 @@ use crate::isa::{Instr, Op, Program, EF, F, MEM_LIMIT, NUM_REGS};
 /// once, generously, here rather than nudged upwards later.
 pub const MEM_BASE: u64 = 1 << 20;
 
-/// The registers handles are allocated from, in allocation-preference order.
-const ALLOCATABLE: [u8; 27] = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27,
+/// The registers handles are allocated from, in allocation-preference order. Width-2 handles take an
+/// aligned pair, so `r25` is reachable only by a width-1 handle: twelve pairs, twenty-five singles.
+const ALLOCATABLE: [u8; 25] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
 ];
-/// Never allocated to a handle: where a spilled operand is reloaded and where a comparison's
-/// difference lands. Contiguous, so a width-2 reload can take any two of them in order.
-const SCRATCH: [u8; 4] = [28, 29, 30, 31];
+/// Never allocated to a handle: where a spilled operand is reloaded, where a comparison's difference
+/// lands, and where the hash layer's raw sequences do their work. Contiguous, so a width-2 reload can
+/// take any two of them in order.
+const SCRATCH: [u8; 6] = [26, 27, 28, 29, 30, 31];
 
 /// Should `Builder::checkpoint` publish its value?
 ///
@@ -113,6 +117,9 @@ pub struct Builder {
     /// Scratch registers taken by the instruction currently being emitted.
     scratch: usize,
     zero: Option<Felt>,
+    /// The sixteen cells `dsl::hash` hashes through, allocated on first use (see
+    /// [`Builder::hash_scratch`]).
+    hash: Option<Ptr>,
     stats: Stats,
 }
 
@@ -131,6 +138,7 @@ impl Builder {
             next_spill: 0,
             scratch: 0,
             zero: None,
+            hash: None,
             stats: Stats::default(),
         }
     }
@@ -258,6 +266,19 @@ impl Builder {
         Ext(id)
     }
 
+    /// `c0 + c1·X` from its two coefficients: two `MOV`s into an aligned register pair, the dual of
+    /// [`Builder::ext_parts`]. This is how a sampled extension challenge is assembled — the
+    /// challenger squeezes two base elements and this makes them one handle.
+    pub fn ext_from_parts(&mut self, c0: Felt, c1: Felt) -> Ext {
+        self.begin();
+        let a0 = self.materialise(c0.0);
+        let a1 = self.materialise(c1.0);
+        let (id, rd) = self.new_handle(2, &[a0, a1]);
+        self.emit(Op::Mov, rd, a0, F::ZERO);
+        self.emit(Op::Mov, rd + 1, a1, F::ZERO);
+        Ext(id)
+    }
+
     /// `(c0, c1)` of `a = c0 + c1·X`.
     pub fn ext_parts(&mut self, a: Ext) -> (Felt, Felt) {
         self.begin();
@@ -379,6 +400,63 @@ impl Builder {
     pub fn get_ext(&mut self, a: Array<Ext>, idx: usize) -> Ext {
         assert!(idx < a.len, "index {idx} is past the end of a {}-element array", a.len);
         self.load_ext(a.base, (idx * a.stride) as i64)
+    }
+
+    /// `n` cells from `src + src_off` to `dst + dst_off`, two rows per cell.
+    ///
+    /// This is the bulk move the hash layer is built out of, and the reason it exists rather than a
+    /// `load`/`store` pair per cell is register pressure: `load` creates a *handle*, which lives to
+    /// the end of the program, so copying a 121-element sponge message through handles would spill a
+    /// hundred of them and pay a third row per cell for the privilege. Here the value goes through
+    /// one scratch register and the two base addresses are materialised once for the whole run, so
+    /// the cost is exactly `2n` rows and no allocator state changes at all.
+    ///
+    /// Overlapping ranges copy ascending, cell by cell, with no temporary: a forward overlap
+    /// (`dst > src` within the same region) will read cells this call has already written.
+    pub fn copy_cells(&mut self, dst: Ptr, dst_off: i64, src: Ptr, src_off: i64, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let (from, to) = (self.ptrs[src.0 as usize], self.ptrs[dst.0 as usize]);
+        self.begin();
+        let rs = self.materialise(from.holder);
+        let rd = self.materialise(to.holder);
+        let t = self.take_scratch(1);
+        for k in 0..n as i64 {
+            self.emit(Op::Load, t, rs, imm(from.delta + src_off + k));
+            self.emit(Op::Store, t, rd, imm(to.delta + dst_off + k));
+        }
+    }
+
+    /// `n` zero cells at `p + off`, one row per cell — `r0` is the value, so this needs no register
+    /// and creates no handle.
+    pub fn zero_cells(&mut self, p: Ptr, off: i64, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let it = self.ptrs[p.0 as usize];
+        self.begin();
+        let rp = self.materialise(it.holder);
+        for k in 0..n as i64 {
+            self.emit(Op::Store, 0, rp, imm(it.delta + off + k));
+        }
+    }
+
+    /// The sixteen cells the DSL's hash layer works through, allocated once per program: the eight
+    /// permutation lanes `0..8` plus two four-cell scratch digests at `8..12` and `12..16`.
+    ///
+    /// One shared region, not one per hash: a fresh allocation per `sponge` call would cost a handle
+    /// (and an `FADDI`) per call, and the verifier program hashes tens of thousands of times. The
+    /// consequence is an aliasing rule, documented on every function in [`super::hash`]: no argument
+    /// to a hash primitive may point into this region, and a primitive that has to survive another
+    /// one's use of the lanes steps aside into one of the two scratch digests first.
+    pub(super) fn hash_scratch(&mut self) -> Ptr {
+        if let Some(p) = self.hash {
+            return p;
+        }
+        let p = self.alloc(16);
+        self.hash = Some(p);
+        p
     }
 
     // --------------------------------------------------------------- hashing
@@ -572,6 +650,55 @@ impl Builder {
     fn address(&mut self, p: Ptr, off: i64) -> (u8, F) {
         let it = self.ptrs[p.0 as usize];
         (self.materialise(it.holder), imm(it.delta + off))
+    }
+
+    // ------------------------------- raw emission, for the DSL's own hash layer
+
+    // `dsl::hash`'s Merkle select is the one sequence in this crate that wants scratch registers
+    // and raw instructions rather than handles: six handles per digest lane, all dead one row after
+    // they are born, would spill six live-forever slots per lane and add 75% to the cost of every
+    // Merkle level. These four hooks are `pub(super)`, so they are reachable from `dsl::hash` and
+    // `dsl::transcript` and from nowhere else. The discipline they demand is the emitter's: call
+    // `raw_group` once, then `raw_reg` for every handle operand (a spilled one reloads into scratch,
+    // which is why they come first), then `raw_scratch` for working registers, and emit. Nothing
+    // that allocates a handle may run in between, or the allocator may move an operand out from
+    // under the instructions already emitted.
+
+    /// Start a raw instruction group: releases every scratch register the previous one held.
+    pub(super) fn raw_group(&mut self) {
+        self.begin();
+    }
+
+    /// `n` further contiguous scratch registers, reserved until the next [`Builder::raw_group`].
+    pub(super) fn raw_scratch(&mut self, n: usize) -> u8 {
+        self.take_scratch(n)
+    }
+
+    /// The register holding `v`, reloading a spilled handle into scratch exactly as any operand is.
+    pub(super) fn raw_reg(&mut self, v: Felt) -> u8 {
+        self.materialise(v.0)
+    }
+
+    /// The `(base register, compile-time cell delta)` an access through `p` uses.
+    pub(super) fn raw_ptr(&mut self, p: Ptr) -> (u8, i64) {
+        let it = self.ptrs[p.0 as usize];
+        (self.materialise(it.holder), it.delta)
+    }
+
+    /// One instruction, verbatim. `b` is an immediate; use [`Builder::raw_reg_imm`] for a register
+    /// in the fourth slot.
+    pub(super) fn raw_emit(&mut self, op: Op, rd: u8, ra: u8, b: F) {
+        self.emit(op, rd, ra, b);
+    }
+
+    /// A register index as the fourth word of an instruction.
+    pub(super) fn raw_reg_imm(r: u8) -> F {
+        F::from_u8(r)
+    }
+
+    /// A signed cell delta as an address immediate.
+    pub(super) fn raw_imm(delta: i64) -> F {
+        imm(delta)
     }
 
     // ------------------------------------------------------------ allocation

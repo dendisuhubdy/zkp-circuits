@@ -9,10 +9,18 @@
 //! immediate instead of emitting arithmetic).
 //!
 //! [`Digest`] and [`Array`] are pure address arithmetic: neither costs an instruction to form.
+//!
+//! On top of the builder sit the two layers every rVM verifier program is written against: [`hash`],
+//! the leaf sponge, the truncated-permutation compressor and the Merkle walk, and [`transcript`], the
+//! duplex challenger. Both are bit-exact with the Plonky3 code the native verifier calls, and
+//! `tests/transcript.rs` checks that against those crates rather than against a second
+//! implementation.
 
 use std::marker::PhantomData;
 
 mod builder;
+pub mod hash;
+pub mod transcript;
 
 pub use builder::{Builder, Checkpoints, Stats, MEM_BASE};
 

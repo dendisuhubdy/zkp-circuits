@@ -15,8 +15,13 @@ use rand::SeedableRng;
 pub type Val = Goldilocks;
 pub type Challenge = BinomialExtensionField<Val, 2>;
 pub type Perm = Poseidon2Goldilocks<8>;
-type Hash = PaddingFreeSponge<Perm, 8, 4, 4>;
-type Compress = TruncatedPermutation<Perm, 2, 4, 8>;
+/// The leaf hasher: a padding-free sponge over the width-8 permutation, rate 4, digest 4.
+/// `pub` so that a crate verifying this machine's proofs — `recursion`'s rVM programs — names this
+/// alias instead of re-deriving the constants and hoping they match.
+pub type Hash = PaddingFreeSponge<Perm, 8, 4, 4>;
+/// The internal-node compressor: two 4-element digests into the eight lanes, permuted, first four
+/// lanes kept. `pub` for the same reason as [`Hash`].
+pub type Compress = TruncatedPermutation<Perm, 2, 4, 8>;
 type Packing = <Val as Field>::Packing;
 pub type ValMmcs = MerkleTreeHidingMmcs<Packing, Packing, Hash, Compress, StdRng, 2, 4, 4>;
 type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
@@ -71,6 +76,63 @@ impl FriProfile {
 
 pub fn permutation() -> Perm {
     Perm::new_from_rng_128(&mut StdRng::seed_from_u64(PERM_SEED))
+}
+
+/// This machine's own `ValMmcs`, deterministically seeded — a test accessor, not a proving path.
+///
+/// `build_config` keeps its MMCS private behind a seeding strategy, which is right for proving: a
+/// hiding commitment must not be salted from a fixed seed. A *verifier* differential test needs the
+/// opposite — the same hasher and compressor this machine commits with, reproducible run to run —
+/// and gets it here. The salt stream is irrelevant to what such a test checks (it commits and opens
+/// through one object), and nothing that proves anything calls this.
+pub fn val_mmcs_for_tests() -> ValMmcs {
+    let perm = permutation();
+    ValMmcs::new(Hash::new(perm.clone()), Compress::new(perm), 2, StdRng::seed_from_u64(PERM_SEED))
+}
+
+/// One full Merkle authentication path per query, restored from a pruned multiproof — a test
+/// accessor over `MerkleTreeMmcs::restore_and_recompute_paths`.
+///
+/// `restore_and_recompute_paths` exists in Plonky3 0.7 for exactly this caller: "an in-circuit
+/// verifier built around a single-path-per-query gadget, with no notion of a shared/amortized
+/// proof" (`p3-merkle-tree-0.7.0/src/mmcs/mod.rs:899-913`). It lives on the *inner*
+/// `MerkleTreeMmcs`, which the hiding wrapper keeps private, so this re-attaches the salts and
+/// widens the dimensions the way `MerkleTreeHidingMmcs::verify_multi_batch` does
+/// (`hiding_mmcs.rs:232-275`) and then hands the job to the inner tree. `dimensions` and
+/// `opened_values` are the *unsalted* ones, as the caller of `verify_multi_batch` has them.
+///
+/// Nothing is checked against the commitment here: `verify_multi_batch` does that, and the two do
+/// the same walk.
+pub fn restore_paths_for_tests(
+    mmcs: &ValMmcs,
+    dimensions: &[p3_matrix::Dimensions],
+    indices: &[usize],
+    opened_values: &[Vec<Vec<Val>>],
+    multi: &(Vec<Vec<Vec<Val>>>, p3_merkle_tree::PrunedMerklePaths<Val, 4>),
+) -> Vec<p3_merkle_tree::MerkleAuthPath<Val, 4>> {
+    const SALT_ELEMS: usize = 4;
+    type Inner = p3_merkle_tree::MerkleTreeMmcs<Packing, Packing, Hash, Compress, 2, 4>;
+    let perm = permutation();
+    let inner = Inner::new(Hash::new(perm.clone()), Compress::new(perm), mmcs.cap_height());
+
+    let (salts, pruned) = multi;
+    let salted: Vec<Vec<Vec<Val>>> = opened_values
+        .iter()
+        .zip(salts)
+        .map(|(rows, salts_at_index)| {
+            rows.iter()
+                .zip(salts_at_index)
+                .map(|(row, salt)| row.iter().chain(salt.iter()).copied().collect())
+                .collect()
+        })
+        .collect();
+    let salted_dims: Vec<p3_matrix::Dimensions> = dimensions
+        .iter()
+        .map(|d| p3_matrix::Dimensions { width: d.width + SALT_ELEMS, height: d.height })
+        .collect();
+    inner
+        .restore_and_recompute_paths(&salted_dims, indices, &salted, pruned)
+        .expect("the multiproof verified, so its paths restore")
 }
 
 /// Builds a `Config` from two explicit RNGs: `mmcs_rng` seeds the value MMCS's per-commit
