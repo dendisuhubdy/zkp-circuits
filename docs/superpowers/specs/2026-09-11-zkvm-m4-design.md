@@ -588,18 +588,32 @@ The guest stops carrying the ELF privately and stops hashing it.
 | `owner` | 32 | |
 | `lamports` | 8 | little-endian `u64` |
 | `data_len` | 8 | little-endian `u64` |
-| `data` | `data_len` | exactly — no realloc padding, no 8-byte alignment padding, no `rent_epoch` |
+| `data` | `data_len` | exactly — no realloc padding, no 8-byte alignment padding |
 | `is_signer`, `is_writable`, `executable` | 1 each | 0 or 1 |
+| `rent_epoch` | 8 | little-endian `u64` — a running program reads it through its `AccountInfo`, so the digest binds it |
 | `instruction_data_len` | 8 | little-endian `u64` |
 | instruction data | `instruction_data_len` | |
+
+  **Every byte of the region is either in this preimage or pinned to zero.** The bytes the encoding
+  omits — the `original_data_len` slot, the 10 240-byte realloc headroom, the 8-byte alignment
+  padding, a duplicate entry's seven padding bytes, and anything after the trailing `program_id` —
+  are all inside the region `r1` points at and therefore readable by the running program, so leaving
+  them merely unhashed would let a prover vary them while the verifier's recomputed `input_hash`
+  still matched. The Solana runtime writes zeros there, so the guest **refuses** a region with a
+  non-zero byte in any of them, exactly as it refuses any other malformed input (status 2,
+  `ParseError::MalformedRegion`; `sbpf_core::abi::check_region`). For the same reason `n_accounts`
+  is the region's **exact** `u64` count and a region claiming more than `MAX_ACCOUNTS` is refused
+  rather than clamped — a clamped count would make a region claiming 64 and one claiming 2^40 hash
+  identically.
 
   The two length prefixes and the trailing instruction data are **not** decoration and are not in
   the ruling's field list: without `n_accounts` and the per-field `data_len`/`instruction_data_len`
   prefixes the concatenation is ambiguous between different account splits, and without the
   instruction data `input_hash` would not bind the instruction at all (for the exit fixture, not the
   transferred amount). Expected saving, per `docs/04-guests.md`: the fixture's 41 825-byte aligned
-  region (654 compressions, 640 of them hashing nothing but zeros) becomes ~801 bytes, ~13
-  compressions — **~290 K cycles**.
+  region (654 compressions, 640 of them hashing nothing but zeros) becomes 833 bytes, 14
+  compressions (measured) — **~290 K cycles**, against which the entry-time zero-check over the
+  40 960 bytes the encoding no longer hashes is a byte-at-a-time scan, not a hash.
 * **The EVM guest (M4.3) is not changed by this plan.** It may adopt the public segment later — a
   public `codehash` segment is the obvious next user — but nothing here touches `evm-core`,
   `src/evm.rs` or the `evm` binary.

@@ -837,8 +837,8 @@ fn measure_production_profile_evm_erc20_transfer() {
 // **Superseded by the public input segment (constraint set 6), which took remedy (B) below.** The
 // ELF is now the *public* input vector, so `H_PUB` binds it and the guest neither carries it on the
 // private tape nor hashes it, and `input_hash` is over the canonical unpadded encoding rather than
-// the aligned region: 1 753 945 cycles became **574 444** and 2 368 SHA-256 compressions became
-// **29**, which fits `Tier(20)`. The proof itself, the tier it lands at and the fate of the
+// the aligned region: 1 753 945 cycles became **690 908** and 2 368 SHA-256 compressions became
+// **30**, which fits `Tier(20)`. The proof itself, the tier it lands at and the fate of the
 // `#[ignore]`d test below are the next task's measurement; everything from here down is M4.4's
 // record of *why* the segment exists, kept because it is the decision record.
 //
@@ -918,15 +918,15 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
 
     let compressions = exec.events.iter().filter(|e| e.sha256_row.is_some()).count();
     // A pure function of the *canonical* encoding's length, which is what the public segment bought:
-    // 13 compressions over the 801-byte canonical `input_hash` preimage, plus the pre- and
+    // 14 compressions over the 833-byte canonical `input_hash` preimage, plus the pre- and
     // post-state account walks (8 each). The 1 698 for `program_hash` are gone entirely — the ELF is
     // public, so `H_PUB` binds it — and the 654 over the aligned region (98 % realloc padding) are
-    // the 13.
-    assert_eq!(compressions, 29, "13 canonical input_hash + 2x8 accounts, was 2 368");
+    // the 14.
+    assert_eq!(compressions, 30, "14 canonical input_hash + 2x8 accounts, was 2 368");
     assert_eq!(
         rand_zkvm::tables::sha256::sha256_log_height(compressions),
         11,
-        "29 blocks of 64 rows",
+        "30 blocks of 64 rows",
     );
     // Two bounds, in both directions, and neither is decoration. The upper one catches a runaway;
     // the lower one is the tripwire that says the next tier down has come into reach. M4.4 measured
@@ -934,9 +934,13 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
     // off the private tape and `program_hash` out of the digest, and the canonical `input_hash`
     // took the realloc padding out of the hashing, so the guest now **fits `Tier(20)`** and the
     // tripwire moves down a tier: the day it fits `Tier(18)`, re-measure and re-tier the proof.
+    //
+    // Of the 690 908, ~116 000 are `check_region`'s zero-scan over the 40 972 bytes the canonical
+    // encoding no longer hashes (~2.8 cycles a byte). That is the price of binding them by pinning
+    // rather than by hashing — a sixth of what hashing them cost.
     assert!(
-        exec.cycles() <= 600_000,
-        "{} cycles, was 574 444 when the public segment landed (1 753 945 before it)",
+        exec.cycles() <= 720_000,
+        "{} cycles, was 690 908 when the public segment landed (1 753 945 before it)",
         exec.cycles()
     );
     assert!(

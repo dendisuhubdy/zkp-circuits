@@ -28,6 +28,9 @@ pub const MAX_PERMITTED_DATA_INCREASE: usize = 10_240;
 /// (`solana_program::entrypoint::NON_DUP_MARKER`).
 pub const NON_DUP_MARKER: u8 = 0xff;
 
+/// Accounts a call may carry, mirrored from the guest so the two refuse the same regions.
+pub const MAX_ACCOUNTS: usize = sbpf_core::abi::MAX_ACCOUNTS;
+
 /// [`sbpf_core::Host`] over this crate's reference primitives: the SHA-256 compression the
 /// `SHA256` syscall computes and the Poseidon2 sponge the `POSEIDON2` syscall computes. Every
 /// `sbpf-core` function is therefore exercised natively on exactly the arithmetic the guest will
@@ -194,12 +197,24 @@ pub fn deserialize_accounts(input: &[u8]) -> Vec<Account> {
 
 /// [`deserialize_accounts`], or `None` if the region does not parse.
 pub fn try_deserialize_accounts(input: &[u8]) -> Option<Vec<Account>> {
-    let n = u64::from_le_bytes(input.get(0..8)?.try_into().ok()?) as usize;
-    let mut out: Vec<Account> = Vec::with_capacity(core::cmp::min(n, 64));
+    let claimed = u64::from_le_bytes(input.get(0..8)?.try_into().ok()?);
+    // The guest refuses a count above its `MAX_ACCOUNTS` rather than clamping it
+    // (`sbpf_core::abi::check_region`), so the host must refuse it too or the two would disagree
+    // about what a call even is.
+    if claimed > MAX_ACCOUNTS as u64 {
+        return None;
+    }
+    let n = claimed as usize;
+    let mut out: Vec<Account> = Vec::with_capacity(n);
     let mut off = 8usize;
     for _ in 0..n {
         let dup = *input.get(off)?;
         if dup != NON_DUP_MARKER {
+            // A duplicate's seven padding bytes are pinned to zero, like every other byte of the
+            // region the canonical preimage does not hash.
+            if input.get(off + 1..off + 8)?.iter().any(|&b| b != 0) {
+                return None;
+            }
             out.push(out.get(dup as usize)?.clone());
             off += 8;
             continue;
@@ -213,9 +228,20 @@ pub fn try_deserialize_accounts(input: &[u8]) -> Option<Vec<Account>> {
         let data_len =
             usize::try_from(u64::from_le_bytes(input.get(off + 80..off + 88)?.try_into().ok()?))
                 .ok()?;
-        let data = input.get(off + 88..off.checked_add(88)?.checked_add(data_len)?)?.to_vec();
-        let after = (off + 88 + data_len).checked_add(MAX_PERMITTED_DATA_INCREASE + 7)? & !7;
-        let rent_epoch = u64::from_le_bytes(input.get(after..after.checked_add(8)?)?.try_into().ok()?);
+        let data_end = off.checked_add(88)?.checked_add(data_len)?;
+        let data = input.get(off + 88..data_end)?.to_vec();
+        let after = data_end.checked_add(MAX_PERMITTED_DATA_INCREASE + 7)? & !7;
+        let rent_epoch =
+            u64::from_le_bytes(input.get(after..after.checked_add(8)?)?.try_into().ok()?);
+        // The `original_data_len` slot the entrypoint skips, and the realloc headroom plus the
+        // alignment padding: the runtime writes zeros there, the canonical preimage hashes none of
+        // it, and the running program can read all of it — so the guest pins it to zero and so does
+        // this twin.
+        if input.get(off + 4..off + 8)?.iter().any(|&b| b != 0)
+            || input.get(data_end..after)?.iter().any(|&b| b != 0)
+        {
+            return None;
+        }
         out.push(Account {
             key,
             owner,
@@ -340,20 +366,40 @@ fn pack_bytes(bytes: &[u8]) -> Vec<u32> {
 /// ```text
 /// program_id(32) ‖ u64 n_accounts
 ///   per entry, in entry order: key(32) ‖ owner(32) ‖ u64 lamports ‖ u64 data_len ‖ data
-///                              ‖ is_signer ‖ is_writable ‖ executable
+///                              ‖ is_signer ‖ is_writable ‖ executable ‖ u64 rent_epoch
 /// ‖ u64 instruction_data_len ‖ instruction data
 /// ```
 ///
-/// No realloc headroom, no alignment padding and no `rent_epoch`: the aligned region's 41 825 bytes
-/// for the SPL Token `Transfer` fixture become 801. Panics on a region that is not a serialized
-/// instruction — this is the host's fixture-side twin, where `sbpf-core`'s is total because its
-/// input is prover-supplied.
+/// No realloc headroom, no alignment padding and no `original_data_len`: the aligned region's
+/// 41 825 bytes for the SPL Token `Transfer` fixture become 833. Those omitted bytes are the ones
+/// the guest pins to zero at entry (`sbpf_core::abi::check_region`), which is why leaving them out
+/// binds the region all the same.
+///
+/// Panics on a region the guest would refuse; [`try_canonical_preimage`] is the fallible form.
 pub fn canonical_preimage(input: &[u8]) -> Vec<u8> {
-    let accounts = deserialize_accounts(input);
-    assert!(accounts.len() <= 64, "more accounts than the guest's MAX_ACCOUNTS walks");
-    let (data, program_id) = deserialize_instruction(input);
+    try_canonical_preimage(input).expect("not a canonical serialized instruction")
+}
+
+/// [`canonical_preimage`], or `None` for exactly the regions `sbpf_core::abi::check_region`
+/// refuses: an account count above [`MAX_ACCOUNTS`], a non-zero byte where the format pins a zero,
+/// an account list that does not walk to its own end, or a tail that is not exactly
+/// `instruction_data_len ‖ instruction data ‖ program_id` ending at the region's last byte.
+pub fn try_canonical_preimage(input: &[u8]) -> Option<Vec<u8>> {
+    let accounts = try_deserialize_accounts(input)?;
+    // Safe now that the accounts walked: `accounts_span` re-walks the same entries.
+    let end = accounts_span(input);
+    let len_bytes = input.get(end..end.checked_add(8)?)?;
+    let n = usize::try_from(u64::from_le_bytes(len_bytes.try_into().ok()?)).ok()?;
+    let data_at = end.checked_add(8)?;
+    let data = input.get(data_at..data_at.checked_add(n)?)?;
+    let id_at = data_at.checked_add(n)?;
+    let program_id = input.get(id_at..id_at.checked_add(32)?)?;
+    if id_at.checked_add(32)? != input.len() {
+        return None;
+    }
+
     let mut out = Vec::new();
-    out.extend_from_slice(&program_id);
+    out.extend_from_slice(program_id);
     out.extend_from_slice(&(accounts.len() as u64).to_le_bytes());
     for a in &accounts {
         out.extend_from_slice(&a.key);
@@ -364,10 +410,11 @@ pub fn canonical_preimage(input: &[u8]) -> Vec<u8> {
         out.push(u8::from(a.is_signer));
         out.push(u8::from(a.is_writable));
         out.push(u8::from(a.executable));
+        out.extend_from_slice(&a.rent_epoch.to_le_bytes());
     }
     out.extend_from_slice(&(data.len() as u64).to_le_bytes());
-    out.extend_from_slice(&data);
-    out
+    out.extend_from_slice(data);
+    Some(out)
 }
 
 /// `sha256` of [`canonical_preimage`]: the guest's `input_hash`, computed the host's own way.

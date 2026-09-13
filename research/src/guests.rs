@@ -56,10 +56,12 @@ pub mod compiled {
 
     /// M4.4's exit guest: an **sBPF interpreter**, compiled from `guests-compiled/sbpf` (see that
     /// Makefile's header for the exact `rustc +1.98.1` build) and committed as
-    /// `guests-compiled/bin/sbpf.bin`. The input vector is `[n_elf, elf bytes…, n_input, input
-    /// bytes…]` (`rand_zkvm::sbpf::SbpfCall::input_words`); the output is a status word plus a
-    /// 224-bit digest over the program, the instruction and the accounts' post-state
-    /// (`sbpf_core::abi`).
+    /// `guests-compiled/bin/sbpf.bin`. It reads **two** vectors: the public one is
+    /// `[n_elf, elf bytes…]` (`rand_zkvm::sbpf::SbpfCall::public_words`, bound by `H_PUB`, which is
+    /// what the chain checks against the ELF it published) and the private one is
+    /// `[n_input, input bytes…]` (`SbpfCall::input_words`). The output is a status word plus a
+    /// 224-bit digest over the instruction and the accounts' post-state — *not* the program, which
+    /// the guest no longer hashes (`sbpf_core::abi`).
     ///
     /// This is an **image**, not a flat binary: a real compiler output has a `.rodata` (the
     /// interpreter's `Halt::Trap` literals, panic locations and the opcode dispatch's jump tables),

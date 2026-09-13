@@ -191,15 +191,17 @@ fn the_public_output_binds_the_input_and_the_post_state() {
 #[test]
 fn the_two_input_vectors_round_trip_through_their_cursors() {
     // Public `[n_elf, elf bytes…]` and private `[n_input, input bytes…]`, each byte string four per
-    // word little-endian and zero-padded.
-    let call = sbpf::SbpfCall { elf: (0..=250u8).collect(), input: b"the input".to_vec() };
+    // word little-endian and zero-padded. The instruction is a real serialized region, because
+    // `decode_input` refuses one that is not (`abi::check_region`).
+    let region = sbpf::serialize_aligned(&[account(5, 3)], b"ix", &[7u8; 32]);
+    let call = sbpf::SbpfCall { elf: (0..=250u8).collect(), input: region.clone() };
     let public = call.public_words();
     let private = call.input_words();
     assert_eq!(public[0], 251);
     assert_eq!(public[1], u32::from_le_bytes([0, 1, 2, 3]));
     assert_eq!(public.len(), 1 + 251usize.div_ceil(4));
-    assert_eq!(private[0], 9);
-    assert_eq!(private.len(), 1 + 9usize.div_ceil(4));
+    assert_eq!(private[0] as usize, region.len());
+    assert_eq!(private.len(), 1 + region.len().div_ceil(4));
 
     let mut ws = Box::new(abi::Workspace::ZERO);
     let mut pc = abi::InputCursor::new(|i| public[i as usize], public.len() as u32);
@@ -221,6 +223,16 @@ fn the_two_input_vectors_round_trip_through_their_cursors() {
     assert_eq!(
         abi::decode_input(&mut ws.input, &mut pc, &mut sc),
         Err(abi::ParseError::Truncated)
+    );
+    // A private vector that parses but is not a serialized instruction is refused too — the cursors
+    // are only half of what makes a pair of vectors a call.
+    let not_a_region = sbpf::SbpfCall { elf: call.elf.clone(), input: b"the input".to_vec() };
+    let junk = not_a_region.input_words();
+    let mut pc = abi::InputCursor::new(|i| public[i as usize], public.len() as u32);
+    let mut sc = abi::InputCursor::new(|i| junk[i as usize], junk.len() as u32);
+    assert_eq!(
+        abi::decode_input(&mut ws.input, &mut pc, &mut sc),
+        Err(abi::ParseError::MalformedRegion)
     );
     // An ELF or input length above its cap is refused without ever reading that many words.
     let big = [u32::MAX];
@@ -352,18 +364,20 @@ fn canonical_input_hash_walks_duplicates_exactly_as_output_hash_does() {
         // length is the sum over *entries*, not over distinct accounts.
         let want: usize = 32
             + 8
-            + shape.iter().map(|x| 32 + 32 + 8 + 8 + x.data.len() + 3).sum::<usize>()
+            + shape.iter().map(|x| 32 + 32 + 8 + 8 + x.data.len() + 3 + 8).sum::<usize>()
             + 8
             + 7;
         assert_eq!(sbpf::canonical_preimage(&buf).len(), want);
     }
 
-    // The fields the aligned region pads with are *not* in the preimage, and the ones that are, are:
-    // two regions differing only in `rent_epoch` hash the same, one differing in a flag does not.
+    // `rent_epoch` is in the preimage: a running program reads it through its `AccountInfo`, so a
+    // prover must not be able to vary it under a digest the verifier still accepts. (This assertion
+    // is the inverse of the one M4.4's first cut had, which pinned its *exclusion*.)
     let mut other = a.clone();
     other.rent_epoch = 7;
     let base = sbpf::serialize_aligned(&[a.clone()], b"ix data", &id);
-    assert_eq!(
+    assert_ne!(a.rent_epoch, 7, "the fixture would not otherwise prove anything");
+    assert_ne!(
         abi::canonical_input_hash(&mut h, &sbpf::serialize_aligned(&[other], b"ix data", &id), &id),
         abi::canonical_input_hash(&mut h, &base, &id),
     );
@@ -386,13 +400,131 @@ fn canonical_input_hash_walks_duplicates_exactly_as_output_hash_does() {
         ),
         abi::canonical_input_hash(&mut h, &base, &id),
     );
-    assert_ne!(abi::canonical_input_hash(&mut h, &base, &[7u8; 32]), abi::canonical_input_hash(&mut h, &base, &id));
+    assert_ne!(
+        abi::canonical_input_hash(&mut h, &base, &[7u8; 32]),
+        abi::canonical_input_hash(&mut h, &base, &id),
+    );
 
     // A region that is not a serialized instruction yields a digest rather than a panic, exactly as
     // `output_hash` does, and an unparseable one has no program id to find.
     for junk in [&[][..], &[0xff][..], &[7, 0, 0, 0, 0, 0, 0, 0][..], &[0xff; 200][..]] {
         let _ = abi::canonical_input_hash(&mut h, junk, &abi::program_id(junk));
         assert_eq!(abi::program_id(junk), [0u8; 32]);
+    }
+}
+
+/// Every byte of an accepted region is either in the canonical preimage or pinned to zero. The
+/// bytes nothing hashes — the `original_data_len` slot, the 10 240-byte realloc headroom, the
+/// alignment padding, a duplicate entry's seven padding bytes, anything past the program id — are
+/// all inside the region `r1` points at, so a prover free to choose them could change what an
+/// honest-looking run does while the verifier's recomputed `input_hash` still matched. The runtime
+/// writes zeros there; the guest refuses anything else, and so does the host twin.
+#[test]
+fn a_region_with_a_non_zero_pinned_byte_is_refused_by_guest_and_host() {
+    let a = account(5, 4);
+    let id = [7u8; 32];
+    let elf = build_elf(
+        &asm(&[insn(opc::MOV64_IMM, 0, 0, 0, 0), insn(opc::EXIT, 0, 0, 0, 0)]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+    let base = sbpf::serialize_aligned(&[a.clone()], b"ix", &id);
+    // The honest region is accepted, by both, and runs.
+    assert_eq!(abi::check_region(&base), Ok(()));
+    assert!(sbpf::try_canonical_preimage(&base).is_some());
+    assert_eq!(run(&elf, &base).0[0], 1);
+
+    // account 0's data ends at 8 (count) + 88 (header) + 4 (data).
+    let data_end = 8 + 88 + a.data.len();
+    let headroom_end = data_end + MAX_PERMITTED_DATA_INCREASE;
+    let padded_end = (headroom_end + 7) & !7;
+    assert!(padded_end > headroom_end, "the fixture must exercise alignment padding too");
+    let dup = sbpf::serialize_aligned(&[a.clone(), a.clone()], b"ix", &id);
+    let dup_at = dup.len() - 32 - 2 - 8 - 8; // the second entry's marker byte
+
+    for (what, region) in [
+        ("the original_data_len slot", {
+            let mut b = base.clone();
+            b[12] = 1;
+            b
+        }),
+        ("the first realloc headroom byte", {
+            let mut b = base.clone();
+            b[data_end] = 1;
+            b
+        }),
+        ("the last realloc headroom byte", {
+            let mut b = base.clone();
+            b[headroom_end - 1] = 1;
+            b
+        }),
+        ("the alignment padding", {
+            let mut b = base.clone();
+            b[padded_end - 1] = 1;
+            b
+        }),
+        ("a duplicate entry's padding", {
+            let mut b = dup.clone();
+            assert_eq!(b[dup_at], 0, "the second entry's marker");
+            b[dup_at + 3] = 1;
+            b
+        }),
+        ("a byte past the program id", {
+            let mut b = base.clone();
+            b.push(0);
+            b
+        }),
+        ("a truncated tail", {
+            let mut b = base.clone();
+            b.truncate(b.len() - 1);
+            b
+        }),
+    ] {
+        assert_eq!(
+            abi::check_region(&region),
+            Err(abi::ParseError::MalformedRegion),
+            "the guest must refuse {what}"
+        );
+        assert!(sbpf::try_canonical_preimage(&region).is_none(), "the host must refuse {what}");
+        // And it is a status-2 call, not a run over a region nobody checked.
+        let (out, result, _) = run(&elf, &region);
+        assert_eq!(out[0], 2, "{what}");
+        assert_eq!(result, Err(Halt::BadElf), "{what}");
+        let z = [0u8; 32];
+        assert_eq!(out, abi::public_output(&mut HostRef, 2, &z, &z), "{what}");
+    }
+}
+
+/// An account count above `MAX_ACCOUNTS` is refused, never clamped: clamping made a region claiming
+/// 64 and one claiming 2^40 hash identically, because the preimage carried the clamped number.
+#[test]
+fn an_account_count_above_the_maximum_is_refused_rather_than_clamped() {
+    let a = account(5, 4);
+    let id = [7u8; 32];
+    let elf = build_elf(
+        &asm(&[insn(opc::MOV64_IMM, 0, 0, 0, 0), insn(opc::EXIT, 0, 0, 0, 0)]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+    // 64 entries that fit the input cap: one real account and 63 duplicates of it, 8 bytes each.
+    let shape: Vec<Account> = core::iter::repeat(a.clone()).take(abi::MAX_ACCOUNTS).collect();
+    let mut buf = sbpf::serialize_aligned(&shape, b"ix", &id);
+    assert!(buf.len() <= abi::MAX_INPUT_BYTES, "{} bytes", buf.len());
+    // Exactly `MAX_ACCOUNTS` is fine, at the boundary.
+    assert_eq!(abi::check_region(&buf), Ok(()));
+    assert_eq!(sbpf::try_deserialize_accounts(&buf).map(|v| v.len()), Some(abi::MAX_ACCOUNTS));
+    assert_eq!(run(&elf, &buf).0[0], 1);
+
+    for claimed in [abi::MAX_ACCOUNTS as u64 + 1, 1 << 40, u64::MAX] {
+        buf[0..8].copy_from_slice(&claimed.to_le_bytes());
+        assert_eq!(abi::check_region(&buf), Err(abi::ParseError::MalformedRegion));
+        assert!(sbpf::try_deserialize_accounts(&buf).is_none());
+        assert!(sbpf::try_canonical_preimage(&buf).is_none());
+        assert_eq!(run(&elf, &buf).0[0], 2, "claimed {claimed}");
     }
 }
 
@@ -809,7 +941,7 @@ fn canonical_input_hash_is_the_unpadded_encoding_and_is_two_orders_smaller() {
     assert_eq!(u64::from_le_bytes(pre[32..40].try_into().unwrap()), accounts.len() as u64);
     let want: usize = 32
         + 8
-        + accounts.iter().map(|a| 32 + 32 + 8 + 8 + a.data.len() + 3).sum::<usize>()
+        + accounts.iter().map(|a| 32 + 32 + 8 + 8 + a.data.len() + 3 + 8).sum::<usize>()
         + 8
         + call_instruction_data_len(&call.input);
     assert_eq!(pre.len(), want);
@@ -828,7 +960,11 @@ fn the_sbpf_abi_reads_the_elf_from_the_public_segment() {
     let private = call.input_words();
     assert_eq!(public[0] as usize, call.elf.len());
     assert_eq!(private[0] as usize, call.input.len());
-    assert!(private.len() < 12_000, "the ELF is no longer on the private tape: {} words", private.len());
+    assert!(
+        private.len() < 12_000,
+        "the ELF is no longer on the private tape: {} words",
+        private.len()
+    );
     let (out, r0, _post) = call.expected();
     assert_eq!(r0, Ok(0));
     assert_eq!(out[0], 1);
