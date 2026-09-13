@@ -46,8 +46,9 @@
 //! #[no_mangle]
 //! pub extern "C" fn main() -> ! {
 //!     let w = unsafe { &mut *core::ptr::addr_of_mut!(W) };
-//!     // READ_INPUT past the committed input length is unsatisfiable in-circuit (M4.1's `H_IN`),
-//!     // so the machine itself is the guest's bound and `u32::MAX` is the honest `len` here.
+//!     // `u32::MAX` is the honest bound: a READ_INPUT past the `n_in` committed to `H_IN` is
+//!     // unsatisfiable in-circuit (M4.1), so a truncated vector yields *no proof at all* rather
+//!     // than a short read — fail-closed, and the machine is the length check. See `InputCursor`.
 //!     let out = run_call(&mut Syscalls, w, guest_sdk::read_input, u32::MAX);
 //!     for (slot, word) in out.iter().enumerate() {
 //!         guest_sdk::write_output(slot as u32, *word);
@@ -91,9 +92,16 @@ pub enum ParseError {
 ///
 /// `len` is how many words the reader can supply. A read at or past it is **not** attempted — the
 /// closure is never called out of range — and sets the truncation flag instead, which
-/// [`decode_input`] turns into [`ParseError::Truncated`]. In the guest `len` is `u32::MAX`: a
-/// `READ_INPUT` beyond the length committed to `H_IN` cannot be satisfied by any witness, so the
-/// machine refuses an overrun before this ever could.
+/// [`decode_input`] turns into [`ParseError::Truncated`].
+///
+/// In the guest `len` is `u32::MAX`, and that is a bound, not a missing one: since M4.1 every
+/// `READ_INPUT` is bound to the proof's `H_IN` commitment over the *whole* input vector, and an
+/// index at or past the committed `n_in` is **unsatisfiable in-circuit** — no witness makes such a
+/// row's constraints hold (`guest-sdk/src/lib.rs`'s `read_input` doc comment;
+/// `research/src/tables/cpu.rs`'s indigest/`INPUT_READ` rules). So a prover who truncates the
+/// vector cannot produce a proof at all, which is fail-closed: the failure is "no proof", never "a
+/// proof of a call that read zeros". The host is the case that needs `len`, where the reader is a
+/// slice and a short vector has to become a [`ParseError`] rather than a panic.
 pub struct InputCursor<F: FnMut(u32) -> u32> {
     read: F,
     pos: u32,
@@ -134,15 +142,33 @@ impl<F: FnMut(u32) -> u32> InputCursor<F> {
     /// The next byte string: a length word, then `ceil(n/4)` words unpacked little-endian into
     /// `out[..n]`. Returns `n`, or `None` when `n > out.len()` — a cap the caller maps to its own
     /// [`ParseError`], never a panic (the brief's sketch panicked; plan Ruling on parse errors).
+    /// The four bytes of each word are written out one at a time rather than through a
+    /// `copy_from_slice` of a 1..4-byte chunk: the slice copy compiles to a `memcpy` *call* per
+    /// word in the guest, which cost ~29 cycles a byte — 37 489 cycles to decode the ERC-20's
+    /// 1 296 bytes of code, a third of M4.3's first-cut budget (measurement in the plan's Task 5
+    /// report). Explicit byte stores make it ~2. They cannot be word stores: `out`'s alignment is
+    /// 1, and a misaligned store is a constraint violation in this machine (`docs/01-isa.md`).
+    #[inline(never)]
     pub fn bytes(&mut self, out: &mut [u8]) -> Option<usize> {
         let n = self.word() as usize;
         if n > out.len() {
             return None;
         }
-        for i in 0..n.div_ceil(4) {
-            let w = self.word().to_le_bytes();
-            let chunk = &mut out[4 * i..core::cmp::min(4 * i + 4, n)];
-            chunk.copy_from_slice(&w[..chunk.len()]);
+        let dst = &mut out[..n];
+        let mut chunks = dst.chunks_exact_mut(4);
+        for chunk in &mut chunks {
+            let w = self.word();
+            chunk[0] = w as u8;
+            chunk[1] = (w >> 8) as u8;
+            chunk[2] = (w >> 16) as u8;
+            chunk[3] = (w >> 24) as u8;
+        }
+        let tail = chunks.into_remainder();
+        if !tail.is_empty() {
+            let w = self.word();
+            for (k, byte) in tail.iter_mut().enumerate() {
+                *byte = (w >> (8 * k)) as u8;
+            }
         }
         Some(n)
     }

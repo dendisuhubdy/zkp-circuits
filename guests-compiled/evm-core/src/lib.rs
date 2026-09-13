@@ -34,31 +34,36 @@ const KECCAK_RATE: usize = 136;
 /// by `take < 136` rather than by exhausting the message.
 pub fn keccak256<H: Host>(h: &mut H, msg: &[u8]) -> [u8; 32] {
     let mut state = [0u32; 50];
-    let mut block = [0u8; KECCAK_RATE];
     let mut off = 0;
-    loop {
-        let take = core::cmp::min(KECCAK_RATE, msg.len() - off);
-        block.fill(0);
-        block[..take].copy_from_slice(&msg[off..off + take]);
-        let last = take < KECCAK_RATE;
-        if last {
-            block[take] ^= 0x01;
-            block[KECCAK_RATE - 1] ^= 0x80;
-        }
+    // Full blocks are absorbed straight out of `msg`. Staging every block in a 136-byte buffer
+    // first — zero it, copy into it, then read it back word by word — cost two `memcpy`-class
+    // passes per block for nothing: only the *last* block, which carries the padding, needs a
+    // buffer of its own. Hashing the ERC-20's 1 296 bytes of code for `codehash` is ten blocks, and
+    // this is ~8 000 guest cycles of the M4.3 measurement.
+    while msg.len() - off >= KECCAK_RATE {
         for i in 0..KECCAK_RATE / 4 {
-            state[i] ^= u32::from_le_bytes([
-                block[4 * i],
-                block[4 * i + 1],
-                block[4 * i + 2],
-                block[4 * i + 3],
-            ]);
+            let p = off + 4 * i;
+            state[i] ^= u32::from_le_bytes([msg[p], msg[p + 1], msg[p + 2], msg[p + 3]]);
         }
         h.keccak_f(&mut state);
-        off += take;
-        if last {
-            break;
-        }
+        off += KECCAK_RATE;
     }
+    // The final block: what is left of the message (possibly nothing — a length that is an exact
+    // multiple of the rate still needs a whole all-padding block) plus `0x01`…`0x80`.
+    let take = msg.len() - off;
+    let mut block = [0u8; KECCAK_RATE];
+    block[..take].copy_from_slice(&msg[off..]);
+    block[take] ^= 0x01;
+    block[KECCAK_RATE - 1] ^= 0x80;
+    for i in 0..KECCAK_RATE / 4 {
+        state[i] ^= u32::from_le_bytes([
+            block[4 * i],
+            block[4 * i + 1],
+            block[4 * i + 2],
+            block[4 * i + 3],
+        ]);
+    }
+    h.keccak_f(&mut state);
     let mut out = [0u8; 32];
     for i in 0..8 {
         out[4 * i..4 * i + 4].copy_from_slice(&state[i].to_le_bytes());
@@ -68,11 +73,15 @@ pub fn keccak256<H: Host>(h: &mut H, msg: &[u8]) -> [u8; 32] {
 
 /// The longest `dhash` message this crate hashes: the 40-word public-output preimage plus its
 /// domain word.
-const DHASH_MAX_WORDS: usize = 48;
+const DHASH_MAX_WORDS: usize = 41;
 
 /// `hash(domain, msg) = poseidon2([domain, msg…])` — the domain-tagged sponge every leaf, node
 /// and digest here is built from, byte-identical to research's `notes::hash`. `1 + msg.len()`
-/// must be at most 48 words.
+/// must be at most 41 words.
+///
+/// This is the *general* form, used once per call for the public-output digest. Every leaf and
+/// node goes through [`hash_pair`] instead, which is the same sponge with none of the copying —
+/// see there for why that matters.
 pub fn dhash<H: Host>(h: &mut H, domain: u32, msg: &[u32]) -> [u32; 8] {
     let n = 1 + msg.len();
     debug_assert!(n <= DHASH_MAX_WORDS);
@@ -82,5 +91,38 @@ pub fn dhash<H: Host>(h: &mut H, domain: u32, msg: &[u32]) -> [u32; 8] {
     h.poseidon2(&mut buf, n);
     let mut out = [0u32; 8];
     out.copy_from_slice(&buf[..8]);
+    out
+}
+
+/// `hash(domain, [a(8) ‖ b(8)])` — the 17-word sponge call every storage leaf and tree node is,
+/// marshalled **in place**: one 17-word buffer, filled once, hashed where it lies.
+///
+/// Identical in output to `dhash(h, domain, &[a ‖ b])` (`tests/evm_storage.rs` checks leaf and node
+/// hashes against research's `notes::hash` directly, on both paths). The difference is cycles, and
+/// it is the single biggest cost in an EVM call: a `transfer` makes 132 of these calls (four
+/// 32-level Merkle walks), and the first cut of M4.3 spent ~850 guest cycles on each — of which
+/// about eight were the `POSEIDON2` syscall and the rest was building a 16-word message array,
+/// zeroing a 48-word buffer and copying the message into it. A 17-word buffer written field by
+/// field removes all three (M4.3 measurement: 112 298 → 44 132 cycles for the storage part of a
+/// transfer).
+pub fn hash_pair<H: Host>(h: &mut H, domain: u32, a: &[u32; 8], b: &[u32; 8]) -> [u32; 8] {
+    let mut buf = [0u32; 17];
+    buf[0] = domain;
+    // Indexed loops, not `copy_from_slice`: a slice copy of eight words compiles to a `memcpy`
+    // *call* in the guest (`compiler_builtins`), and three of those per sponge call were most of
+    // what a Merkle level cost. Unrolled loads and stores have no call and no length check.
+    let mut k = 0;
+    while k < 8 {
+        buf[1 + k] = a[k];
+        buf[9 + k] = b[k];
+        k += 1;
+    }
+    h.poseidon2(&mut buf, 17);
+    let mut out = [0u32; 8];
+    let mut k = 0;
+    while k < 8 {
+        out[k] = buf[k];
+        k += 1;
+    }
     out
 }

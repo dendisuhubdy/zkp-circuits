@@ -23,7 +23,7 @@
 //! stays valid against the new root whether or not it had already been verified.
 
 use crate::u256::U256;
-use crate::{dhash, keccak256, Host};
+use crate::{hash_pair, keccak256, Host};
 
 /// Depth of the storage tree: `notes::DEPTH`.
 pub const DEPTH: usize = 32;
@@ -188,15 +188,19 @@ impl StorageTree {
             // `cur` is this path's node at level `l`. Any other witness whose path agrees with
             // ours strictly above level `l` and differs at level `l` has that very node as its
             // sibling at level `l` — and it is the only sibling of its path this update touched.
-            for j in 0..self.n {
-                if j == i {
-                    continue;
-                }
-                let jdx = self.indices[j];
-                let same_above = l == DEPTH - 1 || (idx >> (l + 1)) == (jdx >> (l + 1));
-                let differs_here = ((idx >> l) & 1) != ((jdx >> l) & 1);
-                if same_above && differs_here {
-                    self.witnesses[j].siblings[l] = cur;
+            // With one witness there is no other path at all (the common case for a one-slot call),
+            // so the scan is skipped rather than run `DEPTH` times over nothing.
+            if self.n > 1 {
+                for j in 0..self.n {
+                    if j == i {
+                        continue;
+                    }
+                    let jdx = self.indices[j];
+                    let same_above = l == DEPTH - 1 || (idx >> (l + 1)) == (jdx >> (l + 1));
+                    let differs_here = ((idx >> l) & 1) != ((jdx >> l) & 1);
+                    if same_above && differs_here {
+                        self.witnesses[j].siblings[l] = cur;
+                    }
                 }
             }
             let sib = self.witnesses[i].siblings[l];
@@ -219,18 +223,13 @@ pub fn slot_index<H: Host>(h: &mut H, slot: &U256) -> u32 {
 /// builder and this crate compute — witnesses, verification, loads, stores and the default
 /// subtrees of an empty tree — goes through this one function.
 pub fn leaf_hash<H: Host>(h: &mut H, slot: &U256, value: &U256) -> [u32; 8] {
-    let mut msg = [0u32; 16];
-    if !value.is_zero() {
-        msg[..8].copy_from_slice(&slot.0);
-        msg[8..].copy_from_slice(&value.0);
+    if value.is_zero() {
+        return hash_pair(h, STORAGE_LEAF_DOMAIN, &[0; 8], &[0; 8]);
     }
-    dhash(h, STORAGE_LEAF_DOMAIN, &msg)
+    hash_pair(h, STORAGE_LEAF_DOMAIN, &slot.0, &value.0)
 }
 
 /// `H(NODE, [left(8), right(8)])` — the commitment tree's node hash exactly.
 pub fn node_hash<H: Host>(h: &mut H, l: &[u32; 8], r: &[u32; 8]) -> [u32; 8] {
-    let mut msg = [0u32; 16];
-    msg[..8].copy_from_slice(l);
-    msg[8..].copy_from_slice(r);
-    dhash(h, NODE_DOMAIN, &msg)
+    hash_pair(h, NODE_DOMAIN, l, r)
 }
