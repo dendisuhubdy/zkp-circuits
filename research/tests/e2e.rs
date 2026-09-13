@@ -834,6 +834,14 @@ fn measure_production_profile_evm_erc20_transfer() {
 
 // ---- M4.4's exit test: an SPL Token `Transfer` through the compiled sBPF guest ------------------
 //
+// **Superseded by the public input segment (constraint set 6), which took remedy (B) below.** The
+// ELF is now the *public* input vector, so `H_PUB` binds it and the guest neither carries it on the
+// private tape nor hashes it, and `input_hash` is over the canonical unpadded encoding rather than
+// the aligned region: 1 753 945 cycles became **574 444** and 2 368 SHA-256 compressions became
+// **29**, which fits `Tier(20)`. The proof itself, the tier it lands at and the fate of the
+// `#[ignore]`d test below are the next task's measurement; everything from here down is M4.4's
+// record of *why* the segment exists, kept because it is the decision record.
+//
 // **The proving half of this exit test does not pass, and is `#[ignore]`d with the measurement that
 // says why.** The guest is correct — `compiled_sbpf_spl_token_transfer_executes_and_publishes_the_
 // bound_digest` below runs it in the machine's own executor and gets the eight words `sbpf-core`
@@ -888,6 +896,9 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
     let p = guests::compiled::sbpf();
     let call = spl_transfer(250);
     let inputs = call.input_words();
+    // The ELF is the public segment now: the chain publishes it and `H_PUB` binds it, which is what
+    // lets the guest stop hashing it (`sbpf_core::abi`).
+    let public = call.public_words();
     let (want, r0, post) = call.expected();
     assert_eq!(r0, Ok(0));
     assert_eq!(want[0], 1);
@@ -902,31 +913,41 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
     // The cap is not a tier's budget: see the comment above this test. It is a bound that fails
     // loudly if the guest ever runs away, rather than the tier the plan asked for.
     const CYCLE_CAP: usize = 4_000_000;
-    let exec = rand_zkvm::emulator::execute(&p, &inputs, &[], CYCLE_CAP).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, &public, CYCLE_CAP).unwrap();
     assert_eq!(exec.outputs, want, "the in-circuit guest and the native run must agree");
 
     let compressions = exec.events.iter().filter(|e| e.sha256_row.is_some()).count();
-    // A pure function of the two input lengths: ceil-with-padding over 108 600 ELF bytes (1 698) and
-    // 41 825 instruction-region bytes (654), plus the pre- and post-state account walks (8 each).
-    assert_eq!(compressions, 2_368, "1698 program + 654 input + 2x8 accounts");
+    // A pure function of the *canonical* encoding's length, which is what the public segment bought:
+    // 13 compressions over the 801-byte canonical `input_hash` preimage, plus the pre- and
+    // post-state account walks (8 each). The 1 698 for `program_hash` are gone entirely — the ELF is
+    // public, so `H_PUB` binds it — and the 654 over the aligned region (98 % realloc padding) are
+    // the 13.
+    assert_eq!(compressions, 29, "13 canonical input_hash + 2x8 accounts, was 2 368");
     assert_eq!(
         rand_zkvm::tables::sha256::sha256_log_height(compressions),
-        18,
-        "2 368 blocks of 64 rows",
+        11,
+        "29 blocks of 64 rows",
     );
     // Two bounds, in both directions, and neither is decoration. The upper one catches a runaway;
-    // the lower one is the tripwire that says the milestone's blocker has been lifted — if the guest
-    // ever fits `Tier(20)`, the real exit test can be un-ignored and this assertion is the thing
-    // that will tell whoever did it.
+    // the lower one is the tripwire that says the next tier down has come into reach. M4.4 measured
+    // 1 753 945 cycles here and the lower tripwire was `Tier(20)`; the public segment took the ELF
+    // off the private tape and `program_hash` out of the digest, and the canonical `input_hash`
+    // took the realloc padding out of the hashing, so the guest now **fits `Tier(20)`** and the
+    // tripwire moves down a tier: the day it fits `Tier(18)`, re-measure and re-tier the proof.
     assert!(
-        exec.cycles() <= 1_800_000,
-        "{} cycles, was 1 753 945 when M4.4 measured it",
+        exec.cycles() <= 600_000,
+        "{} cycles, was 574 444 when the public segment landed (1 753 945 before it)",
         exec.cycles()
     );
     assert!(
-        exec.cycles() > Tier(20).max_cycles(),
-        "{} cycles now fits Tier(20): un-ignore \
-         compiled_sbpf_spl_token_transfer_proves_and_verifies and re-measure the docs",
+        exec.cycles() <= Tier(20).max_cycles(),
+        "{} cycles no longer fits Tier(20)'s {} budget",
+        exec.cycles(),
+        Tier(20).max_cycles()
+    );
+    assert!(
+        exec.cycles() > Tier(18).max_cycles(),
+        "{} cycles now fits Tier(18): re-measure the proof and the docs' tier table",
         exec.cycles()
     );
     // The sBPF instruction count is the interpreter's own meter, which only the native run can
@@ -935,8 +956,8 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
     assert_eq!(native.result, Ok(0));
     eprintln!(
         "sbpf spl transfer: {} program words, {} input words, {} cycles, {} sBPF instructions, \
-         frame high-water {}, {} sha256 compressions, sha256_log_height {}, needs a tier above {} \
-         (max {:?})",
+         frame high-water {}, {} sha256 compressions, sha256_log_height {}, {} public words, \
+         fits Tier(20)'s {} budget (max {:?})",
         p.len(),
         inputs.len(),
         exec.cycles(),
@@ -944,6 +965,7 @@ fn compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest() {
         native.max_depth,
         compressions,
         rand_zkvm::tables::sha256::sha256_log_height(compressions),
+        public.len(),
         Tier(20).max_cycles(),
         Tier(20),
     );
@@ -961,7 +983,9 @@ fn compiled_sbpf_spl_token_transfer_of_too_much_fails_cleanly() {
     assert!(matches!(r0, Ok(code) if code != 0));
     assert_eq!(want[0], 0);
     assert_eq!(post, rand_zkvm::sbpf::deserialize_accounts(&call.input));
-    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), &[], 4_000_000).unwrap();
+    let exec =
+        rand_zkvm::emulator::execute(&p, &call.input_words(), &call.public_words(), 4_000_000)
+            .unwrap();
     assert_eq!(exec.outputs, want);
     // Status 0 is not the only difference from the success case: the digest words differ too,
     // because a successful transfer's post-state is not its pre-state.
@@ -988,10 +1012,11 @@ fn compiled_sbpf_spl_token_transfer_proves_and_verifies() {
     let p = guests::compiled::sbpf();
     let call = rand_zkvm::sbpf::spl_transfer(250);
     let inputs = call.input_words();
+    let public = call.public_words();
     let (want, _r0, _post) = call.expected();
-    let exec = rand_zkvm::emulator::execute(&p, &inputs, &[], Tier(18).max_cycles()).unwrap();
+    let exec = rand_zkvm::emulator::execute(&p, &inputs, &public, Tier(18).max_cycles()).unwrap();
     assert_eq!(exec.outputs, want);
-    let (proof, _) = m.prove_salted(&p, &inputs, &[], [13, 14, 15, 16], None).unwrap();
+    let (proof, _) = m.prove_salted(&p, &inputs, &public, [13, 14, 15, 16], None).unwrap();
     eprintln!(
         "sbpf spl transfer: {} program words, {} input words, {} cycles, {} sha256 compressions, \
          tier {}, sha256_log_height {}, mem_log_height {}, proof {} bytes",
@@ -1021,7 +1046,9 @@ fn sbpf_cycle_breakdown_by_pc() {
     use std::collections::BTreeMap;
     let p = guests::compiled::sbpf();
     let call = rand_zkvm::sbpf::spl_transfer(250);
-    let exec = rand_zkvm::emulator::execute(&p, &call.input_words(), &[], 4_000_000).unwrap();
+    let exec =
+        rand_zkvm::emulator::execute(&p, &call.input_words(), &call.public_words(), 4_000_000)
+            .unwrap();
     let mut hist: BTreeMap<u32, usize> = BTreeMap::new();
     for e in &exec.events {
         *hist.entry(e.pc).or_default() += 1;
