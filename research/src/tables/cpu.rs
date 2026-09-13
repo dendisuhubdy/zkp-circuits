@@ -1282,7 +1282,23 @@ where
             // the row after the last pubdigest row is the first instruction row, whose
             // `HASH_LEFT` legitimately is (and, per `cpu_trace`'s `zero_vec` default, always
             // is) 0 — so the chain and the local full-drain check below agree there instead of
-            // conflicting, and together they force the region to absorb exactly `HASH_N` words.
+            // conflicting.
+            //
+            // Which of the two is load-bearing: the **local** one
+            // (`pubdigest_last · (HASH_LEFT − active_sum) = 0`). It is what forces the region to
+            // absorb exactly `HASH_N` words, and it has no substitute — the chain rule's
+            // application *on the last row* is the redundant one, because the first instruction
+            // row's `HASH_LEFT` carries no zero pin of its own (the `LEFT0..1` decomposition and
+            // every drain rule are gated on hash/digest rows; `cpu_trace`'s `zero_vec` default is
+            // a trace-builder fact, not a constraint). Drop the local rule and an over-declare
+            // attack opens: seed `HASH_N = 4k + 4` and both header `HASH_LEFT`s to match over a
+            // region that only absorbs `4k + 1` words, and the undrained remainder lands in that
+            // free cell — producing an `H_PUB` that is no honest `hash::public_digest` of
+            // anything, which bare `verify` would accept and only `verify_public` would catch.
+            // `tests/cheating.rs`'s
+            // `a_pubdigest_region_declaring_more_words_than_it_absorbs_is_rejected` is that exact
+            // witness (RED-verified against this line commented out). The ledger's Task 2
+            // "redundant drain rule" note had the two backwards.
             t.assert_zero(is_pubdigest.clone() * (v(HASH_LEFT) - active_sum.clone() - n(HASH_LEFT)));
             t.assert_zero(pubdigest_last.clone() * (v(HASH_LEFT) - active_sum.clone()));
             t.assert_zero(not_final_pubdigest.clone() * (n(HASH_IDX) - v(HASH_IDX) - one.clone()));

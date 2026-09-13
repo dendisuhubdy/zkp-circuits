@@ -582,7 +582,7 @@ The guest stops carrying the ELF privately and stops hashing it.
 | field | bytes | notes |
 |---|---|---|
 | `program_id` | 32 | |
-| `n_accounts` | 8 | little-endian `u64`, the count the walk actually used (clamped at `MAX_ACCOUNTS`) |
+| `n_accounts` | 8 | little-endian `u64`, the region's **exact** count — never clamped; a region claiming more than `MAX_ACCOUNTS` is refused (exceptional halt), see the amendment below |
 | per account entry, in entry order — a duplicate entry re-encodes in full the account it duplicates, at the position it occupies, the same walk `output_hash` does: | | |
 | `marker` | 1 | the byte the entry physically carries: `0xff` for a full entry, the duplicated entry's ordinal for a duplicate. It binds the *shape* of the list: a duplicate aliases one buffer where a repeated full entry is two, and the program can tell |
 | `key` | 32 | |

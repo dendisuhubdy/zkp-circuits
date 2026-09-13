@@ -46,7 +46,7 @@ its only two patches (everything else rides along in the wholesale rsync —
 
 ## Commands
 
-- `cargo test` — the whole suite (**394 tests: 388 pass, 6 ignored**).
+- `cargo test` — the whole suite (**395 tests: 389 pass, 6 ignored**).
   Everything uses `FriProfile::Test`; measured in one 2026-09-13 run of the
   constraint-set-6 tree (**1 032 s wall — 17.2 min — and 23.1 GiB peak
   resident**, on a machine that was otherwise quiet apart from a running
@@ -78,8 +78,10 @@ its only two patches (everything else rides along in the wholesale rsync —
   0.11.1 before anything reaches the machine, including loading the committed
   SPL Token ELF and running a real `Transfer` through it. `tests/emulator.rs`
   (25) and `tests/asm.rs` (11) are the same kind of thing. `tests/cheating.rs`
-  is the largest single file at 110, of which constraint set 6 added 16 against
-  the `public` table and its digest region.
+  is the largest single file at 111, of which constraint set 6 added 17 against
+  the `public` table and its digest region. (The wall-clock and memory figures
+  above were measured on the 394-test tree, before the final review added the
+  last of those 17 — a ~2 s cheating test; nothing else about the run changed.)
 
   Of the six `#[ignore]`d tests, three are production-profile proof-size
   measurements, one is the sBPF cycle-breakdown measurement, and two are the

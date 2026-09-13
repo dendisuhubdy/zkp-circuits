@@ -894,7 +894,13 @@ First, the drain chain stays gated by bare `is_pubdigest` rather than a
 `not_final_pubdigest`: the row after the last pubdigest row is the first
 instruction row, whose `HASH_LEFT` is honestly 0, so the chain rule and the
 local `pubdigest_last · (HASH_LEFT − active_sum) = 0` agree there instead of
-conflicting. (The *indigest* region's own chain had to split for the
+conflicting. Of the two it is the **local** rule that is load-bearing — the
+first instruction row's `HASH_LEFT` has no zero pin of its own, so without
+it a region could declare `HASH_N = 4k + 4`, absorb only `4k + 1` words and
+dump the remainder into that free cell, publishing an `H_PUB` that is no
+honest `public_digest` (bare `verify` would accept it; only `verify_public`
+would not) — the chain rule's application on the last row is the redundant
+half. (The *indigest* region's own chain had to split for the
 opposite reason, and did — `indigest_last · n(HASH_LEFT) = 0` became a local
 `indigest_last · (HASH_LEFT − indigest_drain) = 0` with the chain rule gated
 by `not_final_indigest`, since `n(HASH_LEFT)` on that row is now the

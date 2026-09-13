@@ -2374,10 +2374,16 @@ fn a_workload_exceeding_the_poseidon2_budget_is_a_clean_error() {
 }
 
 /// Audit ZH2: the digest rows' 16-bit `HASH_LEFT` (`LEFT0..1`) caps a provable program (and
-/// private-input vector) at 65535 words — enforced host-side now, not as an opaque constraint
-/// failure deep inside `prove_batch`.
+/// private-input vector, and — constraint set 6 — public-input vector) at 65535 words — enforced
+/// host-side now, not as an opaque constraint failure deep inside `prove_batch`.
+///
+/// The public arm is `ProveError::PublicTooLong`, the pubdigest region's twin of
+/// `InputTooLong` (not `PublicTooLarge`, which is the `tables::public::MAX_LOG_HEIGHT` ceiling —
+/// two different caps with confusingly similar names). Checked through `prove`'s auto-tier path
+/// *and* through `build_traces_salted` directly, at a tier whose cycle budget is wide enough that
+/// the earlier `TooManyCycles` guard does not mask it.
 #[test]
-fn a_program_or_input_longer_than_the_16_bit_hash_left_cap_is_a_clean_error() {
+fn a_program_input_or_public_vector_longer_than_the_16_bit_hash_left_cap_is_a_clean_error() {
     use rand_zkvm::machine::ProveError;
     let m = Machine::new(FriProfile::Test);
     let mut a = Assembler::new(0);
@@ -2389,6 +2395,16 @@ fn a_program_or_input_longer_than_the_16_bit_hash_left_cap_is_a_clean_error() {
     let small = guests::fib(10);
     let inputs = vec![0u32; u16::MAX as usize + 1];
     assert!(matches!(m.prove(&small, &inputs, &[], None), Err(ProveError::InputTooLong { .. })));
+    let public = vec![0u32; u16::MAX as usize + 1];
+    assert!(matches!(m.prove(&small, &[], &public, None), Err(ProveError::PublicTooLong { len: 65536 })));
+    // And directly, so the guard is pinned rather than reached through `for_workload`'s pick:
+    // tier 20's cycle budget swallows the 16 384 pubdigest rows, so `TooManyCycles` cannot mask
+    // this the way it would at tier 10.
+    let exec = execute(&small, &[], &public, 10_000).unwrap();
+    assert!(matches!(
+        build_traces_salted(&small, &[], &public, [0u32; 4], &exec, Tier(20)),
+        Err(ProveError::PublicTooLong { len: 65536 })
+    ));
 }
 
 /// Audit coverage: the verify-side declared-height guards for the program and input tables
@@ -2514,13 +2530,19 @@ fn tampering_h_pub_in_public_values_is_rejected() {
 
 /// (6) A mismatched `public_log_height`: the declared height and the batch's degree bits disagree,
 /// which `verify`'s degree-bits equality catches before any verifier key is built.
+///
+/// The variant is `VerifyError::Tier` — the shared degree-bits mismatch every table's declared
+/// height funnels into — *not* `VerifyError::PublicHeight`, which is `check_declared_heights`'
+/// range guard and fires only for a height outside `[MIN_LOG_HEIGHT, MAX_LOG_HEIGHT]` (test (6b)).
+/// `+ 1` here stays inside that range, so it gets past the range guard and dies on the bits.
 #[test]
 fn a_mismatched_public_height_is_rejected_before_any_verifier_key_is_built() {
     let (m, p, t) = setup_with_public(&[11, 22, 33, 44]);
     let mut pr = m.prove_traces(&p, &t, Tier(10));
     pr.public_log_height += 1;
     let fresh = Machine::new(FriProfile::Test);
-    assert!(fresh.verify(&p.digest(), &pr).is_err());
+    let err = fresh.verify(&p.digest(), &pr).unwrap_err();
+    assert!(matches!(err, rand_zkvm::machine::VerifyError::Tier), "actual: {err:?}");
     assert_eq!(fresh.cached_keys(), 0, "rejected before the preprocessed commitment is recomputed");
 }
 
@@ -2836,6 +2858,77 @@ fn an_indigest_region_leaking_hash_left_into_the_public_digest_region_is_rejecte
     for k in 0..8 { t.public_values[cpu::pv::IN0 + k] = F::from_u32(hin[k]); }
     shift_range8(&mut t, &edits);
     rebuild_digest_permutations(&mut t, &p, &blocks, &hash::public_digest_rows(&public));
+    assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+/// (12b) The pubdigest twin of (12), and the witness the *local* full-drain rule
+/// `pubdigest_last * (HASH_LEFT - active_sum) = 0` (`tables::cpu`) exists for — the one rule in
+/// the pubdigest region with no substitute. The chain rule beside it
+/// (`is_pubdigest * (HASH_LEFT - active_sum - n(HASH_LEFT)) = 0`) does *not* cover this on the
+/// last row: `HASH_LEFT` on an ordinary instruction row is an entirely free cell (the `LEFT0..1`
+/// decomposition, the RANGE8 lookups and every drain rule are gated on hash/digest rows; the
+/// `zero_vec` default `cpu_trace` leaves there is a trace-builder fact, not a constraint), so the
+/// chain rule is happy to deposit an undrained remainder into it.
+///
+/// The attack that opens without the local rule: declare `n_pub = 4k + 4` while the region
+/// absorbs only `4k + 1` words. Here, at its smallest — `n_pub` declared as 5 (header lane
+/// `HS0+5`, `HASH_N`, and the first pubdigest row's `HASH_LEFT`, which the indigest-boundary seed
+/// pins to `HASH_N`) over the single block that really absorbs 4, leaving the leftover 1 on the
+/// first instruction row's free `HASH_LEFT`. `PUBLIC_DIGEST` is perfectly balanced throughout —
+/// the four active lanes demand indices 0..3 and the `public` table supplies exactly those — and
+/// the capacity header, both permutations, the `H_PUB` encoding and `pv::PUB0..7` are all made
+/// consistent by hand for the forged `n_pub`. What the prover gains is an `H_PUB` that is
+/// `hash::public_digest` of *nothing*: `verify` alone would accept it, and only `verify_public`,
+/// recomputing the digest from the caller's own words, would notice. That is why this rule is
+/// load-bearing and the chain rule's last-row application is the redundant one.
+///
+/// Discrimination: with `cpu.rs`'s `pubdigest_last * (HASH_LEFT - active_sum)` line commented
+/// out, this exact witness proves *and* verifies (`m.verify(&p.digest(), &pr).is_ok()`); with it
+/// restored, that single constraint is what rejects it. The report records the run.
+#[test]
+fn a_pubdigest_region_declaring_more_words_than_it_absorbs_is_rejected() {
+    use rand_zkvm::hash;
+    let public = [11u32, 22, 33, 44];
+    let (m, p, mut t) = setup_with_public(&public);
+    let w = cpu::col::WIDTH;
+    let offset = p.digest_rows() + hash::input_digest_row_count(0);
+    assert_eq!(t.cpu.values[offset * w + cpu::col::PUBDIGEST_LAST], F::ONE, "n_pub = 4 is a single pubdigest row");
+    assert_eq!(t.cpu.values[(offset + 1) * w + cpu::col::HASH_LEFT], F::ZERO, "and the row after it is an ordinary instruction row");
+
+    // `hash::public_digest_rows(&public)` with the header's `n_pub` lane forged to 5 — a shape no
+    // honest call produces, so it is built here directly. One block, four active lanes, but a
+    // `left_before` of 5.
+    const FORGED_N_PUB: u32 = 5;
+    let mut state_in = [F::ZERO; 8];
+    state_in[4] = F::from_u32(rand_zkvm::notes::domain::PUB);
+    state_in[5] = F::from_u32(FORGED_N_PUB);
+    let mut merged = state_in;
+    for k in 0..4 { merged[k] = F::from_u32(public[k]); }
+    let state_out = hash::permute_state(merged);
+    let forged = hash::DigestBlock {
+        idx: 0,
+        left_before: FORGED_N_PUB,
+        words: public,
+        active: [true; 4],
+        state_in,
+        state_out,
+    };
+
+    let mut edits: Vec<(u32, u32)> = Vec::new();
+    let r = offset * w;
+    t.cpu.values[r + cpu::col::HASH_N] = F::from_u32(FORGED_N_PUB);
+    set_hash_left(&mut t, offset, FORGED_N_PUB, &mut edits);
+    for k in 0..8 { t.cpu.values[r + cpu::col::HS0 + k] = state_in[k]; }
+    // Every lane stays active with the same word, so `HV0..3` and `ACT0..3` are unchanged.
+    // The drain *chain* deposits the undeclared remainder here, in the instruction row's free
+    // cell — satisfied, and exactly what the local rule refuses to let stand.
+    t.cpu.values[(offset + 1) * w + cpu::col::HASH_LEFT] = F::from_u32(FORGED_N_PUB - 4);
+    // The first ordinary instruction row also carries the region's own permutation output.
+    for k in 0..8 { t.cpu.values[(offset + 1) * w + cpu::col::HS0 + k] = state_out[k]; }
+    let hpub = set_digest_encoding(&mut t, offset, state_out, cpu::col::PHVL0, cpu::col::PHIMAX0, cpu::col::PINV0, &mut edits);
+    for k in 0..8 { t.public_values[cpu::pv::PUB0 + k] = F::from_u32(hpub[k]); }
+    shift_range8(&mut t, &edits);
+    rebuild_digest_permutations(&mut t, &p, &hash::input_digest_rows(TEST_SALT, &[]), &[forged]);
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
 
