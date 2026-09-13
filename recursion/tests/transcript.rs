@@ -165,22 +165,40 @@ fn sample_bits_matches_the_low_bits_of_the_canonical_representative() {
 
 #[test]
 fn sample_bits_rejects_a_non_canonical_decomposition() {
-    // 2^64 - 2^32 + 2 ≡ 1 (mod p) has a 64-bit decomposition that is not the canonical one:
-    // the canonicality check must trap on it.
-    let mut b = Builder::new(Checkpoints::Off);
-    let mut ch = DslChallenger::new(&mut b);
-    let s = b.constant(F::ONE);
-    ch.observe(&mut b, s);
-    let _ = ch.sample_bits(&mut b, 20);
-    let p = b.finish();
-    let v: u128 = (1u128 << 64) - (1u128 << 32) + 2; // ≡ 1 mod p, 64 bits wide
-    let mut w: Vec<F> = (0..64).map(|k| F::from_u64(((v >> k) & 1) as u64)).collect();
-    w.push(F::ONE);
-    match execute(&p, &w, 5_000_000) {
-        Err(recursion::emulator::ExecError::InverseOfZero { pc }) => {
-            assert_eq!(p.checkpoint_at(pc), Some("sample_bits canonicality"));
+    // 2^64 - 2^32 + 2 ≡ 1 (mod p) has a 64-bit decomposition that is not the canonical one — high
+    // half all ones, low half 2 — so the canonicality check must trap on it whatever hint the prover
+    // supplies. The two hints exercise the two halves of that check, which trap in different places:
+    //
+    // - `t = 1` is not `lo⁻¹`, so the hint-validity assert (`lo·t·lo = lo`, here 4 ≠ 2) fires;
+    // - `t = lo⁻¹` satisfies it, so execution reaches the rejection assert proper
+    //   (`all_hi · lo · t = 1 ≠ 0`) — the constraint that actually forbids the forgery `v = x + p`
+    //   with an honest hint, and the one nothing else in this file reaches in a violating state.
+    //
+    // Both carry the same checkpoint name, because either firing means the same thing: the hinted
+    // bits are not the canonical representative of the sampled element.
+    let build = || {
+        let mut b = Builder::new(Checkpoints::Off);
+        let mut ch = DslChallenger::new(&mut b);
+        let s = b.constant(F::ONE);
+        ch.observe(&mut b, s);
+        let _ = ch.sample_bits(&mut b, 20);
+        b.finish()
+    };
+    let v: u64 = u64::MAX - (1 << 32) + 3; // 2^64 - 2^32 + 2 ≡ 1 mod p, 64 bits wide
+    let bits: Vec<F> = (0..64).map(|k| F::from_u64((v >> k) & 1)).collect();
+    for (hint, which) in [
+        (F::ONE, "a hint that is not lo's inverse"),
+        (recursion::dsl::transcript::canonicality_hint(v), "lo's real inverse"),
+    ] {
+        let mut w = bits.clone();
+        w.push(hint);
+        let p = build();
+        match execute(&p, &w, 5_000_000) {
+            Err(recursion::emulator::ExecError::InverseOfZero { pc }) => {
+                assert_eq!(p.checkpoint_at(pc), Some("sample_bits canonicality"), "{which}");
+            }
+            other => panic!("{which}: a non-canonical decomposition must trap, got {other:?}"),
         }
-        other => panic!("a non-canonical decomposition must trap, got {other:?}"),
     }
 }
 
@@ -407,6 +425,26 @@ fn a_restored_merkle_path_verifies_in_the_dsl_exactly_where_p3_verifies_it() {
         assert_eq!(levels, 6 - 2 + 0, "log2(64) - cap_height");
         assert_eq!(run(b, &[]), commit.roots()[*idx >> levels].to_vec(), "query {q}");
     }
+}
+
+#[test]
+#[should_panic(expected = "two injections after level 1")]
+fn two_injections_at_one_level_are_refused_at_build_time() {
+    // The reference hashes every matrix at one height into a single digest and compresses once, so
+    // two injections at one level would compress twice and reach a different root. There is no tape
+    // that makes that visible — it is a wrong program, not a rejected proof — so the builder refuses
+    // it (`p3-merkle-tree-0.7.0/src/mmcs/batch.rs:245-262`).
+    let mut b = Builder::new(Checkpoints::Off);
+    let leaf = recursion::dsl::Digest(b.alloc(4));
+    let sib = b.alloc(16);
+    let rows = b.alloc(9);
+    let out = recursion::dsl::Digest(b.alloc(4));
+    let bits: Vec<_> = (0..4).map(|_| b.constant(F::ONE)).collect();
+    let inj = [
+        hash::Injection { after_level: 1, rows, n_cells: 5 },
+        hash::Injection { after_level: 1, rows, n_cells: 4 },
+    ];
+    hash::merkle_walk_with_injections(&mut b, leaf, &bits, sib, 4, &inj, out);
 }
 
 #[test]

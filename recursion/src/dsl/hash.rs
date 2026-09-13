@@ -107,8 +107,12 @@ pub fn merkle_walk(b: &mut Builder, leaf: Digest, index_bits: &[Felt], siblings:
 /// A shorter-height matrix group injected into the walk after `after_level`: the `n_cells` at `rows`
 /// are sponged and compressed into the running digest.
 ///
-/// `rows` is the group's opened rows concatenated *and salted*, i.e. what the leaf hash of that
-/// height would be over — `p3-merkle-tree`'s walk calls the same `hash_iter_slices` on it.
+/// **One `Injection` per level, covering every matrix at that height.** `rows` is *all* the group's
+/// opened rows at that height, concatenated in tallest-first order and each salted, because the
+/// reference does one `hash_iter_slices` over every such matrix and then one compression
+/// (`p3-merkle-tree-0.7.0/src/mmcs/batch.rs:245-262`). Two injections sharing a level would sponge
+/// and compress twice and diverge from that on the second matrix; [`merkle_walk_with_injections`]
+/// rejects it at build time rather than letting it become a wrong digest.
 #[derive(Clone, Copy, Debug)]
 pub struct Injection {
     /// The zero-based level *after* which the injection happens: the group's height is the height
@@ -122,8 +126,9 @@ pub struct Injection {
 /// real round needs: `digest = compress([digest, sponge(rows at that height)])`
 /// (`p3-merkle-tree-0.7.0/src/mmcs/batch.rs:240-262`).
 ///
-/// Injections may be given in any order and more than one may share a level; they are applied in the
-/// order listed, which is the order `verify_batch` hashes a level's groups in.
+/// Injections may be given in any order, but their levels must be **pairwise distinct** — one
+/// compression per height is what the reference does, so one `Injection` per height is what this
+/// takes; see [`Injection`].
 ///
 /// Measured: an injection of `m` cells adds `sponge(m) + 25` rows and `ceil(m/4) + 1` permutations —
 /// 58 rows and four permutations for the nine-cell group a five-column salted matrix comes to.
@@ -134,6 +139,16 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
             "a {levels}-level walk needs {levels} index bits, got {}", index_bits.len());
     assert!(injections.iter().all(|i| i.after_level < levels),
             "an injection after a level the walk never reaches would be silently dropped");
+    for (i, inj) in injections.iter().enumerate() {
+        assert!(
+            injections[..i].iter().all(|other| other.after_level != inj.after_level),
+            "two injections after level {}: the reference sponges every matrix at one height into \
+             one digest and compresses once (p3-merkle-tree-0.7.0/src/mmcs/batch.rs:245-262), so a \
+             height gets one Injection whose `rows` are all of its salted rows concatenated — two \
+             would compress twice and compute a different root",
+            inj.after_level
+        );
+    }
     let st = b.hash_scratch();
     // The running digest lives in the permutation's own first four lanes for the whole walk: every
     // level reads it from there and writes the next level's `left` back over it, so a level costs no

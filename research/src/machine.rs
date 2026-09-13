@@ -17,10 +17,13 @@ pub type Challenge = BinomialExtensionField<Val, 2>;
 pub type Perm = Poseidon2Goldilocks<8>;
 /// The leaf hasher: a padding-free sponge over the width-8 permutation, rate 4, digest 4.
 /// `pub` so that a crate verifying this machine's proofs — `recursion`'s rVM programs — names this
-/// alias instead of re-deriving the constants and hoping they match.
+/// alias instead of re-deriving the constants and hoping they match. `#[doc(hidden)]` with the two
+/// accessors below: nameable by path, not part of this crate's documented surface.
+#[doc(hidden)]
 pub type Hash = PaddingFreeSponge<Perm, 8, 4, 4>;
 /// The internal-node compressor: two 4-element digests into the eight lanes, permuted, first four
 /// lanes kept. `pub` for the same reason as [`Hash`].
+#[doc(hidden)]
 pub type Compress = TruncatedPermutation<Perm, 2, 4, 8>;
 type Packing = <Val as Field>::Packing;
 pub type ValMmcs = MerkleTreeHidingMmcs<Packing, Packing, Hash, Compress, StdRng, 2, 4, 4>;
@@ -84,7 +87,9 @@ pub fn permutation() -> Perm {
 /// hiding commitment must not be salted from a fixed seed. A *verifier* differential test needs the
 /// opposite — the same hasher and compressor this machine commits with, reproducible run to run —
 /// and gets it here. The salt stream is irrelevant to what such a test checks (it commits and opens
-/// through one object), and nothing that proves anything calls this.
+/// through one object), and nothing that proves anything calls this — which is why it is
+/// `#[doc(hidden)]`: a deterministically seeded hiding MMCS has no business on the documented surface.
+#[doc(hidden)]
 pub fn val_mmcs_for_tests() -> ValMmcs {
     let perm = permutation();
     ValMmcs::new(Hash::new(perm.clone()), Compress::new(perm), 2, StdRng::seed_from_u64(PERM_SEED))
@@ -103,6 +108,7 @@ pub fn val_mmcs_for_tests() -> ValMmcs {
 ///
 /// Nothing is checked against the commitment here: `verify_multi_batch` does that, and the two do
 /// the same walk.
+#[doc(hidden)]
 pub fn restore_paths_for_tests(
     mmcs: &ValMmcs,
     dimensions: &[p3_matrix::Dimensions],
