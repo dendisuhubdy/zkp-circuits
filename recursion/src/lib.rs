@@ -11,8 +11,13 @@
 //!   per instruction with the memory accesses and the permutation that row dispatches, so cpu
 //!   rows and permutations per verified inner proof are a byproduct of running a program.
 //!
+//! - [`dsl`] is the builder rVM programs are written in: typed handles over a linear register
+//!   allocator that spills to memory, with named assertion traps so "the program refused at *this*
+//!   step" is a checked claim.
+//!
 //! The rule inherited from `research/AGENTS.md` holds here too: the emulator is the reference
 //! semantics — if an AIR and the emulator disagree, the AIR is wrong.
 
+pub mod dsl;
 pub mod emulator;
 pub mod isa;
