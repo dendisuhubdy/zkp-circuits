@@ -1,6 +1,6 @@
 # Rand zkVM milestone 5 — the recursion VM (rVM)
 
-Status: **design approved in conversation 2026-09-13; spec reviewed and approved by the user 2026-09-14. M5.1 in execution, not built.**
+Status: **design approved in conversation 2026-09-13; spec reviewed and approved by the user 2026-09-14. M5.1 built (2026-09-14): 50 real bundle proofs verified in-circuit at 5 250 623 cpu rows per inner proof — over the 2^19 point; Task 7's precompiles provably cannot close the gap (~3%), so it did not run. See `recursion/docs/00-recursion-vm.md`.**
 Decided by the user on 2026-09-13 after the feasibility spike in `spike-recursive-verifier`:
 block-level proof aggregation needs a recursion coprocessor, and the coprocessor is a second
 machine with a native Goldilocks instruction set ("recursion VM"), not a hardwired verifier AIR.
