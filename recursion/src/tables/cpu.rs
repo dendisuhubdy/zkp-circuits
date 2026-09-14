@@ -25,38 +25,43 @@ pub mod col {
     pub const RD: usize = 4;
     pub const RA: usize = 5;
     pub const B: usize = 6;
-    /// 25: one-hot opcode selectors, in `Op as u8` order (Task 9 appends one more).
+    /// 26: one-hot opcode selectors, in `Op as u8` order.
     pub const SEL0: usize = 7;
     /// The operand values: the `ra` pair, the `rb` pair (or `[imm, 0]`), the result pair.
-    pub const A0: usize = 32;
-    pub const A1: usize = 33;
-    pub const B0: usize = 34;
-    pub const B1: usize = 35;
-    pub const D0: usize = 36;
-    pub const D1: usize = 37;
+    pub const A0: usize = 33;
+    pub const A1: usize = 34;
+    pub const B0: usize = 35;
+    pub const B1: usize = 36;
+    pub const D0: usize = 37;
+    pub const D1: usize = 38;
     /// 5-bit decompositions of the three register indices — the `rd, ra, rb < 32` decode check
     /// the emulator performs, and what makes every `REG` address `2^24 + idx` with `idx < 32`.
-    pub const RD_BIT0: usize = 38; // 5
-    pub const RA_BIT0: usize = 43; // 5
-    pub const RB_BIT0: usize = 48; // 5
+    pub const RD_BIT0: usize = 39; // 5
+    pub const RA_BIT0: usize = 44; // 5
+    pub const RB_BIT0: usize = 49; // 5
     /// The 3 address limbs of the row kind's address subject (a `RANGE8` lookup each).
-    pub const LIMB0: usize = 53;
-    pub const LIMB1: usize = 54;
-    pub const LIMB2: usize = 55;
+    pub const LIMB0: usize = 54;
+    pub const LIMB1: usize = 55;
+    pub const LIMB2: usize = 56;
     /// The `r0` write-drop gadget (the `alu.rs` two-constraint pattern).
-    pub const RD_IS_ZERO: usize = 56;
-    pub const RD_INV: usize = 57;
+    pub const RD_IS_ZERO: usize = 57;
+    pub const RD_INV: usize = 58;
     /// The branch equality gadget on `D0 − A0`.
-    pub const EQ_AUX: usize = 58;
-    pub const EQ_INV: usize = 59;
+    pub const EQ_AUX: usize = 59;
+    pub const EQ_INV: usize = 60;
     /// The running count of `PUBLIC` rows.
-    pub const PUB_IDX: usize = 60;
-    pub const IS_REAL: usize = 61;
-    pub const WIDTH: usize = 62;
+    pub const PUB_IDX: usize = 61;
+    pub const IS_REAL: usize = 62;
+    /// Task 9: the `SPONGE` source pointer's own three limbs (`B0 + 3 < 2^24`, gated on
+    /// `IS_SPONGE` — the one row kind with two addresses).
+    pub const G2LIMB0: usize = 63;
+    pub const G2LIMB1: usize = 64;
+    pub const G2LIMB2: usize = 65;
+    pub const WIDTH: usize = 66;
 }
 use col::*;
 
-pub const NUM_SELECTORS: usize = 25;
+pub const NUM_SELECTORS: usize = 26;
 
 /// Timestamp slots of the row's `REG` messages (the `RAM` messages use the emulator's own slots:
 /// 0..1 for the cpu's loads/stores, 0..15 for a dispatched permutation — see `emulator.rs`).
@@ -85,7 +90,7 @@ impl Sels {
     /// Read the `rb` pair.
     const EXT_READ_RB: &'static [Op] = &[Op::Eadd, Op::Esub, Op::Emul];
     /// Ops whose fourth word names a register (`rb`), mirroring `Op::b_is_register`.
-    const B_REG: &'static [Op] = &[Op::Fadd, Op::Fsub, Op::Fmul, Op::Eadd, Op::Esub, Op::Emul, Op::Emulf];
+    const B_REG: &'static [Op] = &[Op::Fadd, Op::Fsub, Op::Fmul, Op::Eadd, Op::Esub, Op::Emul, Op::Emulf, Op::Sponge];
     /// Read `rd` (the compared or stored value).
     const READ_RD: &'static [Op] = &[Op::Jeq, Op::Jne, Op::Store, Op::Storee];
     /// Write `rd`.
@@ -218,13 +223,20 @@ where
         let is_mem = sel_sum(Sels::MEM1) + sel_sum(Sels::MEM2);
         let subject = sel_sum(Sels::MEM1) * (v(A0) + v(B))
             + sel_sum(Sels::MEM2) * (v(A0) + v(B) + one.clone())
-            + sel(Op::Poseidon2) * (v(A0) + AB::Expr::from_u32(7))
+            + (sel(Op::Poseidon2) + sel(Op::Sponge)) * (v(A0) + AB::Expr::from_u32(7))
             + taken.clone() * v(B);
-        let needs_check = is_mem.clone() + sel(Op::Poseidon2) + taken.clone();
+        let needs_check = is_mem.clone() + sel(Op::Poseidon2) + sel(Op::Sponge) + taken.clone();
         let limbs = v(LIMB0) + v(LIMB1) * AB::Expr::from_u32(1 << 8) + v(LIMB2) * AB::Expr::from_u32(1 << 16);
         b.assert_zero(needs_check.clone() * (subject - limbs));
         for l in [LIMB0, LIMB1, LIMB2] {
             bus::RANGE8.lookup_key(b, [v(l)], Count::bounded(needs_check.clone(), 1));
+        }
+        // Group 2 (Task 9): the `SPONGE` source pointer's own check, `B0 + 3 < 2^24`.
+        let subject2 = sel(Op::Sponge) * (v(B0) + AB::Expr::from_u32(3));
+        let limbs2 = v(G2LIMB0) + v(G2LIMB1) * AB::Expr::from_u32(1 << 8) + v(G2LIMB2) * AB::Expr::from_u32(1 << 16);
+        b.assert_zero(sel(Op::Sponge) * (subject2 - limbs2));
+        for l in [G2LIMB0, G2LIMB1, G2LIMB2] {
+            bus::RANGE8.lookup_key(b, [v(l)], Count::bounded(sel(Op::Sponge), 1));
         }
 
         // ── register traffic (REG) and RAM traffic (RAM) ──
@@ -258,6 +270,7 @@ where
 
         // ── the dispatched chips and the public interface ──
         bus::POSEIDON2.lookup_key(b, [v(CLK), v(A0)], Count::bounded(sel(Op::Poseidon2), 1));
+        bus::SPONGE.lookup_key(b, [v(CLK), v(A0), v(B0)], Count::bounded(sel(Op::Sponge), 1));
         bus::REDUCE.lookup_key(b, [v(CLK), v(A0)], Count::bounded(sel(Op::Reduce), 1));
         bus::PUBLIC.lookup_key(b, [v(PUB_IDX), v(A0)], Count::bounded(sel(Op::Public), 1));
     }
@@ -372,13 +385,23 @@ fn fill_row(r: &mut [F], e: &Event, pub_idx: &mut u32, counts: &mut RangeCounts)
     let subject: Option<u64> = match e.instr.op {
         Op::Load | Op::Store => Some(e.mem[0].addr),
         Op::Loade | Op::Storee => Some(e.mem[0].addr + 1),
-        Op::Poseidon2 => Some(e.a[0].as_canonical_u64() + 7),
+        Op::Poseidon2 | Op::Sponge => Some(e.a[0].as_canonical_u64() + 7),
         Op::Jmp | Op::Jeq | Op::Jne if taken => Some(e.instr.b.as_canonical_u64()),
         _ => None,
     };
     if let Some(s) = subject {
         assert!(s < 1 << 24, "the emulator bounds every address below 2^24");
         for (k, c) in [LIMB0, LIMB1, LIMB2].iter().enumerate() {
+            let limb = (s >> (8 * k)) as u32 & 0xff;
+            r[*c] = F::from_u32(limb);
+            counts.range8(limb);
+        }
+    }
+    if e.instr.op == Op::Sponge {
+        // The source pointer is the `rb` register's value (`e.b_val[0]`); `+ 3` is its far end.
+        let s = e.b_val[0].as_canonical_u64() + 3;
+        assert!(s < 1 << 24, "the emulator bounds the sponge source below 2^24");
+        for (k, c) in [G2LIMB0, G2LIMB1, G2LIMB2].iter().enumerate() {
             let limb = (s >> (8 * k)) as u32 & 0xff;
             r[*c] = F::from_u32(limb);
             counts.range8(limb);

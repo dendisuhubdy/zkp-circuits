@@ -66,6 +66,15 @@ pub enum Liveness {
     Off,
 }
 
+/// Should the build use the Task 8/9 precompiles? `Off` compiles the reduction and the leaf
+/// sponges as ordinary instruction sequences — the differential references — `On` emits
+/// `REDUCE`/`SPONGE`. The shipped program is always `On`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Precompiles {
+    Off,
+    On,
+}
+
 /// What a built program cost. `cells` counts the memory cells the program reserves: the spill
 /// arena's peak concurrent usage plus everything [`Builder::alloc`] handed out. `phase_rows` is
 /// the final instruction count per [`Builder::note_phase`] section, spill and reload insertions
@@ -169,6 +178,7 @@ struct PtrSlot {
 pub struct Builder {
     mode: Checkpoints,
     liveness: Liveness,
+    precompiles: Precompiles,
     ops: Vec<Op2>,
     /// The names passed to [`Builder::checkpoint`], in order, whatever the mode.
     names: Vec<String>,
@@ -194,9 +204,14 @@ impl Builder {
     }
 
     pub fn with_liveness(checkpoints: Checkpoints, liveness: Liveness) -> Self {
+        Self::with_opts(checkpoints, liveness, Precompiles::On)
+    }
+
+    pub fn with_opts(checkpoints: Checkpoints, liveness: Liveness, precompiles: Precompiles) -> Self {
         Builder {
             mode: checkpoints,
             liveness,
+            precompiles,
             ops: Vec::new(),
             names: Vec::new(),
             slots: Vec::new(),
@@ -220,6 +235,11 @@ impl Builder {
     /// Mark a phase boundary for `Stats::phase_rows`.
     pub fn note_phase(&mut self, name: &'static str) {
         self.ops.push(Op2::Phase { name });
+    }
+
+    /// The precompile policy this builder emits with.
+    pub fn precompiles(&self) -> Precompiles {
+        self.precompiles
     }
 
     /// Build the program and return it with its [`Stats`]: the replay computes spills, reloads,
@@ -547,6 +567,30 @@ impl Builder {
         let acc_out = self.load_ext(descr, 5);
         let apow_out = self.load_ext(descr, 7);
         (acc_out, apow_out)
+    }
+
+    /// One `SPONGE` instruction (Task 9): absorb the four cells at `src` into rate lanes 0–3 of
+    /// the state at `state`, permuted in place by the poseidon2 chip. `Ptr` deltas are folded
+    /// into the registers first, the `poseidon2` rule (`Builder::poseidon2`).
+    pub fn sponge_absorb(&mut self, state: Ptr, src: Ptr) {
+        self.begin();
+        let ra = self.ptr_reg(state);
+        let rb = self.ptr_reg(src);
+        self.emit(Op::Sponge, RRef::Raw(0), ra, bref_of(rb));
+        self.stats.perms += 1;
+    }
+
+    /// The register a `Ptr`'s address lives in, folding any compile-time delta in first.
+    fn ptr_reg(&mut self, p: Ptr) -> RRef {
+        let it = self.ptrs[p.0 as usize];
+        let holder = self.materialise(it.holder);
+        if it.delta == 0 {
+            holder
+        } else {
+            let s = self.take_scratch(1);
+            self.emit(Op::Faddi, RRef::scratch(s), holder, BRef::Imm(imm(it.delta)));
+            RRef::scratch(s)
+        }
     }
 
     // --------------------------------------------------------------- hashing

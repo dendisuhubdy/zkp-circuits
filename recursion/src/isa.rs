@@ -92,10 +92,15 @@ pub enum Op {
     /// descriptor. The work is the `reduce` chip's; one cpu row per run. M5.2 Task 8, appended —
     /// opcode 24; opcodes 0–23 never move.
     Reduce,
+    /// absorb the four cells at `rb..rb+4` into rate lanes 0..3 of the state at `ra..ra+8` and
+    /// permute the state in place — one `PaddingFreeSponge` absorb block. The work is the
+    /// poseidon2 chip's second row kind; one cpu row per block. M5.2 Task 9, appended —
+    /// opcode 25.
+    Sponge,
 }
 
 impl Op {
-    pub const COUNT: usize = 25;
+    pub const COUNT: usize = 26;
 
     /// Every opcode, at the index of its own discriminant (pinned by `tests/isa.rs`).
     pub const ALL: [Op; Self::COUNT] = [
@@ -124,6 +129,7 @@ impl Op {
         Op::Poseidon2,
         Op::Halt,
         Op::Reduce,
+        Op::Sponge,
     ];
 
     pub fn from_u8(x: u8) -> Option<Self> {
@@ -157,6 +163,7 @@ impl Op {
             Op::Poseidon2 => "POSEIDON2",
             Op::Halt => "HALT",
             Op::Reduce => "REDUCE",
+            Op::Sponge => "SPONGE",
         }
     }
 
@@ -168,7 +175,7 @@ impl Op {
     pub fn b_is_register(self) -> bool {
         matches!(
             self,
-            Op::Fadd | Op::Fsub | Op::Fmul | Op::Eadd | Op::Esub | Op::Emul | Op::Emulf
+            Op::Fadd | Op::Fsub | Op::Fmul | Op::Eadd | Op::Esub | Op::Emul | Op::Emulf | Op::Sponge
         )
     }
 }

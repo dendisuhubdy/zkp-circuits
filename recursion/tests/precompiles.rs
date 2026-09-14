@@ -172,3 +172,77 @@ fn a_program_without_reduce_has_no_reduce_instance() {
     assert_eq!(proof.reduce_log_height, 0, "no REDUCE row, no reduce instance");
     m.verify(&p, &proof).unwrap();
 }
+
+// ── Task 9: the SPONGE precompile as a poseidon2 row kind ─────────────────────────────────────
+use p3_symmetric::CryptographicHasher;
+use recursion::dsl::Liveness;
+
+/// The transcript.rs leaf-sponge differential, rerun with the precompile on: the SPONGE-instruction
+/// absorb loop and the compiled tail must produce exactly `PaddingFreeSponge`'s digest.
+#[test]
+fn sponge_via_the_precompile_matches_padding_free_sponge() {
+    use recursion::programs::Precompiles;
+    let perm = rand_zkvm::machine::permutation();
+    let sponge = p3_symmetric::PaddingFreeSponge::<rand_zkvm::machine::Perm, 8, 4, 4>::new(perm);
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(3);
+    for n in [1usize, 3, 4, 5, 8, 9, 37, 121] {
+        let msg: Vec<F> = (0..n).map(|_| common::random_felt(&mut rng)).collect();
+        let want: [F; 4] = sponge.hash_iter(msg.iter().copied());
+
+        let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, Precompiles::On);
+        let src = b.alloc(n as u64);
+        for (k, v) in msg.iter().enumerate() {
+            let hv = b.constant(*v);
+            b.store(src, k as i64, hv);
+        }
+        let out = recursion::dsl::Digest(b.alloc(4));
+        recursion::dsl::hash::sponge(&mut b, src, n, out);
+        for k in 0..4 {
+            let v = b.load(out.0, k);
+            b.public(v);
+        }
+        let got = execute(&b.finish(), &[], 1_000_000).unwrap().public;
+        assert_eq!(got, want.to_vec(), "n = {n}");
+    }
+}
+
+/// The sponge contract in a proof (joining Task 5's 1 000-state contract): a program absorbs
+/// 100 random buffers through the precompile and asserts each digest against the host's
+/// `PaddingFreeSponge`, proved and verified. (100, not 1 000, so the in-suite proof stays at
+/// tier 12; the chip-level 1 000-state equality contract is Task 5's `tests/poseidon2.rs`.)
+#[test]
+fn the_sponge_contract_holds_in_a_proof_over_one_hundred_random_buffers() {
+    use recursion::programs::Precompiles;
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(23);
+    let perm = rand_zkvm::machine::permutation();
+    let sponge = p3_symmetric::PaddingFreeSponge::<rand_zkvm::machine::Perm, 8, 4, 4>::new(perm);
+
+    let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, Precompiles::On);
+    let mut tape: Vec<F> = vec![];
+    let n = 12usize;
+    let src = b.alloc(n as u64);
+    let out = recursion::dsl::Digest(b.alloc(4));
+    for _ in 0..100 {
+        let msg: Vec<F> = (0..n).map(|_| common::random_felt(&mut rng)).collect();
+        let want: [F; 4] = sponge.hash_iter(msg.iter().copied());
+        for (k, v) in msg.iter().enumerate() {
+            let hv = b.hint();
+            tape.push(*v);
+            b.store(src, k as i64, hv);
+        }
+        recursion::dsl::hash::sponge(&mut b, src, n, out);
+        for k in 0..4 {
+            let v = b.load(out.0, k);
+            let w = b.constant(want[k as usize]);
+            b.assert_eq(v, w, "sponge digest must equal the reference");
+        }
+    }
+    for _ in 0..4 {
+        let z = b.zero();
+        b.public(z);
+    }
+    let p = b.finish();
+    let m = Machine::new(FriProfile::Test);
+    let (proof, _) = m.prove(&p, &tape, None).unwrap();
+    m.verify(&p, &proof).unwrap();
+}

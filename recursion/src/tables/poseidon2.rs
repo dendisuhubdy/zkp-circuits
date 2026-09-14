@@ -184,8 +184,14 @@ pub fn poseidon2_trace(events: &[(u32, PermEvent)], height: usize) -> RowMajorMa
             Some(&(clk, ev)) => {
                 r[IS_REAL] = F::ONE;
                 r[MULT] = F::ONE;
-                r[IS_PERM] = F::ONE;
                 r[PTR] = F::from_u64(ev.ptr);
+                match ev.src {
+                    None => r[IS_PERM] = F::ONE,
+                    Some(src) => {
+                        r[IS_SPONGE] = F::ONE;
+                        r[SRC_PTR] = F::from_u64(src);
+                    }
+                }
                 debug_assert_eq!(
                     ev.output,
                     rand_zkvm::tables::poseidon2::permute_scalar(ev.input),

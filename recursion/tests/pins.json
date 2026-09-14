@@ -1,7 +1,7 @@
 {
-  "cpu_rows": 2240988,
+  "cpu_rows": 1968619,
   "permutations": 51605,
-  "mem_accesses": 3008239,
+  "mem_accesses": 2705197,
   "witness_words": 199760,
-  "program_instrs": 2250791
+  "program_instrs": 1978422
 }

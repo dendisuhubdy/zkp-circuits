@@ -10,7 +10,7 @@ use recursion::isa::F;
 use recursion::tables::poseidon2::{col, poseidon2_log_height, poseidon2_trace, ROUNDS_F, ROUNDS_P};
 
 fn event(ptr: u64, input: [F; 8]) -> PermEvent {
-    PermEvent { ptr, input, output: rand_zkvm::hash::permute_state(input) }
+    PermEvent { ptr, input, output: rand_zkvm::hash::permute_state(input), src: None }
 }
 
 fn random_state(rng: &mut impl rand::Rng) -> [F; 8] {

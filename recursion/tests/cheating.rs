@@ -306,3 +306,71 @@ fn a_reduce_proof_declaring_no_table_is_rejected() {
         Err(recursion::machine::VerifyError::Tier)
     ));
 }
+
+// ── Task 9: the poseidon2 chip's SPONGE row kind tranche ──────────────────────────────────────
+
+/// An honest setup with one `SPONGE` absorb over a four-word message.
+fn sponge_setup() -> (Machine, Program, Traces) {
+    use recursion::dsl::{Builder, Checkpoints, Digest, Liveness};
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(41);
+    let mut b = Builder::with_liveness(Checkpoints::Off, Liveness::On);
+    let mut tape: Vec<F> = vec![];
+    let src = b.alloc(4);
+    for k in 0..4i64 {
+        let w = common::random_felt(&mut rng);
+        let v = b.hint();
+        tape.push(w);
+        b.store(src, k, v);
+    }
+    // Hint the words into the cells, then one absorb block: `sponge` emits one `SPONGE` here.
+    let out = Digest(b.alloc(4));
+    recursion::dsl::hash::sponge(&mut b, src, 4, out);
+    for k in 0..4 {
+        let v = b.load(out.0, k);
+        b.public(v);
+    }
+    let p = b.finish();
+    let m = Machine::new(FriProfile::Test);
+    let exec = execute(&p, &tape, 10_000).unwrap();
+    let t = build_traces(&p, &exec, Tier(8)).unwrap();
+    (m, p, t)
+}
+
+#[test]
+fn an_absorb_row_with_a_wrong_source_cell_is_rejected() {
+    let (m, p, mut t) = sponge_setup();
+    let w = memory::col::WIDTH;
+    // The RAM trace's read of the absorb's first source cell, shifted by one: read-after-write
+    // is the transition constraint that refuses it (the "wrong Merkle sibling" shape again).
+    let row = (0..t.ram.height()).find(|r| {
+        t.ram.values[r * w + memory::col::IS_REAL] == F::ONE
+            && t.ram.values[r * w + memory::col::IS_WRITE] == F::ZERO
+    }).unwrap();
+    t.ram.values[row * w + memory::col::VALUE] += F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_skipped_absorb_is_rejected() {
+    let (m, p, mut t) = sponge_setup();
+    let w = poseidon2::col::WIDTH;
+    // The absorb row vanishes (its SPONGE-bus claims go with it): the cpu's dispatch has no
+    // provider — `LOOKUP_BALANCE_PANIC` on `SPONGE`.
+    let row = (0..t.poseidon2.height()).find(|r| t.poseidon2.values[r * w + poseidon2::col::IS_SPONGE] == F::ONE).unwrap();
+    t.poseidon2.values[row * w + poseidon2::col::IS_SPONGE] = F::ZERO;
+    t.poseidon2.values[row * w + poseidon2::col::IS_REAL] = F::ZERO;
+    t.poseidon2.values[row * w + poseidon2::col::MULT] = F::ZERO;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_sponge_row_claiming_the_plain_poseidon2_kind_is_rejected() {
+    let (m, p, mut t) = sponge_setup();
+    let w = poseidon2::col::WIDTH;
+    // The absorb row claims to be a plain in-place permutation instead: the SPONGE bus loses
+    // its entry and POSEIDON2 gains one nobody dispatched.
+    let row = (0..t.poseidon2.height()).find(|r| t.poseidon2.values[r * w + poseidon2::col::IS_SPONGE] == F::ONE).unwrap();
+    t.poseidon2.values[row * w + poseidon2::col::IS_SPONGE] = F::ZERO;
+    t.poseidon2.values[row * w + poseidon2::col::IS_PERM] = F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}

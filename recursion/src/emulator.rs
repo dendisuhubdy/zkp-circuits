@@ -48,6 +48,9 @@ pub struct PermEvent {
     pub ptr: u64,
     pub input: [F; 8],
     pub output: [F; 8],
+    /// `Some(src)` for a `SPONGE` absorb (the four source cells at `src` feeding rate lanes 0–3),
+    /// `None` for a plain `POSEIDON2` (all eight cells from `ptr`).
+    pub src: Option<u64>,
 }
 
 /// One run of the batch-opening reduction a `REDUCE` row dispatches (Task 8): the descriptor
@@ -314,7 +317,7 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
                 for (k, value) in output.iter().enumerate() {
                     write(&mut mem, &mut mems, clk, ptr + k as u64, *value);
                 }
-                perm = Some(PermEvent { ptr, input, output });
+                perm = Some(PermEvent { ptr, input, output, src: None });
             }
             Op::Reduce => {
                 a[0] = regs[ra];
@@ -361,6 +364,27 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
                     apow: [d[7], d[8]],
                     alpha,
                 });
+            }
+            Op::Sponge => {
+                a[0] = regs[ra];
+                let rb = reg_b(&instr, pc)? as usize;
+                b_val[0] = regs[rb];
+                let ptr = a[0].as_canonical_u64();
+                let src = b_val[0].as_canonical_u64();
+                bounded(pc, ptr + 7)?;
+                bounded(pc, src + 3)?;
+                let mut input = [F::ZERO; 8];
+                for k in 0..4u64 {
+                    input[k as usize] = read(&mem, &mut mems, clk, src + k);
+                }
+                for k in 0..4u64 {
+                    input[4 + k as usize] = read(&mem, &mut mems, clk, ptr + 4 + k);
+                }
+                let output = rand_zkvm::hash::permute_state(input);
+                for (k, value) in output.iter().enumerate() {
+                    write(&mut mem, &mut mems, clk, ptr + k as u64, *value);
+                }
+                perm = Some(PermEvent { ptr, input, output, src: Some(src) });
             }
             Op::Halt => next_pc = pc,
         }

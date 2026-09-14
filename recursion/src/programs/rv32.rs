@@ -60,16 +60,8 @@ fn constant_cap(b: &mut Builder, cap: &[[crate::isa::F; 4]; 4]) -> [Digest; 4] {
     std::array::from_fn(|i| Digest(b.offset(p, (i * DIGEST_ELEMS) as i64)))
 }
 
-/// Should the build use the Task 8/9 precompiles? `Off` compiles the reduction (and later the
-/// leaf sponges) as ordinary instruction sequences — the differential reference — `On` emits
-/// `REDUCE`/`SPONGE`. The shipped program is always `On`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Precompiles {
-    Off,
-    On,
-}
-
 /// Builds the verifier program for one inner shape.
+pub use crate::dsl::Precompiles;
 pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> VerifierProgram {
     verify_rv32_with(shape, key, cp, crate::dsl::Liveness::On, Precompiles::On)
 }
@@ -85,7 +77,7 @@ pub fn verify_rv32_with(
     pc: Precompiles,
 ) -> VerifierProgram {
     let n = shape.instances();
-    let mut b = Builder::with_liveness(cp, liveness);
+    let mut b = Builder::with_opts(cp, liveness, pc);
     let mark = |b: &mut Builder, name: &'static str| b.note_phase(name);
 
     // ── phase 0: the header. Read the proof's declared shape and pin it to this program's own, so
@@ -281,7 +273,7 @@ pub fn verify_rv32_with(
     }
     mark(&mut b, "query segments: tape reads");
     b.unrolled(shape.num_queries, |b, q| {
-        emit_query(b, pc, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
+        emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
                    &index_bits[q], &all_rows[q], &all_paths[q], &all_commit_openings[q],
                    &all_commit_paths[q]);
     });
@@ -553,7 +545,6 @@ fn read_commit_paths(b: &mut Builder, shape: &InnerShape) -> Vec<Array<Felt>> {
 #[allow(clippy::too_many_arguments)]
 fn emit_query(
     b: &mut Builder,
-    pc: Precompiles,
     shape: &InnerShape,
     opened: &QueryOpenings,
     metas: &[RoundMeta],
@@ -576,7 +567,7 @@ fn emit_query(
     }
 
     // ── the batch-opening reduction.
-    let ros = emit_reduced_openings(b, pc, shape, index_bits, fri_alpha, opened, &rows);
+    let ros = emit_reduced_openings(b, shape, index_bits, fri_alpha, opened, &rows);
 
     // ── the fold chain (`fold_query`, verifier.rs:523-671).
     let mut ros: BTreeMap<usize, Ext> = ros.into_iter().collect();
@@ -798,7 +789,6 @@ fn bit_indicator(b: &mut Builder, bits: &[Felt], v: usize) -> Felt {
 /// semantics.
 fn emit_reduced_openings(
     b: &mut Builder,
-    pc: Precompiles,
     shape: &InnerShape,
     index_bits: &[Felt],
     fri_alpha: Ext,
@@ -833,7 +823,7 @@ fn emit_reduced_openings(
                     .copied()
                     .unwrap_or_else(|| (b.ext_constant(EF::ONE), b.ext_constant(EF::ZERO)));
                 let row = rows[ri][mi];
-                (ro, alpha_pow) = match pc {
+                (ro, alpha_pow) = match b.precompiles() {
                     // The compiled loop, kept as the precompile's differential reference.
                     Precompiles::Off => reduce_compiled(b, *vals, row, inv, ro, alpha_pow, fri_alpha),
                     // Task 8: one `REDUCE` instruction for the whole run.
