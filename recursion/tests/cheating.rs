@@ -374,3 +374,38 @@ fn a_sponge_row_claiming_the_plain_poseidon2_kind_is_rejected() {
     t.poseidon2.values[row * w + poseidon2::col::IS_PERM] = F::ONE;
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
+
+// ── Task 10: the full-suite pass — the remaining per-table tamper vectors ─────────────────────
+
+#[test]
+fn a_padding_row_with_a_selector_set_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = cpu::col::WIDTH;
+    // AGENTS.md invariant 2: on a padding row every send count is a selector expression, so one
+    // hot selector is one sum over `IS_REAL = 0` — the count constraint itself refuses it before
+    // any bus comes into it.
+    let pad = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_REAL] == F::ZERO).unwrap();
+    t.cpu.values[pad * w + cpu::col::SEL0 + Op::Fadd as usize] = F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_forged_memory_delta_limb_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = memory::col::WIDTH;
+    // The `(addr, ts)` sort's delta, forged by one limb: the delta-equality constraint fails on
+    // the row (and a forged limb is exactly what the RANGE8 lookup exists to refuse).
+    let row = (0..t.ram.height()).find(|r| t.ram.values[r * w + memory::col::IS_REAL] == F::ONE).unwrap();
+    t.ram.values[row * w + memory::col::D0] += F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_published_value_out_of_order_is_rejected() {
+    let (m, p, mut t) = setup();
+    let w = public_table::col::WIDTH;
+    // Rows 1 and 2 of the public table swapped: `SEL_i·(IDX − i) = 0` and `VALUE = pv[i]` cannot
+    // both hold on the swapped rows.
+    t.public.values.swap(1 * w + public_table::col::VALUE, 2 * w + public_table::col::VALUE);
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}

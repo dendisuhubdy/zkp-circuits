@@ -278,16 +278,18 @@ fn the_committed_program_digest_is_reproducible() {
     }
 }
 
-// ── M5.2 Task 6: the machine's rehearsal ──────────────────────────────────────────────────────
+// ── M5.2 Task 10: the test-profile exit twin ──────────────────────────────────────────────────
 
-/// The Task-6 gate: **the full M5.1 verifier program over one test-profile bundle proof, proved
-/// and verified natively** by the rVM machine — the pre-cut program, 1 210 045 rows, tier 21.
-/// `#[ignore]`d for its cost, with the sizing from the M5.2 plan: ~32 GB of committed oracle,
-/// ~40 GB peak resident, ~10–20 min on the development machine. This is the "the machine proves
-/// the real thing" gate before the row-cut tasks (7–9), and the exact shape of Task 10's exit.
+/// The Task-10 twin: **the post-cut verifier program over one real test-profile bundle proof,
+/// proved and verified natively** — 441 643 rows, tier 19, with the exact shape of Task 10's
+/// production exit (tier 21, ~2 M rows). `#[ignore]`d for its cost (~11–14 GB peak per the
+/// sizing derivation in `recursion/docs/01-rvm-machine.md`, ~2–5 min). The sibling
+/// `cheating.rs`'s `a_proof_of_one_program_does_not_verify_another` covers the small-scale case;
+/// here the R1 binding is checked at full scale: a proof of the verifier program never verifies
+/// against a *different* program's key.
 #[test]
-#[ignore = "the M5.2 Task-6 rehearsal: tier 21, ~40 GB peak, ~10-20 min; run: cargo +1.98.1 test -p recursion --test exit rehearsal -- --ignored --nocapture"]
-fn rehearsal_the_verifier_program_over_one_test_profile_proof_proves_and_verifies_natively() {
+#[ignore = "the M5.2 Task-10 twin: post-cut program, tier 19, ~11-14 GB peak, ~2-5 min; run: cargo +1.98.1 test -p recursion --test exit twin -- --ignored --nocapture"]
+fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_verifies_natively() {
     let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
     let shape = InnerShape::of(FriProfile::Test, p.proof.tier, p.proof.program_log_height,
         p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height,
@@ -299,11 +301,63 @@ fn rehearsal_the_verifier_program_over_one_test_profile_proof_proves_and_verifie
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 1_210_045, "the rehearsal proves the pre-cut program as measured");
+    assert_eq!(exec.cpu_rows(), 441_643, "the twin proves the post-cut program as measured");
+    assert_eq!(rvm_proof.tier, recursion::machine::Tier(19));
+    let t1 = std::time::Instant::now();
+    m.verify(&vp.program, &rvm_proof).unwrap();
+    println!("twin: prove {prove_s:.1}s, verify {:.2}s, proof {} bytes, public values {:?}",
+             t1.elapsed().as_secs_f64(), rvm_proof.size(), rvm_proof.public_values);
+    assert_eq!(rvm_proof.public_values.len(), 4);
+
+    // R1 at full scale: the preprocessed cap binds the program, so the same proof never verifies
+    // against a different program's key.
+    let mut other_vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    other_vp.program.instrs[123] = recursion::isa::Instr { op: recursion::isa::Op::Faddi, rd: 9, ra: 0, b: recursion::isa::F::from_u64(1) };
+    assert!(m.verify(&other_vp.program, &rvm_proof).is_err(),
+            "a proof of one program never verifies against another's key (R1)");
+}
+
+/// The M5.2 exit (spec §7, verbatim): an rVM proof of the post-cut verifier program's execution
+/// over **one real cs6 production-profile bundle proof** verifies natively. Written and measured
+/// in Task 10 against the derived requirement in `recursion/docs/01-rvm-machine.md`: the
+/// committed oracle is 48.6 GB by the calibrated formula, so the exit runs on a **≥ 64 GB**
+/// machine (`research/docs/04-guests.md`'s big-proof class) — this 48 GB box cannot hold it, and
+/// it is not attempted here.
+#[test]
+#[ignore = "the M5.2 exit: production profile, post-cut program, tier 21, ~1 968 619 rows; \
+            needs >= 64 GB (committed oracle 48.6 GB derived in recursion/docs/01-rvm-machine.md; \
+            est. 43-61 GB peak, est. 20-40 min). Run on the big machine: \
+            cargo +1.98.1 test -p recursion --release --test exit -- --ignored --nocapture"]
+fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_natively() {
+    let p = common::bundle_proofs(FriProfile::Production, 1).pop().unwrap();
+    let shape = InnerShape::of(FriProfile::Production, p.proof.tier, p.proof.program_log_height,
+        p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height,
+        p.proof.mem_log_height);
+    let key = InnerKey::of(FriProfile::Production, &shape);
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    assert_eq!(recursion::programs::digest_hex(&vp.program), common::committed_digest(),
+               "the registered program is the committed one");
+    let tape = WitnessTape::build(FriProfile::Production, &shape, &key, &p.proof).unwrap();
+    let m = recursion::machine::Machine::new(FriProfile::Production);
+    let t0 = std::time::Instant::now();
+    let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
+    let prove_s = t0.elapsed().as_secs_f64();
+    assert_eq!(exec.cpu_rows(), 1_968_619, "the exit proves the post-cut program as measured");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(21));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();
-    println!("rehearsal: prove {prove_s:.1}s, verify {:.1}s, proof {} bytes, public values {:?}",
-             t1.elapsed().as_secs_f64(), rvm_proof.size(), rvm_proof.public_values);
+    let verify_s = t1.elapsed().as_secs_f64();
+    println!("exit: prove {prove_s:.1}s, verify {verify_s:.2}s, proof {} bytes, public values {:?}",
+             rvm_proof.size(), rvm_proof.public_values);
     assert_eq!(rvm_proof.public_values.len(), 4);
+
+    // A tampered inner proof makes the program trap: no proof exists.
+    let mut bad_tape = tape.words.clone();
+    let (_, start, len) = *tape.segments.iter().find(|(s, _, _)| *s == Segment::OpenedValues).unwrap();
+    assert!(len > 0);
+    bad_tape[start] += F::ONE;
+    assert!(
+        matches!(m.prove(&vp.program, &bad_tape, None), Err(recursion::machine::ProveError::Exec(_))),
+        "a tampered inner proof traps the program — no proof exists"
+    );
 }

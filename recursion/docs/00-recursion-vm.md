@@ -254,3 +254,10 @@ to revisit this paragraph.
   (above), replacing spec §7's cost model: `TIERS`, `poseidon2_log_height` and the memory table's
   height are cut from these, and they say one inner proof wants ~2^23 cpu rows, not 2^19.
 - The precompile question answered with a measurement: not `FRIFOLD`/`EXPBITS`.
+
+**Superseded (M5.2 built, 2026-09-15).** The machine this section hands to exists now: the ISA
+is at 26 instructions (`REDUCE` = 24, `SPONGE` = 25; 0–23 frozen), the program is three row cuts
+smaller (5 682 847 → 1 968 619, tier 21), and the measured machine numbers — tables, buses,
+tiers, widths, degrees, the three cuts' deltas and gates, the test-profile twin's times and proof
+size, and the production exit's derived resource requirement — live in
+`docs/01-rvm-machine.md`. This section remains as the record of what M5.1 actually handed over.
