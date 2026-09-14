@@ -9,7 +9,7 @@ use recursion::dsl::Checkpoints;
 use recursion::emulator::{execute, ExecError};
 use recursion::isa::F;
 use recursion::programs::{cycle_report, verify_rv32};
-use recursion::shape::{inner_vk_digest, InnerKey, InnerShape};
+use recursion::shape::{InnerKey, InnerShape};
 use recursion::witness::{Segment, WitnessTape};
 
 const MAX_CYCLES: usize = 1 << 24;
@@ -27,10 +27,11 @@ fn accept_all(profile: FriProfile, n: usize) -> Vec<usize> {
         assert_eq!(vp.shape, shape, "every fixture proof must share one shape");
         let tape = WitnessTape::build(profile, &shape, &key, &p.proof).unwrap();
         let exec = execute(&vp.program, &tape.words, MAX_CYCLES).expect("accepts a real proof");
-        let mut want = inner_vk_digest(&shape, &key).to_vec();
-        want.push(F::ONE);
-        want.extend(p.proof.public_values.iter().map(|x| F::from_u64(*x)));
-        assert_eq!(exec.public, want, "§4.4's public values, exactly");
+        // R5: the run publishes exactly the four-element interface digest; the node recomputes
+        // the §4.4 list from the bundles and compares digests.
+        let words = recursion::public_values::interface_words(&shape, &key, &[p.proof.public_values.clone()]);
+        assert_eq!(exec.public, recursion::public_values::public_digest(&words).to_vec(),
+                   "the interface digest, exactly");
         rows.push(exec.cpu_rows());
     }
     rows

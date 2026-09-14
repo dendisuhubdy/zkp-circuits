@@ -98,18 +98,30 @@ log:
 
 | | `FriProfile::Test` (16 queries) | `FriProfile::Production` (80 queries) |
 |---|---:|---:|
-| cpu rows | 1 209 871 | **5 682 847** |
-| Poseidon2 permutations | 11 195 | **51 595** |
-| memory accesses | 1 365 013 | 6 354 037 |
-| program instructions | 1 211 914 | 5 692 650 |
+| cpu rows | 1 210 045 | **5 683 021** |
+| Poseidon2 permutations | 11 205 | **51 605** |
+| memory accesses | 1 365 368 | 6 354 392 |
+| program instructions | 1 212 087 | 5 692 824 |
 | witness words read | 43 344 | 199 760 |
 | tape words | 43 344 | 199 760 |
 
 The program is straight-line in the proof's data: every proof of the shape costs the same rows
 (asserted by the exit test on 5 test-profile and 50 production-profile proofs). The production
 row is pinned in `tests/pins.json`; the production program's digest
-(`Checkpoints::Off`, `01c6471433d31791aa8967b32047b86d55182c01259cc9ccb2b022a9d5043d86`) in
+(`Checkpoints::Off`, `c1c04ac3a9faf266eb8980260dae6c7f12fe9ee4cf3dfa40de8440182258d731`) in
 `src/programs/verify_rv32.digest`.
+
+**M5.2 Task 4 re-pin (2026-09-14, ruling R5).** The table above is the *current* program's
+measurement, re-taken after phase 8 changed from thirty-nine raw `PUBLIC` rows to the
+four-element **interface digest**: the §4.4 list (vk digest, `N`, the 34 inner public values) is
+stored, sponged with a capacity-seeded header (`RVM_PUB_DOMAIN = 17`, the `Program::digest`
+construction — the proof's batch public values are always exactly those four elements, the cs6
+`H_PUB` pattern; the node recomputes the list from the covered bundles and compares digests).
+The measured delta against the M5.1 measurement: +174 cpu rows (5 682 847 → 5 683 021), +10
+permutations (51 595 → 51 605, `ceil(39/4)`), +355 memory accesses; witness and tape unchanged.
+The pre-R5 numbers remain the ones in the "Where the rows go" and "precompile decision" sections
+below — their structure (the reduction and spill terms) is untouched by phase 8, and M5.2's Tasks
+7–9 re-measure everything again anyway.
 
 ### Where the rows go
 

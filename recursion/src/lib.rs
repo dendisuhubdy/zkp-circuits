@@ -32,6 +32,7 @@ pub mod emulator;
 pub mod isa;
 pub mod machine;
 pub mod programs;
+pub mod public_values;
 pub mod reference;
 pub mod shape;
 pub mod tables;

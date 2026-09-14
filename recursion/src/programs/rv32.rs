@@ -21,6 +21,7 @@ use crate::dsl::transcript::DslChallenger;
 use crate::dsl::{Array, Builder, Checkpoints, Digest, Ext, Felt, Ptr, DIGEST_ELEMS};
 use crate::emulator::Execution;
 use crate::isa::{Program, EF, F};
+use crate::public_values::RVM_PUB_DOMAIN;
 use crate::shape::{
     natural_domain, InnerKey, InnerShape, CAP_HEIGHT, LOG_BLOWUP, NUM_RANDOM_CODEWORDS,
     PV_INSTANCE, RVM_VK_DOMAIN,
@@ -273,11 +274,14 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     });
     mark(&b, "queries: merkle walks, reduction, folds");
 
-    // ── phase 8: acceptance and spec §4.4's public values ──────────────────────────────────────
+    // ── phase 8: acceptance and the interface digest (R5) ────────────────────────────────────
     //
     // `inner_vk_digest`, recomputed in-program from the compile-time shape words and the key's
-    // cap (so it is bound by the program digest twice over), then `N = 1`, then the 34 inner
-    // public values read in phase 2 (constraint set 6 grew them by `PUB0..7`).
+    // cap (so it is bound by the program digest twice over), then the §4.4 list — the vk digest,
+    // `N = 1`, the 34 inner public values — stored, sponged with the capacity header, and the
+    // digest's four lanes published. The batch public values are always exactly those four (R5):
+    // the node recomputes the list from the covered bundles' public fields and compares digests
+    // (the cs6 `H_PUB` pattern). What used to be thirty-nine `PUBLIC` rows is the digest's four.
     let words = shape.shape_words();
     let mut msg = Vec::with_capacity(1 + words.len() + CAP_WORDS);
     msg.push(F::from_u64(RVM_VK_DOMAIN));
@@ -290,17 +294,25 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     }
     let vk = Digest(b.alloc(DIGEST_ELEMS as u64));
     hash::sponge(&mut b, src, msg.len(), vk);
+    let n_list = DIGEST_ELEMS + 1 + shape.num_public_values[PV_INSTANCE];
+    let list = b.alloc(n_list as u64);
     for lane in 0..DIGEST_ELEMS as i64 {
         let v = b.load(vk.0, lane);
-        b.public(v);
+        b.store(list, lane, v);
     }
     let one = b.constant(F::ONE);
-    b.public(one);
+    b.store(list, DIGEST_ELEMS as i64, one);
     for k in 0..shape.num_public_values[PV_INSTANCE] {
         let v = b.get(pvs, k);
+        b.store(list, (DIGEST_ELEMS + 1 + k) as i64, v);
+    }
+    let interface = Digest(b.alloc(DIGEST_ELEMS as u64));
+    hash::sponge_seeded(&mut b, RVM_PUB_DOMAIN, list, n_list, interface);
+    for lane in 0..DIGEST_ELEMS as i64 {
+        let v = b.load(interface.0, lane);
         b.public(v);
     }
-    mark(&b, "phase 8: §4.4 public values");
+    mark(&b, "phase 8: the interface digest (R5)");
 
     let stats = b.stats();
     let checkpoint_names = b.checkpoint_names().to_vec();

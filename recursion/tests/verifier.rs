@@ -602,13 +602,11 @@ fn the_quotient_identity_holds_in_the_program_for_a_real_proof() {
     let vp = verify_rv32(&shape, &key, Checkpoints::Off);
     let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
     let exec = execute(&vp.program, &tape.words, 200_000_000).expect("accepts a real proof");
-    // Spec §4.4's own list, exactly: `4 + 1 + 34` (constraint set 6 grew the inner list to 34).
-    // (At Task 5's boundary the `Off` build published
-    // nothing yet; Task 6's finished program publishes these.)
-    let mut want = recursion::shape::inner_vk_digest(&shape, &key).to_vec();
-    want.push(F::ONE);
-    want.extend(p.proof.public_values.iter().map(|x| F::from_u64(*x)));
-    assert_eq!(exec.public, want, "§4.4's public values, exactly");
+    // R5: exactly the four-element interface digest (the §4.4 list, hashed in-circuit — the
+    // in-circuit seeded sponge and the host's `public_digest` are pinned to each other here).
+    let words = recursion::public_values::interface_words(&shape, &key, &[p.proof.public_values.clone()]);
+    assert_eq!(exec.public, recursion::public_values::public_digest(&words).to_vec(),
+               "the interface digest, exactly");
     // And it got there by reading the *whole* tape, not by stopping short of it: without that this
     // test would pass on a program with no query phase at all.
     assert_eq!(exec.hints_read, tape.len());
@@ -708,10 +706,11 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
     );
     // Hashing: phases 0–4 cost the challenger's 51 duplexes and phase 5 hashes nothing; the rest
     // is the query phase — the FRI transcript's duplexes, the five input rounds' leaf sponges,
-    // walks and injections, and the commit-phase rows and walks. Pinned at the measured
-    // Test-profile number (constraint set 6's shape); the production one lives in
+    // walks and injections, and the commit-phase rows and walks — plus phase 8's interface
+    // digest (R5): a 39-word seeded sponge, `ceil(39/4)` = 10 permutations. Pinned at the
+    // measured Test-profile number (constraint set 6's shape); the production one lives in
     // `docs/00-recursion-vm.md` and `pins.json`.
-    assert_eq!(exec.permutations(), 11_195, "51 transcript duplexes in phases 0–4, the rest is the query phase");
+    assert_eq!(exec.permutations(), 11_205, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
 }
 
 /// Every assertion phase 5 makes is a *named* checkpoint, and the names are the interface Task 6's

@@ -36,6 +36,7 @@ use crate::isa::{DecodeError, Instr, Op, Program, NUM_REGS};
 use crate::tables::memory::MemoryAir;
 use crate::tables::pad_height;
 use crate::tables::program::ProgramAir;
+use crate::tables::public::PublicAir;
 use crate::tables::range::RangeAir;
 
 /// Fixed seed for the rVM's `key_config` RNGs — the role of `research`'s `machine::KEY_SEED`
@@ -291,6 +292,7 @@ pub fn chips(program: &Arc<Program>, _tier: Tier, _reduce_log_height: u8) -> Vec
         Chip::Program(ProgramAir::new(program.clone())),
         Chip::RegMemory(MemoryAir { register: true }),
         Chip::RamMemory(MemoryAir { register: false }),
+        Chip::Public(PublicAir),
         Chip::Range(RangeAir),
     ]
 }
@@ -304,6 +306,7 @@ fn current_degree_bits(program: &Program, _tier: Tier) -> Vec<usize> {
         program_log_height(program.instrs.len()) as usize + zk,
         MIN_LOG_HEIGHT as usize + zk,
         MIN_LOG_HEIGHT as usize + zk,
+        PUBLIC_LOG_HEIGHT as usize + zk,
         crate::tables::range::HEIGHT.trailing_zeros() as usize + zk,
     ]
 }
@@ -314,6 +317,7 @@ pub enum Chip {
     Program(ProgramAir),
     RegMemory(MemoryAir),
     RamMemory(MemoryAir),
+    Public(PublicAir),
     Range(RangeAir),
 }
 
@@ -322,6 +326,7 @@ impl p3_air::BaseAir<Val> for Chip {
         match self {
             Chip::Program(a) => p3_air::BaseAir::<Val>::width(a),
             Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::BaseAir::<Val>::width(a),
+            Chip::Public(a) => p3_air::BaseAir::<Val>::width(a),
             Chip::Range(a) => p3_air::BaseAir::<Val>::width(a),
         }
     }
@@ -329,6 +334,7 @@ impl p3_air::BaseAir<Val> for Chip {
         match self {
             Chip::Program(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
             Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
+            Chip::Public(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
             Chip::Range(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
         }
     }
@@ -336,7 +342,15 @@ impl p3_air::BaseAir<Val> for Chip {
         match self {
             Chip::Program(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
             Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
+            Chip::Public(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
             Chip::Range(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
+        }
+    }
+    /// The public table owns the batch's public values (R5); every other chip declares none.
+    fn num_public_values(&self) -> usize {
+        match self {
+            Chip::Public(a) => p3_air::BaseAir::<Val>::num_public_values(a),
+            _ => 0,
         }
     }
 }
@@ -349,6 +363,7 @@ where
         match self {
             Chip::Program(a) => p3_air::Air::eval(a, b),
             Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::Air::eval(a, b),
+            Chip::Public(a) => p3_air::Air::eval(a, b),
             Chip::Range(a) => p3_air::Air::eval(a, b),
         }
     }

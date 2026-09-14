@@ -109,3 +109,56 @@ fn register_and_ram_histories_split_by_address_class() {
     assert_eq!(cell(&rt, 1, col::VALUE), F::from_u64(11));
     assert_eq!(cell(&mt, 1, col::VALUE), F::from_u64(22));
 }
+
+// ── Task 4: the public table and the interface digest ────────────────────────────────────────
+use recursion::public_values::{public_digest, RVM_PUB_DOMAIN};
+use recursion::tables::public::{col as pcol, public_trace, HEIGHT as PUBLIC_HEIGHT};
+
+#[test]
+fn the_public_trace_pins_one_selector_per_real_row_and_none_on_padding() {
+    let published = [F::from_u64(11), F::from_u64(22), F::from_u64(33), F::from_u64(44)];
+    let t = public_trace(&published, PUBLIC_HEIGHT);
+    for i in 0..4 {
+        assert_eq!(cell(&t, i, pcol::IDX).as_canonical_u64(), i as u64);
+        assert_eq!(cell(&t, i, pcol::VALUE), published[i]);
+        assert_eq!(cell(&t, i, pcol::IS_REAL), F::ONE);
+        for j in 0..4 {
+            assert_eq!(cell(&t, i, pcol::SEL0 + j), if i == j { F::ONE } else { F::ZERO }, "SEL_{j} on row {i}");
+        }
+    }
+    for i in 4..PUBLIC_HEIGHT {
+        assert_eq!(cell(&t, i, pcol::IS_REAL), F::ZERO);
+        for j in 0..4 {
+            assert_eq!(cell(&t, i, pcol::SEL0 + j), F::ZERO, "no selector on padding row {i}");
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "the interface digest is always four words")]
+fn the_public_trace_accepts_exactly_four_published_words() {
+    public_trace(&[F::ONE, F::TWO], PUBLIC_HEIGHT);
+}
+
+#[test]
+fn the_interface_digest_is_capacity_seeded_and_binds_length() {
+    // The construction, pinned against accidental change: domain and length in the capacity
+    // lanes, then one permutation per four-word block with the padding-free partial rule.
+    let words: Vec<F> = (1..=39u64).map(F::from_u64).collect();
+    let mut state = [F::ZERO; 8];
+    state[4] = F::from_u64(RVM_PUB_DOMAIN);
+    state[5] = F::from_u64(39);
+    let mut done = 0;
+    while done < 39 {
+        let k = (39 - done).min(4);
+        state[..k].copy_from_slice(&words[done..done + k]);
+        state = rand_zkvm::hash::permute_state(state);
+        done += k;
+    }
+    assert_eq!(public_digest(&words), <[F; 4]>::try_from(&state[..4]).unwrap());
+    // A different length is a different digest even on a shared prefix (the capacity length) —
+    // the padding-free-sponge concern `research/AGENTS.md` records, closed by construction.
+    assert_ne!(public_digest(&words), public_digest(&words[..38]));
+    // The domain does not collide with the program (15) or inner-vk (16) domains.
+    assert_eq!(RVM_PUB_DOMAIN, 17);
+}

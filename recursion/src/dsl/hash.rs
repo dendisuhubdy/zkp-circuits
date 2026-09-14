@@ -23,7 +23,8 @@
 //! this module may point into that region.
 
 use super::{Builder, Digest, Felt, Ptr};
-use crate::isa::Op;
+use crate::isa::{Op, F};
+use p3_field::PrimeCharacteristicRing;
 
 /// A digest is four field elements on this machine (re-exported so `hash::DIGEST_ELEMS` reads as one
 /// idea with [`super::DIGEST_ELEMS`] rather than two constants that happen to agree).
@@ -63,6 +64,35 @@ pub fn sponge(b: &mut Builder, src: Ptr, n: usize, out: Digest) {
     // Lanes the first block overwrites need no zeroing; every other lane must start at zero, and
     // *stay* whatever the previous permutation left it after that — the padding-free rule.
     b.zero_cells(st, first as i64, WIDTH - first);
+    let mut done = 0;
+    while done < n {
+        let k = (n - done).min(RATE);
+        b.copy_cells(st, 0, src, done as i64, k);
+        b.poseidon2(st);
+        done += k;
+    }
+    b.copy_cells(out.0, 0, st, 0, DIGEST_ELEMS);
+}
+
+/// The capacity-seeded sponge (plan R5): the `Program::digest` construction generalized to a
+/// word slice — the state starts as `[0, 0, 0, 0, domain, n, 0, 0]` (the domain tag and the word
+/// count in the *capacity* lanes, so two different lengths are different digests by
+/// construction), then the absorb loop is [`sponge`]'s own, overwrite rule included. The host
+/// twin is `public_values::public_digest`; `tests/verifier.rs` pins the two to each other on
+/// every fixture, and `tests/tables.rs` pins the construction itself.
+///
+/// Measured against `sponge`: the same `ceil(n / 4)` permutations plus the four header rows.
+pub fn sponge_seeded(b: &mut Builder, domain: u64, src: Ptr, n: usize, out: Digest) {
+    assert!(n >= 1, "a padding-free sponge over an empty message is not a hash");
+    let st = b.hash_scratch();
+    // Lanes 0..4 start zero (a short first block's unreached lanes stay zero, the padding-free
+    // rule); lanes 4..6 are the header; lane 7 starts zero.
+    b.zero_cells(st, 0, 4);
+    let d = b.constant(F::from_u64(domain));
+    b.store(st, 4, d);
+    let l = b.constant(F::from_u64(n as u64));
+    b.store(st, 5, l);
+    b.zero_cells(st, 6, 2);
     let mut done = 0;
     while done < n {
         let k = (n - done).min(RATE);
