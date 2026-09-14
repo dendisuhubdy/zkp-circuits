@@ -38,6 +38,7 @@ fn event(clk: u32, pc: u32) -> Event {
         d: [F::ZERO; 2],
         mem: vec![],
         perm: None,
+        reduce: None,
     }
 }
 

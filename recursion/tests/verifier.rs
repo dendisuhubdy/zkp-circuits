@@ -761,14 +761,14 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
         p.proof.sha256_log_height, p.proof.public_log_height, p.proof.mem_log_height,
     );
     let key = InnerKey::of(FriProfile::Production, &shape);
-    let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off);
+    let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
         "c1c04ac3a9faf266eb8980260dae6c7f12fe9ee4cf3dfa40de8440182258d731",
         "the Off replay must reproduce the pre-Task-7 stream byte for byte"
     );
 
-    let on = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::On);
+    let on = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::On, recursion::programs::Precompiles::On);
     assert_ne!(off.program.digest(), on.program.digest(), "liveness changes the schedule");
 
     // The acceptance differential: both builds accept a real proof with identical public values.

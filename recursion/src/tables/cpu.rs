@@ -25,38 +25,38 @@ pub mod col {
     pub const RD: usize = 4;
     pub const RA: usize = 5;
     pub const B: usize = 6;
-    /// 24: one-hot opcode selectors, in `Op as u8` order (Tasks 8–9 append two more).
+    /// 25: one-hot opcode selectors, in `Op as u8` order (Task 9 appends one more).
     pub const SEL0: usize = 7;
     /// The operand values: the `ra` pair, the `rb` pair (or `[imm, 0]`), the result pair.
-    pub const A0: usize = 31;
-    pub const A1: usize = 32;
-    pub const B0: usize = 33;
-    pub const B1: usize = 34;
-    pub const D0: usize = 35;
-    pub const D1: usize = 36;
+    pub const A0: usize = 32;
+    pub const A1: usize = 33;
+    pub const B0: usize = 34;
+    pub const B1: usize = 35;
+    pub const D0: usize = 36;
+    pub const D1: usize = 37;
     /// 5-bit decompositions of the three register indices — the `rd, ra, rb < 32` decode check
     /// the emulator performs, and what makes every `REG` address `2^24 + idx` with `idx < 32`.
-    pub const RD_BIT0: usize = 37; // 5
-    pub const RA_BIT0: usize = 42; // 5
-    pub const RB_BIT0: usize = 47; // 5
+    pub const RD_BIT0: usize = 38; // 5
+    pub const RA_BIT0: usize = 43; // 5
+    pub const RB_BIT0: usize = 48; // 5
     /// The 3 address limbs of the row kind's address subject (a `RANGE8` lookup each).
-    pub const LIMB0: usize = 52;
-    pub const LIMB1: usize = 53;
-    pub const LIMB2: usize = 54;
+    pub const LIMB0: usize = 53;
+    pub const LIMB1: usize = 54;
+    pub const LIMB2: usize = 55;
     /// The `r0` write-drop gadget (the `alu.rs` two-constraint pattern).
-    pub const RD_IS_ZERO: usize = 55;
-    pub const RD_INV: usize = 56;
+    pub const RD_IS_ZERO: usize = 56;
+    pub const RD_INV: usize = 57;
     /// The branch equality gadget on `D0 − A0`.
-    pub const EQ_AUX: usize = 57;
-    pub const EQ_INV: usize = 58;
+    pub const EQ_AUX: usize = 58;
+    pub const EQ_INV: usize = 59;
     /// The running count of `PUBLIC` rows.
-    pub const PUB_IDX: usize = 59;
-    pub const IS_REAL: usize = 60;
-    pub const WIDTH: usize = 61;
+    pub const PUB_IDX: usize = 60;
+    pub const IS_REAL: usize = 61;
+    pub const WIDTH: usize = 62;
 }
 use col::*;
 
-pub const NUM_SELECTORS: usize = 24;
+pub const NUM_SELECTORS: usize = 25;
 
 /// Timestamp slots of the row's `REG` messages (the `RAM` messages use the emulator's own slots:
 /// 0..1 for the cpu's loads/stores, 0..15 for a dispatched permutation — see `emulator.rs`).
@@ -258,6 +258,7 @@ where
 
         // ── the dispatched chips and the public interface ──
         bus::POSEIDON2.lookup_key(b, [v(CLK), v(A0)], Count::bounded(sel(Op::Poseidon2), 1));
+        bus::REDUCE.lookup_key(b, [v(CLK), v(A0)], Count::bounded(sel(Op::Reduce), 1));
         bus::PUBLIC.lookup_key(b, [v(PUB_IDX), v(A0)], Count::bounded(sel(Op::Public), 1));
     }
 }

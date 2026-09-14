@@ -98,17 +98,17 @@ log:
 
 | | `FriProfile::Test` (16 queries) | `FriProfile::Production` (80 queries) |
 |---|---:|---:|
-| cpu rows | 858 343 | **4 052 455** |
+| cpu rows | 496 028 | **2 240 988** |
 | Poseidon2 permutations | 11 205 | **51 605** |
-| memory accesses | 753 808 | 3 488 864 |
-| program instructions | 860 386 | 4 062 258 |
+| memory accesses | 657 567 | 3 008 239 |
+| program instructions | 498 071 | 2 250 791 |
 | witness words read | 43 344 | 199 760 |
 | tape words | 43 344 | 199 760 |
 
 The program is straight-line in the proof's data: every proof of the shape costs the same rows
 (asserted by the exit test on 5 test-profile and 50 production-profile proofs). The production
 row is pinned in `tests/pins.json`; the production program's digest
-(`Checkpoints::Off`, `361613706a683c0cb08f2db1eb010bc5694cbd0f0d756d4a6dc15531ba7ad717`) in
+(`Checkpoints::Off`, `7606f17b9cb9a92493afb65629b6c3af6d93595d7255467dd67d5f0df5324e5e`) in
 `src/programs/verify_rv32.digest`.
 
 **M5.2 Task 4 re-pin (2026-09-14, ruling R5).** The table above is the *current* program's
@@ -134,6 +134,17 @@ accumulators) — and **memory accesses 6 354 392 → 3 488 864 (−45 %)**; per
 unchanged. Test profile: 1 210 045 → 858 343 rows. The Task-8 gate (`rows > 2^21 · 0.75` =
 1 572 864) **fires** at 4 052 455, exactly as the plan predicted, and the exit still needs tier 22
 after this task alone.
+
+**M5.2 Task 8 re-pin (2026-09-15, the `REDUCE` precompile).** The table above is *re-measured
+again* with the batch-opening reduction in its chip (opcode 24, appended): one chip row per
+column instead of the compiled loop, gated on Task 7's measurement, differentially pinned to
+`run_reduce_sequence` (`tests/precompiles.rs`) which stays in the tree as the compiled reference.
+Measured delta against the Task-7 row above: **cpu rows 4 052 455 → 2 240 988 (−44.7 %)** — the
+compiled reduction was 1 811 467 rows post-liveness (~11.6 per column, more than the plan's ~7
+estimate, so the cut beats the plan's ~2.5 M) — and **memory accesses 3 488 864 → 3 008 239**;
+permutations and witness unchanged. Test profile: 858 343 → 496 028 rows. The exit is still 6.9 %
+over tier 21's 2^21 = 2 097 152, and the Task-9 gate **fires** at 2 240 988 — as the plan
+predicted.
 
 ### Where the rows go
 

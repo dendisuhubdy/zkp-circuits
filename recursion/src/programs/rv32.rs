@@ -26,7 +26,7 @@ use crate::shape::{
     natural_domain, InnerKey, InnerShape, CAP_HEIGHT, LOG_BLOWUP, NUM_RANDOM_CODEWORDS,
     PV_INSTANCE, RVM_VK_DOMAIN,
 };
-use p3_field::{Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
 use p3_util::reverse_bits_len;
 use std::collections::BTreeMap;
 
@@ -60,14 +60,30 @@ fn constant_cap(b: &mut Builder, cap: &[[crate::isa::F; 4]; 4]) -> [Digest; 4] {
     std::array::from_fn(|i| Digest(b.offset(p, (i * DIGEST_ELEMS) as i64)))
 }
 
-/// Builds the verifier program for one inner shape.
-pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> VerifierProgram {
-    verify_rv32_with(shape, key, cp, crate::dsl::Liveness::On)
+/// Should the build use the Task 8/9 precompiles? `Off` compiles the reduction (and later the
+/// leaf sponges) as ordinary instruction sequences — the differential reference — `On` emits
+/// `REDUCE`/`SPONGE`. The shipped program is always `On`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Precompiles {
+    Off,
+    On,
 }
 
-/// [`verify_rv32`] with the allocator's liveness policy chosen: `Off` reproduces the pre-Task-7
-/// program byte for byte (the differential reference), `On` is what ships.
-pub fn verify_rv32_with(shape: &InnerShape, key: &InnerKey, cp: Checkpoints, liveness: crate::dsl::Liveness) -> VerifierProgram {
+/// Builds the verifier program for one inner shape.
+pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> VerifierProgram {
+    verify_rv32_with(shape, key, cp, crate::dsl::Liveness::On, Precompiles::On)
+}
+
+/// [`verify_rv32`] with the allocator's liveness policy and the precompiles chosen: `Off`
+/// reproduces the pre-Task-7 program byte for byte (the differential reference), `On` is what
+/// ships.
+pub fn verify_rv32_with(
+    shape: &InnerShape,
+    key: &InnerKey,
+    cp: Checkpoints,
+    liveness: crate::dsl::Liveness,
+    pc: Precompiles,
+) -> VerifierProgram {
     let n = shape.instances();
     let mut b = Builder::with_liveness(cp, liveness);
     let mark = |b: &mut Builder, name: &'static str| b.note_phase(name);
@@ -265,7 +281,7 @@ pub fn verify_rv32_with(shape: &InnerShape, key: &InnerKey, cp: Checkpoints, liv
     }
     mark(&mut b, "query segments: tape reads");
     b.unrolled(shape.num_queries, |b, q| {
-        emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
+        emit_query(b, pc, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
                    &index_bits[q], &all_rows[q], &all_paths[q], &all_commit_openings[q],
                    &all_commit_paths[q]);
     });
@@ -537,6 +553,7 @@ fn read_commit_paths(b: &mut Builder, shape: &InnerShape) -> Vec<Array<Felt>> {
 #[allow(clippy::too_many_arguments)]
 fn emit_query(
     b: &mut Builder,
+    pc: Precompiles,
     shape: &InnerShape,
     opened: &QueryOpenings,
     metas: &[RoundMeta],
@@ -559,7 +576,7 @@ fn emit_query(
     }
 
     // ── the batch-opening reduction.
-    let ros = emit_reduced_openings(b, shape, index_bits, fri_alpha, opened, &rows);
+    let ros = emit_reduced_openings(b, pc, shape, index_bits, fri_alpha, opened, &rows);
 
     // ── the fold chain (`fold_query`, verifier.rs:523-671).
     let mut ros: BTreeMap<usize, Ext> = ros.into_iter().collect();
@@ -781,6 +798,7 @@ fn bit_indicator(b: &mut Builder, bits: &[Felt], v: usize) -> Felt {
 /// semantics.
 fn emit_reduced_openings(
     b: &mut Builder,
+    pc: Precompiles,
     shape: &InnerShape,
     index_bits: &[Felt],
     fri_alpha: Ext,
@@ -815,16 +833,12 @@ fn emit_reduced_openings(
                     .copied()
                     .unwrap_or_else(|| (b.ext_constant(EF::ONE), b.ext_constant(EF::ZERO)));
                 let row = rows[ri][mi];
-                for k in 0..vals.len {
-                    let pz = b.get_ext(*vals, k);
-                    let px = b.load(row.base, k as i64);
-                    let px_e = b.ext_lift(px);
-                    let diff = b.ext_sub(pz, px_e);
-                    let t = b.ext_mul(alpha_pow, diff);
-                    let t = b.ext_mul(t, inv);
-                    ro = b.ext_add(ro, t);
-                    alpha_pow = b.ext_mul(alpha_pow, fri_alpha);
-                }
+                (ro, alpha_pow) = match pc {
+                    // The compiled loop, kept as the precompile's differential reference.
+                    Precompiles::Off => reduce_compiled(b, *vals, row, inv, ro, alpha_pow, fri_alpha),
+                    // Task 8: one `REDUCE` instruction for the whole run.
+                    Precompiles::On => b.reduce(*vals, row, inv, ro, alpha_pow, fri_alpha),
+                };
                 acc.insert(h, (alpha_pow, ro));
             }
         }
@@ -839,6 +853,53 @@ fn emit_reduced_openings(
         b.assert_eq(c1, zero, "reduced opening at the blowup height");
     }
     acc.into_iter().rev().map(|(h, (_, ro))| (h, ro)).collect()
+}
+
+/// One run of the batch-opening reduction, as a compiled DSL loop: `acc += Σ_k
+/// alpha_pow·(vals_k − row_k)·inv`, `alpha_pow ·= alpha` over `vals.len == row.len` columns —
+/// the sequence the `REDUCE` precompile replaces (Task 8), kept in the tree as its differential
+/// reference and used by the `Precompiles::Off` build.
+pub fn reduce_compiled(
+    b: &mut Builder,
+    vals: Array<Ext>,
+    row: Array<Felt>,
+    inv: Ext,
+    mut acc: Ext,
+    mut alpha_pow: Ext,
+    alpha: Ext,
+) -> (Ext, Ext) {
+    assert!(
+        vals.len <= row.len,
+        "a reduction run covers `vals.len` columns of the opened row (the rest are salts and the          hiding wrapper's hidden values, hashed by the leaf sponge, not reduced)"
+    );
+    for k in 0..vals.len {
+        let pz = b.get_ext(vals, k);
+        let px = b.load(row.base, k as i64);
+        let px_e = b.ext_lift(px);
+        let diff = b.ext_sub(pz, px_e);
+        let t = b.ext_mul(alpha_pow, diff);
+        let t = b.ext_mul(t, inv);
+        acc = b.ext_add(acc, t);
+        alpha_pow = b.ext_mul(alpha_pow, alpha);
+    }
+    (acc, alpha_pow)
+}
+
+/// [`reduce_compiled`] computed natively — the host-side anchor of the precompile's differential
+/// (`tests/precompiles.rs::reduce_matches_the_compiled_sequence`): the compiled loop and the
+/// `REDUCE` instruction must both land on this value.
+pub fn run_reduce_sequence(vals: &[EF], row: &[F], inv: EF, acc: EF, alpha_pow: EF, alpha: EF) -> (EF, EF) {
+    assert_eq!(vals.len(), row.len());
+    let (mut acc, mut apow) = (acc, alpha_pow);
+    for (k, pz) in vals.iter().enumerate() {
+        let px = EF::from_basis_coefficients_slice(&[row[k], F::ZERO]).unwrap();
+        let diff = *pz - px;
+        let t = apow * diff;
+        let t = t * inv;
+        acc = acc + t;
+        apow = apow * alpha;
+    }
+    (acc, apow)
 }
 
 /// `TwoAdicFriFolding::fold_row`: barycentric Lagrange interpolation at `beta` over the arity's

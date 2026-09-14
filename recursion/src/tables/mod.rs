@@ -5,6 +5,7 @@ pub mod poseidon2;
 pub mod program;
 pub mod public;
 pub mod range;
+pub mod reduce;
 
 pub type F = p3_goldilocks::Goldilocks;
 

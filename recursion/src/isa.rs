@@ -86,10 +86,16 @@ pub enum Op {
     Poseidon2,
     /// end the program
     Halt,
+    /// one run of the batch-opening reduction over the 11-cell descriptor at `ra`
+    /// (`[vals_base, row_base, len, inv(2), acc(2), apow(2), alpha(2)]`): `acc += Σ_k
+    /// apow·(vals_k − row_k)·inv` and `apow ·= alpha`, chained in and out through the
+    /// descriptor. The work is the `reduce` chip's; one cpu row per run. M5.2 Task 8, appended —
+    /// opcode 24; opcodes 0–23 never move.
+    Reduce,
 }
 
 impl Op {
-    pub const COUNT: usize = 24;
+    pub const COUNT: usize = 25;
 
     /// Every opcode, at the index of its own discriminant (pinned by `tests/isa.rs`).
     pub const ALL: [Op; Self::COUNT] = [
@@ -117,6 +123,7 @@ impl Op {
         Op::Public,
         Op::Poseidon2,
         Op::Halt,
+        Op::Reduce,
     ];
 
     pub fn from_u8(x: u8) -> Option<Self> {
@@ -149,6 +156,7 @@ impl Op {
             Op::Public => "PUBLIC",
             Op::Poseidon2 => "POSEIDON2",
             Op::Halt => "HALT",
+            Op::Reduce => "REDUCE",
         }
     }
 

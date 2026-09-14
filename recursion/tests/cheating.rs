@@ -199,3 +199,110 @@ fn an_out_of_range_tier_is_an_error_not_a_panic() {
     proof.tier = Tier(99);
     assert!(matches!(m.verify(&p, &proof), Err(recursion::machine::VerifyError::Tier)));
 }
+
+// ── Task 8: the reduce chip's tranche ─────────────────────────────────────────────────────────
+use p3_field::BasedVectorSpace;
+use recursion::isa::EF;
+use recursion::tables::reduce as reduce_table;
+
+/// An honest setup with one four-column `REDUCE` run, for the tranche.
+fn reduce_setup() -> (Machine, Program, Traces, Vec<F>) {
+    use recursion::dsl::{Builder, Checkpoints};
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(31);
+    let vals: Vec<EF> = (0..4).map(|_| common::random_ext(&mut rng)).collect();
+    let row: Vec<F> = (0..4).map(|_| common::random_felt(&mut rng)).collect();
+    let inv = common::random_ext(&mut rng);
+    let alpha = common::random_ext(&mut rng);
+    let mut b = Builder::new(Checkpoints::Off);
+    let mut tape: Vec<F> = vec![];
+    let vals_a = b.hint_ext_array(4);
+    for v in &vals {
+        tape.extend_from_slice(v.as_basis_coefficients_slice());
+    }
+    let row_a = b.hint_array(4);
+    tape.extend_from_slice(&row);
+    let inv_h = b.ext_constant(inv);
+    let zero = b.ext_constant(EF::ZERO);
+    let one = b.ext_constant(EF::ONE);
+    let alpha_h = b.ext_constant(alpha);
+    let (ro, _ap) = b.reduce(vals_a, row_a, inv_h, zero, one, alpha_h);
+    b.public_ext(ro);
+    b.public_ext(ro);
+    let p = b.finish();
+    let m = Machine::new(FriProfile::Test);
+    let exec = execute(&p, &tape, 10_000).unwrap();
+    let t = build_traces(&p, &exec, Tier(8)).unwrap();
+    (m, p, t, tape)
+}
+
+fn reduce_verify(m: &Machine, p: &Program, t: &Traces) -> Result<(), recursion::machine::VerifyError> {
+    let proof = m.prove_traces(p, t, Tier(8));
+    m.verify(p, &proof)
+}
+
+#[test]
+fn honest_reduce_traces_pass() {
+    let (m, p, t, _) = reduce_setup();
+    assert!(t.reduce.is_some(), "the setup's batch carries the reduce table");
+    reduce_verify(&m, &p, &t).unwrap();
+}
+
+#[test]
+fn a_wrong_accumulated_value_in_the_reduction_is_rejected() {
+    let (m, p, mut t, _) = reduce_setup();
+    let w = reduce_table::col::WIDTH;
+    let r = t.reduce.as_mut().unwrap();
+    // The second row's accumulator, shifted by one: the chain to the next row fails.
+    r.values[w + reduce_table::col::ACC0] += F::ONE;
+    assert!(rejects(|| reduce_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_dropped_column_in_the_reduction_is_rejected() {
+    let (m, p, mut t, _) = reduce_setup();
+    let w = reduce_table::col::WIDTH;
+    let r = t.reduce.as_mut().unwrap();
+    // Claim the run ends a column early: IS_LAST on the LEN=2 row — the is-one gadget refuses it.
+    let len2 = (0..r.height()).find(|i| r.values[i * w + reduce_table::col::LEN] == F::TWO).unwrap();
+    r.values[len2 * w + reduce_table::col::IS_LAST] = F::ONE;
+    assert!(rejects(|| reduce_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_forged_descriptor_field_in_the_reduction_is_rejected() {
+    let (m, p, mut t, _) = reduce_setup();
+    let w = reduce_table::col::WIDTH;
+    let r = t.reduce.as_mut().unwrap();
+    // The descriptor's `inv`, forged on the chip's first row: the RAM message's value no longer
+    // matches the read the memory table holds.
+    r.values[reduce_table::col::INV0] += F::ONE;
+    assert!(rejects(|| reduce_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_reduce_dispatch_with_no_chip_run_is_rejected() {
+    let (m, p, mut t, _) = reduce_setup();
+    let w = reduce_table::col::WIDTH;
+    let r = t.reduce.as_mut().unwrap();
+    // The whole run vanishes: the cpu's dispatch has no provider (and the run's reads and
+    // write-backs have no sender either).
+    for i in 0..r.height() {
+        r.values[i * w + reduce_table::col::IS_REAL] = F::ZERO;
+        r.values[i * w + reduce_table::col::IS_FIRST] = F::ZERO;
+        r.values[i * w + reduce_table::col::IS_LAST] = F::ZERO;
+    }
+    assert!(rejects(|| reduce_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_reduce_proof_declaring_no_table_is_rejected() {
+    let (m, p, t, _) = reduce_setup();
+    // The keccak pattern's verify-side rule: a proof carrying a reduce instance cannot declare
+    // `reduce_log_height = 0` — the degree-bits vector's length mismatches the batch's.
+    let mut proof = m.prove_traces(&p, &t, Tier(8));
+    proof.reduce_log_height = 0;
+    assert!(matches!(
+        m.verify(&p, &proof),
+        Err(recursion::machine::VerifyError::Tier)
+    ));
+}

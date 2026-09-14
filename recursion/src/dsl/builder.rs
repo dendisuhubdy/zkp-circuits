@@ -160,6 +160,10 @@ struct Slot {
 struct PtrSlot {
     holder: u32,
     delta: i64,
+    /// The holder's compile-time value: the `FADDI` immediate `alloc` materialised it with.
+    /// Every `Ptr` descends from `alloc` (through `offset`), so every pointer's absolute
+    /// address is a compile-time constant — which is what `reduce` writes into a descriptor.
+    base_value: u64,
 }
 
 pub struct Builder {
@@ -420,14 +424,14 @@ impl Builder {
         self.begin();
         let (id, rd) = self.new_handle(1);
         self.emit(Op::Faddi, rd, RRef::Raw(0), BRef::Imm(F::from_u64(base)));
-        self.ptrs.push(PtrSlot { holder: id, delta: 0 });
+        self.ptrs.push(PtrSlot { holder: id, delta: 0, base_value: base });
         Ptr(self.ptrs.len() as u32 - 1)
     }
 
     /// `p` shifted by `cells`. Free: the delta is folded into the immediate of every access.
     pub fn offset(&mut self, p: Ptr, cells: i64) -> Ptr {
         let it = self.ptrs[p.0 as usize];
-        self.ptrs.push(PtrSlot { holder: it.holder, delta: it.delta + cells });
+        self.ptrs.push(PtrSlot { holder: it.holder, delta: it.delta + cells, base_value: it.base_value });
         Ptr(self.ptrs.len() as u32 - 1)
     }
 
@@ -509,6 +513,40 @@ impl Builder {
         let p = self.alloc(16);
         self.hash = Some(p);
         p
+    }
+
+    // ---------------------------------------------------- the REDUCE precompile (Task 8)
+
+    /// One run of the batch-opening reduction over `vals.len == row.len` columns:
+    /// `acc += Σ_k alpha_pow·(vals_k − row_k)·inv` and `alpha_pow ·= alpha`, in one `REDUCE`
+    /// instruction — the precompile form of the compiled loop [`run_reduce_sequence`] replaces,
+    /// and differentially pinned to (`tests/precompiles.rs`). The 11-cell descriptor —
+    /// `[vals_base, row_base, len, inv, acc, alpha_pow, alpha]` — is built fresh per call; the
+    /// accumulator and running power are read back out of it, so a height group's runs chain
+    /// exactly like the compiled loop's.
+    pub fn reduce(&mut self, vals: Array<Ext>, row: Array<Felt>, inv: Ext, acc: Ext, alpha_pow: Ext, alpha: Ext) -> (Ext, Ext) {
+        assert!(
+            vals.len <= row.len,
+            "a reduction run covers `vals.len` columns of the opened row (the rest are salts and              the hiding wrapper's hidden values, hashed by the leaf sponge, not reduced)"
+        );
+        self.begin();
+        let descr = self.alloc(11);
+        let vb = self.constant(F::from_u64(self.addr_of(vals.base)));
+        self.store(descr, 0, vb);
+        let rb = self.constant(F::from_u64(self.addr_of(row.base)));
+        self.store(descr, 1, rb);
+        let ln = self.constant(F::from_u64(vals.len as u64));
+        self.store(descr, 2, ln);
+        self.store_ext(descr, 3, inv);
+        self.store_ext(descr, 5, acc);
+        self.store_ext(descr, 7, alpha_pow);
+        self.store_ext(descr, 9, alpha);
+        let holder = self.ptrs[descr.0 as usize].holder;
+        let ra = self.materialise(holder);
+        self.emit(Op::Reduce, RRef::Raw(0), ra, BRef::Imm(F::ZERO));
+        let acc_out = self.load_ext(descr, 5);
+        let apow_out = self.load_ext(descr, 7);
+        (acc_out, apow_out)
     }
 
     // --------------------------------------------------------------- hashing
@@ -739,6 +777,12 @@ impl Builder {
     fn address(&mut self, p: Ptr, off: i64) -> (RRef, F) {
         let it = self.ptrs[p.0 as usize];
         (self.materialise(it.holder), imm(it.delta + off))
+    }
+
+    /// The absolute address of a pointer, as a compile-time constant (`PtrSlot::base_value`).
+    fn addr_of(&self, p: Ptr) -> u64 {
+        let it = self.ptrs[p.0 as usize];
+        (it.base_value as i64 + it.delta) as u64
     }
 
     // ------------------------------------------------------------ allocation (buffer time)
