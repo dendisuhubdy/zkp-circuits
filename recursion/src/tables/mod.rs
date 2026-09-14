@@ -1,5 +1,6 @@
 //! The tables of the rVM and the buses that connect them (plan, "The tables and buses").
 pub mod memory;
+pub mod poseidon2;
 pub mod program;
 pub mod public;
 pub mod range;
