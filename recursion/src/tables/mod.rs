@@ -1,4 +1,5 @@
 //! The tables of the rVM and the buses that connect them (plan, "The tables and buses").
+pub mod program;
 pub mod range;
 
 pub type F = p3_goldilocks::Goldilocks;

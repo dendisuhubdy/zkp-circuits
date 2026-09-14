@@ -34,6 +34,7 @@ pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
 use crate::emulator::ExecError;
 use crate::isa::{DecodeError, Instr, Op, Program, NUM_REGS};
 use crate::tables::pad_height;
+use crate::tables::program::ProgramAir;
 use crate::tables::range::RangeAir;
 
 /// Fixed seed for the rVM's `key_config` RNGs — the role of `research`'s `machine::KEY_SEED`
@@ -226,16 +227,16 @@ impl Machine {
         Self { config: make_config(profile), profile, keys: Mutex::new(KeyCache::default()) }
     }
 
-    /// The preprocessed commitment for `(program, tier, reduce)` (R6), cached. Task 1's chip set
-    /// is the range table alone; `chips()` and the full `log_ext_degrees` wiring arrive with the
-    /// later tables (Tasks 2–6), and this function's body converges on `research`'s verbatim
-    /// then — the cache key is already the final one, so no caller changes.
+    /// The preprocessed commitment for `(program, tier, reduce)` (R6), cached. The chip set
+    /// grows per task toward the final eight-instance batch (Task 6); the cache key is already
+    /// the final one, so no caller changes.
     pub fn verifier_key(&self, program: &Program, tier: Tier, reduce: bool) -> Arc<CommonData<Config>> {
         let digest = program.digest();
         let key = (tier.0, std::array::from_fn(|i| digest[i].as_canonical_u64()), reduce);
         if let Some(hit) = self.keys.lock().unwrap().get(&key) { return hit; }
-        let airs: Vec<Chip> = vec![Chip::Range(RangeAir)];
-        let degrees = vec![crate::tables::range::HEIGHT.trailing_zeros() as usize + 1];
+        let arc = Arc::new(program.clone());
+        let airs = chips(&arc, tier, if reduce { MIN_LOG_HEIGHT } else { 0 });
+        let degrees = current_degree_bits(program, tier);
         let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &airs, &degrees).common);
         self.keys.lock().unwrap().insert(key, common.clone());
         common
@@ -280,28 +281,51 @@ fn check_instr(instr: &Instr) -> Result<(), DecodeError> {
     Ok(())
 }
 
-/// The machine's chips. Task 1 ships `Range` alone; later tables append their variants in the
-/// final `chips()` order (`program, cpu, reg_memory, ram_memory, poseidon2, public, range`,
-/// `reduce` last when declared) — the order is load-bearing: the public table owns the batch's
-/// public values at instance index 5, and `prove`/`verify` (Task 6) hard-code it.
+/// The machine's chips, in the final `chips()` order's relative positions: `program, cpu,
+/// reg_memory, ram_memory, poseidon2, public, range`, `reduce` last when declared. The set grows
+/// per task (Task 2: `program` + `range`) — the order is load-bearing: the public table owns the
+/// batch's public values at instance index 5, and `prove`/`verify` (Task 6) hard-code it.
+pub fn chips(program: &Arc<Program>, _tier: Tier, _reduce_log_height: u8) -> Vec<Chip> {
+    vec![
+        Chip::Program(ProgramAir::new(program.clone())),
+        Chip::Range(RangeAir),
+    ]
+}
+
+/// The degree bits matching the *current* `chips()` set, ZK-doubled. Converges on
+/// [`log_ext_degrees`] as the chip set completes (Task 6); until then it is the per-task
+/// intermediate — the key is cached per task's set, and nothing cross-checks keys across tasks.
+fn current_degree_bits(program: &Program, _tier: Tier) -> Vec<usize> {
+    let zk = 1usize;
+    vec![
+        program_log_height(program.instrs.len()) as usize + zk,
+        crate::tables::range::HEIGHT.trailing_zeros() as usize + zk,
+    ]
+}
+
+/// The machine's chips. Later tables append their variants in the final `chips()` order.
 #[derive(Clone, Debug)]
 pub enum Chip {
+    Program(ProgramAir),
     Range(RangeAir),
 }
 
 impl p3_air::BaseAir<Val> for Chip {
     fn width(&self) -> usize {
         match self {
+            Chip::Program(a) => p3_air::BaseAir::<Val>::width(a),
             Chip::Range(a) => p3_air::BaseAir::<Val>::width(a),
         }
     }
     fn preprocessed_width(&self) -> usize {
         match self {
+            Chip::Program(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
             Chip::Range(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
         }
     }
     fn preprocessed_trace(&self) -> Option<p3_matrix::dense::RowMajorMatrix<Val>> {
         match self {
+            Chip::Program(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
             Chip::Range(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
         }
     }
@@ -313,6 +337,7 @@ where
 {
     fn eval(&self, b: &mut AB) {
         match self {
+            Chip::Program(a) => p3_air::Air::eval(a, b),
             Chip::Range(a) => p3_air::Air::eval(a, b),
         }
     }
