@@ -8,9 +8,15 @@ mod common;
 
 use p3_field::PrimeCharacteristicRing;
 use rand_zkvm::machine::{FriProfile, Proof};
+use rand_zkvm::tables::cpu::pv;
+use recursion::aggregate::{
+    aggregate, aggregate_program, verify_aggregate, AggregateError, AggregateProof,
+    InnerVerifierKey, VerifyAggregateError,
+};
 use recursion::dsl::Checkpoints;
 use recursion::emulator::{execute, ExecError};
 use recursion::isa::F;
+use recursion::machine::{Machine as RvmMachine, Tier as RvmTier};
 use recursion::programs::{aggregate_program_digest, verify_rv32, verify_rv32n};
 use recursion::shape::{InnerKey, InnerShape};
 use recursion::witness::{Segment, WitnessTape};
@@ -259,3 +265,82 @@ fn tampers_in_later_iterations_are_refused_at_the_named_steps() {
     refuse_at(FriProfile::Test, &proofs, 2, Segment::Header, 3);
     refuse_at(FriProfile::Test, &proofs, 1, Segment::LookupTerminals, 0);
 }
+
+// ── Task 3: the chain-facing API ─────────────────────────────────────────────────────────────
+
+fn inner_vk(shape: &InnerShape, key: &InnerKey) -> InnerVerifierKey {
+    InnerVerifierKey { shape: shape.clone(), key: key.clone() }
+}
+
+/// (a) an aggregate of one fixture proof round-trips — `aggregate` → `verify_aggregate` → the
+/// bundle's `OUT0..7`; (d) one word of the §4.4 list edited fails `verify_aggregate` with
+/// `DigestMismatch` even though the proof itself is untouched; (b) the rVM proof's declared tier
+/// bumped — bytes otherwise honest — fails at `Machine::verify`, past a digest check that still
+/// passes. One prove covers all three.
+#[test]
+fn a_one_proof_aggregate_round_trips_and_tampered_variants_are_refused() {
+    let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
+    let (shape, key) = shape_and_key(&p.proof);
+    let vk = inner_vk(&shape, &key);
+    let m = RvmMachine::new(FriProfile::Test);
+    let a = aggregate(&m, &vk, std::slice::from_ref(&p.proof), None)
+        .expect("one real bundle proof aggregates");
+    assert_eq!(a.proof.tier, RvmTier(19), "the test-profile N=1 aggregate lands at tier 19");
+    let program = aggregate_program(&vk);
+    let outs = verify_aggregate(&m, &program, &a).expect("the aggregate verifies");
+    let want: [u32; 8] =
+        std::array::from_fn(|k| u32::try_from(p.proof.public_values[pv::OUT0 + k]).unwrap());
+    assert_eq!(outs, vec![want], "the covered bundle's OUT0..7, in proof order");
+
+    // (`machine::Proof` is serde-only, so the forged handles are postcard round-trips, the
+    // fixture cache's own move.)
+    let bytes = a.proof.to_bytes();
+
+    // (d): one word of the §4.4 list edited — the proof itself untouched.
+    let proof2: recursion::machine::Proof = postcard::from_bytes(&bytes).unwrap();
+    let mut forged = AggregateProof { proof: proof2, public: a.public.clone() };
+    forged.public[5 + pv::OUT0] += F::ONE;
+    match verify_aggregate(&m, &program, &forged) {
+        Err(VerifyAggregateError::DigestMismatch) => {}
+        other => panic!("a tampered public list must fail the digest check, got {other:?}"),
+    }
+
+    // (b): the rVM proof's declared tier bumped — `check_declared_heights`/`degree_bits`'s
+    // refusal, exactly the chain's `Machine::verify` rejecting a tampered aggregate.
+    let mut proof3: recursion::machine::Proof = postcard::from_bytes(&bytes).unwrap();
+    proof3.tier = RvmTier(proof3.tier.0 + 1);
+    let forged = AggregateProof { proof: proof3, public: a.public.clone() };
+    match verify_aggregate(&m, &program, &forged) {
+        Err(VerifyAggregateError::Verify(_)) => {}
+        other => panic!("a tampered aggregate must fail Machine::verify, got {other:?}"),
+    }
+}
+
+/// (b) an empty set is `AggregateError::Empty`, before any work.
+#[test]
+fn an_empty_set_is_refused_before_any_work() {
+    let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
+    let (shape, key) = shape_and_key(&p.proof);
+    let vk = inner_vk(&shape, &key);
+    let m = RvmMachine::new(FriProfile::Test);
+    assert!(matches!(aggregate(&m, &vk, &[], None), Err(AggregateError::Empty)));
+}
+
+/// (c) a wrong-shape proof in the set is `AggregateError::WrongShape { index }`, checked for the
+/// whole set before any tape work — here at index 1, so index 0's match is not what stops it.
+#[test]
+fn a_wrong_shape_proof_in_the_set_is_named_by_index_before_any_tape_work() {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Test, 2).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = shape_and_key(&proofs[0]);
+    let vk = inner_vk(&shape, &key);
+    let m = RvmMachine::new(FriProfile::Test);
+    let mut set = proofs;
+    set[1].input_log_height += 1; // no longer the key's shape
+    match aggregate(&m, &vk, &set, None) {
+        Err(AggregateError::WrongShape { index }) => assert_eq!(index, 1),
+        Err(e) => panic!("expected WrongShape at index 1, got {e:?}"),
+        Ok(_) => panic!("expected WrongShape at index 1, got an aggregate"),
+    }
+}
+

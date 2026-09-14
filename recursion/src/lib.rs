@@ -27,6 +27,7 @@
 //! The rule inherited from `research/AGENTS.md` holds here too: the emulator is the reference
 //! semantics — if an AIR and the emulator disagree, the AIR is wrong.
 
+pub mod aggregate;
 pub mod dsl;
 pub mod emulator;
 pub mod isa;
