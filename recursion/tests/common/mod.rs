@@ -257,3 +257,45 @@ pub fn bundle_proofs(profile: FriProfile, n: usize) -> Vec<BundleProof> {
         })
         .collect()
 }
+
+// ── `rejects()`, the cheating-test discipline ────────────────────────────────────────────────
+// The one definition of what counts as "the constraint system caught this", re-homed from
+// `research/tests/common/mod.rs` per the M5.2 plan (its self-test lives in `tests/machine.rs`).
+// Every cheating test in this crate counts a rejection through this helper and nothing else.
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+/// The panic `p3-batch-stark`'s debug constraint checker raises when a row violates a
+/// constraint (`check_constraints.rs`'s `panic!`); matching the fixed prefix is what separates
+/// "the constraint system caught this" from any other unwind. It runs per AIR instance, so it
+/// catches violations local to one table's own rows.
+#[allow(dead_code)]
+pub const CONSTRAINT_PANIC: &str = "constraints not satisfied on row";
+
+/// The panic `p3-lookup`'s debug bus-balance checker (`p3_lookup::debug_util::check_lookups`)
+/// raises when a *global* lookup — provider and consumers in different AIR instances — has a
+/// nonzero net multiplicity for some tuple. The only mechanism that catches an unpaid table
+/// multiplicity on a table with no row-level validity marker of its own.
+#[allow(dead_code)]
+pub const LOOKUP_BALANCE_PANIC: &str = "Lookup mismatch (";
+
+/// A tamper counts as rejected only if `verify` returned an error, or if the panic came from
+/// one of the two constraint-system checks above. Anything else — a trace-builder `assert!`,
+/// an index out of bounds — means the test tripped over something other than the constraint it
+/// was written for, so it must fail rather than pass for the wrong reason.
+#[allow(dead_code)]
+pub fn rejects(f: impl FnOnce() -> Result<(), recursion::machine::VerifyError>) -> bool {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(())) => false,
+        Ok(Err(_)) => true,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            let is_constraint = msg.contains(CONSTRAINT_PANIC) || msg.contains(LOOKUP_BALANCE_PANIC);
+            if !is_constraint { eprintln!("rejects(): panic was not a constraint failure: {msg}"); }
+            is_constraint
+        }
+    }
+}
