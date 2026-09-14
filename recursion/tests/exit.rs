@@ -226,24 +226,44 @@ fn the_committed_program_digest_is_reproducible() {
     // sequence must be a subsequence of it, which is the invariant that makes the differential
     // tests evidence about the shipped program and not about a different one.
     //
-    // The comparison normalizes branch targets to *relative* offsets. The plan's literal
-    // `Instr` equality cannot hold here: `Builder::assert_eq`'s `JEQ` carries an absolute target
-    // (`pc + 2`), and every checkpoint `PUBLIC` the `On` build inserts before such a branch
-    // shifts its position — so the two builds' branch immediates differ even though their
-    // control flow is identical. Relative offsets are the build-invariant content of a branch.
+    // The comparison is over *logical* instructions: register fields are dropped (the two-pass
+    // allocator's register assignments legitimately differ between the two builds — checkpoint
+    // `PUBLIC`s extend handle lifetimes, so the liveness schedule is not checkpoint-neutral the
+    // way the pre-liveness live-forever allocator was) and spill/reload insertions are dropped
+    // (they are the allocator's business, not the program's). What remains is exactly the
+    // program's own op sequence, and of that sequence the Off build must be a subsequence of the
+    // On build. Branch immediates are normalized to *relative* offsets for the reason given
+    // above (`Builder::assert_eq`'s `JEQ` carries an absolute target, and every inserted
+    // checkpoint `PUBLIC` shifts it).
     use p3_field::PrimeField64;
     use recursion::isa::{Op, Program};
-    let normalized = |p: &Program| -> Vec<(Op, u8, u8, u64)> {
+    let normalized = |p: &Program| -> Vec<(Op, Option<u64>)> {
         p.instrs
             .iter()
             .enumerate()
-            .map(|(i, ins)| {
-                let b = ins.b.as_canonical_u64();
-                let b = match ins.op {
-                    Op::Jmp | Op::Jeq | Op::Jne => b.wrapping_sub(i as u64),
-                    _ => b,
-                };
-                (ins.op, ins.rd, ins.ra, b)
+            .filter_map(|(i, ins)| {
+                // Spill/reload insertions: r0-based memory ops into the spill arena.
+                match ins.op {
+                    Op::Load | Op::Loade | Op::Store | Op::Storee
+                        if ins.ra == 0 && ins.b.as_canonical_u64() < recursion::dsl::MEM_BASE =>
+                    {
+                        None
+                    }
+                    _ => {
+                        // `b` is kept only when it is an immediate; register operands are part of
+                        // the allocator's assignment, dropped like `rd`/`ra`.
+                        let b = if ins.op.b_is_register() {
+                            None
+                        } else {
+                            let b = ins.b.as_canonical_u64();
+                            Some(match ins.op {
+                                Op::Jmp | Op::Jeq | Op::Jne => b.wrapping_sub(i as u64),
+                                _ => b,
+                            })
+                        };
+                        Some((ins.op, b))
+                    }
+                }
             })
             .collect()
     };
@@ -253,7 +273,7 @@ fn the_committed_program_digest_is_reproducible() {
     let mut j = 0usize;
     for want in &a_norm {
         while j < c_norm.len() && c_norm[j] != *want { j += 1; }
-        assert!(j < c_norm.len(), "the Off program is not a subsequence of the On program");
+        assert!(j < c_norm.len(), "the Off program's logical op sequence is not a subsequence of the On build's");
         j += 1;
     }
 }

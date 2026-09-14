@@ -22,6 +22,7 @@
 //! program that hashes tens of thousands of times pays for it once. No argument to any function in
 //! this module may point into that region.
 
+use super::builder::RRef;
 use super::{Builder, Digest, Felt, Ptr};
 use crate::isa::{Op, F};
 use p3_field::PrimeCharacteristicRing;
@@ -224,14 +225,14 @@ fn select_children(b: &mut Builder, st: Ptr, sib: Ptr, off: i64, t: Felt) {
     let w = b.raw_scratch(3);
     let (d, s, m) = (w, w + 1, w + 2);
     for k in 0..DIGEST_ELEMS as i64 {
-        b.raw_emit(Op::Load, d, rst, Builder::raw_imm(dst + k));
-        b.raw_emit(Op::Load, s, rsib, Builder::raw_imm(dsib + off + k));
-        b.raw_emit(Op::Fsub, m, s, Builder::raw_reg_imm(d));
-        b.raw_emit(Op::Fmul, m, rt, Builder::raw_reg_imm(m));
+        b.raw_emit(Op::Load, RRef::scratch(d), rst, Builder::raw_imm(dst + k));
+        b.raw_emit(Op::Load, RRef::scratch(s), rsib, Builder::raw_imm(dsib + off + k));
+        b.raw_emit(Op::Fsub, RRef::scratch(m), RRef::scratch(s), Builder::raw_scratch_b(d));
+        b.raw_emit(Op::Fmul, RRef::scratch(m), rt, Builder::raw_scratch_b(m));
         // `right` first: it consumes `s`, which `left` does not need.
-        b.raw_emit(Op::Fsub, s, s, Builder::raw_reg_imm(m));
-        b.raw_emit(Op::Fadd, d, d, Builder::raw_reg_imm(m));
-        b.raw_emit(Op::Store, d, rst, Builder::raw_imm(dst + k));
-        b.raw_emit(Op::Store, s, rst, Builder::raw_imm(dst + DIGEST_ELEMS as i64 + k));
+        b.raw_emit(Op::Fsub, RRef::scratch(s), RRef::scratch(s), Builder::raw_scratch_b(m));
+        b.raw_emit(Op::Fadd, RRef::scratch(d), RRef::scratch(d), Builder::raw_scratch_b(m));
+        b.raw_emit(Op::Store, RRef::scratch(d), rst, Builder::raw_imm(dst + k));
+        b.raw_emit(Op::Store, RRef::scratch(s), rst, Builder::raw_imm(dst + DIGEST_ELEMS as i64 + k));
     }
 }

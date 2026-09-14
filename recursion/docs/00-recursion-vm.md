@@ -98,17 +98,17 @@ log:
 
 | | `FriProfile::Test` (16 queries) | `FriProfile::Production` (80 queries) |
 |---|---:|---:|
-| cpu rows | 1 210 045 | **5 683 021** |
+| cpu rows | 858 343 | **4 052 455** |
 | Poseidon2 permutations | 11 205 | **51 605** |
-| memory accesses | 1 365 368 | 6 354 392 |
-| program instructions | 1 212 087 | 5 692 824 |
+| memory accesses | 753 808 | 3 488 864 |
+| program instructions | 860 386 | 4 062 258 |
 | witness words read | 43 344 | 199 760 |
 | tape words | 43 344 | 199 760 |
 
 The program is straight-line in the proof's data: every proof of the shape costs the same rows
 (asserted by the exit test on 5 test-profile and 50 production-profile proofs). The production
 row is pinned in `tests/pins.json`; the production program's digest
-(`Checkpoints::Off`, `c1c04ac3a9faf266eb8980260dae6c7f12fe9ee4cf3dfa40de8440182258d731`) in
+(`Checkpoints::Off`, `361613706a683c0cb08f2db1eb010bc5694cbd0f0d756d4a6dc15531ba7ad717`) in
 `src/programs/verify_rv32.digest`.
 
 **M5.2 Task 4 re-pin (2026-09-14, ruling R5).** The table above is the *current* program's
@@ -122,6 +122,18 @@ permutations (51 595 → 51 605, `ceil(39/4)`), +355 memory accesses; witness an
 The pre-R5 numbers remain the ones in the "Where the rows go" and "precompile decision" sections
 below — their structure (the reduction and spill terms) is untouched by phase 8, and M5.2's Tasks
 7–9 re-measure everything again anyway.
+
+**M5.2 Task 7 re-pin (2026-09-15, liveness).** The table above is *re-measured again* after the
+two-pass allocator landed: the replay frees a handle's register at its last use (clamped out of
+loop bodies) and reuses spill cells by width, and the `Off` policy reproduces the pre-liveness
+stream byte for byte (pinned by `tests/verifier.rs` against the pre-Task-7 digest). Measured
+delta against the Task-4 row above: **cpu rows 5 683 021 → 4 052 455 (−28.7 %)** — 66 % of the
+measured 2 454 511 spill/reload rows die, against the plan's ~3.6 M estimate (it guessed
+85–90 %; the survivor is real register pressure in the reduction and the loop-carried
+accumulators) — and **memory accesses 6 354 392 → 3 488 864 (−45 %)**; permutations and witness
+unchanged. Test profile: 1 210 045 → 858 343 rows. The Task-8 gate (`rows > 2^21 · 0.75` =
+1 572 864) **fires** at 4 052 455, exactly as the plan predicted, and the exit still needs tier 22
+after this task alone.
 
 ### Where the rows go
 

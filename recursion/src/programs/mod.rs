@@ -13,7 +13,7 @@
 pub mod constraints;
 mod rv32;
 
-pub use rv32::{cycle_report, digest_hex, verify_rv32, CycleReport};
+pub use rv32::{cycle_report, digest_hex, verify_rv32, verify_rv32_with, CycleReport};
 
 use crate::dsl::{Checkpoints, Stats};
 use constraints::Phase5Cost;

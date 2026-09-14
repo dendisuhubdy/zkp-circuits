@@ -318,7 +318,11 @@ impl InnerShape {
     /// A pure function of the tier, the declared heights and the profile — `Machine::verifier_key`
     /// is seeded from a fixed constant precisely so that it is — and cached inside the shared
     /// [`machine`], so calling it per instance costs one hash-map lookup.
-    pub(crate) fn common_data(&self) -> std::sync::Arc<p3_batch_stark::CommonData<Config>> {
+    /// `#[doc(hidden)]` — the lookup contexts and preprocessed commitment, nameable by tests
+    /// that exercise the constraint emitter directly (the house test-hook pattern, like
+    /// `rand_zkvm::machine::val_mmcs_for_tests`).
+    #[doc(hidden)]
+    pub fn common_data(&self) -> std::sync::Arc<p3_batch_stark::CommonData<Config>> {
         machine(self.profile()).verifier_key(
             Tier(self.tier),
             self.program_log_height,

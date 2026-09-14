@@ -62,15 +62,15 @@ fn constant_cap(b: &mut Builder, cap: &[[crate::isa::F; 4]; 4]) -> [Digest; 4] {
 
 /// Builds the verifier program for one inner shape.
 pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> VerifierProgram {
+    verify_rv32_with(shape, key, cp, crate::dsl::Liveness::On)
+}
+
+/// [`verify_rv32`] with the allocator's liveness policy chosen: `Off` reproduces the pre-Task-7
+/// program byte for byte (the differential reference), `On` is what ships.
+pub fn verify_rv32_with(shape: &InnerShape, key: &InnerKey, cp: Checkpoints, liveness: crate::dsl::Liveness) -> VerifierProgram {
     let n = shape.instances();
-    let mut b = Builder::new(cp);
-    let mut phase_rows: Vec<(&'static str, usize)> = Vec::new();
-    let mut phase_mark = 0usize;
-    let mut mark = |b: &Builder, name: &'static str| {
-        let now = b.stats().instrs;
-        phase_rows.push((name, now - phase_mark));
-        phase_mark = now;
-    };
+    let mut b = Builder::with_liveness(cp, liveness);
+    let mark = |b: &mut Builder, name: &'static str| b.note_phase(name);
 
     // ── phase 0: the header. Read the proof's declared shape and pin it to this program's own, so
     // a proof of another shape is refused here instead of being read with the wrong field widths.
@@ -156,7 +156,7 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     let zero = b.zero();
     b.assert_eq(c0, zero, "lookup terminal sum");
     b.assert_eq(c1, zero, "lookup terminal sum");
-    mark(&b, "phases 0-4: header, transcript, commitments, terminal sum");
+    mark(&mut b, "phases 0-4: header, transcript, commitments, terminal sum");
 
     // ── phase 5: the generated constraint evaluation at `zeta` (spec §4.3).
     //
@@ -173,16 +173,13 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     let batch = Batch { shape, airs: &airs, lookups: &lookups, alpha, zeta };
     let mut phase5 = Vec::with_capacity(n);
     for i in 0..n {
-        let before = b.stats();
+        let before = b.emitted();
         let mut cost = Phase5Cost::default();
         emit_instance(&mut b, &batch, &openings, i, &mut cost);
-        let after = b.stats();
-        cost.instrs = after.instrs - before.instrs;
-        cost.spills = after.spills - before.spills;
-        cost.reloads = after.reloads - before.reloads;
+        cost.instrs = b.emitted() - before;
         phase5.push(cost);
     }
-    mark(&b, "phase 5: constraint evaluation at zeta");
+    mark(&mut b, "phase 5: constraint evaluation at zeta");
 
     // ── phase 6: the FRI query phase (`p3-fri-0.7.0/src/verifier.rs:207-426`, in that order) ──
     //
@@ -244,7 +241,7 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     let index_bits: Vec<Vec<Felt>> = (0..shape.num_queries)
         .map(|_| ch.sample_bits(&mut b, log_global))
         .collect();
-    mark(&b, "phase 6 preamble: claimed evals, betas, final poly, pow, indices");
+    mark(&mut b, "phase 6 preamble: claimed evals, betas, final poly, pow, indices");
 
     // 7. Per query, unrolled: the count is a compile-time constant of the shape, and a counted
     // loop would force every intermediate through memory for no benefit. The four query-major
@@ -266,13 +263,13 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     for _ in 0..shape.num_queries {
         all_commit_paths.push(read_commit_paths(&mut b, shape));
     }
-    mark(&b, "query segments: tape reads");
+    mark(&mut b, "query segments: tape reads");
     b.unrolled(shape.num_queries, |b, q| {
         emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
                    &index_bits[q], &all_rows[q], &all_paths[q], &all_commit_openings[q],
                    &all_commit_paths[q]);
     });
-    mark(&b, "queries: merkle walks, reduction, folds");
+    mark(&mut b, "queries: merkle walks, reduction, folds");
 
     // ── phase 8: acceptance and the interface digest (R5) ────────────────────────────────────
     //
@@ -312,12 +309,13 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
         let v = b.load(interface.0, lane);
         b.public(v);
     }
-    mark(&b, "phase 8: the interface digest (R5)");
+    mark(&mut b, "phase 8: the interface digest (R5)");
 
-    let stats = b.stats();
     let checkpoint_names = b.checkpoint_names().to_vec();
+    let (program, mut stats) = b.finish_stats();
+    let phase_rows = std::mem::take(&mut stats.phase_rows);
     VerifierProgram {
-        program: b.finish(),
+        program,
         shape: shape.clone(),
         key: key.clone(),
         checkpoints: cp,

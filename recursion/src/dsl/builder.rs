@@ -1,28 +1,31 @@
-//! The builder: value slots, a linear register allocator with spills, and the control constructs
-//! rVM programs are made of.
+//! The builder: value slots, a two-pass register allocator with liveness, and the control
+//! constructs rVM programs are made of.
 //!
-//! **The allocator.** `r1..r27` are allocatable and `r28..r31` are scratch (`r0` is the constant
-//! zero). Every handle is allocated a register when it is created and keeps it until pressure forces
-//! a spill; a spilled handle is written to the spill arena — the first [`MEM_BASE`] cells of memory,
-//! which is why user allocations start above it — and from then on is reloaded into a scratch
-//! register at each use. There is no liveness analysis and no promotion back into a register: a
-//! handle is live from its definition to the end of the program, so the allocator's only choice is
-//! *which* resident handle to evict, and it evicts the oldest one that the instruction being emitted
-//! does not need. That is the "simple linear allocator with spills" spec §4.1 asks for, and every
-//! spill and reload is counted in [`Stats`] so the cost is visible rather than inferred.
+//! **The allocator (M5.2 Task 7).** Every public method buffers handle-annotated operations —
+//! `Mat` (a materialise), `Def` (a fresh handle), `Instr` (one annotated instruction), and
+//! group/loop markers — and `finish()` replays them, assigning registers, emitting spill and
+//! reload instructions, and resolving branch targets and checkpoint pcs. With
+//! [`Liveness::On`] the replay **frees a handle's register at its last use** (last-use is
+//! computed over the whole buffered program, clamped out of loop bodies: anything a loop body
+//! touches stays live until the loop ends) and reuses spill cells, so pressure — and with it
+//! spill/reload traffic — collapses. With [`Liveness::Off`] the replay runs the pre-liveness
+//! policy verbatim (handles live to the end of the program, the oldest resident spills first,
+//! no cell reuse) and reproduces the pre-Task-7 instruction stream **byte for byte** — the
+//! differential reference `tests/dsl.rs` and `tests/verifier.rs` pin against the On build.
 //!
-//! **Why scratch registers exist.** Both operands of an extension binary operation can be spilled,
-//! which is two consecutive registers each; `assert_eq` needs a third for its difference. Four is
-//! the worst case among the handle-level operations. Six are reserved, because the DSL's own hash
-//! layer emits raw sequences (see the `raw_*` hooks below) whose deepest one — the Merkle walk's
-//! child select — needs a reloaded index bit, two reloaded base addresses and three working
-//! registers at once. [`Builder::take_scratch`] asserts the bound rather than silently aliasing.
+//! **Scratch registers.** `r26..r31` are never allocated to a handle: where a spilled operand is
+//! reloaded, where a comparison's difference lands, and where the hash layer's raw sequences do
+//! their work. Six, because the deepest sequence — the Merkle walk's child select — needs a
+//! reloaded index bit, two reloaded base addresses and three working registers at once; the
+//! replay assigns scratch slots in buffered order and asserts the bound.
 //!
-//! **Discipline the code below depends on.** A handle's defining instruction is emitted immediately
-//! after the handle is created, with nothing in between that could allocate — otherwise the
-//! allocator could spill a register whose value has not been written yet.
+//! **Discipline the replay depends on.** A handle's `Def` entry is followed immediately by its
+//! defining instruction(s), with nothing in between that could allocate — otherwise the replay
+//! could spill a register whose value has not been written yet (the pre-liveness rule, carried).
+//! Loop bodies leave the allocation of every handle that existed before them untouched; the
+//! replay checks it at the loop markers, where the pre-liveness builder checked it at emit time.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 
@@ -31,14 +34,11 @@ use crate::isa::{Instr, Op, Program, EF, F, MEM_LIMIT, NUM_REGS};
 
 /// The first cell a user allocation can use. Cells `0..MEM_BASE` are the spill arena.
 ///
-/// `2^22`, a quarter of the `2^24`-cell address space. A spilled handle keeps its cell for the
-/// rest of the program (there is no liveness analysis and no promotion back into a register), so the
-/// arena has to hold *every handle the program ever spills* — and the verifier program spills on the
-/// order of `10^6` of them (the FRI reduction alone creates ~10 handle slots per opened column per
-/// query). Cells cost nothing on their own: the rVM's memory is addressed, not materialised, so an
-/// unused cell is neither a row nor a trace entry. Raising this number moves every user allocation
-/// and therefore **changes every program digest**, which is why it is set once, generously, here
-/// rather than nudged upwards later. (`2^20` sufficed through phase 5 and overflows in phase 6.)
+/// `2^22`, a quarter of the `2^24`-cell address space. With liveness the arena holds only the
+/// handles spilled *concurrently* — the pre-liveness "every handle the program ever spills"
+/// requirement (on the order of `10^6` cells for the verifier program) is gone — but the base is
+/// where every program already built points its user allocations, and moving it changes every
+/// digest for no benefit.
 pub const MEM_BASE: u64 = 1 << 22;
 
 /// The registers handles are allocated from, in allocation-preference order. Width-2 handles take an
@@ -46,49 +46,112 @@ pub const MEM_BASE: u64 = 1 << 22;
 const ALLOCATABLE: [u8; 25] = [
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
 ];
-/// Never allocated to a handle: where a spilled operand is reloaded, where a comparison's difference
-/// lands, and where the hash layer's raw sequences do their work. Contiguous, so a width-2 reload can
-/// take any two of them in order.
+/// Never allocated to a handle. Contiguous, so a width-2 reload can take any two in order.
 const SCRATCH: [u8; 6] = [26, 27, 28, 29, 30, 31];
 
 /// Should `Builder::checkpoint` publish its value?
-///
-/// The differential tests need dozens of intermediate values exposed; the shipped program's public
-/// values are spec §4.4 exactly. Both builds record the same checkpoint *names*, in the same order,
-/// so the two tables line up (`Builder::checkpoint_names`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Checkpoints {
     Off,
     On,
 }
 
-/// What a built program cost. `cells` counts the memory cells the program reserves: the spill arena
-/// it actually used plus everything [`Builder::alloc`] handed out.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Should `Builder::finish` free a handle's register at its last use (Task 7), or run the
+/// pre-liveness policy that keeps every handle to the end of the program? `Off` exists as the
+/// differential reference for `On` — it reproduces the pre-Task-7 stream byte for byte — not as
+/// a mode anyone should build with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Liveness {
+    On,
+    Off,
+}
+
+/// What a built program cost. `cells` counts the memory cells the program reserves: the spill
+/// arena's peak concurrent usage plus everything [`Builder::alloc`] handed out. `phase_rows` is
+/// the final instruction count per [`Builder::note_phase`] section, spill and reload insertions
+/// included — the pre-liveness builder counted the same thing inline at the phase boundaries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     pub instrs: usize,
     pub spills: usize,
     pub reloads: usize,
     pub perms: usize,
     pub cells: u64,
+    /// Peak simultaneously-live handles over the build (Task 7): the number the liveness
+    /// analysis exists to shrink — the pre-liveness build's answer is "every handle the program
+    /// ever creates".
+    pub live_max: usize,
+    pub phase_rows: Vec<(&'static str, usize)>,
 }
 
-/// Where a handle's value is right now.
+// ------------------------------------------------------------------ the buffered operations
+
+/// A register reference in a buffered instruction: a handle's home (lane 0 or 1 of the pair), a
+/// materialise's output (the [`Op2::Mat`] entry's index), a symbolic scratch slot (per group,
+/// assigned in buffered order at replay), or a literal register (`r0` and the raw layer's own).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Place {
-    Reg(u8),
-    Mem(u64),
+pub(super) enum RRef {
+    Home(u32, u8),
+    Mat(u32, u8),
+    Scratch(u32),
+    Raw(u8),
 }
 
-#[derive(Clone, Copy, Debug)]
+impl RRef {
+    pub(super) fn scratch(sym: u8) -> RRef {
+        RRef::Scratch(sym as u32)
+    }
+}
+
+/// The fourth word of a buffered instruction: a register reference or an immediate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum BRef {
+    Home(u32, u8),
+    Mat(u32, u8),
+    Scratch(u32),
+    Imm(F),
+}
+
+/// A register reference as the fourth word of an instruction.
+pub(super) fn bref_of(r: RRef) -> BRef {
+    match r {
+        RRef::Home(id, lane) => BRef::Home(id, lane),
+        RRef::Mat(e, lane) => BRef::Mat(e, lane),
+        RRef::Scratch(sym) => BRef::Scratch(sym),
+        RRef::Raw(r) => BRef::Imm(F::from_u8(r)),
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Op2 {
+    /// A `begin()`/`raw_group()` marker: scratch assignment resets here.
+    Group,
+    /// A materialise: at replay, the handle's home register if resident, else a reload into the
+    /// next scratch slot. Field references to this entry are `RRef::Mat(index)`.
+    Mat { id: u32 },
+    /// A fresh handle: at replay, claim its home register (evicting if needed).
+    Def { id: u32, width: u8 },
+    /// A `take_scratch` call: reserve `n` symbolic scratch slots, assigned in order at replay.
+    TakeScratch { n: usize },
+    /// One annotated instruction. `target` is a buffer index for `Jmp`/`Jeq`/`Jne` (or
+    /// `u32::MAX`): branch targets are buffer positions, resolved to final pcs at replay.
+    Instr { op: Op, rd: RRef, ra: RRef, b: BRef, target: u32, checkpoint: Option<String> },
+    /// Loop markers, paired by `id`: the liveness clamp and the allocation-invariant check.
+    LoopTop { id: u32 },
+    LoopEnd { id: u32 },
+    /// A phase boundary for `Stats::phase_rows`: the replay counts emitted instructions between
+    /// consecutive markers.
+    Phase { name: &'static str },
+}
+
 struct Slot {
     width: u8,
-    place: Place,
     /// The value, when it is a compile-time constant ([`Builder::constant`], [`Builder::zero`]).
-    /// Only [`Builder::counted_loop`] reads it, to reject a statically-zero iteration count; it is
-    /// deliberately *not* propagated through arithmetic, because a builder that constant-folded
-    /// would emit a different program than the one it was asked for.
+    /// Only [`Builder::counted_loop`] reads it; it is deliberately *not* propagated through
+    /// arithmetic.
     konst: Option<F>,
+    /// The `r0` handle: reads as the literal register 0, never allocated, never freed.
+    zero: bool,
 }
 
 /// A pointer: a value slot holding a base address, plus a compile-time cell delta that is folded
@@ -101,75 +164,87 @@ struct PtrSlot {
 
 pub struct Builder {
     mode: Checkpoints,
-    instrs: Vec<Instr>,
-    /// `pc -> name` for the assertion traps, in increasing `pc` (what `Program::checkpoint_at`
-    /// binary-searches).
-    checkpoints: Vec<(u32, String)>,
+    liveness: Liveness,
+    ops: Vec<Op2>,
     /// The names passed to [`Builder::checkpoint`], in order, whatever the mode.
     names: Vec<String>,
     slots: Vec<Slot>,
     ptrs: Vec<PtrSlot>,
-    /// Which handle occupies each register; both halves of a width-2 handle map to it.
-    regs: [Option<u32>; NUM_REGS],
-    /// The resident handles, oldest allocation first: the spill order.
-    order: VecDeque<u32>,
     next_cell: u64,
-    next_spill: u64,
-    /// Scratch registers taken by the instruction currently being emitted.
+    /// Scratch slots handed out in the current group (buffered; the replay assigns concrete
+    /// registers in the same order).
     scratch: usize,
     zero: Option<Felt>,
-    /// The sixteen cells `dsl::hash` hashes through, allocated on first use (see
-    /// [`Builder::hash_scratch`]).
+    /// The sixteen cells `dsl::hash` hashes through, allocated on first use.
     hash: Option<Ptr>,
+    /// Loop markers are paired by a counter, so nested loops match up.
+    next_loop: u32,
+    /// Instructions buffered so far — the incremental count `note_phase`'s callers measure with.
+    buf_instrs: usize,
     stats: Stats,
 }
 
 impl Builder {
     pub fn new(checkpoints: Checkpoints) -> Self {
+        Self::with_liveness(checkpoints, Liveness::On)
+    }
+
+    pub fn with_liveness(checkpoints: Checkpoints, liveness: Liveness) -> Self {
         Builder {
             mode: checkpoints,
-            instrs: Vec::new(),
-            checkpoints: Vec::new(),
+            liveness,
+            ops: Vec::new(),
             names: Vec::new(),
             slots: Vec::new(),
             ptrs: Vec::new(),
-            regs: [None; NUM_REGS],
-            order: VecDeque::new(),
             next_cell: MEM_BASE,
-            next_spill: 0,
             scratch: 0,
             zero: None,
             hash: None,
+            next_loop: 0,
+            buf_instrs: 0,
             stats: Stats::default(),
         }
     }
 
-    pub fn stats(&self) -> Stats {
-        self.stats
+    /// The instructions buffered so far, spill/reload insertions excluded (they exist only at
+    /// replay). What `Builder::stats` reported incrementally before Task 7.
+    pub(crate) fn emitted(&self) -> usize {
+        self.buf_instrs
+    }
+
+    /// Mark a phase boundary for `Stats::phase_rows`.
+    pub fn note_phase(&mut self, name: &'static str) {
+        self.ops.push(Op2::Phase { name });
+    }
+
+    /// Build the program and return it with its [`Stats`]: the replay computes spills, reloads,
+    /// the final instruction count and `live_max`, so they are only knowable here. This is what
+    /// every caller that wants the numbers uses; `finish` discards them.
+    pub fn finish_stats(mut self) -> (Program, Stats) {
+        self.emit(Op::Halt, RRef::Raw(0), RRef::Raw(0), BRef::Imm(F::ZERO));
+        self.replay()
     }
 
     /// The names passed to [`Builder::checkpoint`], in order. Identical under both
-    /// [`Checkpoints`] modes — that is what makes the two builds' checkpoint tables comparable.
+    /// [`Checkpoints`] modes.
     pub fn checkpoint_names(&self) -> &[String] {
         &self.names
     }
 
-    /// Close the program: append `HALT`.
-    ///
-    /// There is no separate trap block to patch. A failing assertion's `INV` of zero sits inline
-    /// right after the branch that skips it (see [`Builder::assert_eq`]), so every trap's `pc`
-    /// identifies its own assertion and nothing has to be resolved at the end.
-    pub fn finish(mut self) -> Program {
-        self.emit(Op::Halt, 0, 0, F::ZERO);
-        Program { instrs: self.instrs, checkpoints: self.checkpoints }
+    /// Close the program: append `HALT` and replay the buffered operations into the final
+    /// instruction stream — see the module doc comment for the two policies. [`Builder::finish_stats`]
+    /// returns the build's cost numbers with it.
+    pub fn finish(self) -> Program {
+        self.finish_stats().0
     }
 
     // ---------------------------------------------------------------- values
 
     pub fn constant(&mut self, v: F) -> Felt {
         self.begin();
-        let (id, rd) = self.new_handle(1, &[]);
-        self.emit(Op::Faddi, rd, 0, v);
+        let (id, rd) = self.new_handle(1);
+        self.emit(Op::Faddi, rd, RRef::Raw(0), BRef::Imm(v));
         self.slots[id as usize].konst = Some(v);
         Felt(id)
     }
@@ -180,7 +255,7 @@ impl Builder {
             return z;
         }
         let id = self.slots.len() as u32;
-        self.slots.push(Slot { width: 1, place: Place::Reg(0), konst: Some(F::ZERO) });
+        self.slots.push(Slot { width: 1, konst: Some(F::ZERO), zero: true });
         let z = Felt(id);
         self.zero = Some(z);
         z
@@ -222,9 +297,9 @@ impl Builder {
         self.begin();
         let c = v.as_basis_coefficients_slice();
         let (c0, c1) = (c[0], c[1]);
-        let (id, rd) = self.new_handle(2, &[]);
-        self.emit(Op::Faddi, rd, 0, c0);
-        self.emit(Op::Faddi, rd + 1, 0, c1);
+        let (id, rd) = self.new_handle(2);
+        self.emit(Op::Faddi, rd, RRef::Raw(0), BRef::Imm(c0));
+        self.emit(Op::Faddi, RRef::Home(id, 1), RRef::Raw(0), BRef::Imm(c1));
         Ext(id)
     }
 
@@ -232,9 +307,9 @@ impl Builder {
     pub fn ext_lift(&mut self, a: Felt) -> Ext {
         self.begin();
         let ra = self.materialise(a.0);
-        let (id, rd) = self.new_handle(2, &[ra]);
-        self.emit(Op::Mov, rd, ra, F::ZERO);
-        self.emit(Op::Mov, rd + 1, 0, F::ZERO);
+        let (id, rd) = self.new_handle(2);
+        self.emit(Op::Mov, rd, ra, BRef::Imm(F::ZERO));
+        self.emit(Op::Mov, RRef::Home(id, 1), RRef::Raw(0), BRef::Imm(F::ZERO));
         Ext(id)
     }
 
@@ -254,29 +329,27 @@ impl Builder {
         self.begin();
         let ra = self.materialise(a.0);
         let rb = self.materialise(b.0);
-        let (id, rd) = self.new_handle(2, &[ra, ra + 1, rb]);
-        self.emit(Op::Emulf, rd, ra, F::from_u8(rb));
+        let (id, rd) = self.new_handle(2);
+        self.emit(Op::Emulf, rd, ra, bref_of(rb));
         Ext(id)
     }
 
     pub fn ext_inv(&mut self, a: Ext) -> Ext {
         self.begin();
         let ra = self.materialise(a.0);
-        let (id, rd) = self.new_handle(2, &[ra, ra + 1]);
-        self.emit(Op::Einv, rd, ra, F::ZERO);
+        let (id, rd) = self.new_handle(2);
+        self.emit(Op::Einv, rd, ra, BRef::Imm(F::ZERO));
         Ext(id)
     }
 
-    /// `c0 + c1·X` from its two coefficients: two `MOV`s into an aligned register pair, the dual of
-    /// [`Builder::ext_parts`]. This is how a sampled extension challenge is assembled — the
-    /// challenger squeezes two base elements and this makes them one handle.
+    /// `c0 + c1·X` from its two coefficients: two `MOV`s into an aligned register pair.
     pub fn ext_from_parts(&mut self, c0: Felt, c1: Felt) -> Ext {
         self.begin();
         let a0 = self.materialise(c0.0);
         let a1 = self.materialise(c1.0);
-        let (id, rd) = self.new_handle(2, &[a0, a1]);
-        self.emit(Op::Mov, rd, a0, F::ZERO);
-        self.emit(Op::Mov, rd + 1, a1, F::ZERO);
+        let (id, rd) = self.new_handle(2);
+        self.emit(Op::Mov, rd, a0, BRef::Imm(F::ZERO));
+        self.emit(Op::Mov, RRef::Home(id, 1), a1, BRef::Imm(F::ZERO));
         Ext(id)
     }
 
@@ -284,11 +357,10 @@ impl Builder {
     pub fn ext_parts(&mut self, a: Ext) -> (Felt, Felt) {
         self.begin();
         let ra = self.materialise(a.0);
-        let pinned = [ra, ra + 1];
-        let (i0, r0) = self.new_handle(1, &pinned);
-        self.emit(Op::Mov, r0, ra, F::ZERO);
-        let (i1, r1) = self.new_handle(1, &pinned);
-        self.emit(Op::Mov, r1, ra + 1, F::ZERO);
+        let (i0, r0) = self.new_handle(1);
+        self.emit(Op::Mov, r0, ra, BRef::Imm(F::ZERO));
+        let (i1, r1) = self.new_handle(1);
+        self.emit(Op::Mov, r1, lane1(ra), BRef::Imm(F::ZERO));
         (Felt(i0), Felt(i1))
     }
 
@@ -296,22 +368,19 @@ impl Builder {
 
     pub fn hint(&mut self) -> Felt {
         self.begin();
-        let (id, rd) = self.new_handle(1, &[]);
-        self.emit(Op::Hint, rd, 0, F::ZERO);
+        let (id, rd) = self.new_handle(1);
+        self.emit(Op::Hint, rd, RRef::Raw(0), BRef::Imm(F::ZERO));
         Felt(id)
     }
 
     pub fn hint_ext(&mut self) -> Ext {
         self.begin();
-        let (id, rd) = self.new_handle(2, &[]);
-        self.emit(Op::Hinte, rd, 0, F::ZERO);
+        let (id, rd) = self.new_handle(2);
+        self.emit(Op::Hinte, rd, RRef::Raw(0), BRef::Imm(F::ZERO));
         Ext(id)
     }
 
-    /// `n` witness words, read in order into `n` fresh cells.
-    ///
-    /// The words go through one scratch register rather than through `n` handles: an array is read
-    /// back from memory, so keeping every element in a register would only spill it straight back.
+    /// `n` witness words, read in order into `n` fresh cells, through one scratch register.
     pub fn hint_array(&mut self, n: usize) -> Array<Felt> {
         let base = self.alloc(n as u64);
         let holder = self.ptrs[base.0 as usize].holder;
@@ -319,8 +388,8 @@ impl Builder {
         let rp = self.materialise(holder);
         let s = self.take_scratch(1);
         for k in 0..n {
-            self.emit(Op::Hint, s, 0, F::ZERO);
-            self.emit(Op::Store, s, rp, imm(k as i64));
+            self.emit(Op::Hint, RRef::scratch(s), RRef::Raw(0), BRef::Imm(F::ZERO));
+            self.emit(Op::Store, RRef::scratch(s), rp, BRef::Imm(imm(k as i64)));
         }
         Array::new(base, n, 1)
     }
@@ -333,8 +402,8 @@ impl Builder {
         let rp = self.materialise(holder);
         let s = self.take_scratch(2);
         for k in 0..n {
-            self.emit(Op::Hinte, s, 0, F::ZERO);
-            self.emit(Op::Storee, s, rp, imm(2 * k as i64));
+            self.emit(Op::Hinte, RRef::scratch(s), RRef::Raw(0), BRef::Imm(F::ZERO));
+            self.emit(Op::Storee, RRef::scratch(s), rp, BRef::Imm(imm(2 * k as i64)));
         }
         Array::new(base, n, 2)
     }
@@ -349,14 +418,13 @@ impl Builder {
         self.next_cell += cells;
         self.stats.cells += cells;
         self.begin();
-        let (id, rd) = self.new_handle(1, &[]);
-        self.emit(Op::Faddi, rd, 0, F::from_u64(base));
+        let (id, rd) = self.new_handle(1);
+        self.emit(Op::Faddi, rd, RRef::Raw(0), BRef::Imm(F::from_u64(base)));
         self.ptrs.push(PtrSlot { holder: id, delta: 0 });
         Ptr(self.ptrs.len() as u32 - 1)
     }
 
-    /// `p` shifted by `cells`. Free: the delta is folded into the immediate of every access made
-    /// through the result, and `LOAD`'s immediate is a full field element.
+    /// `p` shifted by `cells`. Free: the delta is folded into the immediate of every access.
     pub fn offset(&mut self, p: Ptr, cells: i64) -> Ptr {
         let it = self.ptrs[p.0 as usize];
         self.ptrs.push(PtrSlot { holder: it.holder, delta: it.delta + cells });
@@ -366,8 +434,8 @@ impl Builder {
     pub fn load(&mut self, p: Ptr, off: i64) -> Felt {
         self.begin();
         let (rp, at) = self.address(p, off);
-        let (id, rd) = self.new_handle(1, &[rp]);
-        self.emit(Op::Load, rd, rp, at);
+        let (id, rd) = self.new_handle(1);
+        self.emit(Op::Load, rd, rp, BRef::Imm(at));
         Felt(id)
     }
 
@@ -375,14 +443,14 @@ impl Builder {
         self.begin();
         let rv = self.materialise(v.0);
         let (rp, at) = self.address(p, off);
-        self.emit(Op::Store, rv, rp, at);
+        self.emit(Op::Store, rv, rp, BRef::Imm(at));
     }
 
     pub fn load_ext(&mut self, p: Ptr, off: i64) -> Ext {
         self.begin();
         let (rp, at) = self.address(p, off);
-        let (id, rd) = self.new_handle(2, &[rp]);
-        self.emit(Op::Loade, rd, rp, at);
+        let (id, rd) = self.new_handle(2);
+        self.emit(Op::Loade, rd, rp, BRef::Imm(at));
         Ext(id)
     }
 
@@ -390,7 +458,7 @@ impl Builder {
         self.begin();
         let rv = self.materialise(v.0);
         let (rp, at) = self.address(p, off);
-        self.emit(Op::Storee, rv, rp, at);
+        self.emit(Op::Storee, rv, rp, BRef::Imm(at));
     }
 
     pub fn get(&mut self, a: Array<Felt>, idx: usize) -> Felt {
@@ -403,17 +471,8 @@ impl Builder {
         self.load_ext(a.base, (idx * a.stride) as i64)
     }
 
-    /// `n` cells from `src + src_off` to `dst + dst_off`, two rows per cell.
-    ///
-    /// This is the bulk move the hash layer is built out of, and the reason it exists rather than a
-    /// `load`/`store` pair per cell is register pressure: `load` creates a *handle*, which lives to
-    /// the end of the program, so copying a 121-element sponge message through handles would spill a
-    /// hundred of them and pay a third row per cell for the privilege. Here the value goes through
-    /// one scratch register and the two base addresses are materialised once for the whole run, so
-    /// the cost is exactly `2n` rows and no allocator state changes at all.
-    ///
-    /// Overlapping ranges copy ascending, cell by cell, with no temporary: a forward overlap
-    /// (`dst > src` within the same region) will read cells this call has already written.
+    /// `n` cells from `src + src_off` to `dst + dst_off`, two rows per cell, through one scratch
+    /// register and no allocator state changes beyond the two materialised base addresses.
     pub fn copy_cells(&mut self, dst: Ptr, dst_off: i64, src: Ptr, src_off: i64, n: usize) {
         if n == 0 {
             return;
@@ -424,13 +483,12 @@ impl Builder {
         let rd = self.materialise(to.holder);
         let t = self.take_scratch(1);
         for k in 0..n as i64 {
-            self.emit(Op::Load, t, rs, imm(from.delta + src_off + k));
-            self.emit(Op::Store, t, rd, imm(to.delta + dst_off + k));
+            self.emit(Op::Load, RRef::scratch(t), rs, BRef::Imm(imm(from.delta + src_off + k)));
+            self.emit(Op::Store, RRef::scratch(t), rd, BRef::Imm(imm(to.delta + dst_off + k)));
         }
     }
 
-    /// `n` zero cells at `p + off`, one row per cell — `r0` is the value, so this needs no register
-    /// and creates no handle.
+    /// `n` zero cells at `p + off`, one row per cell — `r0` is the value.
     pub fn zero_cells(&mut self, p: Ptr, off: i64, n: usize) {
         if n == 0 {
             return;
@@ -439,18 +497,11 @@ impl Builder {
         self.begin();
         let rp = self.materialise(it.holder);
         for k in 0..n as i64 {
-            self.emit(Op::Store, 0, rp, imm(it.delta + off + k));
+            self.emit(Op::Store, RRef::Raw(0), rp, BRef::Imm(imm(it.delta + off + k)));
         }
     }
 
-    /// The sixteen cells the DSL's hash layer works through, allocated once per program: the eight
-    /// permutation lanes `0..8` plus two four-cell scratch digests at `8..12` and `12..16`.
-    ///
-    /// One shared region, not one per hash: a fresh allocation per `sponge` call would cost a handle
-    /// (and an `FADDI`) per call, and the verifier program hashes tens of thousands of times. The
-    /// consequence is an aliasing rule, documented on every function in [`super::hash`]: no argument
-    /// to a hash primitive may point into this region, and a primitive that has to survive another
-    /// one's use of the lanes steps aside into one of the two scratch digests first.
+    /// The sixteen cells the DSL's hash layer works through, allocated once per program.
     pub(super) fn hash_scratch(&mut self) -> Ptr {
         if let Some(p) = self.hash {
             return p;
@@ -462,10 +513,8 @@ impl Builder {
 
     // --------------------------------------------------------------- hashing
 
-    /// Permute the eight cells at `p` in place.
-    ///
-    /// `POSEIDON2`'s pointer is a register with no immediate (spec §3), so a `Ptr` carrying a
-    /// compile-time delta costs one `FADDI` to fold it in first.
+    /// Permute the eight cells at `p` in place. `POSEIDON2`'s pointer is a register with no
+    /// immediate, so a `Ptr` carrying a compile-time delta costs one `FADDI` to fold it in first.
     pub fn poseidon2(&mut self, p: Ptr) {
         self.begin();
         let it = self.ptrs[p.0 as usize];
@@ -474,34 +523,29 @@ impl Builder {
             holder
         } else {
             let s = self.take_scratch(1);
-            self.emit(Op::Faddi, s, holder, imm(it.delta));
-            s
+            self.emit(Op::Faddi, RRef::scratch(s), holder, BRef::Imm(imm(it.delta)));
+            RRef::scratch(s)
         };
-        self.emit(Op::Poseidon2, 0, ra, F::ZERO);
+        self.emit(Op::Poseidon2, RRef::Raw(0), ra, BRef::Imm(F::ZERO));
         self.stats.perms += 1;
     }
 
     // --------------------------------------------------------------- control
 
     /// `a == b`, or the program traps at a `pc` that names `what`.
-    ///
-    /// Three rows: the difference, a branch over the trap, and the trap — `INV r1, r0`, the standard
-    /// unsatisfiable row. The trap is emitted per assertion rather than shared, so the `pc` in
-    /// `ExecError::InverseOfZero` identifies *which* assertion failed with no patching at the end
-    /// and no ambiguity. `r1`'s contents are irrelevant: nothing runs after the trap.
     pub fn assert_eq(&mut self, a: Felt, b: Felt, what: &str) {
         self.begin();
         let ra = self.materialise(a.0);
         let rb = self.materialise(b.0);
         let t = self.take_scratch(1);
-        self.emit_r(Op::Fsub, t, ra, rb);
-        let over = self.instrs.len() as u64 + 2;
-        self.emit(Op::Jeq, t, 0, F::from_u64(over));
+        self.emit_r(Op::Fsub, RRef::scratch(t), ra, bref_of(rb));
+        let over = self.ops.len() as u32 + 2;
+        self.emit(Op::Jeq, RRef::scratch(t), RRef::Raw(0), BRef::Imm(F::ZERO));
+        self.set_target(over);
         self.trap(what);
     }
 
-    /// Two [`Builder::assert_eq`]s, one per coefficient, named `"<what> (c0)"` and `"<what> (c1)"`
-    /// so a failure says which half disagreed.
+    /// Two [`Builder::assert_eq`]s, one per coefficient, named `"<what> (c0)"` and `"<what> (c1)"`.
     pub fn assert_eq_ext(&mut self, a: Ext, b: Ext, what: &str) {
         let (a0, a1) = self.ext_parts(a);
         let (b0, b1) = self.ext_parts(b);
@@ -509,20 +553,13 @@ impl Builder {
         self.assert_eq(a1, b1, &format!("{what} (c1)"));
     }
 
-    /// `a != 0` **and** `a⁻¹`, in one row.
-    ///
-    /// The extension analogue of [`Builder::assert_nonzero`], except that it hands back the inverse
-    /// instead of discarding it, because its caller wants both: the verifier's `inv_vanishing` *is*
-    /// `1/Z_H(zeta)`, and `Z_H(zeta) != 0` is `p3-batch-stark`'s `OodPointInDomain` check. `EINV` of
-    /// zero is exactly the trap, so one `EINV` is the value and the assertion at once — the named
-    /// checkpoint sits on that instruction's own `pc`.
+    /// `a != 0` **and** `a⁻¹`, in one row — the value and the assertion at once.
     pub fn ext_inv_checked(&mut self, a: Ext, what: &str) -> Ext {
         self.begin();
         let ra = self.materialise(a.0);
-        let (id, rd) = self.new_handle(2, &[ra, ra + 1]);
-        let at = self.instrs.len() as u32;
-        self.emit(Op::Einv, rd, ra, F::ZERO);
-        self.checkpoints.push((at, what.to_string()));
+        let (id, rd) = self.new_handle(2);
+        self.emit(Op::Einv, rd, ra, BRef::Imm(F::ZERO));
+        self.name_last(what);
         Ext(id)
     }
 
@@ -531,36 +568,21 @@ impl Builder {
         self.begin();
         let ra = self.materialise(a.0);
         let t = self.take_scratch(1);
-        let at = self.instrs.len() as u32;
-        self.emit(Op::Inv, t, ra, F::ZERO);
-        self.checkpoints.push((at, what.to_string()));
+        self.emit(Op::Inv, RRef::scratch(t), ra, BRef::Imm(F::ZERO));
+        self.name_last(what);
     }
 
-    /// `body` emitted `n` times, with the iteration index as a Rust `usize`. No restriction on what
-    /// the body does — every iteration gets its own instructions.
+    /// `body` emitted `n` times, with the iteration index as a Rust `usize`.
     pub fn unrolled(&mut self, n: usize, mut body: impl FnMut(&mut Self, usize)) {
         for i in 0..n {
             body(self, i);
         }
     }
 
-    /// `body` emitted **once** and executed `n` times, with a down-counter (`n, n-1, …, 1`) as its
-    /// index.
-    ///
-    /// **Precondition: `n >= 1`.** The counter is tested *after* the body, so this is a do-while:
-    /// `n = 0` runs the body once and then counts down from `-1`, i.e. `2^64 - 2^32` more times —
-    /// not an empty loop but an unbounded one. A caller whose count can be zero has to branch around
-    /// the loop itself; nothing in the emitted code can recover from a zero reaching the `MOV`.
-    /// When `n` is a compile-time constant ([`Builder::constant`] or [`Builder::zero`]) the builder
-    /// checks the precondition and panics on a zero; when it is a runtime value — a round or query
-    /// count read off the witness tape, say — the precondition is the caller's to establish.
-    ///
-    /// Because the body is emitted once, the registers it reads on the second iteration are whatever
-    /// the first left behind — so the body must not move any handle that existed before the loop,
-    /// the counter above all. The builder snapshots the allocation and panics if the body's net
-    /// effect on it is not zero; a body that needs more registers than are free has to communicate
-    /// through memory instead. Handles the body *creates* are unconstrained: they are rewritten by
-    /// their own instructions every iteration.
+    /// `body` emitted **once** and executed `n` times, with a down-counter as its index. The
+    /// preconditions are unchanged from the pre-liveness builder: `n >= 1`, and the body must
+    /// not move any handle that existed before the loop — the replay checks the allocation
+    /// invariant at the loop markers (the pre-liveness builder checked it at emit time).
     pub fn counted_loop(&mut self, n: Felt, mut body: impl FnMut(&mut Self, Felt)) {
         assert!(
             self.slots[n.0 as usize].konst != Some(F::ZERO),
@@ -570,25 +592,20 @@ impl Builder {
         );
         self.begin();
         let rn = self.materialise(n.0);
-        let (ctr, rc) = self.new_handle(1, &[rn]);
-        self.emit(Op::Mov, rc, rn, F::ZERO);
+        let (ctr, rc) = self.new_handle(1);
+        self.emit(Op::Mov, rc, rn, BRef::Imm(F::ZERO));
 
-        let top = self.instrs.len() as u64;
-        let before: Vec<Place> = self.slots.iter().map(|s| s.place).collect();
+        let loop_id = self.next_loop;
+        self.next_loop += 1;
+        let top = self.ops.len() as u32;
+        self.ops.push(Op2::LoopTop { id: loop_id });
         body(self, Felt(ctr));
-        for (id, was) in before.iter().enumerate() {
-            let now = self.slots[id].place;
-            assert!(
-                now == *was,
-                "counted_loop: the body moved handle {id} from {was:?} to {now:?}. A loop body is \
-                 emitted once and run many times, so it must leave the allocation of every handle \
-                 that existed before it untouched — pass values in and out through memory."
-            );
-        }
+        self.ops.push(Op2::LoopEnd { id: loop_id });
 
         self.begin();
-        self.emit(Op::Faddi, rc, rc, F::NEG_ONE);
-        self.emit(Op::Jne, rc, 0, F::from_u64(top));
+        self.emit(Op::Faddi, RRef::Home(ctr, 0), RRef::Home(ctr, 0), BRef::Imm(F::NEG_ONE));
+        self.emit(Op::Jne, RRef::Home(ctr, 0), RRef::Raw(0), BRef::Imm(F::ZERO));
+        self.set_target(top + 1);
     }
 
     // ---------------------------------------------------------------- output
@@ -596,19 +613,19 @@ impl Builder {
     pub fn public(&mut self, v: Felt) {
         self.begin();
         let ra = self.materialise(v.0);
-        self.emit(Op::Public, 0, ra, F::ZERO);
+        self.emit(Op::Public, RRef::Raw(0), ra, BRef::Imm(F::ZERO));
     }
 
     /// `c0` then `c1`, the order `BasedVectorSpace` reads an extension element in.
     pub fn public_ext(&mut self, v: Ext) {
         self.begin();
         let ra = self.materialise(v.0);
-        self.emit(Op::Public, 0, ra, F::ZERO);
-        self.emit(Op::Public, 0, ra + 1, F::ZERO);
+        self.emit(Op::Public, RRef::Raw(0), ra, BRef::Imm(F::ZERO));
+        self.emit(Op::Public, RRef::Raw(0), lane1(ra), BRef::Imm(F::ZERO));
     }
 
     /// An intermediate value a differential test wants to see: published under
-    /// [`Checkpoints::On`], nothing at all under `Off`. The name is recorded either way.
+    /// [`Checkpoints::On`], nothing at all under `Off`.
     pub fn checkpoint(&mut self, name: &str, v: Ext) {
         self.names.push(name.to_string());
         if self.mode == Checkpoints::On {
@@ -616,71 +633,7 @@ impl Builder {
         }
     }
 
-    // ------------------------------------------------------------- emission
-
-    fn begin(&mut self) {
-        self.scratch = 0;
-    }
-
-    fn emit(&mut self, op: Op, rd: u8, ra: u8, b: F) {
-        self.instrs.push(Instr { op, rd, ra, b });
-        self.stats.instrs += 1;
-    }
-
-    fn emit_r(&mut self, op: Op, rd: u8, ra: u8, rb: u8) {
-        self.emit(op, rd, ra, F::from_u8(rb));
-    }
-
-    /// The inline trap for an assertion, and the name its `pc` resolves to.
-    fn trap(&mut self, what: &str) {
-        let at = self.instrs.len() as u32;
-        self.emit(Op::Inv, 1, 0, F::ZERO);
-        self.checkpoints.push((at, what.to_string()));
-    }
-
-    fn un(&mut self, op: Op, a: Felt, c: F) -> Felt {
-        self.begin();
-        let ra = self.materialise(a.0);
-        let (id, rd) = self.new_handle(1, &[ra]);
-        self.emit(op, rd, ra, c);
-        Felt(id)
-    }
-
-    fn bin(&mut self, op: Op, a: Felt, b: Felt) -> Felt {
-        self.begin();
-        let ra = self.materialise(a.0);
-        let rb = self.materialise(b.0);
-        let (id, rd) = self.new_handle(1, &[ra, rb]);
-        self.emit_r(op, rd, ra, rb);
-        Felt(id)
-    }
-
-    fn ebin(&mut self, op: Op, a: Ext, b: Ext) -> Ext {
-        self.begin();
-        let ra = self.materialise(a.0);
-        let rb = self.materialise(b.0);
-        let (id, rd) = self.new_handle(2, &[ra, ra + 1, rb, rb + 1]);
-        self.emit_r(op, rd, ra, rb);
-        Ext(id)
-    }
-
-    /// The `(register, immediate)` pair an access through `p` at `off` uses.
-    fn address(&mut self, p: Ptr, off: i64) -> (u8, F) {
-        let it = self.ptrs[p.0 as usize];
-        (self.materialise(it.holder), imm(it.delta + off))
-    }
-
-    // ------------------------------- raw emission, for the DSL's own hash layer
-
-    // `dsl::hash`'s Merkle select is the one sequence in this crate that wants scratch registers
-    // and raw instructions rather than handles: six handles per digest lane, all dead one row after
-    // they are born, would spill six live-forever slots per lane and add 75% to the cost of every
-    // Merkle level. These four hooks are `pub(super)`, so they are reachable from `dsl::hash` and
-    // `dsl::transcript` and from nowhere else. The discipline they demand is the emitter's: call
-    // `raw_group` once, then `raw_reg` for every handle operand (a spilled one reloads into scratch,
-    // which is why they come first), then `raw_scratch` for working registers, and emit. Nothing
-    // that allocates a handle may run in between, or the allocator may move an operand out from
-    // under the instructions already emitted.
+    // ------------------------------------------------------------- raw emission
 
     /// Start a raw instruction group: releases every scratch register the previous one held.
     pub(super) fn raw_group(&mut self) {
@@ -692,53 +645,116 @@ impl Builder {
         self.take_scratch(n)
     }
 
-    /// The register holding `v`, reloading a spilled handle into scratch exactly as any operand is.
-    pub(super) fn raw_reg(&mut self, v: Felt) -> u8 {
+    /// A field reference to `v`, reloading a spilled handle into scratch exactly as any operand is.
+    pub(super) fn raw_reg(&mut self, v: Felt) -> RRef {
         self.materialise(v.0)
     }
 
-    /// The `(base register, compile-time cell delta)` an access through `p` uses.
-    pub(super) fn raw_ptr(&mut self, p: Ptr) -> (u8, i64) {
+    /// The field reference and compile-time cell delta an access through `p` uses.
+    pub(super) fn raw_ptr(&mut self, p: Ptr) -> (RRef, i64) {
         let it = self.ptrs[p.0 as usize];
         (self.materialise(it.holder), it.delta)
     }
 
-    /// One instruction, verbatim. `b` is an immediate; use [`Builder::raw_reg_imm`] for a register
-    /// in the fourth slot.
-    pub(super) fn raw_emit(&mut self, op: Op, rd: u8, ra: u8, b: F) {
+    /// One instruction, verbatim, with field references.
+    pub(super) fn raw_emit(&mut self, op: Op, rd: RRef, ra: RRef, b: BRef) {
         self.emit(op, rd, ra, b);
     }
 
-    /// A register index as the fourth word of an instruction.
-    pub(super) fn raw_reg_imm(r: u8) -> F {
-        F::from_u8(r)
+    /// A scratch slot as the fourth word of an instruction.
+    pub(super) fn raw_scratch_b(s: u8) -> BRef {
+        BRef::Scratch(s as u32)
     }
 
     /// A signed cell delta as an address immediate.
-    pub(super) fn raw_imm(delta: i64) -> F {
-        imm(delta)
+    pub(super) fn raw_imm(delta: i64) -> BRef {
+        BRef::Imm(imm(delta))
     }
 
-    // ------------------------------------------------------------ allocation
+    // ------------------------------------------------------------- emission
 
-    /// The register holding `id`, reloading it into scratch if it has been spilled. A reloaded
-    /// handle stays in memory: there is no promotion, so each use of a spilled handle costs one
-    /// `LOAD`/`LOADE`.
-    fn materialise(&mut self, id: u32) -> u8 {
-        let slot = self.slots[id as usize];
-        match slot.place {
-            Place::Reg(r) => r,
-            Place::Mem(addr) => {
-                let s = self.take_scratch(slot.width as usize);
-                let op = if slot.width == 1 { Op::Load } else { Op::Loade };
-                self.emit(op, s, 0, F::from_u64(addr));
-                self.stats.reloads += 1;
-                s
-            }
+    fn begin(&mut self) {
+        self.scratch = 0;
+        self.ops.push(Op2::Group);
+    }
+
+    fn emit(&mut self, op: Op, rd: RRef, ra: RRef, b: BRef) {
+        self.buf_instrs += 1;
+        self.ops.push(Op2::Instr { op, rd, ra, b, target: u32::MAX, checkpoint: None });
+    }
+
+    fn emit_r(&mut self, op: Op, rd: RRef, ra: RRef, rb: BRef) {
+        self.emit(op, rd, ra, rb);
+    }
+
+    /// Set the last instruction's branch target (a buffer index).
+    fn set_target(&mut self, target: u32) {
+        let Some(Op2::Instr { target: t, .. }) = self.ops.last_mut() else {
+            panic!("set_target on a non-instruction");
+        };
+        *t = target;
+    }
+
+    /// Record the last instruction's checkpoint name (assertion traps and checked inverses).
+    fn name_last(&mut self, what: &str) {
+        let Some(Op2::Instr { checkpoint, .. }) = self.ops.last_mut() else {
+            panic!("name_last on a non-instruction");
+        };
+        *checkpoint = Some(what.to_string());
+    }
+
+    /// The inline trap for an assertion, and the name its `pc` resolves to.
+    fn trap(&mut self, what: &str) {
+        self.emit(Op::Inv, RRef::Raw(1), RRef::Raw(0), BRef::Imm(F::ZERO));
+        self.name_last(what);
+    }
+
+    fn un(&mut self, op: Op, a: Felt, c: F) -> Felt {
+        self.begin();
+        let ra = self.materialise(a.0);
+        let (id, rd) = self.new_handle(1);
+        self.emit(op, rd, ra, BRef::Imm(c));
+        Felt(id)
+    }
+
+    fn bin(&mut self, op: Op, a: Felt, b: Felt) -> Felt {
+        self.begin();
+        let ra = self.materialise(a.0);
+        let rb = self.materialise(b.0);
+        let (id, rd) = self.new_handle(1);
+        self.emit_r(op, rd, ra, bref_of(rb));
+        Felt(id)
+    }
+
+    fn ebin(&mut self, op: Op, a: Ext, b: Ext) -> Ext {
+        self.begin();
+        let ra = self.materialise(a.0);
+        let rb = self.materialise(b.0);
+        let (id, rd) = self.new_handle(2);
+        self.emit_r(op, rd, ra, bref_of(rb));
+        Ext(id)
+    }
+
+    /// The `(field reference, immediate)` pair an access through `p` at `off` uses.
+    fn address(&mut self, p: Ptr, off: i64) -> (RRef, F) {
+        let it = self.ptrs[p.0 as usize];
+        (self.materialise(it.holder), imm(it.delta + off))
+    }
+
+    // ------------------------------------------------------------ allocation (buffer time)
+
+    /// A field reference to `id`, recorded as a `Mat` entry: at replay, the handle's home
+    /// register if resident, else a reload into the next scratch slot.
+    fn materialise(&mut self, id: u32) -> RRef {
+        if self.slots[id as usize].zero {
+            return RRef::Raw(0);
         }
+        let entry = self.ops.len() as u32;
+        self.ops.push(Op2::Mat { id });
+        RRef::Mat(entry, 0)
     }
 
-    /// The next `width` scratch registers. Contiguous, so a width-2 reload is a legal `E` operand.
+    /// The next `width` symbolic scratch slots of this group.
     fn take_scratch(&mut self, width: usize) -> u8 {
         let at = self.scratch;
         assert!(
@@ -747,37 +763,405 @@ impl Builder {
             SCRATCH.len()
         );
         self.scratch = at + width;
-        SCRATCH[at]
+        self.ops.push(Op2::TakeScratch { n: width });
+        at as u8
     }
 
-    /// A fresh handle in a fresh register, spilling as needed. `pinned` names the registers the
-    /// instruction about to be emitted is reading, which must survive.
-    fn new_handle(&mut self, width: u8, pinned: &[u8]) -> (u32, u8) {
-        let reg = self.claim(width, pinned);
+    /// A fresh handle: the slot, then the `Def` entry the replay allocates a home for.
+    fn new_handle(&mut self, width: u8) -> (u32, RRef) {
         let id = self.slots.len() as u32;
-        self.slots.push(Slot { width, place: Place::Reg(reg), konst: None });
-        self.regs[reg as usize] = Some(id);
-        if width == 2 {
-            self.regs[reg as usize + 1] = Some(id);
-        }
-        self.order.push_back(id);
-        (id, reg)
+        self.slots.push(Slot { width, konst: None, zero: false });
+        self.ops.push(Op2::Def { id, width });
+        (id, RRef::Home(id, 0))
     }
 
-    fn claim(&mut self, width: u8, pinned: &[u8]) -> u8 {
-        loop {
-            if let Some(r) = self.free(width) {
-                return r;
+    // ------------------------------------------------------------ the replay
+
+    fn replay(self) -> (Program, Stats) {
+        let live = self.liveness == Liveness::On;
+        let n = self.ops.len();
+
+        // ── pass 1: liveness. last_use[id] is the last buffer index whose instruction or
+        // materialise references `id`, with anything a loop body touches clamped to the loop's
+        // end (a body re-executes, so "last use" inside it is really "until the loop is over").
+        let mut last_use = vec![0u32; self.slots.len()];
+        let mut def_idx = vec![u32::MAX; self.slots.len()];
+        let mut loops: Vec<(u32, u32)> = Vec::new();
+        let mut loop_stack: Vec<u32> = Vec::new();
+        for (i, op) in self.ops.iter().enumerate() {
+            match op {
+                Op2::Mat { id } => last_use[*id as usize] = i as u32,
+                Op2::Def { id, .. } => def_idx[*id as usize] = i as u32,
+                Op2::Instr { rd, ra, b, .. } => {
+                    for id in [rd, ra]
+                        .iter()
+                        .filter_map(|r| match r {
+                            RRef::Home(id, _) => Some(*id),
+                            RRef::Mat(e, _) => mat_owner(&self.ops, *e),
+                            _ => None,
+                        })
+                        .chain(match b {
+                            BRef::Home(id, _) => Some(*id),
+                            BRef::Mat(e, _) => mat_owner(&self.ops, *e),
+                            _ => None,
+                        })
+                    {
+                        last_use[id as usize] = i as u32;
+                    }
+                }
+                Op2::LoopTop { .. } => loop_stack.push(i as u32),
+                Op2::LoopEnd { .. } => {
+                    let top = loop_stack.pop().expect("unbalanced loop markers");
+                    loops.push((top, i as u32));
+                }
+                Op2::Group | Op2::TakeScratch { .. } | Op2::Phase { .. } => {}
             }
-            self.spill_oldest(pinned);
         }
-    }
+        for &(top, end) in &loops {
+            for id in 0..self.slots.len() {
+                if def_idx[id] != u32::MAX
+                    && def_idx[id] < top
+                    && last_use[id] > top
+                    && last_use[id] < end
+                {
+                    last_use[id] = end;
+                }
+            }
+        }
+        // Deaths, bucketed by buffer index: at index `i` the replay frees exactly
+        // `dying_at[i]`, without scanning every handle at every instruction.
+        let mut dying_at: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for (id, &lu) in last_use.iter().enumerate() {
+            if !self.slots[id].zero && def_idx[id] != u32::MAX {
+                dying_at[lu as usize].push(id as u32);
+            }
+        }
 
-    /// A free register, or a free *aligned* consecutive pair for a width-2 handle. Aligning pairs to
-    /// odd starts keeps singles from fragmenting the register file into unusable gaps.
-    fn free(&self, width: u8) -> Option<u8> {
-        let vacant = |r: u8| self.regs[r as usize].is_none();
-        if width == 1 {
+        // Per-handle use lists, for the eviction rule's next-use pointers.
+        let mut uses: Vec<Vec<u32>> = vec![Vec::new(); self.slots.len()];
+        for (i, op) in self.ops.iter().enumerate() {
+            match op {
+                Op2::Mat { id } => uses[*id as usize].push(i as u32),
+                Op2::Instr { rd, ra, b, .. } => {
+                    for id in [rd, ra]
+                        .iter()
+                        .filter_map(|r| match r {
+                            RRef::Home(id, _) => Some(*id),
+                            RRef::Mat(e, _) => mat_owner(&self.ops, *e),
+                            _ => None,
+                        })
+                        .chain(match b {
+                            BRef::Home(id, _) => Some(*id),
+                            BRef::Mat(e, _) => mat_owner(&self.ops, *e),
+                            _ => None,
+                        })
+                    {
+                        uses[id as usize].push(i as u32);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (id, us) in uses.iter_mut().enumerate() {
+            // The liveness clamp applies to eviction too: pretend the clamped uses sit at the
+            // loop end, so a resident used inside a loop is never evicted mid-loop.
+            for &(top, end) in &loops {
+                if def_idx[id] != u32::MAX && def_idx[id] < top {
+                    for u in us.iter_mut() {
+                        if *u > top && *u < end {
+                            *u = end;
+                        }
+                    }
+                }
+            }
+            us.sort_unstable();
+        }
+
+        // ── pass 2: the walk ──
+        let mut out: Vec<Instr> = Vec::with_capacity(n + self.slots.len() / 4);
+        let mut pc_of_buf: Vec<u32> = vec![u32::MAX; n];
+        let mut checkpoints: Vec<(u32, String)> = Vec::new();
+        let mut home: Vec<Option<u8>> = vec![None; self.slots.len()];
+        let mut cells: Vec<Option<u64>> = vec![None; self.slots.len()];
+        let mut regs: [Option<u32>; NUM_REGS] = [None; NUM_REGS];
+        let mut residents: VecDeque<u32> = VecDeque::new();
+        // Freed spill cells, by width: a width-2 spill may only reuse a cell pair that died as a
+        // pair — a shared list let a width-2 spill overwrite the *neighbour* cell of a live
+        // width-1 handle (the ext2 divergence: lane 0 clobbered, lane 1 intact).
+        let mut free_cells_1: Vec<u64> = Vec::new();
+        let mut free_cells_2: Vec<u64> = Vec::new();
+        let mut arena: u64 = 0;
+        let mut arena_peak: u64 = 0;
+        let mut scratch_c = 0usize;
+        let mut scratch_sym = 0u32;
+        let mut scratch_slots: HashMap<u32, u8> = HashMap::new();
+        let mut mat_out: HashMap<u32, u8> = HashMap::new();
+        let mut live_count = 0usize;
+        let mut live_max = 0usize;
+        let mut phase_rows: Vec<(&'static str, usize)> = Vec::new();
+        let mut phase_mark = 0usize;
+        let mut stats = self.stats;
+        let mut loop_snap: Vec<(u32, Vec<Option<u8>>, Vec<Option<u64>>)> = Vec::new();
+
+        let ops = self.ops;
+        for (i, op) in ops.iter().enumerate() {
+            pc_of_buf[i] = out.len() as u32;
+            match op {
+                Op2::Group => {
+                    scratch_c = 0;
+                    scratch_sym = 0;
+                    scratch_slots.clear();
+                    mat_out.clear();
+                }
+                Op2::Mat { id } => {
+                    let r = match home[*id as usize] {
+                        Some(r) => r,
+                        None => {
+                            let width = self.slots[*id as usize].width;
+                            let slot = take_scratch_concrete(&mut scratch_c, width);
+                            let addr = cells[*id as usize].expect("a spilled handle has a cell");
+                            let op = if width == 1 { Op::Load } else { Op::Loade };
+                            out.push(Instr { op, rd: slot, ra: 0, b: F::from_u64(addr) });
+                            stats.reloads += 1;
+                            slot
+                        }
+                    };
+                    mat_out.insert(i as u32, r);
+                }
+                Op2::Def { id, width } => {
+                    // The registers the defining instruction(s) read must survive the claim —
+                    // the pre-liveness `pinned` list: the next instructions' operand registers.
+                    let mut pinned: Vec<u8> = Vec::new();
+                    for next in ops[i + 1..].iter().take_while(|o| matches!(o, Op2::Instr { .. })).take(2) {
+                        if let Op2::Instr { rd, ra, b, .. } = next {
+                            let is_def = matches!(rd, RRef::Home(d, 0) if d == id);
+                            for r in [*ra, b_rd_as_rref(b)] {
+                                match r {
+                                    RRef::Home(h, lane) => {
+                                        if let Some(reg) = home[h as usize] {
+                                            pinned.push(reg + lane);
+                                        }
+                                    }
+                                    RRef::Mat(e, lane) => {
+                                        if let Some(reg) = mat_out.get(&e) {
+                                            if *reg < SCRATCH[0] {
+                                                pinned.push(reg + lane);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if is_def && matches!(self.slots[*id as usize].width, 1) {
+                                break;
+                            }
+                        }
+                    }
+                    let reg = claim(
+                        *width,
+                        &pinned,
+                        &mut home,
+                        &mut cells,
+                        &mut regs,
+                        &mut residents,
+                        &mut free_cells_1,
+                        &mut free_cells_2,
+                        &mut arena,
+                        &mut arena_peak,
+                        &mut out,
+                        &mut stats,
+                        live,
+                        &uses,
+                        i as u32,
+                        &self.slots,
+                        &mut live_count,
+                    );
+                    home[*id as usize] = Some(reg);
+                    regs[reg as usize] = Some(*id);
+                    if *width == 2 {
+                        regs[reg as usize + 1] = Some(*id);
+                    }
+                    residents.push_back(*id);
+                    live_count += 1;
+                    live_max = live_max.max(live_count);
+                }
+                Op2::TakeScratch { n } => {
+                    // The concrete slots come from the group's shared counter (reloads and
+                    // working slots in one sequence, the pre-liveness order); the symbolic
+                    // indices the buffer handed out count TakeScratch calls only.
+                    let base = take_scratch_concrete(&mut scratch_c, *n as u8);
+                    for k in 0..*n {
+                        scratch_slots.insert(scratch_sym + k as u32, base + k as u8);
+                    }
+                    scratch_sym += *n as u32;
+                }
+                Op2::Instr { op, rd, ra, b, target, checkpoint } => {
+                    let rd = resolve_r(*rd, &home, &mat_out, &scratch_slots);
+                    let ra = resolve_r(*ra, &home, &mat_out, &scratch_slots);
+                    let b = resolve_b(*b, &home, &mat_out, &scratch_slots);
+                    out.push(Instr { op: *op, rd, ra, b });
+                    if let Some(name) = checkpoint {
+                        checkpoints.push((out.len() as u32 - 1, name.clone()));
+                    }
+                    let _ = target;
+                }
+                Op2::LoopTop { id } => {
+                    loop_snap.push((*id, home.clone(), cells.clone()));
+                }
+                Op2::Phase { name } => {
+                    phase_rows.push((name, out.len() - phase_mark));
+                    phase_mark = out.len();
+                }
+                Op2::LoopEnd { id } => {
+                    let (want_id, was_home, was_cells) = loop_snap.pop().expect("unbalanced LoopEnd");
+                    assert_eq!(*id, want_id, "unbalanced loop markers");
+                    for h in 0..was_home.len() {
+                        assert!(
+                            home[h] == was_home[h] && cells[h] == was_cells[h],
+                            "counted_loop: the body moved handle {h} from ({:?}, {:?}) to ({:?}, {:?}). A loop body is \
+                             emitted once and run many times, so it must leave the allocation of every handle \
+                             that existed before it untouched — pass values in and out through memory.",
+                            was_home[h], was_cells[h], home[h], cells[h]
+                        );
+                    }
+                }
+            }
+            // Free the handles whose last use this was (liveness only). A handle dies *after* the
+            // instruction that last reads it, so eviction candidates see it through this index.
+            if live {
+                for id in dying_at[i].iter().copied().collect::<Vec<_>>() {
+                    if let Some(r) = home[id as usize].take() {
+                        regs[r as usize] = None;
+                        if self.slots[id as usize].width == 2 {
+                            regs[r as usize + 1] = None;
+                        }
+                        if let Some(pos) = residents.iter().position(|&h| h == id) {
+                            residents.remove(pos);
+                        }
+                        live_count -= 1;
+                    }
+                    if let Some(c) = cells[id as usize].take() {
+                        match self.slots[id as usize].width {
+                            1 => free_cells_1.push(c),
+                            _ => free_cells_2.push(c),
+                        }
+                    }
+                }
+            }
+        }
+
+        // Resolve branch targets (buffer indices) to final pcs.
+        for (i, op) in ops.iter().enumerate() {
+            if let Op2::Instr { op, target, .. } = op {
+                if *target != u32::MAX {
+                    let pc = pc_of_buf[i] as usize;
+                    let to = pc_of_buf[*target as usize];
+                    assert!(to != u32::MAX, "a branch targets a buffer position that emits no instruction");
+                    out[pc].b = F::from_u64(to as u64);
+                    let _ = op;
+                }
+            }
+        }
+
+        checkpoints.sort_by_key(|(pc, _)| *pc);
+        stats.instrs = out.len();
+        stats.live_max = live_max;
+        stats.cells += arena_peak;
+        stats.phase_rows = phase_rows;
+        (Program { instrs: out, checkpoints }, stats)
+    }
+}
+
+/// The `b` field of a buffered instruction as a register reference, when it is one.
+fn b_rd_as_rref(b: &BRef) -> RRef {
+    match b {
+        BRef::Home(id, lane) => RRef::Home(*id, *lane),
+        BRef::Mat(e, lane) => RRef::Mat(*e, *lane),
+        BRef::Scratch(sym) => RRef::Scratch(*sym),
+        BRef::Imm(_) => RRef::Raw(0),
+    }
+}
+
+/// The handle a `Mat` entry materialises.
+fn mat_owner(ops: &[Op2], entry: u32) -> Option<u32> {
+    match &ops[entry as usize] {
+        Op2::Mat { id } => Some(*id),
+        _ => None,
+    }
+}
+
+/// Lane 1 of the same reference: the upper half of a width-2 operand.
+fn lane1(r: RRef) -> RRef {
+    match r {
+        RRef::Mat(e, 0) => RRef::Mat(e, 1),
+        RRef::Home(id, 0) => RRef::Home(id, 1),
+        other => panic!("lane1 of a base operand: {other:?}"),
+    }
+}
+
+/// A concrete scratch register for a width-`width` need: the next slots of the group, asserted
+/// against the bound and never colliding with a symbolic slot already taken.
+fn take_scratch_concrete(c: &mut usize, width: u8) -> u8 {
+    let at = *c;
+    assert!(at + width as usize <= SCRATCH.len(), "one instruction wanted more than {} scratch registers", SCRATCH.len());
+    *c = at + width as usize;
+    SCRATCH[at]
+}
+
+/// Resolve a buffered register reference to a concrete register.
+fn resolve_r(
+    r: RRef,
+    home: &[Option<u8>],
+    mat_out: &HashMap<u32, u8>,
+    scratch_slots: &HashMap<u32, u8>,
+) -> u8 {
+    match r {
+        RRef::Home(id, lane) => home[id as usize].map(|r| r + lane).expect("a handle used after its last use"),
+        RRef::Mat(e, lane) => *mat_out.get(&e).expect("a Mat entry with no output") + lane,
+        RRef::Scratch(sym) => *scratch_slots.get(&sym).expect("a scratch slot never taken"),
+        RRef::Raw(r) => r,
+    }
+}
+
+fn resolve_b(
+    b: BRef,
+    home: &[Option<u8>],
+    mat_out: &HashMap<u32, u8>,
+    scratch_slots: &HashMap<u32, u8>,
+) -> F {
+    match b {
+        BRef::Imm(v) => v,
+        BRef::Home(id, lane) => F::from_u8(resolve_r(RRef::Home(id, lane), home, mat_out, scratch_slots)),
+        BRef::Mat(e, lane) => F::from_u8(*mat_out.get(&e).expect("a Mat entry with no output") + lane),
+        BRef::Scratch(sym) => F::from_u8(*scratch_slots.get(&sym).expect("a scratch slot never taken")),
+    }
+}
+
+/// Claim a free register (or aligned pair), evicting as needed — the pre-liveness `claim`'s two
+/// policies: the oldest resident first (`Off`), or the resident whose next use is farthest (`On`).
+#[allow(clippy::too_many_arguments)]
+fn claim(
+    width: u8,
+    pinned: &[u8],
+    home: &mut [Option<u8>],
+    cells: &mut [Option<u64>],
+    regs: &mut [Option<u32>; NUM_REGS],
+    residents: &mut VecDeque<u32>,
+    free_cells_1: &mut Vec<u64>,
+    free_cells_2: &mut Vec<u64>,
+    arena: &mut u64,
+    arena_peak: &mut u64,
+    out: &mut Vec<Instr>,
+    stats: &mut Stats,
+    live: bool,
+    uses: &[Vec<u32>],
+    at: u32,
+    slots: &[Slot],
+    live_count: &mut usize,
+) -> u8 {
+    loop {
+        let vacant = |r: u8| regs[r as usize].is_none();
+        let found = if width == 1 {
             ALLOCATABLE.iter().copied().find(|&r| vacant(r))
         } else {
             ALLOCATABLE
@@ -785,45 +1169,62 @@ impl Builder {
                 .copied()
                 .step_by(2)
                 .find(|&r| r < ALLOCATABLE[ALLOCATABLE.len() - 1] && vacant(r) && vacant(r + 1))
+        };
+        if let Some(r) = found {
+            return r;
         }
-    }
-
-    /// Evict the oldest resident handle whose registers this instruction does not need.
-    fn spill_oldest(&mut self, pinned: &[u8]) {
-        let at = self
-            .order
-            .iter()
-            .position(|&id| {
-                let slot = self.slots[id as usize];
-                match slot.place {
-                    Place::Reg(r) => !(0..slot.width).any(|k| pinned.contains(&(r + k))),
-                    Place::Mem(_) => false,
+        // Evict. `Off`: the oldest resident not pinned. `On`: the resident whose next use is
+        // farthest away (never a pinned one).
+        let victim = if live {
+            let mut best: Option<(usize, u32)> = None;
+            for (pos, &id) in residents.iter().enumerate() {
+                let r = home[id as usize].expect("resident");
+                if (0..slots[id as usize].width).any(|k| pinned.contains(&(r + k))) {
+                    continue;
                 }
-            })
-            .expect("every allocatable register is pinned by one instruction");
-        let id = self.order.remove(at).expect("position() returned a valid index");
-        self.spill(id);
-    }
-
-    fn spill(&mut self, id: u32) {
-        let slot = self.slots[id as usize];
-        let Place::Reg(r) = slot.place else { return };
-        let width = slot.width as u64;
-        let addr = self.next_spill;
-        assert!(
-            addr + width <= MEM_BASE,
-            "the {MEM_BASE}-cell spill arena is full; raise dsl::MEM_BASE"
-        );
-        self.next_spill += width;
-        self.stats.cells += width;
-        let op = if slot.width == 1 { Op::Store } else { Op::Storee };
-        self.emit(op, r, 0, F::from_u64(addr));
-        self.slots[id as usize].place = Place::Mem(addr);
-        self.regs[r as usize] = None;
-        if slot.width == 2 {
-            self.regs[r as usize + 1] = None;
+                let ptr = uses[id as usize].partition_point(|&u| u <= at);
+                let next = uses[id as usize].get(ptr).copied().unwrap_or(u32::MAX);
+                if best.is_none_or(|(_, b)| next > b) {
+                    best = Some((pos, next));
+                }
+            }
+            best.map(|(pos, _)| pos).unwrap_or_else(|| panic!("every allocatable register is pinned: {} residents, pinned {pinned:?} at buffer {at}", residents.len()))
+        } else {
+            residents
+                .iter()
+                .position(|&id| {
+                    let r = home[id as usize].expect("resident");
+                    !(0..slots[id as usize].width).any(|k| pinned.contains(&(r + k)))
+                })
+                .expect("every allocatable register is pinned by one instruction")
+        };
+        let id = residents.remove(victim).expect("a valid resident index");
+        let r = home[id as usize].take().expect("resident");
+        if live {
+            *live_count -= 1;
         }
-        self.stats.spills += 1;
+        regs[r as usize] = None;
+        if slots[id as usize].width == 2 {
+            regs[r as usize + 1] = None;
+        }
+        let w = slots[id as usize].width as u64;
+        let addr = if live {
+            match w {
+                1 => free_cells_1.pop().unwrap_or(*arena),
+                _ => free_cells_2.pop().unwrap_or(*arena),
+            }
+        } else {
+            *arena
+        };
+        if addr == *arena {
+            *arena += w;
+            *arena_peak = (*arena_peak).max(*arena);
+        }
+        assert!(addr + w <= MEM_BASE, "the {MEM_BASE}-cell spill arena is full; raise dsl::MEM_BASE");
+        cells[id as usize] = Some(addr);
+        let op = if w == 1 { Op::Store } else { Op::Storee };
+        out.push(Instr { op, rd: r, ra: 0, b: F::from_u64(addr) });
+        stats.spills += 1;
     }
 }
 
