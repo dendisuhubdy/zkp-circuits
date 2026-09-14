@@ -448,6 +448,22 @@ impl Builder {
         Ptr(self.ptrs.len() as u32 - 1)
     }
 
+    /// Reserve `cells` cells addressed **absolutely**: no holder register at all — every
+    /// `LOAD`/`STORE` compiles to `r0` plus the full address immediate, and a register-only
+    /// address operand (`POSEIDON2`, `SPONGE`) pays one `FADDI` into scratch per use. The
+    /// pointer therefore claims no register and has no allocation the replay's loop invariant
+    /// could see moved — the shape M5.3's interface-sponge state and cursor need: they live
+    /// across the counted loop while the body's register pressure churns underneath.
+    pub fn alloc_absolute(&mut self, cells: u64) -> Ptr {
+        let base = self.next_cell;
+        assert!(base + cells <= MEM_LIMIT, "the rVM's {MEM_LIMIT}-cell memory is full");
+        self.next_cell += cells;
+        self.stats.cells += cells;
+        let z = self.zero();
+        self.ptrs.push(PtrSlot { holder: z.0, delta: 0, base_value: base });
+        Ptr(self.ptrs.len() as u32 - 1)
+    }
+
     /// `p` shifted by `cells`. Free: the delta is folded into the immediate of every access.
     pub fn offset(&mut self, p: Ptr, cells: i64) -> Ptr {
         let it = self.ptrs[p.0 as usize];
@@ -468,6 +484,16 @@ impl Builder {
         let rv = self.materialise(v.0);
         let (rp, at) = self.address(p, off);
         self.emit(Op::Store, rv, rp, BRef::Imm(at));
+    }
+
+    /// `v` stored at the absolute address *held in* `addr` — the runtime-addressed store the
+    /// counted loop's staging needs (M5.3's interface sponge writes its next rate lane through
+    /// a cursor cell, not a compile-time pointer). One row, no immediate.
+    pub fn store_indirect(&mut self, addr: Felt, v: Felt) {
+        self.begin();
+        let ra = self.materialise(addr.0);
+        let rv = self.materialise(v.0);
+        self.emit(Op::Store, rv, ra, BRef::Imm(F::ZERO));
     }
 
     pub fn load_ext(&mut self, p: Ptr, off: i64) -> Ext {
@@ -501,6 +527,20 @@ impl Builder {
         if n == 0 {
             return;
         }
+        let abs = |p: Ptr| self.slots[self.ptrs[p.0 as usize].holder as usize].zero;
+        if abs(src) || abs(dst) {
+            // An absolute side folds its whole address into the immediate — one `address` call
+            // per element per side, no holder to materialise.
+            self.begin();
+            let t = self.take_scratch(1);
+            for k in 0..n as i64 {
+                let (rs, at_s) = self.address(src, src_off + k);
+                let (rd, at_d) = self.address(dst, dst_off + k);
+                self.emit(Op::Load, RRef::scratch(t), rs, BRef::Imm(at_s));
+                self.emit(Op::Store, RRef::scratch(t), rd, BRef::Imm(at_d));
+            }
+            return;
+        }
         let (from, to) = (self.ptrs[src.0 as usize], self.ptrs[dst.0 as usize]);
         self.begin();
         let rs = self.materialise(from.holder);
@@ -515,6 +555,14 @@ impl Builder {
     /// `n` zero cells at `p + off`, one row per cell — `r0` is the value.
     pub fn zero_cells(&mut self, p: Ptr, off: i64, n: usize) {
         if n == 0 {
+            return;
+        }
+        if self.slots[self.ptrs[p.0 as usize].holder as usize].zero {
+            self.begin();
+            for k in 0..n as i64 {
+                let (rp, at) = self.address(p, off + k);
+                self.emit(Op::Store, RRef::Raw(0), rp, BRef::Imm(at));
+            }
             return;
         }
         let it = self.ptrs[p.0 as usize];
@@ -533,6 +581,17 @@ impl Builder {
         let p = self.alloc(16);
         self.hash = Some(p);
         p
+    }
+
+    /// Forget the cached hash scratch region; the next [`Builder::hash_scratch`] allocates a
+    /// fresh one. M5.3's aggregate program calls this before its counted loop: a scratch holder
+    /// allocated before the loop but first re-used inside it is exactly the handle the body's
+    /// register pressure evicts — and the replay's loop invariant then names — while a scratch
+    /// allocated *inside* the body is ordinary per-iteration state, free to churn. The pre-loop
+    /// region's sixteen cells stay allocated (its holder dies at its last pre-loop use, so the
+    /// invariant sees nothing), sixteen cells once, against the alternative.
+    pub(crate) fn release_hash_scratch(&mut self) {
+        self.hash = None;
     }
 
     // ---------------------------------------------------- the REDUCE precompile (Task 8)
@@ -580,9 +639,15 @@ impl Builder {
         self.stats.perms += 1;
     }
 
-    /// The register a `Ptr`'s address lives in, folding any compile-time delta in first.
+    /// The register a `Ptr`'s address lives in, folding any compile-time delta in first. An
+    /// absolute pointer has no holder: the address is a constant, materialised into scratch.
     fn ptr_reg(&mut self, p: Ptr) -> RRef {
         let it = self.ptrs[p.0 as usize];
+        if self.slots[it.holder as usize].zero {
+            let s = self.take_scratch(1);
+            self.emit(Op::Faddi, RRef::scratch(s), RRef::Raw(0), BRef::Imm(imm(it.base_value as i64 + it.delta)));
+            return RRef::scratch(s);
+        }
         let holder = self.materialise(it.holder);
         if it.delta == 0 {
             holder
@@ -596,18 +661,11 @@ impl Builder {
     // --------------------------------------------------------------- hashing
 
     /// Permute the eight cells at `p` in place. `POSEIDON2`'s pointer is a register with no
-    /// immediate, so a `Ptr` carrying a compile-time delta costs one `FADDI` to fold it in first.
+    /// immediate, so a `Ptr` carrying a compile-time delta — or an absolute pointer's constant
+    /// address — costs one `FADDI` into scratch to fold it in first.
     pub fn poseidon2(&mut self, p: Ptr) {
         self.begin();
-        let it = self.ptrs[p.0 as usize];
-        let holder = self.materialise(it.holder);
-        let ra = if it.delta == 0 {
-            holder
-        } else {
-            let s = self.take_scratch(1);
-            self.emit(Op::Faddi, RRef::scratch(s), holder, BRef::Imm(imm(it.delta)));
-            RRef::scratch(s)
-        };
+        let ra = self.ptr_reg(p);
         self.emit(Op::Poseidon2, RRef::Raw(0), ra, BRef::Imm(F::ZERO));
         self.stats.perms += 1;
     }
@@ -661,6 +719,24 @@ impl Builder {
         }
     }
 
+    /// `body` emitted once and executed when `a == b`: a `JNE` over it. Assertions branch to a
+    /// trap; this is the working conditional — the one the runtime-length sponge's rate-fill
+    /// branch needs (M5.3). The body's allocation effects are its own; a taken branch simply
+    /// skips its rows.
+    pub fn if_eq(&mut self, a: Felt, b: Felt, body: impl FnOnce(&mut Self)) {
+        self.begin();
+        let ra = self.materialise(a.0);
+        let rb = self.materialise(b.0);
+        self.emit(Op::Jne, ra, rb, BRef::Imm(F::ZERO));
+        let at = self.ops.len() as u32 - 1;
+        body(self);
+        // The branch lands on the group marker that follows the body, so it resolves even when
+        // the body's last buffer entry is itself a marker.
+        self.begin();
+        let over = self.ops.len() as u32 - 1;
+        self.set_target_at(at, over);
+    }
+
     /// `body` emitted **once** and executed `n` times, with a down-counter as its index. The
     /// preconditions are unchanged from the pre-liveness builder: `n >= 1`, and the body must
     /// not move any handle that existed before the loop — the replay checks the allocation
@@ -687,6 +763,43 @@ impl Builder {
         self.begin();
         self.emit(Op::Faddi, RRef::Home(ctr, 0), RRef::Home(ctr, 0), BRef::Imm(F::NEG_ONE));
         self.emit(Op::Jne, RRef::Home(ctr, 0), RRef::Raw(0), BRef::Imm(F::ZERO));
+        self.set_target(top + 1);
+    }
+
+    /// [`counted_loop`] with its counter in a memory cell, not a register: `cell` (one
+    /// **absolute** cell, [`Builder::alloc_absolute`]) holds the remaining count, reloaded,
+    /// decremented and stored back once per iteration, so the loop keeps no register resident
+    /// and the body receives no counter. That is the shape a big body needs: a resident counter
+    /// whose only use is the post-body decrement is the first handle the body's register
+    /// pressure evicts, and the replay's loop invariant then names it (M5.3's aggregate program
+    /// hit exactly this). The trip count and the test-after-the-body order are
+    /// [`counted_loop`]'s: `n >= 1` is the precondition.
+    pub fn counted_loop_mem(&mut self, cell: Ptr, n: Felt, mut body: impl FnMut(&mut Self)) {
+        assert!(
+            self.slots[self.ptrs[cell.0 as usize].holder as usize].zero,
+            "counted_loop_mem's counter cell must be absolute (alloc_absolute): a register-backed \
+             cell's holder lives across the body and the loop invariant forbids moving it"
+        );
+        assert!(
+            self.slots[n.0 as usize].konst != Some(F::ZERO),
+            "counted_loop_mem: the iteration count is a compile-time zero — n >= 1 is the \
+             precondition. Branch around the loop instead."
+        );
+        self.store(cell, 0, n);
+
+        let loop_id = self.next_loop;
+        self.next_loop += 1;
+        let top = self.ops.len() as u32;
+        self.ops.push(Op2::LoopTop { id: loop_id });
+        body(self);
+        self.ops.push(Op2::LoopEnd { id: loop_id });
+
+        let t = self.load(cell, 0);
+        let dec = self.add_const(t, F::NEG_ONE);
+        self.store(cell, 0, dec);
+        self.begin();
+        let r = self.materialise(dec.0);
+        self.emit(Op::Jne, r, RRef::Raw(0), BRef::Imm(F::ZERO));
         self.set_target(top + 1);
     }
 
@@ -732,9 +845,13 @@ impl Builder {
         self.materialise(v.0)
     }
 
-    /// The field reference and compile-time cell delta an access through `p` uses.
+    /// The field reference and compile-time cell delta an access through `p` uses. An absolute
+    /// pointer's delta is its whole address (the reference is `r0`).
     pub(super) fn raw_ptr(&mut self, p: Ptr) -> (RRef, i64) {
         let it = self.ptrs[p.0 as usize];
+        if self.slots[it.holder as usize].zero {
+            return (RRef::Raw(0), it.base_value as i64 + it.delta);
+        }
         (self.materialise(it.holder), it.delta)
     }
 
@@ -773,6 +890,15 @@ impl Builder {
     fn set_target(&mut self, target: u32) {
         let Some(Op2::Instr { target: t, .. }) = self.ops.last_mut() else {
             panic!("set_target on a non-instruction");
+        };
+        *t = target;
+    }
+
+    /// [`set_target`] for an instruction emitted earlier — `if_eq`'s forward branch, whose
+    /// target is only known after the body.
+    fn set_target_at(&mut self, at: u32, target: u32) {
+        let Some(Op2::Instr { target: t, .. }) = self.ops.get_mut(at as usize) else {
+            panic!("set_target_at on a non-instruction");
         };
         *t = target;
     }
@@ -817,14 +943,20 @@ impl Builder {
         Ext(id)
     }
 
-    /// The `(field reference, immediate)` pair an access through `p` at `off` uses.
+    /// The `(field reference, immediate)` pair an access through `p` at `off` uses. An absolute
+    /// pointer's holder is the zero slot — `r0` — so its whole address folds into the immediate.
     fn address(&mut self, p: Ptr, off: i64) -> (RRef, F) {
         let it = self.ptrs[p.0 as usize];
+        if self.slots[it.holder as usize].zero {
+            return (RRef::Raw(0), imm(it.base_value as i64 + it.delta + off));
+        }
         (self.materialise(it.holder), imm(it.delta + off))
     }
 
     /// The absolute address of a pointer, as a compile-time constant (`PtrSlot::base_value`).
-    fn addr_of(&self, p: Ptr) -> u64 {
+    /// Public for the runtime-addressed stores that add a *runtime* offset to it (M5.3's staged
+    /// absorb compares its cursor against `addr_of(state) + RATE`).
+    pub fn addr_of(&self, p: Ptr) -> u64 {
         let it = self.ptrs[p.0 as usize];
         (it.base_value as i64 + it.delta) as u64
     }

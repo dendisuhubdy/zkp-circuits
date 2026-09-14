@@ -12,8 +12,10 @@
 
 pub mod constraints;
 mod rv32;
+mod rv32n;
 
 pub use rv32::{cycle_report, digest_hex, reduce_compiled, run_reduce_sequence, verify_rv32, verify_rv32_with, CycleReport, Precompiles};
+pub use rv32n::{aggregate_program_digest, verify_rv32n};
 
 use crate::dsl::{Checkpoints, Stats};
 use constraints::Phase5Cost;
