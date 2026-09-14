@@ -21,11 +21,12 @@ use crate::dsl::transcript::DslChallenger;
 use crate::dsl::{Array, Builder, Checkpoints, Digest, Ext, Felt, Ptr, DIGEST_ELEMS};
 use crate::emulator::Execution;
 use crate::isa::{Program, EF, F};
+use crate::public_values::RVM_PUB_DOMAIN;
 use crate::shape::{
     natural_domain, InnerKey, InnerShape, CAP_HEIGHT, LOG_BLOWUP, NUM_RANDOM_CODEWORDS,
     PV_INSTANCE, RVM_VK_DOMAIN,
 };
-use p3_field::{Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
 use p3_util::reverse_bits_len;
 use std::collections::BTreeMap;
 
@@ -60,16 +61,24 @@ fn constant_cap(b: &mut Builder, cap: &[[crate::isa::F; 4]; 4]) -> [Digest; 4] {
 }
 
 /// Builds the verifier program for one inner shape.
+pub use crate::dsl::Precompiles;
 pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> VerifierProgram {
+    verify_rv32_with(shape, key, cp, crate::dsl::Liveness::On, Precompiles::On)
+}
+
+/// [`verify_rv32`] with the allocator's liveness policy and the precompiles chosen: `Off`
+/// reproduces the pre-Task-7 program byte for byte (the differential reference), `On` is what
+/// ships.
+pub fn verify_rv32_with(
+    shape: &InnerShape,
+    key: &InnerKey,
+    cp: Checkpoints,
+    liveness: crate::dsl::Liveness,
+    pc: Precompiles,
+) -> VerifierProgram {
     let n = shape.instances();
-    let mut b = Builder::new(cp);
-    let mut phase_rows: Vec<(&'static str, usize)> = Vec::new();
-    let mut phase_mark = 0usize;
-    let mut mark = |b: &Builder, name: &'static str| {
-        let now = b.stats().instrs;
-        phase_rows.push((name, now - phase_mark));
-        phase_mark = now;
-    };
+    let mut b = Builder::with_opts(cp, liveness, pc);
+    let mark = |b: &mut Builder, name: &'static str| b.note_phase(name);
 
     // ── phase 0: the header. Read the proof's declared shape and pin it to this program's own, so
     // a proof of another shape is refused here instead of being read with the wrong field widths.
@@ -155,7 +164,7 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     let zero = b.zero();
     b.assert_eq(c0, zero, "lookup terminal sum");
     b.assert_eq(c1, zero, "lookup terminal sum");
-    mark(&b, "phases 0-4: header, transcript, commitments, terminal sum");
+    mark(&mut b, "phases 0-4: header, transcript, commitments, terminal sum");
 
     // ── phase 5: the generated constraint evaluation at `zeta` (spec §4.3).
     //
@@ -172,16 +181,13 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     let batch = Batch { shape, airs: &airs, lookups: &lookups, alpha, zeta };
     let mut phase5 = Vec::with_capacity(n);
     for i in 0..n {
-        let before = b.stats();
+        let before = b.emitted();
         let mut cost = Phase5Cost::default();
         emit_instance(&mut b, &batch, &openings, i, &mut cost);
-        let after = b.stats();
-        cost.instrs = after.instrs - before.instrs;
-        cost.spills = after.spills - before.spills;
-        cost.reloads = after.reloads - before.reloads;
+        cost.instrs = b.emitted() - before;
         phase5.push(cost);
     }
-    mark(&b, "phase 5: constraint evaluation at zeta");
+    mark(&mut b, "phase 5: constraint evaluation at zeta");
 
     // ── phase 6: the FRI query phase (`p3-fri-0.7.0/src/verifier.rs:207-426`, in that order) ──
     //
@@ -243,7 +249,7 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     let index_bits: Vec<Vec<Felt>> = (0..shape.num_queries)
         .map(|_| ch.sample_bits(&mut b, log_global))
         .collect();
-    mark(&b, "phase 6 preamble: claimed evals, betas, final poly, pow, indices");
+    mark(&mut b, "phase 6 preamble: claimed evals, betas, final poly, pow, indices");
 
     // 7. Per query, unrolled: the count is a compile-time constant of the shape, and a counted
     // loop would force every intermediate through memory for no benefit. The four query-major
@@ -265,19 +271,22 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     for _ in 0..shape.num_queries {
         all_commit_paths.push(read_commit_paths(&mut b, shape));
     }
-    mark(&b, "query segments: tape reads");
+    mark(&mut b, "query segments: tape reads");
     b.unrolled(shape.num_queries, |b, q| {
         emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
                    &index_bits[q], &all_rows[q], &all_paths[q], &all_commit_openings[q],
                    &all_commit_paths[q]);
     });
-    mark(&b, "queries: merkle walks, reduction, folds");
+    mark(&mut b, "queries: merkle walks, reduction, folds");
 
-    // ── phase 8: acceptance and spec §4.4's public values ──────────────────────────────────────
+    // ── phase 8: acceptance and the interface digest (R5) ────────────────────────────────────
     //
     // `inner_vk_digest`, recomputed in-program from the compile-time shape words and the key's
-    // cap (so it is bound by the program digest twice over), then `N = 1`, then the 34 inner
-    // public values read in phase 2 (constraint set 6 grew them by `PUB0..7`).
+    // cap (so it is bound by the program digest twice over), then the §4.4 list — the vk digest,
+    // `N = 1`, the 34 inner public values — stored, sponged with the capacity header, and the
+    // digest's four lanes published. The batch public values are always exactly those four (R5):
+    // the node recomputes the list from the covered bundles' public fields and compares digests
+    // (the cs6 `H_PUB` pattern). What used to be thirty-nine `PUBLIC` rows is the digest's four.
     let words = shape.shape_words();
     let mut msg = Vec::with_capacity(1 + words.len() + CAP_WORDS);
     msg.push(F::from_u64(RVM_VK_DOMAIN));
@@ -290,22 +299,31 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     }
     let vk = Digest(b.alloc(DIGEST_ELEMS as u64));
     hash::sponge(&mut b, src, msg.len(), vk);
+    let n_list = DIGEST_ELEMS + 1 + shape.num_public_values[PV_INSTANCE];
+    let list = b.alloc(n_list as u64);
     for lane in 0..DIGEST_ELEMS as i64 {
         let v = b.load(vk.0, lane);
-        b.public(v);
+        b.store(list, lane, v);
     }
     let one = b.constant(F::ONE);
-    b.public(one);
+    b.store(list, DIGEST_ELEMS as i64, one);
     for k in 0..shape.num_public_values[PV_INSTANCE] {
         let v = b.get(pvs, k);
+        b.store(list, (DIGEST_ELEMS + 1 + k) as i64, v);
+    }
+    let interface = Digest(b.alloc(DIGEST_ELEMS as u64));
+    hash::sponge_seeded(&mut b, RVM_PUB_DOMAIN, list, n_list, interface);
+    for lane in 0..DIGEST_ELEMS as i64 {
+        let v = b.load(interface.0, lane);
         b.public(v);
     }
-    mark(&b, "phase 8: §4.4 public values");
+    mark(&mut b, "phase 8: the interface digest (R5)");
 
-    let stats = b.stats();
     let checkpoint_names = b.checkpoint_names().to_vec();
+    let (program, mut stats) = b.finish_stats();
+    let phase_rows = std::mem::take(&mut stats.phase_rows);
     VerifierProgram {
-        program: b.finish(),
+        program,
         shape: shape.clone(),
         key: key.clone(),
         checkpoints: cp,
@@ -805,16 +823,12 @@ fn emit_reduced_openings(
                     .copied()
                     .unwrap_or_else(|| (b.ext_constant(EF::ONE), b.ext_constant(EF::ZERO)));
                 let row = rows[ri][mi];
-                for k in 0..vals.len {
-                    let pz = b.get_ext(*vals, k);
-                    let px = b.load(row.base, k as i64);
-                    let px_e = b.ext_lift(px);
-                    let diff = b.ext_sub(pz, px_e);
-                    let t = b.ext_mul(alpha_pow, diff);
-                    let t = b.ext_mul(t, inv);
-                    ro = b.ext_add(ro, t);
-                    alpha_pow = b.ext_mul(alpha_pow, fri_alpha);
-                }
+                (ro, alpha_pow) = match b.precompiles() {
+                    // The compiled loop, kept as the precompile's differential reference.
+                    Precompiles::Off => reduce_compiled(b, *vals, row, inv, ro, alpha_pow, fri_alpha),
+                    // Task 8: one `REDUCE` instruction for the whole run.
+                    Precompiles::On => b.reduce(*vals, row, inv, ro, alpha_pow, fri_alpha),
+                };
                 acc.insert(h, (alpha_pow, ro));
             }
         }
@@ -829,6 +843,53 @@ fn emit_reduced_openings(
         b.assert_eq(c1, zero, "reduced opening at the blowup height");
     }
     acc.into_iter().rev().map(|(h, (_, ro))| (h, ro)).collect()
+}
+
+/// One run of the batch-opening reduction, as a compiled DSL loop: `acc += Σ_k
+/// alpha_pow·(vals_k − row_k)·inv`, `alpha_pow ·= alpha` over `vals.len == row.len` columns —
+/// the sequence the `REDUCE` precompile replaces (Task 8), kept in the tree as its differential
+/// reference and used by the `Precompiles::Off` build.
+pub fn reduce_compiled(
+    b: &mut Builder,
+    vals: Array<Ext>,
+    row: Array<Felt>,
+    inv: Ext,
+    mut acc: Ext,
+    mut alpha_pow: Ext,
+    alpha: Ext,
+) -> (Ext, Ext) {
+    assert!(
+        vals.len <= row.len,
+        "a reduction run covers `vals.len` columns of the opened row (the rest are salts and the          hiding wrapper's hidden values, hashed by the leaf sponge, not reduced)"
+    );
+    for k in 0..vals.len {
+        let pz = b.get_ext(vals, k);
+        let px = b.load(row.base, k as i64);
+        let px_e = b.ext_lift(px);
+        let diff = b.ext_sub(pz, px_e);
+        let t = b.ext_mul(alpha_pow, diff);
+        let t = b.ext_mul(t, inv);
+        acc = b.ext_add(acc, t);
+        alpha_pow = b.ext_mul(alpha_pow, alpha);
+    }
+    (acc, alpha_pow)
+}
+
+/// [`reduce_compiled`] computed natively — the host-side anchor of the precompile's differential
+/// (`tests/precompiles.rs::reduce_matches_the_compiled_sequence`): the compiled loop and the
+/// `REDUCE` instruction must both land on this value.
+pub fn run_reduce_sequence(vals: &[EF], row: &[F], inv: EF, acc: EF, alpha_pow: EF, alpha: EF) -> (EF, EF) {
+    assert_eq!(vals.len(), row.len());
+    let (mut acc, mut apow) = (acc, alpha_pow);
+    for (k, pz) in vals.iter().enumerate() {
+        let px = EF::from_basis_coefficients_slice(&[row[k], F::ZERO]).unwrap();
+        let diff = *pz - px;
+        let t = apow * diff;
+        let t = t * inv;
+        acc = acc + t;
+        apow = apow * alpha;
+    }
+    (acc, apow)
 }
 
 /// `TwoAdicFriFolding::fold_row`: barycentric Lagrange interpolation at `beta` over the arity's

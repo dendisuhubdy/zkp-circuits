@@ -22,8 +22,10 @@
 //! program that hashes tens of thousands of times pays for it once. No argument to any function in
 //! this module may point into that region.
 
+use super::builder::RRef;
 use super::{Builder, Digest, Felt, Ptr};
-use crate::isa::Op;
+use crate::isa::{Op, F};
+use p3_field::PrimeCharacteristicRing;
 
 /// A digest is four field elements on this machine (re-exported so `hash::DIGEST_ELEMS` reads as one
 /// idea with [`super::DIGEST_ELEMS`] rather than two constants that happen to agree).
@@ -56,6 +58,37 @@ const TMP_B: i64 = WIDTH as i64 + DIGEST_ELEMS as i64;
 /// rather than through handles: handles would add a third. `src` and `out` must not point into
 /// `Builder::hash_scratch`; `out` may overlap `src`.
 pub fn sponge(b: &mut Builder, src: Ptr, n: usize, out: Digest) {
+    match b.precompiles() {
+        crate::dsl::Precompiles::Off => sponge_compiled(b, src, n, out),
+        crate::dsl::Precompiles::On => {
+            assert!(n >= 1, "a padding-free sponge over an empty message is not a hash; p3's own hash_iter \
+                             would return the zero state's first four lanes, and no call site does it");
+            let st = b.hash_scratch();
+            let first = n.min(RATE);
+            // The first block's unreached lanes start zero and stay whatever the previous
+            // permutation leaves them after that — the padding-free rule, exactly as compiled.
+            b.zero_cells(st, first as i64, WIDTH - first);
+            let mut done = 0;
+            while done + RATE <= n {
+                let block = b.offset(src, done as i64);
+                b.sponge_absorb(st, block);
+                done += RATE;
+            }
+            // The trailing partial block stays compiled: one copy of the tail into the rate,
+            // then one in-place permutation (`SPONGE` absorbs exactly four lanes).
+            if done < n {
+                b.copy_cells(st, 0, src, done as i64, n - done);
+                b.poseidon2(st);
+            }
+            b.copy_cells(out.0, 0, st, 0, DIGEST_ELEMS);
+        }
+    }
+}
+
+/// [`sponge`] with the absorb loop compiled as plain instructions (`copy_cells` + `POSEIDON2`
+/// per block) — the precompile's differential reference, kept in the tree
+/// (`tests/transcript.rs` and `tests/precompiles.rs` pin the two to each other).
+pub fn sponge_compiled(b: &mut Builder, src: Ptr, n: usize, out: Digest) {
     assert!(n >= 1, "a padding-free sponge over an empty message is not a hash; p3's own hash_iter \
                      would return the zero state's first four lanes, and no call site does it");
     let st = b.hash_scratch();
@@ -69,6 +102,50 @@ pub fn sponge(b: &mut Builder, src: Ptr, n: usize, out: Digest) {
         b.copy_cells(st, 0, src, done as i64, k);
         b.poseidon2(st);
         done += k;
+    }
+    b.copy_cells(out.0, 0, st, 0, DIGEST_ELEMS);
+}
+
+/// The capacity-seeded sponge (plan R5): the `Program::digest` construction generalized to a
+/// word slice — the state starts as `[0, 0, 0, 0, domain, n, 0, 0]` (the domain tag and the word
+/// count in the *capacity* lanes, so two different lengths are different digests by
+/// construction), then the absorb loop is [`sponge`]'s own, overwrite rule included. The host
+/// twin is `public_values::public_digest`; `tests/verifier.rs` pins the two to each other on
+/// every fixture, and `tests/tables.rs` pins the construction itself.
+///
+/// Measured against `sponge`: the same `ceil(n / 4)` permutations plus the four header rows.
+pub fn sponge_seeded(b: &mut Builder, domain: u64, src: Ptr, n: usize, out: Digest) {
+    assert!(n >= 1, "a padding-free sponge over an empty message is not a hash");
+    let st = b.hash_scratch();
+    // Lanes 0..4 start zero (a short first block's unreached lanes stay zero, the padding-free
+    // rule); lanes 4..6 are the header; lane 7 starts zero.
+    b.zero_cells(st, 0, 4);
+    let d = b.constant(F::from_u64(domain));
+    b.store(st, 4, d);
+    let l = b.constant(F::from_u64(n as u64));
+    b.store(st, 5, l);
+    b.zero_cells(st, 6, 2);
+    let mut done = 0;
+    match b.precompiles() {
+        crate::dsl::Precompiles::On => {
+            while done + RATE <= n {
+                let block = b.offset(src, done as i64);
+                b.sponge_absorb(st, block);
+                done += RATE;
+            }
+            if done < n {
+                b.copy_cells(st, 0, src, done as i64, n - done);
+                b.poseidon2(st);
+            }
+        }
+        crate::dsl::Precompiles::Off => {
+            while done < n {
+                let k = (n - done).min(RATE);
+                b.copy_cells(st, 0, src, done as i64, k);
+                b.poseidon2(st);
+                done += k;
+            }
+        }
     }
     b.copy_cells(out.0, 0, st, 0, DIGEST_ELEMS);
 }
@@ -194,14 +271,14 @@ fn select_children(b: &mut Builder, st: Ptr, sib: Ptr, off: i64, t: Felt) {
     let w = b.raw_scratch(3);
     let (d, s, m) = (w, w + 1, w + 2);
     for k in 0..DIGEST_ELEMS as i64 {
-        b.raw_emit(Op::Load, d, rst, Builder::raw_imm(dst + k));
-        b.raw_emit(Op::Load, s, rsib, Builder::raw_imm(dsib + off + k));
-        b.raw_emit(Op::Fsub, m, s, Builder::raw_reg_imm(d));
-        b.raw_emit(Op::Fmul, m, rt, Builder::raw_reg_imm(m));
+        b.raw_emit(Op::Load, RRef::scratch(d), rst, Builder::raw_imm(dst + k));
+        b.raw_emit(Op::Load, RRef::scratch(s), rsib, Builder::raw_imm(dsib + off + k));
+        b.raw_emit(Op::Fsub, RRef::scratch(m), RRef::scratch(s), Builder::raw_scratch_b(d));
+        b.raw_emit(Op::Fmul, RRef::scratch(m), rt, Builder::raw_scratch_b(m));
         // `right` first: it consumes `s`, which `left` does not need.
-        b.raw_emit(Op::Fsub, s, s, Builder::raw_reg_imm(m));
-        b.raw_emit(Op::Fadd, d, d, Builder::raw_reg_imm(m));
-        b.raw_emit(Op::Store, d, rst, Builder::raw_imm(dst + k));
-        b.raw_emit(Op::Store, s, rst, Builder::raw_imm(dst + DIGEST_ELEMS as i64 + k));
+        b.raw_emit(Op::Fsub, RRef::scratch(s), RRef::scratch(s), Builder::raw_scratch_b(m));
+        b.raw_emit(Op::Fadd, RRef::scratch(d), RRef::scratch(d), Builder::raw_scratch_b(m));
+        b.raw_emit(Op::Store, RRef::scratch(d), rst, Builder::raw_imm(dst + k));
+        b.raw_emit(Op::Store, RRef::scratch(s), rst, Builder::raw_imm(dst + DIGEST_ELEMS as i64 + k));
     }
 }

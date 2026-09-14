@@ -126,11 +126,11 @@ pub struct Phase5Cost {
     pub leaves: usize,
     pub leaf_hits: usize,
     /// Instructions the whole block emitted — the selectors, the accumulator, the quotient and the
-    /// identity. Phase 5 is fully unrolled, so this is also its cpu rows.
+    /// identity. Phase 5 is fully unrolled, so this is also its cpu rows. (Pre-Task-7 this block
+    /// also reported allocator spills/reloads; with the two-pass allocator those exist only at
+    /// the replay, where they belong to the program's liveness profile as a whole, not to one
+    /// instance — the whole-program numbers live in `dsl::Stats`.)
     pub instrs: usize,
-    /// Allocator spills and reloads inside the block.
-    pub spills: usize,
-    pub reloads: usize,
 }
 
 // ───────────────────────────────────────────────────────────── reading the tape
@@ -631,7 +631,8 @@ enum LeafKey {
 /// The walk's memo tables and counters. One per instance: the pointer keys are only meaningful while
 /// the expression vectors this walk borrows are alive.
 #[derive(Default)]
-struct Emit {
+#[doc(hidden)]
+pub struct Emit {
     /// Interior nodes by the address of their `Arc`'s referent — `Arc` identity, the unit the DAG
     /// shares on. Base and extension nodes are different types, hence different tables.
     base_nodes: HashMap<usize, Ext>,
@@ -657,7 +658,8 @@ impl Emit {
         }
     }
 
-    fn base(&mut self, b: &mut Builder, e: &SymbolicExpression<F>, o: &InstanceOpenings) -> Ext {
+    #[doc(hidden)]
+    pub fn base(&mut self, b: &mut Builder, e: &SymbolicExpression<F>, o: &InstanceOpenings) -> Ext {
         let key = e as *const SymbolicExpression<F> as usize;
         if let Some(v) = self.base_nodes.get(&key) {
             self.node_hits += 1;
@@ -735,7 +737,8 @@ impl Emit {
         v
     }
 
-    fn ext(
+    #[doc(hidden)]
+    pub fn ext(
         &mut self,
         b: &mut Builder,
         e: &SymbolicExpressionExt<F, EF>,

@@ -21,6 +21,18 @@ use crate::isa::{DecodeError, Instr, Op, Program, EF, F, MEM_LIMIT, NUM_REGS};
 /// M5.2's `memory` table asks only for strict monotonicity, which `16·clk + k` gives.
 pub const TS_PER_ROW: u32 = 16;
 
+/// The `REDUCE` run's timestamp slots, shared with the `reduce` chip's memory messages (Task 8):
+/// the 11 descriptor cells at slots `0..11`, the per-column reads reusing slots `11..14`
+/// (distinct addresses per column, which is all the memory table's monotonicity asks), and the
+/// four write-backs at slots 14–15 (distinct addresses from the reads).
+pub const TS_RUN_PZ0: u32 = 11;
+pub const TS_RUN_PZ1: u32 = 12;
+pub const TS_RUN_PX: u32 = 13;
+pub const TS_WB_ACC0: u32 = 14;
+pub const TS_WB_ACC1: u32 = 15;
+pub const TS_WB_APOW0: u32 = 14;
+pub const TS_WB_APOW1: u32 = 15;
+
 /// One cell read or written, at the timestamp `16·clk + k` of its slot in the row.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct MemAccess {
@@ -36,6 +48,24 @@ pub struct PermEvent {
     pub ptr: u64,
     pub input: [F; 8],
     pub output: [F; 8],
+    /// `Some(src)` for a `SPONGE` absorb (the four source cells at `src` feeding rate lanes 0–3),
+    /// `None` for a plain `POSEIDON2` (all eight cells from `ptr`).
+    pub src: Option<u64>,
+}
+
+/// One run of the batch-opening reduction a `REDUCE` row dispatches (Task 8): the descriptor
+/// the chip's first row reads, its run length, and the run constants. The accumulator and the
+/// running power are chained in and out through the descriptor in memory.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ReduceEvent {
+    pub descr_ptr: u64,
+    pub vals_base: u64,
+    pub row_base: u64,
+    pub len: u32,
+    pub inv: [F; 2],
+    pub acc: [F; 2],
+    pub apow: [F; 2],
+    pub alpha: [F; 2],
 }
 
 /// One executed instruction.
@@ -56,6 +86,7 @@ pub struct Event {
     pub d: [F; 2],
     pub mem: Vec<MemAccess>,
     pub perm: Option<PermEvent>,
+    pub reduce: Option<ReduceEvent>,
 }
 
 /// A completed run: the event log, the public values the program appended, the number of witness
@@ -105,6 +136,9 @@ pub enum ExecError {
     InverseOfZero { pc: u32 },
     HintExhausted { pc: u32 },
     OutOfCycles(usize),
+    /// A `REDUCE` descriptor declared a zero-length run: there is nothing to reduce, and a
+    /// `REDUCE` of zero columns is a build-time mistake (the program must not emit it).
+    ReduceZeroLength { pc: u32 },
 }
 
 /// Run `p` against `witness` for at most `max_cycles` instructions.
@@ -138,6 +172,7 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
 
         let mut mems: Vec<MemAccess> = Vec::new();
         let mut perm = None;
+        let mut reduce = None;
         let mut a = [F::ZERO; 2];
         let mut b_val = if op.b_is_register() { [F::ZERO; 2] } else { [instr.b, F::ZERO] };
         let mut d = [F::ZERO; 2];
@@ -282,7 +317,74 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
                 for (k, value) in output.iter().enumerate() {
                     write(&mut mem, &mut mems, clk, ptr + k as u64, *value);
                 }
-                perm = Some(PermEvent { ptr, input, output });
+                perm = Some(PermEvent { ptr, input, output, src: None });
+            }
+            Op::Reduce => {
+                a[0] = regs[ra];
+                let descr = a[0].as_canonical_u64();
+                for k in 0..11u64 {
+                    bounded(pc, descr + k)?;
+                }
+                let mut d = [F::ZERO; 11];
+                for (k, c) in d.iter_mut().enumerate() {
+                    *c = read_at(&mem, &mut mems, clk, k as u32, descr + k as u64);
+                }
+                let vals_base = d[0].as_canonical_u64();
+                let row_base = d[1].as_canonical_u64();
+                let len = d[2].as_canonical_u64() as usize;
+                if len == 0 {
+                    return Err(ExecError::ReduceZeroLength { pc });
+                }
+                bounded(pc, vals_base + 2 * len as u64 - 1)?;
+                bounded(pc, row_base + len as u64 - 1)?;
+                let (inv, mut acc, mut apow, alpha) = ([d[3], d[4]], [d[5], d[6]], [d[7], d[8]], [d[9], d[10]]);
+                for k in 0..len as u64 {
+                    let pz = [
+                        read_at(&mem, &mut mems, clk, TS_RUN_PZ0, vals_base + 2 * k),
+                        read_at(&mem, &mut mems, clk, TS_RUN_PZ1, vals_base + 2 * k + 1),
+                    ];
+                    let px = read_at(&mem, &mut mems, clk, TS_RUN_PX, row_base + k);
+                    let diff = ext([pz[0], pz[1]]) - px;
+                    let t = ext(apow) * diff;
+                    let t = t * ext(inv);
+                    acc = parts(ext(acc) + t);
+                    apow = parts(ext(apow) * ext(alpha));
+                }
+                write_at(&mut mem, &mut mems, clk, TS_WB_ACC0, descr + 5, acc[0]);
+                write_at(&mut mem, &mut mems, clk, TS_WB_ACC1, descr + 6, acc[1]);
+                write_at(&mut mem, &mut mems, clk, TS_WB_APOW0, descr + 7, apow[0]);
+                write_at(&mut mem, &mut mems, clk, TS_WB_APOW1, descr + 8, apow[1]);
+                reduce = Some(ReduceEvent {
+                    descr_ptr: descr,
+                    vals_base,
+                    row_base,
+                    len: len as u32,
+                    inv,
+                    acc: [d[5], d[6]],
+                    apow: [d[7], d[8]],
+                    alpha,
+                });
+            }
+            Op::Sponge => {
+                a[0] = regs[ra];
+                let rb = reg_b(&instr, pc)? as usize;
+                b_val[0] = regs[rb];
+                let ptr = a[0].as_canonical_u64();
+                let src = b_val[0].as_canonical_u64();
+                bounded(pc, ptr + 7)?;
+                bounded(pc, src + 3)?;
+                let mut input = [F::ZERO; 8];
+                for k in 0..4u64 {
+                    input[k as usize] = read(&mem, &mut mems, clk, src + k);
+                }
+                for k in 0..4u64 {
+                    input[4 + k as usize] = read(&mem, &mut mems, clk, ptr + 4 + k);
+                }
+                let output = rand_zkvm::hash::permute_state(input);
+                for (k, value) in output.iter().enumerate() {
+                    write(&mut mem, &mut mems, clk, ptr + k as u64, *value);
+                }
+                perm = Some(PermEvent { ptr, input, output, src: Some(src) });
             }
             Op::Halt => next_pc = pc,
         }
@@ -290,7 +392,7 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
         for access in &mems {
             run.max_addr = run.max_addr.max(access.addr);
         }
-        run.events.push(Event { clk, pc, next_pc, instr, a, b_val, d, mem: mems, perm });
+        run.events.push(Event { clk, pc, next_pc, instr, a, b_val, d, mem: mems, perm, reduce });
         if op == Op::Halt {
             return Ok(run);
         }
@@ -376,4 +478,18 @@ fn write(mem: &mut HashMap<u64, F>, log: &mut Vec<MemAccess>, clk: u32, addr: u6
 
 fn ts(clk: u32, slot: usize) -> u32 {
     clk * TS_PER_ROW + slot as u32
+}
+
+/// `read` with an explicit slot: the `REDUCE` case reuses slots across its run's columns
+/// (distinct addresses per column), which the position-based helpers cannot express.
+fn read_at(mem: &HashMap<u64, F>, log: &mut Vec<MemAccess>, clk: u32, slot: u32, addr: u64) -> F {
+    let value = mem.get(&addr).copied().unwrap_or(F::ZERO);
+    log.push(MemAccess { addr, ts: clk * TS_PER_ROW + slot, value, is_write: false });
+    value
+}
+
+/// `write` with an explicit slot (see [`read_at`]).
+fn write_at(mem: &mut HashMap<u64, F>, log: &mut Vec<MemAccess>, clk: u32, slot: u32, addr: u64, value: F) {
+    mem.insert(addr, value);
+    log.push(MemAccess { addr, ts: clk * TS_PER_ROW + slot, value, is_write: true });
 }

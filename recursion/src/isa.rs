@@ -86,10 +86,21 @@ pub enum Op {
     Poseidon2,
     /// end the program
     Halt,
+    /// one run of the batch-opening reduction over the 11-cell descriptor at `ra`
+    /// (`[vals_base, row_base, len, inv(2), acc(2), apow(2), alpha(2)]`): `acc += Σ_k
+    /// apow·(vals_k − row_k)·inv` and `apow ·= alpha`, chained in and out through the
+    /// descriptor. The work is the `reduce` chip's; one cpu row per run. M5.2 Task 8, appended —
+    /// opcode 24; opcodes 0–23 never move.
+    Reduce,
+    /// absorb the four cells at `rb..rb+4` into rate lanes 0..3 of the state at `ra..ra+8` and
+    /// permute the state in place — one `PaddingFreeSponge` absorb block. The work is the
+    /// poseidon2 chip's second row kind; one cpu row per block. M5.2 Task 9, appended —
+    /// opcode 25.
+    Sponge,
 }
 
 impl Op {
-    pub const COUNT: usize = 24;
+    pub const COUNT: usize = 26;
 
     /// Every opcode, at the index of its own discriminant (pinned by `tests/isa.rs`).
     pub const ALL: [Op; Self::COUNT] = [
@@ -117,6 +128,8 @@ impl Op {
         Op::Public,
         Op::Poseidon2,
         Op::Halt,
+        Op::Reduce,
+        Op::Sponge,
     ];
 
     pub fn from_u8(x: u8) -> Option<Self> {
@@ -149,6 +162,8 @@ impl Op {
             Op::Public => "PUBLIC",
             Op::Poseidon2 => "POSEIDON2",
             Op::Halt => "HALT",
+            Op::Reduce => "REDUCE",
+            Op::Sponge => "SPONGE",
         }
     }
 
@@ -160,7 +175,7 @@ impl Op {
     pub fn b_is_register(self) -> bool {
         matches!(
             self,
-            Op::Fadd | Op::Fsub | Op::Fmul | Op::Eadd | Op::Esub | Op::Emul | Op::Emulf
+            Op::Fadd | Op::Fsub | Op::Fmul | Op::Eadd | Op::Esub | Op::Emul | Op::Emulf | Op::Sponge
         )
     }
 }

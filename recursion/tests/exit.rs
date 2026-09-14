@@ -9,7 +9,7 @@ use recursion::dsl::Checkpoints;
 use recursion::emulator::{execute, ExecError};
 use recursion::isa::F;
 use recursion::programs::{cycle_report, verify_rv32};
-use recursion::shape::{inner_vk_digest, InnerKey, InnerShape};
+use recursion::shape::{InnerKey, InnerShape};
 use recursion::witness::{Segment, WitnessTape};
 
 const MAX_CYCLES: usize = 1 << 24;
@@ -27,10 +27,11 @@ fn accept_all(profile: FriProfile, n: usize) -> Vec<usize> {
         assert_eq!(vp.shape, shape, "every fixture proof must share one shape");
         let tape = WitnessTape::build(profile, &shape, &key, &p.proof).unwrap();
         let exec = execute(&vp.program, &tape.words, MAX_CYCLES).expect("accepts a real proof");
-        let mut want = inner_vk_digest(&shape, &key).to_vec();
-        want.push(F::ONE);
-        want.extend(p.proof.public_values.iter().map(|x| F::from_u64(*x)));
-        assert_eq!(exec.public, want, "§4.4's public values, exactly");
+        // R5: the run publishes exactly the four-element interface digest; the node recomputes
+        // the §4.4 list from the bundles and compares digests.
+        let words = recursion::public_values::interface_words(&shape, &key, &[p.proof.public_values.clone()]);
+        assert_eq!(exec.public, recursion::public_values::public_digest(&words).to_vec(),
+                   "the interface digest, exactly");
         rows.push(exec.cpu_rows());
     }
     rows
@@ -225,24 +226,44 @@ fn the_committed_program_digest_is_reproducible() {
     // sequence must be a subsequence of it, which is the invariant that makes the differential
     // tests evidence about the shipped program and not about a different one.
     //
-    // The comparison normalizes branch targets to *relative* offsets. The plan's literal
-    // `Instr` equality cannot hold here: `Builder::assert_eq`'s `JEQ` carries an absolute target
-    // (`pc + 2`), and every checkpoint `PUBLIC` the `On` build inserts before such a branch
-    // shifts its position — so the two builds' branch immediates differ even though their
-    // control flow is identical. Relative offsets are the build-invariant content of a branch.
+    // The comparison is over *logical* instructions: register fields are dropped (the two-pass
+    // allocator's register assignments legitimately differ between the two builds — checkpoint
+    // `PUBLIC`s extend handle lifetimes, so the liveness schedule is not checkpoint-neutral the
+    // way the pre-liveness live-forever allocator was) and spill/reload insertions are dropped
+    // (they are the allocator's business, not the program's). What remains is exactly the
+    // program's own op sequence, and of that sequence the Off build must be a subsequence of the
+    // On build. Branch immediates are normalized to *relative* offsets for the reason given
+    // above (`Builder::assert_eq`'s `JEQ` carries an absolute target, and every inserted
+    // checkpoint `PUBLIC` shifts it).
     use p3_field::PrimeField64;
     use recursion::isa::{Op, Program};
-    let normalized = |p: &Program| -> Vec<(Op, u8, u8, u64)> {
+    let normalized = |p: &Program| -> Vec<(Op, Option<u64>)> {
         p.instrs
             .iter()
             .enumerate()
-            .map(|(i, ins)| {
-                let b = ins.b.as_canonical_u64();
-                let b = match ins.op {
-                    Op::Jmp | Op::Jeq | Op::Jne => b.wrapping_sub(i as u64),
-                    _ => b,
-                };
-                (ins.op, ins.rd, ins.ra, b)
+            .filter_map(|(i, ins)| {
+                // Spill/reload insertions: r0-based memory ops into the spill arena.
+                match ins.op {
+                    Op::Load | Op::Loade | Op::Store | Op::Storee
+                        if ins.ra == 0 && ins.b.as_canonical_u64() < recursion::dsl::MEM_BASE =>
+                    {
+                        None
+                    }
+                    _ => {
+                        // `b` is kept only when it is an immediate; register operands are part of
+                        // the allocator's assignment, dropped like `rd`/`ra`.
+                        let b = if ins.op.b_is_register() {
+                            None
+                        } else {
+                            let b = ins.b.as_canonical_u64();
+                            Some(match ins.op {
+                                Op::Jmp | Op::Jeq | Op::Jne => b.wrapping_sub(i as u64),
+                                _ => b,
+                            })
+                        };
+                        Some((ins.op, b))
+                    }
+                }
             })
             .collect()
     };
@@ -252,7 +273,91 @@ fn the_committed_program_digest_is_reproducible() {
     let mut j = 0usize;
     for want in &a_norm {
         while j < c_norm.len() && c_norm[j] != *want { j += 1; }
-        assert!(j < c_norm.len(), "the Off program is not a subsequence of the On program");
+        assert!(j < c_norm.len(), "the Off program's logical op sequence is not a subsequence of the On build's");
         j += 1;
     }
+}
+
+// ── M5.2 Task 10: the test-profile exit twin ──────────────────────────────────────────────────
+
+/// The Task-10 twin: **the post-cut verifier program over one real test-profile bundle proof,
+/// proved and verified natively** — 441 643 rows, tier 19, with the exact shape of Task 10's
+/// production exit (tier 21, ~2 M rows). `#[ignore]`d for its cost (~11–14 GB peak per the
+/// sizing derivation in `recursion/docs/01-rvm-machine.md`, ~2–5 min). The sibling
+/// `cheating.rs`'s `a_proof_of_one_program_does_not_verify_another` covers the small-scale case;
+/// here the R1 binding is checked at full scale: a proof of the verifier program never verifies
+/// against a *different* program's key.
+#[test]
+#[ignore = "the M5.2 Task-10 twin: post-cut program, tier 19, ~11-14 GB peak, ~2-5 min; run: cargo +1.98.1 test -p recursion --test exit twin -- --ignored --nocapture"]
+fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_verifies_natively() {
+    let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
+    let shape = InnerShape::of(FriProfile::Test, p.proof.tier, p.proof.program_log_height,
+        p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height,
+        p.proof.mem_log_height);
+    let key = InnerKey::of(FriProfile::Test, &shape);
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let m = recursion::machine::Machine::new(FriProfile::Test);
+    let t0 = std::time::Instant::now();
+    let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
+    let prove_s = t0.elapsed().as_secs_f64();
+    assert_eq!(exec.cpu_rows(), 441_643, "the twin proves the post-cut program as measured");
+    assert_eq!(rvm_proof.tier, recursion::machine::Tier(19));
+    let t1 = std::time::Instant::now();
+    m.verify(&vp.program, &rvm_proof).unwrap();
+    println!("twin: prove {prove_s:.1}s, verify {:.2}s, proof {} bytes, public values {:?}",
+             t1.elapsed().as_secs_f64(), rvm_proof.size(), rvm_proof.public_values);
+    assert_eq!(rvm_proof.public_values.len(), 4);
+
+    // R1 at full scale: the preprocessed cap binds the program, so the same proof never verifies
+    // against a different program's key.
+    let mut other_vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    other_vp.program.instrs[123] = recursion::isa::Instr { op: recursion::isa::Op::Faddi, rd: 9, ra: 0, b: recursion::isa::F::from_u64(1) };
+    assert!(m.verify(&other_vp.program, &rvm_proof).is_err(),
+            "a proof of one program never verifies against another's key (R1)");
+}
+
+/// The M5.2 exit (spec §7, verbatim): an rVM proof of the post-cut verifier program's execution
+/// over **one real cs6 production-profile bundle proof** verifies natively. Written and measured
+/// in Task 10 against the derived requirement in `recursion/docs/01-rvm-machine.md`: the
+/// committed oracle is 48.6 GB by the calibrated formula, so the exit runs on a **≥ 64 GB**
+/// machine (`research/docs/04-guests.md`'s big-proof class) — this 48 GB box cannot hold it, and
+/// it is not attempted here.
+#[test]
+#[ignore = "the M5.2 exit: production profile, post-cut program, tier 21, ~1 968 619 rows; \
+            needs >= 64 GB (committed oracle 48.6 GB derived in recursion/docs/01-rvm-machine.md; \
+            est. 43-61 GB peak, est. 20-40 min). Run on the big machine: \
+            cargo +1.98.1 test -p recursion --release --test exit -- --ignored --nocapture"]
+fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_natively() {
+    let p = common::bundle_proofs(FriProfile::Production, 1).pop().unwrap();
+    let shape = InnerShape::of(FriProfile::Production, p.proof.tier, p.proof.program_log_height,
+        p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height,
+        p.proof.mem_log_height);
+    let key = InnerKey::of(FriProfile::Production, &shape);
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    assert_eq!(recursion::programs::digest_hex(&vp.program), common::committed_digest(),
+               "the registered program is the committed one");
+    let tape = WitnessTape::build(FriProfile::Production, &shape, &key, &p.proof).unwrap();
+    let m = recursion::machine::Machine::new(FriProfile::Production);
+    let t0 = std::time::Instant::now();
+    let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
+    let prove_s = t0.elapsed().as_secs_f64();
+    assert_eq!(exec.cpu_rows(), 1_968_619, "the exit proves the post-cut program as measured");
+    assert_eq!(rvm_proof.tier, recursion::machine::Tier(21));
+    let t1 = std::time::Instant::now();
+    m.verify(&vp.program, &rvm_proof).unwrap();
+    let verify_s = t1.elapsed().as_secs_f64();
+    println!("exit: prove {prove_s:.1}s, verify {verify_s:.2}s, proof {} bytes, public values {:?}",
+             rvm_proof.size(), rvm_proof.public_values);
+    assert_eq!(rvm_proof.public_values.len(), 4);
+
+    // A tampered inner proof makes the program trap: no proof exists.
+    let mut bad_tape = tape.words.clone();
+    let (_, start, len) = *tape.segments.iter().find(|(s, _, _)| *s == Segment::OpenedValues).unwrap();
+    assert!(len > 0);
+    bad_tape[start] += F::ONE;
+    assert!(
+        matches!(m.prove(&vp.program, &bad_tape, None), Err(recursion::machine::ProveError::Exec(_))),
+        "a tampered inner proof traps the program — no proof exists"
+    );
 }

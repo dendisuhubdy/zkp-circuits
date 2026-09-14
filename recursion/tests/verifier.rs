@@ -602,13 +602,11 @@ fn the_quotient_identity_holds_in_the_program_for_a_real_proof() {
     let vp = verify_rv32(&shape, &key, Checkpoints::Off);
     let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
     let exec = execute(&vp.program, &tape.words, 200_000_000).expect("accepts a real proof");
-    // Spec §4.4's own list, exactly: `4 + 1 + 34` (constraint set 6 grew the inner list to 34).
-    // (At Task 5's boundary the `Off` build published
-    // nothing yet; Task 6's finished program publishes these.)
-    let mut want = recursion::shape::inner_vk_digest(&shape, &key).to_vec();
-    want.push(F::ONE);
-    want.extend(p.proof.public_values.iter().map(|x| F::from_u64(*x)));
-    assert_eq!(exec.public, want, "§4.4's public values, exactly");
+    // R5: exactly the four-element interface digest (the §4.4 list, hashed in-circuit — the
+    // in-circuit seeded sponge and the host's `public_digest` are pinned to each other here).
+    let words = recursion::public_values::interface_words(&shape, &key, &[p.proof.public_values.clone()]);
+    assert_eq!(exec.public, recursion::public_values::public_digest(&words).to_vec(),
+               "the interface digest, exactly");
     // And it got there by reading the *whole* tape, not by stopping short of it: without that this
     // test would pass on a program with no query phase at all.
     assert_eq!(exec.hints_read, tape.len());
@@ -653,11 +651,11 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
 
     let mut table = String::from(
         "phase 5, per instance: width  lookups  base+ext constraints  nodes(+hits)  \
-         leaves(+hits)  instrs  spills/reloads\n",
+         leaves(+hits)  instrs\n",
     );
     for (i, c) in vp.phase5.iter().enumerate() {
         table += &format!(
-            "  [{i}] w={:<4} l={:<3} {:>5}+{:<4} {:>6}(+{:<6}) {:>5}(+{:<6}) {:>7}  {}/{}\n",
+            "  [{i}] w={:<4} l={:<3} {:>5}+{:<4} {:>6}(+{:<6}) {:>5}(+{:<6}) {:>7}\n",
             shape.widths[i],
             shape.num_lookups[i],
             c.base_constraints,
@@ -666,9 +664,7 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
             c.node_hits,
             c.leaves,
             c.leaf_hits,
-            c.instrs,
-            c.spills,
-            c.reloads
+            c.instrs
         );
     }
     let sum = |f: fn(&recursion::programs::constraints::Phase5Cost) -> usize| -> usize {
@@ -708,10 +704,11 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
     );
     // Hashing: phases 0–4 cost the challenger's 51 duplexes and phase 5 hashes nothing; the rest
     // is the query phase — the FRI transcript's duplexes, the five input rounds' leaf sponges,
-    // walks and injections, and the commit-phase rows and walks. Pinned at the measured
-    // Test-profile number (constraint set 6's shape); the production one lives in
+    // walks and injections, and the commit-phase rows and walks — plus phase 8's interface
+    // digest (R5): a 39-word seeded sponge, `ceil(39/4)` = 10 permutations. Pinned at the
+    // measured Test-profile number (constraint set 6's shape); the production one lives in
     // `docs/00-recursion-vm.md` and `pins.json`.
-    assert_eq!(exec.permutations(), 11_195, "51 transcript duplexes in phases 0–4, the rest is the query phase");
+    assert_eq!(exec.permutations(), 11_205, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
 }
 
 /// Every assertion phase 5 makes is a *named* checkpoint, and the names are the interface Task 6's
@@ -745,4 +742,39 @@ fn phase_5s_assertions_are_all_named() {
     assert!(vp.checkpoint_names.contains(&format!("accumulator[{}]", shape.instances() - 1)));
     // And the trap table stays pc-sorted, which is what `checkpoint_at`'s binary search needs.
     assert!(vp.program.checkpoints.windows(2).all(|w| w[0].0 < w[1].0));
+}
+
+/// Task 7's two allocator policies: the `Off` replay reproduces the pre-liveness program byte
+/// for byte, and the two builds accept the same proofs with the same public values. The
+/// hardcoded digest is the production shape's pre-Task-7 program digest (the value committed
+/// before the liveness rework — after this task re-records, `src/programs/verify_rv32.digest`
+/// carries the On build's own, different, digest).
+#[test]
+fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
+    use recursion::dsl::Liveness;
+    use recursion::programs::verify_rv32_with;
+
+    let p = common::bundle_proofs(FriProfile::Production, 1).pop().unwrap();
+    let shape = InnerShape::of(
+        FriProfile::Production,
+        p.proof.tier, p.proof.program_log_height, p.proof.input_log_height, p.proof.keccak_log_height,
+        p.proof.sha256_log_height, p.proof.public_log_height, p.proof.mem_log_height,
+    );
+    let key = InnerKey::of(FriProfile::Production, &shape);
+    let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
+    assert_eq!(
+        recursion::programs::digest_hex(&off.program),
+        "c1c04ac3a9faf266eb8980260dae6c7f12fe9ee4cf3dfa40de8440182258d731",
+        "the Off replay must reproduce the pre-Task-7 stream byte for byte"
+    );
+
+    let on = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::On, recursion::programs::Precompiles::On);
+    assert_ne!(off.program.digest(), on.program.digest(), "liveness changes the schedule");
+
+    // The acceptance differential: both builds accept a real proof with identical public values.
+    let tape = WitnessTape::build(FriProfile::Production, &shape, &key, &p.proof).unwrap();
+    let got_off = execute(&off.program, &tape.words, 200_000_000).unwrap().public;
+    let got_on = execute(&on.program, &tape.words, 200_000_000).unwrap().public;
+    assert_eq!(got_off, got_on);
+    assert_eq!(got_on.len(), 4, "the interface digest, from both builds");
 }

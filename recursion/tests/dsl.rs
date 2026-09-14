@@ -11,6 +11,7 @@ fn run(b: Builder, witness: &[F]) -> Vec<F> {
     execute(&p, witness, 1_000_000).unwrap().public
 }
 
+
 #[test]
 fn a_dsl_program_emulates_to_the_expected_field_values() {
     let mut b = Builder::new(Checkpoints::Off);
@@ -52,9 +53,9 @@ fn the_allocator_spills_to_memory_and_the_result_is_unchanged() {
         acc = b.add(acc, *v);
     }
     b.public(acc);
-    let stats = b.stats();
-    assert!(stats.spills > 0, "40 live handles must spill: {stats:?}");
-    assert_eq!(run(b, &[]), vec![F::from_u64(40 * 41 / 2)]);
+    let (p, stats) = b.finish_stats();
+    assert!(stats.spills > 0, "40 simultaneously-live handles must spill: {stats:?}");
+    assert_eq!(execute(&p, &[], 1_000_000).unwrap().public, vec![F::from_u64(40 * 41 / 2)]);
 }
 
 #[test]
@@ -73,9 +74,9 @@ fn the_allocator_spills_extension_handles_to_consecutive_cells() {
         acc = b.ext_add(acc, *v);
     }
     b.public_ext(acc);
-    let stats = b.stats();
+    let (p, stats) = b.finish_stats();
     assert!(stats.spills > 0 && stats.reloads > 0, "20 pairs must spill and reload: {stats:?}");
-    assert_eq!(run(b, &[]), [210u64, 420].map(F::from_u64).to_vec());
+    assert_eq!(execute(&p, &[], 1_000_000).unwrap().public, [210u64, 420].map(F::from_u64).to_vec());
 }
 
 #[test]
@@ -205,7 +206,6 @@ fn poseidon2_permutes_the_eight_cells_at_an_offset_pointer() {
     let a = b.hint_array(12);
     let tail = b.offset(a.base, 4);
     b.poseidon2(tail);
-    assert_eq!(b.stats().perms, 1);
     for k in 0..12 {
         let v = b.get(a, k);
         b.public(v);
@@ -224,12 +224,21 @@ fn a_loop_body_that_evicts_a_pre_existing_handle_is_refused() {
     let mut b = Builder::new(Checkpoints::Off);
     let n = b.constant(F::TWO);
     b.counted_loop(n, |b, _i| {
-        // More fresh handles than there are free registers: the counter gets spilled, and a
-        // once-emitted body that spills its own counter would not count.
-        for k in 0..30u64 {
-            b.constant(F::from_u64(k));
+        // Thirty simultaneously-live handles (kept alive by the fold below) against 25
+        // allocatable registers: the counter is the farthest-next-use resident, so the replay
+        // evicts it — and a once-emitted body that spills its own counter would not count.
+        // (Pre-liveness, thirty dropped handles did the same; liveness frees dead-on-arrival
+        // handles instantly, so the pressure now has to be *real*.)
+        let vals: Vec<_> = (0..30u64).map(|k| b.constant(F::from_u64(k))).collect();
+        let mut s = vals[0];
+        for v in &vals[1..] {
+            s = b.add(s, *v);
         }
+        let _ = s;
     });
+    // The invariant is a replay-time property of the emitted-once body's allocation: it fires
+    // when the program is built, where the pre-liveness builder caught it at emit time.
+    let _ = b.finish();
 }
 
 #[test]
@@ -330,4 +339,38 @@ fn hex_digest(d: [F; 4]) -> String {
         .map(|x| hex::encode(x.as_canonical_u64().to_be_bytes()))
         .collect::<Vec<_>>()
         .join("")
+}
+
+// ── Task 7: liveness in the register allocator ────────────────────────────────────────────────
+
+#[test]
+fn die_immediately_handles_cost_nothing_and_live_max_is_measured() {
+    // Forty sequential constants, each published and dead on the spot: liveness frees each at
+    // its last use, so nothing ever spills. (The plan's "spills 0" case; every number below is
+    // measured, not a target.)
+    let mut b = Builder::new(Checkpoints::Off);
+    for k in 0..40u64 {
+        let c = b.constant(F::from_u64(k));
+        b.public(c);
+    }
+    let (_p, stats) = b.finish_stats();
+    assert_eq!((stats.spills, stats.reloads, stats.live_max), (0, 0, 1), "die-immediately: {stats:?}");
+
+    // The fold's creation phase keeps all 40 constants simultaneously live — the only reason it
+    // spills at all — and the fold's progressive deaths stop it at the minimum: 16 spills, 16
+    // reloads, a 16-cell arena peak (the pre-liveness allocator spilled and reloaded every one
+    // of the 40, keeping them all forever).
+    let mut b = Builder::new(Checkpoints::Off);
+    let vals: Vec<_> = (1..=40u64).map(|k| b.constant(F::from_u64(k))).collect();
+    let mut acc = vals[0];
+    for v in &vals[1..] {
+        acc = b.add(acc, *v);
+    }
+    b.public(acc);
+    let (_p, stats) = b.finish_stats();
+    assert_eq!(
+        (stats.spills, stats.reloads, stats.live_max, stats.cells),
+        (16, 16, 25, 16),
+        "the 40-constant fold, measured: {stats:?}"
+    );
 }

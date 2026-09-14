@@ -98,18 +98,63 @@ log:
 
 | | `FriProfile::Test` (16 queries) | `FriProfile::Production` (80 queries) |
 |---|---:|---:|
-| cpu rows | 1 209 871 | **5 682 847** |
-| Poseidon2 permutations | 11 195 | **51 595** |
-| memory accesses | 1 365 013 | 6 354 037 |
-| program instructions | 1 211 914 | 5 692 650 |
+| cpu rows | 441 643 | **1 968 619** |
+| Poseidon2 permutations | 11 205 | **51 605** |
+| memory accesses | 597 021 | 2 705 197 |
+| program instructions | 443 686 | 1 978 422 |
 | witness words read | 43 344 | 199 760 |
 | tape words | 43 344 | 199 760 |
 
 The program is straight-line in the proof's data: every proof of the shape costs the same rows
 (asserted by the exit test on 5 test-profile and 50 production-profile proofs). The production
 row is pinned in `tests/pins.json`; the production program's digest
-(`Checkpoints::Off`, `01c6471433d31791aa8967b32047b86d55182c01259cc9ccb2b022a9d5043d86`) in
+(`Checkpoints::Off`, `8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`) in
 `src/programs/verify_rv32.digest`.
+
+**M5.2 Task 4 re-pin (2026-09-14, ruling R5).** The table above is the *current* program's
+measurement, re-taken after phase 8 changed from thirty-nine raw `PUBLIC` rows to the
+four-element **interface digest**: the §4.4 list (vk digest, `N`, the 34 inner public values) is
+stored, sponged with a capacity-seeded header (`RVM_PUB_DOMAIN = 17`, the `Program::digest`
+construction — the proof's batch public values are always exactly those four elements, the cs6
+`H_PUB` pattern; the node recomputes the list from the covered bundles and compares digests).
+The measured delta against the M5.1 measurement: +174 cpu rows (5 682 847 → 5 683 021), +10
+permutations (51 595 → 51 605, `ceil(39/4)`), +355 memory accesses; witness and tape unchanged.
+The pre-R5 numbers remain the ones in the "Where the rows go" and "precompile decision" sections
+below — their structure (the reduction and spill terms) is untouched by phase 8, and M5.2's Tasks
+7–9 re-measure everything again anyway.
+
+**M5.2 Task 7 re-pin (2026-09-15, liveness).** The table above is *re-measured again* after the
+two-pass allocator landed: the replay frees a handle's register at its last use (clamped out of
+loop bodies) and reuses spill cells by width, and the `Off` policy reproduces the pre-liveness
+stream byte for byte (pinned by `tests/verifier.rs` against the pre-Task-7 digest). Measured
+delta against the Task-4 row above: **cpu rows 5 683 021 → 4 052 455 (−28.7 %)** — 66 % of the
+measured 2 454 511 spill/reload rows die, against the plan's ~3.6 M estimate (it guessed
+85–90 %; the survivor is real register pressure in the reduction and the loop-carried
+accumulators) — and **memory accesses 6 354 392 → 3 488 864 (−45 %)**; permutations and witness
+unchanged. Test profile: 1 210 045 → 858 343 rows. The Task-8 gate (`rows > 2^21 · 0.75` =
+1 572 864) **fires** at 4 052 455, exactly as the plan predicted, and the exit still needs tier 22
+after this task alone.
+
+**M5.2 Task 8 re-pin (2026-09-15, the `REDUCE` precompile).** The table above is *re-measured
+again* with the batch-opening reduction in its chip (opcode 24, appended): one chip row per
+column instead of the compiled loop, gated on Task 7's measurement, differentially pinned to
+`run_reduce_sequence` (`tests/precompiles.rs`) which stays in the tree as the compiled reference.
+Measured delta against the Task-7 row above: **cpu rows 4 052 455 → 2 240 988 (−44.7 %)** — the
+compiled reduction was 1 811 467 rows post-liveness (~11.6 per column, more than the plan's ~7
+estimate, so the cut beats the plan's ~2.5 M) — and **memory accesses 3 488 864 → 3 008 239**;
+permutations and witness unchanged. Test profile: 858 343 → 496 028 rows. The exit is still 6.9 %
+over tier 21's 2^21 = 2 097 152, and the Task-9 gate **fires** at 2 240 988 — as the plan
+predicted.
+
+**M5.2 Task 9 re-pin (2026-09-15, the `SPONGE` precompile).** The table above is *re-measured
+again* with the leaf-sponge absorb loop in the poseidon2 chip's second row kind (opcode 25,
+appended): one `SPONGE` per four-lane absorb block, gated on Task 8's measurement,
+differentially pinned to `PaddingFreeSponge` (`tests/precompiles.rs`) with the compiled loop kept
+as `dsl::hash::sponge_compiled`. Measured delta against the Task-8 row above: **cpu rows
+2 240 988 → 1 968 619 (−12.1 %)** — 272 369 rows of absorb bookkeeping (~8.8 per absorb block;
+the plan's ~0.55 M estimate guessed ~15–20) — and **memory accesses 3 008 239 → 2 705 197**;
+permutations and witness unchanged. Test profile: 496 028 → 441 643 rows. **The exit now fits
+tier 21: 1 968 619 < 2^21 = 2 097 152, with 6.1 % headroom** — the plan's target, landed.
 
 ### Where the rows go
 
@@ -209,3 +254,10 @@ to revisit this paragraph.
   (above), replacing spec §7's cost model: `TIERS`, `poseidon2_log_height` and the memory table's
   height are cut from these, and they say one inner proof wants ~2^23 cpu rows, not 2^19.
 - The precompile question answered with a measurement: not `FRIFOLD`/`EXPBITS`.
+
+**Superseded (M5.2 built, 2026-09-15).** The machine this section hands to exists now: the ISA
+is at 26 instructions (`REDUCE` = 24, `SPONGE` = 25; 0–23 frozen), the program is three row cuts
+smaller (5 682 847 → 1 968 619, tier 21), and the measured machine numbers — tables, buses,
+tiers, widths, degrees, the three cuts' deltas and gates, the test-profile twin's times and proof
+size, and the production exit's derived resource requirement — live in
+`docs/01-rvm-machine.md`. This section remains as the record of what M5.1 actually handed over.
