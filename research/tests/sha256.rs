@@ -459,7 +459,7 @@ mod harness {
         }
         a.extend(call_sha256(ptr));
         a.extend(halt());
-        let exec = execute(&a.assemble(), &[], 1 << 16).unwrap();
+        let exec = execute(&a.assemble(), &[], &[], 1 << 16).unwrap();
 
         let cycle = exec
             .events

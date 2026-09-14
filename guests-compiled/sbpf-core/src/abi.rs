@@ -1,15 +1,17 @@
 //! The input layout and the public output digest: everything between the machine's
-//! `READ_INPUT`/`WRITE_OUTPUT` syscalls and the interpreter. [`run_call`] is the whole guest —
-//! decode the input vector, load, run, produce the eight output words — so the binary Task 6
-//! commits is a wrapper around this one function.
+//! `READ_PUBLIC`/`READ_INPUT`/`WRITE_OUTPUT` syscalls and the interpreter. [`run_call`] is the
+//! whole guest — decode the two input vectors, load, run, produce the eight output words — so the
+//! committed binary is a wrapper around this one function.
 //!
-//! # The input vector
+//! # The two input vectors
 //!
-//! `READ_INPUT` word indices, in order, byte strings packed four per word little-endian and
-//! zero-padded:
+//! The ELF is **public** and the instruction is **private**, so the call arrives on two tapes —
+//! `READ_PUBLIC` word indices and `READ_INPUT` word indices — each byte string packed four per
+//! word little-endian and zero-padded:
 //!
 //! ```text
-//! [n_elf, elf bytes…, n_input, input bytes…]
+//! public:  [n_elf, elf bytes…]
+//! private: [n_input, input bytes…]
 //! ```
 //!
 //! # The public output
@@ -17,15 +19,25 @@
 //! `out0 = status` and `out1..out7` = words 0..6 of
 //!
 //! ```text
-//! hash(SBPF_OUT, [program_hash(8) ‖ input_hash(8) ‖ output_hash(8)])
+//! hash(SBPF_OUT, [input_hash(8) ‖ output_hash(8)])
 //! ```
 //!
-//! — 24 words through the domain-tagged Poseidon2 sponge, a 224-bit binding of the program, the
-//! instruction it was given and the state it left behind. `program_hash = sha256(elf bytes)`,
-//! `input_hash = sha256(serialized input as passed to the program)`, and `output_hash` is
-//! [`output_hash`] over the accounts. Each 32-byte digest is packed into eight words as
-//! `word[i] = LE(bytes[4i..4i+4])`, and all three go through the chip, which is what puts the
-//! SHA-256 table on the exit test's own path.
+//! — 16 words through the domain-tagged Poseidon2 sponge, a 224-bit binding of the instruction the
+//! program was given and the state it left behind. **There is no `program_hash`**: the ELF is in
+//! the public segment, so the proof's unsalted `H_PUB` already binds it word for word and the chain
+//! checks that digest against the ELF it published (`Machine::verify_public`) — hashing the ELF a
+//! second time in-circuit bought nothing and cost 1 698 SHA-256 compressions.
+//!
+//! `input_hash` is [`canonical_input_hash`] over the instruction — the unpadded encoding of spec
+//! §9.4, not `sha256` of the aligned region, whose 10 240 bytes of realloc headroom per account
+//! were 98 % of what was hashed. What the encoding leaves out, [`check_region`] pins to a fixed
+//! value at entry — zero for the padding, `{0, 1}` for the flag bytes — so every byte the running
+//! program can read is either hashed or pinned.
+//! `output_hash` is [`output_hash`] over the accounts. The account list's *shape* is bound too: the
+//! preimage carries each entry's raw marker byte, so a duplicate entry and a repeated full entry
+//! are different calls even when every account field matches. Each
+//! 32-byte digest is packed into eight words as `word[i] = LE(bytes[4i..4i+4])`, and both go
+//! through the chip, which is what puts the SHA-256 table on the exit test's own path.
 //!
 //! The status word is the plan's: `1` = the program returned `r0 == 0`, `0` = it returned something
 //! else (a `ProgramError`, whose code is *not* published — the seven digest words are spoken for),
@@ -48,9 +60,17 @@
 //! #[no_mangle]
 //! pub extern "C" fn main() -> ! {
 //!     let w = unsafe { &mut *core::ptr::addr_of_mut!(W) };
-//!     // READ_INPUT past the committed input length is unsatisfiable in-circuit (M4.1's `H_IN`),
-//!     // so the machine itself is the guest's bound and `u32::MAX` is the honest `len` here.
-//!     let out = run_call(&mut Syscalls, w, guest_sdk::read_input, u32::MAX);
+//!     // A read past either segment's committed length is unsatisfiable in-circuit (M4.1's `H_IN`,
+//!     // and `H_PUB`), so the machine is the bound on both and `u32::MAX` is the honest `len` for
+//!     // each.
+//!     let out = run_call(
+//!         &mut Syscalls,
+//!         w,
+//!         guest_sdk::read_public,
+//!         u32::MAX,
+//!         guest_sdk::read_input,
+//!         u32::MAX,
+//!     );
 //!     for (slot, word) in out.iter().enumerate() {
 //!         guest_sdk::write_output(slot as u32, *word);
 //!     }
@@ -61,11 +81,11 @@
 use crate::elf;
 use crate::interp::{Halt, Vm};
 use crate::memory::{Memory, HEAP_BYTES, STACK_BYTES};
-use crate::{dhash, hash_words, sha256, Host, Sha256};
+use crate::{dhash, hash_words, Host, Sha256};
 
-/// The largest ELF the input vector may carry (the plan's number).
+/// The largest ELF the public vector may carry (the plan's number).
 pub const MAX_ELF_BYTES: usize = 262_144;
-/// The largest serialized instruction the input vector may carry.
+/// The largest serialized instruction the private vector may carry.
 ///
 /// **Measured, not the plan's 16 KiB** (Task 6). The aligned format leaves
 /// [`MAX_PERMITTED_DATA_INCREASE`] = 10 240 bytes of realloc headroom after *every* account's data,
@@ -79,8 +99,10 @@ pub const MAX_INPUT_BYTES: usize = 49_152;
 /// `notes::domain::SBPF_OUT`, mirrored here so the guest and the host agree without a dependency.
 pub const SBPF_OUT_DOMAIN: u32 = 14;
 
-/// Accounts [`output_hash`] can walk. Solana's own per-transaction limit is 64; a serialized input
-/// claiming more is walked only this far, which is a deterministic answer rather than a panic.
+/// Accounts a call may carry. Solana's own per-transaction limit is 64; a serialized input claiming
+/// more is **refused** at entry ([`check_region`]) rather than clamped, so the count the digest
+/// carries is always the count that was walked. The walks themselves still stop here, because
+/// [`output_hash`] must stay total over a post-state region the program may have scribbled on.
 pub const MAX_ACCOUNTS: usize = 64;
 
 /// Bytes of realloc headroom the aligned format leaves after every account's data
@@ -90,29 +112,38 @@ pub const MAX_PERMITTED_DATA_INCREASE: usize = 10_240;
 /// The marker byte of an account that is not a duplicate of an earlier one.
 const NON_DUP_MARKER: u8 = 0xff;
 
-/// Words in the public-output digest's preimage: three eight-word SHA-256 digests.
-const OUT_WORDS: usize = 24;
+/// Words in the public-output digest's preimage: two eight-word SHA-256 digests.
+const OUT_WORDS: usize = 16;
 
-/// Why an input vector is not a call. Every one of these is status 2 with the canonical malformed
-/// output ([`run_call_with`]); none is a panic, because every length involved is prover-supplied
-/// and a panicking guest aborts without producing a proof at all.
+/// Why a pair of input vectors is not a call. Every one of these is status 2 with the canonical
+/// malformed output ([`run_call_with`]); none is a panic, because every length involved is
+/// prover-supplied and a panicking guest aborts without producing a proof at all.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ParseError {
-    /// The vector ends before the layout does.
+    /// One of the two vectors ends before its layout does.
     Truncated,
     /// `n_elf` above [`MAX_ELF_BYTES`].
     ElfTooLong,
     /// `n_input` above [`MAX_INPUT_BYTES`].
     InputTooLong,
+    /// The instruction region is not the canonical aligned encoding the Solana runtime produces:
+    /// an account count above [`MAX_ACCOUNTS`], a non-zero byte where the runtime guarantees zeros
+    /// (the `original_data_len` slot, the realloc headroom, the alignment padding, a duplicate
+    /// entry's seven padding bytes), an account list that does not walk to its own end, or a tail
+    /// that is not exactly `instruction_data_len ‖ instruction data ‖ program_id`. See
+    /// [`check_region`].
+    MalformedRegion,
 }
 
-/// Reads the input vector through a `read(idx) -> u32` closure, so the same code runs on the host
-/// (over a slice) and in the guest (over the `READ_INPUT` syscall).
+/// Reads one input vector through a `read(idx) -> u32` closure, so the same code runs on the host
+/// (over a slice) and in the guest (over the `READ_PUBLIC` or `READ_INPUT` syscall). A call has one
+/// cursor per segment: the public one carries the ELF, the private one the instruction.
 ///
 /// `len` is how many words the reader can supply. A read at or past it is **not** attempted — the
 /// closure is never called out of range — and sets the truncation flag instead. In the guest `len`
-/// is `u32::MAX`: a `READ_INPUT` beyond the length committed to `H_IN` cannot be satisfied by any
-/// witness, so the machine refuses an overrun before this ever could.
+/// is `u32::MAX` for both: a read beyond the length committed to `H_IN` (private) or `H_PUB`
+/// (public) cannot be satisfied by any witness, so the machine refuses an overrun before this ever
+/// could.
 pub struct InputCursor<F: FnMut(u32) -> u32> {
     read: F,
     pos: u32,
@@ -204,120 +235,439 @@ impl Workspace {
         Workspace { input: CallInput::ZERO, stack: [0; STACK_BYTES], heap: [0; HEAP_BYTES] };
 }
 
-/// Decodes the input vector into `dst`, in place — the ELF, then the serialized instruction.
+/// Decodes the two input vectors into `dst`, in place — the ELF from the **public** cursor, the
+/// serialized instruction from the **private** one.
 ///
-/// Refuses, rather than trusting, everything the layout leaves to the prover: either length above
-/// its cap, and a vector that ends before the layout does. Checked once at the end, as M4.3's
-/// `decode_input` is: nothing here branches on anything but a length and a read past the end
+/// Refuses, rather than trusting, everything either layout leaves to the prover: either length
+/// above its cap, and a vector that ends before its layout does. Checked once at the end, as
+/// M4.3's `decode_input` is: nothing here branches on anything but a length and a read past the end
 /// yields zero, so a truncated vector can only have produced *shorter* fields, never misread ones.
-pub fn decode_input<F: FnMut(u32) -> u32>(
+/// Truncation of *either* segment is the same `Truncated`: neither vector is a call without the
+/// other.
+pub fn decode_input<FP: FnMut(u32) -> u32, FS: FnMut(u32) -> u32>(
     dst: &mut CallInput,
-    c: &mut InputCursor<F>,
+    elf_c: &mut InputCursor<FP>,
+    in_c: &mut InputCursor<FS>,
 ) -> Result<(), ParseError> {
     dst.elf_len = 0;
     dst.input_len = 0;
-    dst.elf_len = c.bytes(&mut dst.elf).ok_or(ParseError::ElfTooLong)?;
-    dst.input_len = c.bytes(&mut dst.input).ok_or(ParseError::InputTooLong)?;
-    if c.truncated() {
+    dst.elf_len = elf_c.bytes(&mut dst.elf).ok_or(ParseError::ElfTooLong)?;
+    dst.input_len = in_c.bytes(&mut dst.input).ok_or(ParseError::InputTooLong)?;
+    if elf_c.truncated() || in_c.truncated() {
         return Err(ParseError::Truncated);
     }
+    // Refuse, rather than hash around, a region that is not the canonical aligned encoding: see
+    // [`check_region`] for why every byte of it has to be either hashed or pinned to zero.
+    check_region(&dst.input[..dst.input_len])
+}
+
+/// One account entry's offsets inside the serialized region, as [`AccountWalk`] resolves them: a
+/// duplicate entry carries the offsets of the account it duplicates, so nothing downstream has to
+/// know which kind of entry it came from. `owner` immediately follows `key`.
+#[derive(Clone, Copy)]
+struct Entry {
+    /// The byte the entry physically carries at its own offset: [`NON_DUP_MARKER`] for a full
+    /// entry, the duplicated entry's ordinal for a duplicate. It belongs to the **position**, not
+    /// to the account, so a duplicate's copy carries its own marker rather than the original's —
+    /// which is the whole point of hashing it: `[A, A_dup(0)]` and a region with two full entries
+    /// of `A` hand the program different aliasing (one shared buffer versus two) while every
+    /// account field is identical.
+    marker: u8,
+    /// `is_signer`, `is_writable`, `executable` — three consecutive bytes.
+    flags_at: usize,
+    /// `key` (32 bytes), immediately followed by `owner` (32 bytes).
+    key_at: usize,
+    lamports: u64,
+    data_at: usize,
+    data_len: usize,
+    /// The account's `rent_epoch`, which sits after the realloc headroom and the alignment padding.
+    /// A running program reads it through its `AccountInfo`, so the canonical preimage binds it.
+    rent_epoch: u64,
+}
+
+const ZERO_ENTRY: Entry = Entry {
+    marker: 0,
+    flags_at: 0,
+    key_at: 0,
+    lamports: 0,
+    data_at: 0,
+    data_len: 0,
+    rent_epoch: 0,
+};
+
+/// The one walk over the *aligned* serialized-instruction format
+/// (`solana_program::entrypoint::deserialize`'s layout). [`output_hash`] and
+/// [`canonical_input_hash`] both drive it and differ only in which fields they hash, so the two can
+/// never drift on how a duplicate entry resolves — which is the part that is easy to get silently
+/// wrong.
+///
+/// A duplicate's marker byte is an index into **all** entries seen so far, duplicates included —
+/// the same index space `deserialize` pushes into, since it does
+/// `accounts.push(accounts[dup_info].clone())` over a `Vec` that already holds its own duplicates
+/// (and so does this crate's host twin, `rand_zkvm::sbpf::deserialize_accounts`). Indexing anything
+/// else silently reads the wrong account: `[A, A, B, C, B]`'s last entry carries the byte 2, which
+/// is `B` among all entries but `C` among the non-duplicate ones.
+///
+/// Total by construction: a region that is not a serialized instruction, or that ends before its
+/// own account count does, yields the prefix the walk got through and then stops for good
+/// ([`AccountWalk::end`] returns `None`, so no caller mistakes the stopping point for the start of
+/// the instruction data). Totality is what lets [`output_hash`] run over a *post*-state the program
+/// has scribbled on; the entry-time refusals live in [`check_region`], not here.
+struct AccountWalk<'a> {
+    input: &'a [u8],
+    off: usize,
+    /// Entries still to produce: the region's own count, clamped at [`MAX_ACCOUNTS`] so the walk
+    /// stays total. A region claiming more than that is *refused* by [`check_region`] before any of
+    /// this runs — the clamp is a bound on the loop, never a reinterpretation of the count.
+    left: usize,
+    /// Where each entry's fields sit, indexed by its **entry ordinal** — duplicates included.
+    seen: [Entry; MAX_ACCOUNTS],
+    n_entries: usize,
+    stopped: bool,
+    /// Whether to check the bytes the runtime guarantees are zero. Only [`check_region`] asks for
+    /// it: the scan is ~41 KB for a four-account region and the two hashing walks must not pay it.
+    check_pinned: bool,
+    /// Set when a checking walk saw a byte the format does not admit: a non-zero where it pins a
+    /// zero, or a flag byte above 1. The walk does not stop on it — the flag is the answer, so a
+    /// caller that does not care is not affected.
+    pinned_invalid: bool,
+}
+
+impl<'a> AccountWalk<'a> {
+    /// The walk and the region's **exact** account count, as its own `u64` — not clamped. Read in
+    /// `u64` because on the 32-bit target a count above `u32::MAX` would otherwise truncate into a
+    /// small, plausible-looking number instead of being seen for what it is.
+    fn new(input: &'a [u8]) -> (Self, u64) {
+        Self::with_checking(input, false)
+    }
+
+    fn with_checking(input: &'a [u8], check_pinned: bool) -> (Self, u64) {
+        let (off, claimed) = match read_u64(input, 0) {
+            Some(n) => (8, n),
+            None => (0, 0),
+        };
+        let w = AccountWalk {
+            input,
+            off,
+            left: core::cmp::min(claimed, MAX_ACCOUNTS as u64) as usize,
+            seen: [ZERO_ENTRY; MAX_ACCOUNTS],
+            n_entries: 0,
+            stopped: off == 0,
+            check_pinned,
+            pinned_invalid: false,
+        };
+        (w, claimed)
+    }
+
+    /// The next entry, or `None` once the count is exhausted or the region stops making sense.
+    fn next(&mut self) -> Option<Entry> {
+        if self.stopped || self.left == 0 {
+            return None;
+        }
+        match self.step() {
+            Some(e) => {
+                self.left -= 1;
+                Some(e)
+            }
+            None => {
+                self.stopped = true;
+                None
+            }
+        }
+    }
+
+    fn step(&mut self) -> Option<Entry> {
+        let input = self.input;
+        let off = self.off;
+        let dup = *input.get(off)?;
+        let entry = if dup == NON_DUP_MARKER {
+            // marker, is_signer, is_writable, executable, then four bytes of `original_data_len`.
+            let flags_at = off + 1;
+            let key_at = off + 8;
+            let lamports_at = key_at + 64;
+            let data_len_at = lamports_at + 8;
+            let lamports = read_u64(input, lamports_at)?;
+            let data_len = usize::try_from(read_u64(input, data_len_at)?).ok()?;
+            let data_at = data_len_at + 8;
+            let data_end = data_at.checked_add(data_len)?;
+            if data_end > input.len() {
+                return None;
+            }
+            // The realloc headroom, then padding to the next eight-byte boundary, then
+            // `rent_epoch`.
+            let after = (data_end.checked_add(MAX_PERMITTED_DATA_INCREASE)?.checked_add(7)?) & !7;
+            let rent_epoch = read_u64(input, after)?;
+            if self.check_pinned {
+                // The `original_data_len` slot and the realloc headroom plus the alignment padding:
+                // bytes the runtime writes as zeros and nothing hashes.
+                //
+                // Pinning the `original_data_len` slot to zero is right for an *input* region:
+                // agave's aligned serializer writes four zero bytes there, and it is the
+                // program-side entrypoint deserializer that later stores `original_data_len` into
+                // that slot — inside the guest's own memory, after the digest is taken. Nothing
+                // hands the guest a region with it already filled in (the host serializer writes
+                // zeros for exactly the same reason).
+                self.check_zeros(off + 4, off + 8);
+                self.check_zeros(data_end, after);
+                // The three flag bytes are booleans: the format admits 0 and 1, the program reads
+                // the raw byte, and the preimage hashes the normalised one — so anything else is
+                // refused rather than normalised away.
+                self.check_bools(flags_at, flags_at + 3);
+            }
+            self.off = after.checked_add(8)?;
+            Entry { marker: dup, flags_at, key_at, lamports, data_at, data_len, rent_epoch }
+        } else {
+            // A duplicate: the index, then seven bytes of padding, and nothing else.
+            if dup as usize >= self.n_entries {
+                return None;
+            }
+            let mut entry = *self.seen.get(dup as usize)?;
+            // The marker belongs to this position, not to the account being duplicated — including
+            // when the entry it points at is itself a duplicate.
+            entry.marker = dup;
+            if self.check_pinned {
+                self.check_zeros(off + 1, off + 8);
+            }
+            self.off = off + 8;
+            entry
+        };
+        // Every entry is recorded at its own ordinal, so a later duplicate of a duplicate lands on
+        // the same account either way.
+        if self.n_entries < MAX_ACCOUNTS {
+            self.seen[self.n_entries] = entry;
+        }
+        self.n_entries += 1;
+        Some(entry)
+    }
+
+    /// The offset just past the last account entry — where `instruction_data_len` begins — or
+    /// `None` if the walk stopped early or has not finished.
+    fn end(&self) -> Option<usize> {
+        if self.stopped || self.left != 0 {
+            None
+        } else {
+            Some(self.off)
+        }
+    }
+
+    /// Records whether every byte of `input[from..to]` is 0 or 1.
+    fn check_bools(&mut self, from: usize, to: usize) {
+        if let Some(bytes) = self.input.get(from..to) {
+            for &b in bytes {
+                if b > 1 {
+                    self.pinned_invalid = true;
+                }
+            }
+        }
+    }
+
+    /// Records whether `input[from..to]` is all zeros.
+    ///
+    /// Four bytes per iteration, ORed together rather than compared, so the loop is branch-free and
+    /// pays its increment and test once per four bytes instead of once per byte — this scan covers
+    /// ~41 KB for a four-account region, so its constant is the whole cost of the zero-pinning. It
+    /// cannot use a wider *load*: the run starts at an offset the format does not align and
+    /// `#![forbid(unsafe_code)]` rules out the realignment that would need.
+    fn check_zeros(&mut self, from: usize, to: usize) {
+        if let Some(bytes) = self.input.get(from..to) {
+            let mut acc = 0u8;
+            let mut chunks = bytes.chunks_exact(4);
+            for c in &mut chunks {
+                acc |= c[0] | c[1] | c[2] | c[3];
+            }
+            for &b in chunks.remainder() {
+                acc |= b;
+            }
+            if acc != 0 {
+                self.pinned_invalid = true;
+            }
+        }
+    }
+}
+
+/// Whether a serialized instruction region is the canonical aligned encoding — the entry-time
+/// refusal `decode_input` applies, and the reason every byte of an accepted region is either hashed
+/// by [`canonical_input_hash`] or pinned to a fixed value here.
+///
+/// The unhashed bytes matter because the *program* can read them: `original_data_len`, the realloc
+/// headroom and the alignment padding are all inside the region `r1` points at, so a prover free to
+/// choose them could change what an honest-looking run does while the verifier's recomputed
+/// `input_hash` still matched. The Solana runtime writes them as zeros, so pinning them costs an
+/// honest caller nothing and closes the gap without hashing 40 960 bytes of padding again.
+///
+/// Refused, each as `ParseError::MalformedRegion`:
+///
+/// * an account count above [`MAX_ACCOUNTS`] — **never clamped**, so the count the preimage carries
+///   is always the count the walk produced;
+/// * a non-zero byte in the `original_data_len` slot, the realloc headroom, the alignment padding,
+///   or a duplicate entry's seven padding bytes;
+/// * a flag byte (`is_signer`, `is_writable`, `executable`) above 1 — the program reads the raw
+///   byte, the preimage hashes the normalised one, so the two are kept equal by refusing the rest;
+/// * an account list that does not walk to its own end (a truncated or self-contradictory entry);
+/// * a tail that is not exactly `u64 instruction_data_len ‖ instruction data ‖ program_id(32)`,
+///   ending at the region's last byte — trailing bytes are readable by the program too.
+pub fn check_region(input: &[u8]) -> Result<(), ParseError> {
+    let (mut w, claimed) = AccountWalk::with_checking(input, true);
+    if claimed > MAX_ACCOUNTS as u64 {
+        return Err(ParseError::MalformedRegion);
+    }
+    while w.next().is_some() {}
+    let end = w.end().ok_or(ParseError::MalformedRegion)?;
+    if w.pinned_invalid {
+        return Err(ParseError::MalformedRegion);
+    }
+    let n = usize::try_from(read_u64(input, end).ok_or(ParseError::MalformedRegion)?)
+        .map_err(|_| ParseError::MalformedRegion)?;
+    let region_end = end
+        .checked_add(8)
+        .and_then(|o| o.checked_add(n))
+        .and_then(|o| o.checked_add(32))
+        .ok_or(ParseError::MalformedRegion)?;
+    if region_end != input.len() {
+        return Err(ParseError::MalformedRegion);
+    }
     Ok(())
+}
+
+/// An entry's `key ‖ owner`.
+///
+/// **Precondition**: `e` came from [`AccountWalk::next`] over this same `input`, which produced it
+/// only after `read_u64(input, key_at + 64 + 8)` succeeded — so the 64 bytes are always in range
+/// and the `&[]` fallback is unreachable. It is a fallback rather than an `unwrap` because a
+/// panicking guest aborts without producing a proof at all, and every offset here began as a
+/// prover-supplied length.
+fn entry_key_owner<'a>(input: &'a [u8], e: &Entry) -> &'a [u8] {
+    debug_assert!(e.key_at + 64 <= input.len(), "the walk bounds-checks past key ‖ owner");
+    e.key_at.checked_add(64).and_then(|end| input.get(e.key_at..end)).unwrap_or(&[])
+}
+
+/// An entry's `data`, exactly `data_len` bytes and no realloc headroom.
+///
+/// **Precondition**: as [`entry_key_owner`] — the walk checked `data_at + data_len <= input.len()`
+/// before producing `e`, so the `&[]` fallback is unreachable.
+fn entry_data<'a>(input: &'a [u8], e: &Entry) -> &'a [u8] {
+    debug_assert!(e.data_at + e.data_len <= input.len(), "the walk bounds-checks the data");
+    e.data_at.checked_add(e.data_len).and_then(|end| input.get(e.data_at..end)).unwrap_or(&[])
+}
+
+/// An entry's three flag bytes, normalised to 0 or 1 — `deserialize` reads them as `!= 0`, and this
+/// keeps the digest total over a region nobody checked. For an *accepted* region the normalised
+/// byte equals the raw one, because [`check_region`] refuses a flag byte above 1.
+fn entry_flags(input: &[u8], e: &Entry) -> [u8; 3] {
+    let mut f = [0u8; 3];
+    for (i, slot) in f.iter_mut().enumerate() {
+        *slot = u8::from(input.get(e.flags_at + i).copied().unwrap_or(0) != 0);
+    }
+    f
+}
+
+/// `(instruction_data_len, instruction data)` at `end`, the offset the account walk finished at.
+/// A claimed length the region cannot hold contributes the length and no bytes — the length is
+/// hashed either way, so two regions that disagree about it cannot collide.
+fn instruction_tail<'a>(input: &'a [u8], end: Option<usize>) -> (u64, &'a [u8]) {
+    let Some(off) = end else { return (0, &[]) };
+    let Some(n) = read_u64(input, off) else { return (0, &[]) };
+    let start = off + 8; // `read_u64` succeeded, so this is within the region
+    let data = usize::try_from(n)
+        .ok()
+        .and_then(|n| start.checked_add(n))
+        .and_then(|e| input.get(start..e))
+        .unwrap_or(&[]);
+    (n, data)
 }
 
 /// `sha256(for each account in order: lamports ‖ data_len ‖ data)`, each integer eight
 /// little-endian bytes — the plan's `output_hash`, over whatever state the serialized input region
 /// holds when it is called. Covers every account, writable or not.
 ///
-/// The walk is over the *aligned* format (`solana_program::entrypoint::deserialize`'s layout), and
-/// a duplicate account entry re-hashes the account it duplicates, at the position it occupies. Its
-/// marker byte is an index into **all** entries seen so far, duplicates included — the same index
-/// space `deserialize` pushes into.
-///
-/// Total by construction: a region that is not a serialized instruction, or that ends before its
-/// own account count does, hashes the prefix the walk got through and stops. Both the pre- and the
-/// post-state digest of a run go through this same walk, so a malformed region still binds
-/// consistently — and a well-formed one is exactly the documented preimage.
+/// The walk is [`AccountWalk`]: a duplicate account entry re-hashes the account it duplicates, at
+/// the position it occupies, and a region that stops making sense hashes the prefix the walk got
+/// through. Both the pre- and the post-state digest of a run go through this same walk, so a
+/// malformed region still binds consistently — and a well-formed one is exactly the documented
+/// preimage.
 pub fn output_hash<H: Host>(h: &mut H, input: &[u8]) -> [u8; 32] {
     let mut s = Sha256::new();
-    // Where each entry's lamports and data sit, indexed by its **entry ordinal** — duplicates
-    // included. A duplicate's marker byte is an index into the full list of entries seen so far,
-    // not into the non-duplicate ones: `solana_program::entrypoint::deserialize` does
-    // `accounts.push(accounts[dup_info].clone())` over a `Vec` that already holds its own
-    // duplicates, and so does this crate's host twin (`rand_zkvm::sbpf::deserialize_accounts`).
-    // Indexing anything else silently hashes the wrong account — `[A, A, B, C, B]`'s last entry
-    // carries the byte 2, which is `B` among all entries but `C` among the non-duplicate ones.
-    let mut seen = [(0usize, 0usize, 0usize); MAX_ACCOUNTS];
-    let mut n_entries = 0usize;
-
-    let mut off = 0usize;
-    // Clamped in `u64`: on the 32-bit target a count above `u32::MAX` would otherwise truncate
-    // into a small, plausible-looking number instead of being refused.
-    let n_accounts = match read_u64(input, 0) {
-        Some(n) => {
-            off = 8;
-            core::cmp::min(n, MAX_ACCOUNTS as u64) as usize
-        }
-        None => 0,
-    };
-    for _ in 0..n_accounts {
-        let dup = match input.get(off) {
-            Some(d) => *d,
-            None => break,
-        };
-        let entry = if dup == NON_DUP_MARKER {
-            // marker, is_signer, is_writable, executable, then four bytes of `original_data_len`.
-            let key_at = off + 8;
-            let lamports_at = key_at + 64;
-            let data_len_at = lamports_at + 8;
-            let Some(data_len) = read_u64(input, data_len_at) else { break };
-            let data_at = data_len_at + 8;
-            let Ok(data_len) = usize::try_from(data_len) else { break };
-            let Some(data_end) = data_at.checked_add(data_len) else { break };
-            if data_end > input.len() {
-                break;
-            }
-            // The realloc headroom, then padding to the next eight-byte boundary, then
-            // `rent_epoch`.
-            let after = match data_end.checked_add(MAX_PERMITTED_DATA_INCREASE) {
-                Some(a) => (a + 7) & !7,
-                None => break,
-            };
-            off = match after.checked_add(8) {
-                Some(o) => o,
-                None => break,
-            };
-            (lamports_at, data_at, data_len)
-        } else {
-            // A duplicate: the index, then seven bytes of padding, and nothing else.
-            if dup as usize >= n_entries {
-                break;
-            }
-            let Some(&entry) = seen.get(dup as usize) else { break };
-            off += 8;
-            entry
-        };
-        // Every entry is recorded at its own ordinal, so a later duplicate of a duplicate lands on
-        // the same account either way.
-        if n_entries < MAX_ACCOUNTS {
-            seen[n_entries] = entry;
-        }
-        n_entries += 1;
-
-        let (lamports_at, data_at, data_len) = entry;
-        let Some(lamports) = read_u64(input, lamports_at) else { break };
-        let Some(data_end) = data_at.checked_add(data_len) else { break };
-        if data_end > input.len() {
-            break;
-        }
-        hash_account(h, &mut s, lamports, data_len, &input[data_at..data_end]);
+    let (mut w, _) = AccountWalk::new(input);
+    while let Some(e) = w.next() {
+        s.update(h, &e.lamports.to_le_bytes());
+        s.update(h, &(e.data_len as u64).to_le_bytes());
+        s.update(h, entry_data(input, &e));
     }
     s.finish(h)
 }
 
-fn hash_account<H: Host>(h: &mut H, s: &mut Sha256, lamports: u64, data_len: usize, data: &[u8]) {
-    s.update(h, &lamports.to_le_bytes());
-    s.update(h, &(data_len as u64).to_le_bytes());
+/// `input_hash`: SHA-256 over the **canonical** encoding of the instruction (design spec §9.4), not
+/// over the aligned region the program is handed.
+///
+/// ```text
+/// program_id(32) ‖ u64 n_accounts
+///   per entry, in entry order: marker(1) ‖ key(32) ‖ owner(32) ‖ u64 lamports ‖ u64 data_len
+///                              ‖ data ‖ is_signer ‖ is_writable ‖ executable ‖ u64 rent_epoch
+/// ‖ u64 instruction_data_len ‖ instruction data
+/// ```
+///
+/// `marker` is the byte the entry physically carries — `0xff` for a full entry, the duplicated
+/// entry's ordinal for a duplicate — so the *shape* of the account list is bound, not just its
+/// contents: two entries that resolve to the same account fields alias one buffer if the second is
+/// a duplicate and two buffers if it is not, and the program can tell.
+///
+/// The aligned region leaves [`MAX_PERMITTED_DATA_INCREASE`] = 10 240 bytes of realloc headroom
+/// after every account's data; for the SPL Token `Transfer` fixture that is 40 960 of 41 825 bytes,
+/// so 640 of 654 SHA-256 compressions hashed nothing but zeros. The canonical encoding is 837
+/// bytes and 14 compressions for the same call.
+///
+/// Every length prefix is load-bearing rather than decoration: without `n_accounts` and the
+/// per-field `data_len`/`instruction_data_len` the concatenation is ambiguous between different
+/// account splits, and without the instruction data the digest would not bind the instruction at
+/// all — for the fixture, not the amount transferred. `n_accounts` is the region's **exact** `u64`
+/// count, never a clamped one: a region claiming more than [`MAX_ACCOUNTS`] is refused outright by
+/// [`check_region`], so the count in the preimage is always the count the walk produced.
+///
+/// Together with [`check_region`]'s pinning, every byte of an accepted region is either in this
+/// preimage or provably a fixed value — including `rent_epoch`, which a running program reads
+/// through its `AccountInfo` and which nothing else binds. The three flag bytes are hashed
+/// normalised to 0/1, which loses nothing because [`check_region`] refuses any other value.
+///
+/// The walk is [`output_hash`]'s, entry for entry, so the two digests can never disagree about
+/// which account a duplicate entry means.
+pub fn canonical_input_hash<H: Host>(h: &mut H, input: &[u8], program_id: &[u8; 32]) -> [u8; 32] {
+    let mut s = Sha256::new();
+    s.update(h, program_id);
+    let (mut w, n_accounts) = AccountWalk::new(input);
+    s.update(h, &n_accounts.to_le_bytes());
+    while let Some(e) = w.next() {
+        s.update(h, &[e.marker]);
+        s.update(h, entry_key_owner(input, &e));
+        s.update(h, &e.lamports.to_le_bytes());
+        s.update(h, &(e.data_len as u64).to_le_bytes());
+        s.update(h, entry_data(input, &e));
+        s.update(h, &entry_flags(input, &e));
+        s.update(h, &e.rent_epoch.to_le_bytes());
+    }
+    let (n, data) = instruction_tail(input, w.end());
+    s.update(h, &n.to_le_bytes());
     s.update(h, data);
+    s.finish(h)
+}
+
+/// The program id the serialized region ends with — the caller of [`canonical_input_hash`] gets it
+/// from here, because the id is part of the instruction and nothing else in the guest knows it.
+/// All zeros if the region does not carry one, which is exactly the malformed case
+/// [`canonical_input_hash`] is already total over.
+pub fn program_id(input: &[u8]) -> [u8; 32] {
+    program_id_opt(input).unwrap_or([0u8; 32])
+}
+
+fn program_id_opt(input: &[u8]) -> Option<[u8; 32]> {
+    let (mut w, _) = AccountWalk::new(input);
+    while w.next().is_some() {}
+    let off = w.end()?;
+    let n = usize::try_from(read_u64(input, off)?).ok()?;
+    let at = off.checked_add(8)?.checked_add(n)?;
+    let bytes = input.get(at..at.checked_add(32)?)?;
+    let mut id = [0u8; 32];
+    id.copy_from_slice(bytes);
+    Some(id)
 }
 
 fn read_u64(b: &[u8], off: usize) -> Option<u64> {
@@ -326,18 +676,19 @@ fn read_u64(b: &[u8], off: usize) -> Option<u64> {
 }
 
 /// The eight public output words: `out[0] = status`, `out[1..8]` = words 0..6 of
-/// `hash(SBPF_OUT, [program_hash ‖ input_hash ‖ output_hash])`.
+/// `hash(SBPF_OUT, [input_hash ‖ output_hash])`.
+///
+/// There is no `program_hash` in the preimage: the ELF is read from the public segment, so `H_PUB`
+/// binds it and the chain checks that against the ELF it published.
 pub fn public_output<H: Host>(
     h: &mut H,
     status: u32,
-    program_hash: &[u8; 32],
     input_hash: &[u8; 32],
     output_hash: &[u8; 32],
 ) -> [u32; 8] {
     let mut msg = [0u32; OUT_WORDS];
-    msg[0..8].copy_from_slice(&hash_words(program_hash));
-    msg[8..16].copy_from_slice(&hash_words(input_hash));
-    msg[16..24].copy_from_slice(&hash_words(output_hash));
+    msg[0..8].copy_from_slice(&hash_words(input_hash));
+    msg[8..16].copy_from_slice(&hash_words(output_hash));
     let d = dhash(h, SBPF_OUT_DOMAIN, &msg);
     let mut out = [0u32; 8];
     out[0] = status;
@@ -345,36 +696,43 @@ pub fn public_output<H: Host>(
     out
 }
 
-/// The whole guest: decode the input vector, load the ELF, run it, produce the eight public output
-/// words. See the module docs for the `static mut` pattern and for what `len` means.
-pub fn run_call<H: Host, F: FnMut(u32) -> u32>(
+/// The whole guest: decode the public and private input vectors, load the ELF, run it, produce the
+/// eight public output words. See the module docs for the `static mut` pattern and for what the two
+/// `len`s mean.
+pub fn run_call<H: Host, FP: FnMut(u32) -> u32, FS: FnMut(u32) -> u32>(
     h: &mut H,
     ws: &mut Workspace,
-    read: F,
-    len: u32,
+    read_public: FP,
+    n_public: u32,
+    read_private: FS,
+    n_private: u32,
 ) -> [u32; 8] {
-    run_call_with(h, ws, read, len).0
+    run_call_with(h, ws, read_public, n_public, read_private, n_private).0
 }
 
 /// [`run_call`] plus the interpreter's own outcome — what a host test needs to check the output
 /// against its own idea of the call (`rand_zkvm::sbpf::SbpfCall::expected`). The post-state of the
 /// accounts is left in `ws.input.input[..input_len]`, so a caller can deserialize it. The guest
 /// uses [`run_call`].
-pub fn run_call_with<H: Host, F: FnMut(u32) -> u32>(
+pub fn run_call_with<H: Host, FP: FnMut(u32) -> u32, FS: FnMut(u32) -> u32>(
     h: &mut H,
     ws: &mut Workspace,
-    read: F,
-    len: u32,
+    read_public: FP,
+    n_public: u32,
+    read_private: FS,
+    n_private: u32,
 ) -> ([u32; 8], Result<u64, Halt>) {
-    let mut c = InputCursor::new(read, len);
-    if decode_input(&mut ws.input, &mut c).is_err() {
-        // A vector that does not parse is not a call, so there is nothing to bind: the output is
-        // the one canonical malformed value — status 2 over three all-zero digests. A verifier
-        // recomputing the digest from the program and instruction it meant to run gets something
-        // else and rejects the proof, which is the right answer to a prover-supplied vector that is
-        // not even well formed.
+    let mut elf_c = InputCursor::new(read_public, n_public);
+    let mut in_c = InputCursor::new(read_private, n_private);
+    if decode_input(&mut ws.input, &mut elf_c, &mut in_c).is_err() {
+        // A vector that does not parse — or an instruction region that is not the canonical
+        // aligned encoding ([`check_region`]) — is not a call, so there is nothing to bind: the
+        // output is the one canonical malformed value, status 2 over two all-zero digests. A
+        // verifier recomputing the digest from the instruction it meant to run gets something else
+        // and rejects the proof, which is the right answer to a prover-supplied vector that is not
+        // even well formed.
         let z = [0u8; 32];
-        return (public_output(h, 2, &z, &z, &z), Err(Halt::BadElf));
+        return (public_output(h, 2, &z, &z), Err(Halt::BadElf));
     }
     // Now split the workspace into its fields: the ELF buffer is borrowed by the loaded program for
     // as long as the run lasts, while the instruction region, the stack and the heap are the memory
@@ -383,8 +741,11 @@ pub fn run_call_with<H: Host, F: FnMut(u32) -> u32>(
     let elf_len = *elf_len;
     let input_len = *input_len;
 
-    let program_hash = sha256(h, &elf[..elf_len]);
-    let input_hash = sha256(h, &input[..input_len]);
+    // No `program_hash`: the ELF came from the public segment, so `H_PUB` binds it (and the chain
+    // checks `H_PUB` against the ELF it published) — hashing 108 600 bytes again in-circuit was
+    // 1 698 of the guest's 2 368 SHA-256 compressions and bought nothing.
+    let input_hash =
+        canonical_input_hash(h, &input[..input_len], &program_id(&input[..input_len]));
     // The pre-state digest, taken before a single instruction runs: this is what a status of 0 or 2
     // binds, so a run that changed accounts and then failed publishes no change at all.
     let pre_output = output_hash(h, &input[..input_len]);
@@ -423,5 +784,5 @@ pub fn run_call_with<H: Host, F: FnMut(u32) -> u32>(
     };
     let post_output =
         if status == 1 { output_hash(h, &input[..input_len]) } else { pre_output };
-    (public_output(h, status, &program_hash, &input_hash, &post_output), result)
+    (public_output(h, status, &input_hash, &post_output), result)
 }

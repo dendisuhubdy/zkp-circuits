@@ -104,7 +104,7 @@ fn nibble_table_answers_and4_or4_xor4_lookups() {
 #[test]
 fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
     let p = guests::fib(5);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     let t = program_trace(&p, &e.events, 16);
     assert_eq!(t.height(), 16);
     let w = program::col::WIDTH;
@@ -131,7 +131,7 @@ fn program_table_rows_are_decoded_instructions_and_fetch_counts() {
 #[test]
 fn every_guest_program_trace_has_mult_word_equal_to_valid() {
     for (name, program, inputs) in guests::all() {
-        let e = execute(&program, &inputs, 1 << 20).unwrap_or_else(|err| panic!("{name}: {err:?}"));
+        let e = execute(&program, &inputs, &[], 1 << 20).unwrap_or_else(|err| panic!("{name}: {err:?}"));
         let height = 1usize << program::program_log_height(program.len());
         let t = program_trace(&program, &e.events, height);
         let w = program::col::WIDTH;
@@ -288,7 +288,7 @@ fn program_decoder_equals_instr_decode() {
 #[test]
 fn memory_trace_is_sorted_and_consistent() {
     let p = guests::memcpy(4);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     let mut counts = RangeCounts::default();
     let t = memory_trace(&e.events, 0, 1 << 12, &mut counts);
     let w = memory::col::WIDTH;
@@ -423,15 +423,18 @@ fn input_table_shape_and_padding() {
 #[test]
 fn cpu_trace_mirrors_events_and_pads() {
     let p = guests::fib(3);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
-    let t = cpu_trace(&p, &[], [0u32; 4], &e.events, 64, &mut range, &mut nibble);
+    let t = cpu_trace(&p, &[], &[], [0u32; 4], &e.events, 64, &mut range, &mut nibble);
     let w = cpu::col::WIDTH;
     // M4.1: ordinary events now start after both the program-digest prefix (`dr`) and the
     // (always >= 1) input-digest prefix (`rand_zkvm::hash::input_digest_row_count(0) == 1`
-    // here, since this test passes no inputs).
-    let dr = p.digest_rows() + rand_zkvm::hash::input_digest_row_count(0);
+    // here, since this test passes no inputs). Constraint set 6 adds a third prefix on the
+    // same terms — `public_digest_row_count(0) == 1`, the header-only block.
+    let dr = p.digest_rows()
+        + rand_zkvm::hash::input_digest_row_count(0)
+        + rand_zkvm::hash::public_digest_row_count(0);
     assert_eq!(t.height(), 64);
     // Row 0 is the first of the `dr` M3.4 digest rows; ordinary events start at row `dr`.
     assert_eq!(t.values[cpu::col::IS_DIGEST], F::ONE);
@@ -460,7 +463,7 @@ fn cpu_trace_mirrors_events_and_pads() {
     let last = &t.values[(t.height() - 1) * w..t.height() * w];
     assert_eq!(last[cpu::col::WRITTEN0], F::ONE, "slot 0 was written");
     for k in 1..8 { assert_eq!(last[cpu::col::WRITTEN0 + k], F::ZERO, "slot {k} was not"); }
-    let pv = public_values(0, 10, &e.outputs, &p.digest(), &rand_zkvm::hash::input_digest([0u32; 4], &[]));
+    let pv = public_values(0, 10, &e.outputs, &p.digest(), &rand_zkvm::hash::input_digest([0u32; 4], &[]), &rand_zkvm::hash::public_digest(&[]));
     assert_eq!(pv.len(), cpu::pv::NUM);
     assert_eq!(pv[cpu::pv::OUT0], F::from_u32(2));
 }
@@ -468,15 +471,17 @@ fn cpu_trace_mirrors_events_and_pads() {
 #[test]
 fn cpu_trace_limbs_and_counts_every_load_store_address() {
     let p = guests::memcpy(4);
-    let e = execute(&p, &[], 10_000).unwrap();
+    let e = execute(&p, &[], &[], 10_000).unwrap();
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
-    let t = cpu_trace(&p, &[], [0u32; 4], &e.events, 1 << 10, &mut range, &mut nibble);
+    let t = cpu_trace(&p, &[], &[], [0u32; 4], &e.events, 1 << 10, &mut range, &mut nibble);
     let w = cpu::col::WIDTH;
     // M4.1: as in `cpu_trace_mirrors_events_and_pads`, ordinary events start after both the
-    // program-digest prefix and the (always >= 1) input-digest prefix.
+    // program-digest prefix and the (always >= 1) input-digest prefix — and, since constraint
+    // set 6, the (always >= 1) public-digest prefix too.
     let idr = rand_zkvm::hash::input_digest_row_count(0);
-    let dr = p.digest_rows() + idr;
+    let pdr = rand_zkvm::hash::public_digest_row_count(0);
+    let dr = p.digest_rows() + idr + pdr;
     let is_mem = |i: usize| { let d = &e.events[i].dec; d.is_lb + d.is_lh + d.is_lw + d.is_sb + d.is_sh + d.is_sw == 1 };
     let is_store = |i: usize| { let d = &e.events[i].dec; d.is_sb + d.is_sh + d.is_sw == 1 };
     let mem_rows: Vec<usize> = (0..e.events.len()).filter(|i| is_mem(*i)).collect();
@@ -503,7 +508,9 @@ fn cpu_trace_limbs_and_counts_every_load_store_address() {
     // >= 1 since this test passes no inputs) pays the identical 4-per-row rate (already folded
     // into `dr = program digest rows + idr`) plus its own 32-word `IHVL0..31` canonical
     // encoding on its own last row — a second +32, on top of the program digest's own.
-    let digest_range8 = 4 * dr + 32 + 32;
+    // Constraint set 6: the public-digest prefix (`pdr` rows, also folded into `dr`) pays the
+    // same 4-per-row rate plus its own 32-word `PHVL0..31` encoding — a third +32.
+    let digest_range8 = 4 * dr + 32 + 32 + 32;
     assert_eq!(range.range.iter().sum::<u64>() as usize, 8 * mem_rows.len() + 4 * n_stores + digest_range8);
     let nibble_total: u64 = nibble.and.iter().sum();
     assert_eq!(nibble_total as usize, 2 * mem_rows.len());
@@ -623,9 +630,10 @@ fn alu_max_constraint_degree_is_pinned() {
         rand_zkvm::tables::input::MIN_LOG_HEIGHT,
         0,
         0,
+        rand_zkvm::tables::public::MIN_LOG_HEIGHT,
         Tier(10).min_mem_log_height(),
     );
-    assert_eq!(bare.len(), 8, "eight chips when the proof declares neither hash table");
+    assert_eq!(bare.len(), 9, "nine chips when the proof declares neither hash table");
 
     let degrees = max_constraint_degrees(
         Tier(10),
@@ -633,10 +641,13 @@ fn alu_max_constraint_degree_is_pinned() {
         rand_zkvm::tables::input::MIN_LOG_HEIGHT,
         rand_zkvm::tables::keccak::MIN_LOG_HEIGHT,
         rand_zkvm::tables::sha256::MIN_LOG_HEIGHT,
+        rand_zkvm::tables::public::MIN_LOG_HEIGHT,
         Tier(10).min_mem_log_height(),
     );
-    assert_eq!(degrees.len(), 10, "one degree per chip in machine::chips() order");
-    assert_eq!(bare[..], degrees[..8], "the other eight tables are unaffected");
+    assert_eq!(degrees.len(), 11, "one degree per chip in machine::chips() order");
+    // `public` is last, so dropping the two optional chips moves it from index 10 to index 8.
+    assert_eq!(bare[..8], degrees[..8], "the eight mandatory non-public tables are unaffected");
+    assert_eq!(bare[8], degrees[10], "the public table's degree does not depend on the hash chips");
 
     // program: M3.4's main-trace in-circuit decoder. Every one-hot flag pin
     // (`flag*(op-code)=0`) and field-consistency equation is at most degree 2 in the
@@ -701,6 +712,12 @@ fn alu_max_constraint_degree_is_pinned() {
     // rule needs a range lookup.
     assert_eq!(degrees[9], 4, "sha256 table max constraint degree");
 
+    // public (constraint set 6): `tables::input`'s table verbatim, one bus pair, no arithmetic —
+    // a boolean flag, an arithmetic-sequence pin, and a degree-2 provided count on the busier of
+    // its two split buses (`IS_REAL` alone on `PUBLIC_DIGEST`, `IS_REAL * MULT_READ` on
+    // `PUBLIC_READ`). Same number as `input`'s, for the same reasons.
+    assert_eq!(degrees[10], 2, "public table max constraint degree: tables::input's, one bus pair, no arithmetic");
+
     // Task 3 measured this off `Sha256Air` through a local height-carrying wrapper, because
     // `Chip::Sha256` did not exist yet; the wrapper is gone and the two halves below are measured
     // off the real chip instance, so the pin says *where* the degree comes from (as the cpu
@@ -726,7 +743,8 @@ fn alu_max_constraint_degree_is_pinned() {
         );
         assert_eq!(air_only, 3, "sha256 table max constraint degree, AIR rules alone");
         // The packed groups, read off the same `CommonData` `verifier_key` hands a verifier — the
-        // sha256 instance is last in `chips()` order, hence index 9 in the ten-chip shape.
+        // sha256 instance is the last *optional* one in `chips()` order, hence index 9 in the
+        // eleven-chip shape (constraint set 6 appends the mandatory `public` chip after it).
         let m = Machine::new(FriProfile::Test);
         let common = m.verifier_key(
             Tier(10),
@@ -734,8 +752,9 @@ fn alu_max_constraint_degree_is_pinned() {
             rand_zkvm::tables::input::MIN_LOG_HEIGHT,
             rand_zkvm::tables::keccak::MIN_LOG_HEIGHT,
             sha256::MIN_LOG_HEIGHT,
+            rand_zkvm::tables::public::MIN_LOG_HEIGHT,
         );
-        assert_eq!(common.lookups.len(), 10);
+        assert_eq!(common.lookups.len(), 11);
         assert_eq!(common.lookups[9].len(), 7, "sha256 packed lookup groups");
     }
 }
@@ -1070,4 +1089,31 @@ mod keccak_tests {
         assert_eq!(Tier(10).max_keccak_log_height(), 15);
         assert_eq!(Tier(20).max_keccak_log_height(), 25);
     }
+}
+
+/// Constraint set 6: the `public` table is `tables::input`'s layout and rules exactly — one row
+/// per committed public word, `IDX` counting through the padding, every message column (and the
+/// read count's own witness) pinned to zero on a padding row.
+#[test]
+fn public_table_rows_are_committed_words_with_their_read_counts() {
+    use rand_zkvm::tables::public;
+    let w = public::col::WIDTH;
+    let t = public::public_trace(&[5, 6, 7], &[2, 0, 1], 8);
+    assert_eq!(t.height(), 8);
+    for i in 0..3 {
+        assert_eq!(t.values[i * w + public::col::IDX], F::from_u32(i as u32));
+        assert_eq!(t.values[i * w + public::col::IS_REAL], F::ONE);
+    }
+    assert_eq!(t.values[public::col::WORD], F::from_u32(5));
+    assert_eq!(t.values[public::col::MULT_READ], F::from_u32(2));
+    // Padding: IDX keeps counting, everything else is pinned to zero.
+    assert_eq!(t.values[3 * w + public::col::IDX], F::from_u32(3));
+    assert_eq!(t.values[3 * w + public::col::IS_REAL], F::ZERO);
+    assert_eq!(t.values[3 * w + public::col::WORD], F::ZERO);
+    assert_eq!(t.values[3 * w + public::col::MULT_READ], F::ZERO);
+    // Height rule: declare n+1, floor at MIN_HEIGHT — tables::input's rule exactly.
+    assert_eq!(public::public_log_height(0), public::MIN_LOG_HEIGHT);
+    assert_eq!(public::public_log_height(3), 2);
+    assert_eq!(public::public_log_height(4), 3);
+    assert_eq!(public::public_log_height(1000), 10);
 }

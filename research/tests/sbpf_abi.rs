@@ -154,18 +154,18 @@ fn output_hash_covers_lamports_and_data_of_every_account() {
 }
 
 #[test]
-fn the_public_output_binds_program_input_and_post_state() {
+fn the_public_output_binds_the_input_and_the_post_state() {
     let mut h = HostRef;
-    let program_hash = rand_zkvm::sha256::sha256(b"an elf");
     let input_hash = rand_zkvm::sha256::sha256(b"an input");
     let out_hash = rand_zkvm::sha256::sha256(b"a post-state");
-    let out = abi::public_output(&mut h, 1, &program_hash, &input_hash, &out_hash);
+    let out = abi::public_output(&mut h, 1, &input_hash, &out_hash);
 
     // `out0` is the status word; `out1..7` are words 0..6 of the domain-tagged Poseidon2 sponge
-    // over the 24-word preimage, mirrored here with the host's own `notes::hash`.
+    // over the **16**-word preimage (M4.4's was 24: the `program_hash` group is gone, because the
+    // ELF is in the public segment and `H_PUB` binds it), mirrored here with `notes::hash`.
     assert_eq!(out[0], 1);
-    let mut msg = [0u32; 24];
-    for (i, bytes) in [program_hash, input_hash, out_hash].iter().enumerate() {
+    let mut msg = [0u32; 16];
+    for (i, bytes) in [input_hash, out_hash].iter().enumerate() {
         for j in 0..8 {
             msg[8 * i + j] = u32::from_le_bytes(bytes[4 * j..4 * j + 4].try_into().unwrap());
         }
@@ -175,46 +175,79 @@ fn the_public_output_binds_program_input_and_post_state() {
     assert_eq!(notes::domain::SBPF_OUT, 14);
     assert_eq!(abi::SBPF_OUT_DOMAIN, notes::domain::SBPF_OUT);
 
-    // Every one of the three digests, and the status word, is bound: changing any one changes the
-    // output.
-    assert_ne!(abi::public_output(&mut h, 0, &program_hash, &input_hash, &out_hash), out);
-    assert_ne!(abi::public_output(&mut h, 2, &program_hash, &input_hash, &out_hash), out);
-    assert_ne!(abi::public_output(&mut h, 1, &input_hash, &input_hash, &out_hash), out);
-    assert_ne!(abi::public_output(&mut h, 1, &program_hash, &out_hash, &out_hash), out);
-    assert_ne!(abi::public_output(&mut h, 1, &program_hash, &input_hash, &input_hash), out);
+    // Both digests, and the status word, are bound: changing any one changes the output.
+    assert_ne!(abi::public_output(&mut h, 0, &input_hash, &out_hash), out);
+    assert_ne!(abi::public_output(&mut h, 2, &input_hash, &out_hash), out);
+    assert_ne!(abi::public_output(&mut h, 1, &out_hash, &out_hash), out);
+    assert_ne!(abi::public_output(&mut h, 1, &input_hash, &input_hash), out);
+    // And the two are not interchangeable: swapping them is a different preimage.
+    assert_ne!(abi::public_output(&mut h, 1, &out_hash, &input_hash), out);
     // The status word is `out0` only: it does not enter the digest, so the low seven words of two
     // runs that differ only in status are the same.
-    let zero = abi::public_output(&mut h, 0, &program_hash, &input_hash, &out_hash);
+    let zero = abi::public_output(&mut h, 0, &input_hash, &out_hash);
     assert_eq!(&zero[1..], &out[1..]);
 }
 
 #[test]
-fn the_input_vector_round_trips_through_the_cursor() {
-    // `[n_elf, elf bytes…, n_input, input bytes…]`, byte strings four per word little-endian and
-    // zero-padded.
-    let call = sbpf::SbpfCall { elf: (0..=250u8).collect(), input: b"the input".to_vec() };
-    let words = call.input_words();
-    assert_eq!(words[0], 251);
-    assert_eq!(words[1], u32::from_le_bytes([0, 1, 2, 3]));
-    assert_eq!(words.len(), 1 + 251usize.div_ceil(4) + 1 + 9usize.div_ceil(4));
-    assert_eq!(words[1 + 251usize.div_ceil(4)], 9);
+fn the_two_input_vectors_round_trip_through_their_cursors() {
+    // Public `[n_elf, elf bytes…]` and private `[n_input, input bytes…]`, each byte string four per
+    // word little-endian and zero-padded. The instruction is a real serialized region, because
+    // `decode_input` refuses one that is not (`abi::check_region`).
+    let region = sbpf::serialize_aligned(&[account(5, 3)], b"ix", &[7u8; 32]);
+    let call = sbpf::SbpfCall { elf: (0..=250u8).collect(), input: region.clone() };
+    let public = call.public_words();
+    let private = call.input_words();
+    assert_eq!(public[0], 251);
+    assert_eq!(public[1], u32::from_le_bytes([0, 1, 2, 3]));
+    assert_eq!(public.len(), 1 + 251usize.div_ceil(4));
+    assert_eq!(private[0] as usize, region.len());
+    assert_eq!(private.len(), 1 + region.len().div_ceil(4));
 
     let mut ws = Box::new(abi::Workspace::ZERO);
-    let mut c = abi::InputCursor::new(|i| words[i as usize], words.len() as u32);
-    abi::decode_input(&mut ws.input, &mut c).unwrap();
+    let mut pc = abi::InputCursor::new(|i| public[i as usize], public.len() as u32);
+    let mut sc = abi::InputCursor::new(|i| private[i as usize], private.len() as u32);
+    abi::decode_input(&mut ws.input, &mut pc, &mut sc).unwrap();
     assert_eq!(&ws.input.elf[..ws.input.elf_len], &call.elf[..]);
     assert_eq!(&ws.input.input[..ws.input.input_len], &call.input[..]);
 
-    // A vector that ends before the layout does is a parse error, not a panic.
-    let mut c = abi::InputCursor::new(|i| words[i as usize], 3);
-    assert_eq!(abi::decode_input(&mut ws.input, &mut c), Err(abi::ParseError::Truncated));
+    // A vector that ends before its layout does is a parse error, not a panic — and it is the same
+    // error whichever of the two segments runs out.
+    let mut pc = abi::InputCursor::new(|i| public[i as usize], 3);
+    let mut sc = abi::InputCursor::new(|i| private[i as usize], private.len() as u32);
+    assert_eq!(
+        abi::decode_input(&mut ws.input, &mut pc, &mut sc),
+        Err(abi::ParseError::Truncated)
+    );
+    let mut pc = abi::InputCursor::new(|i| public[i as usize], public.len() as u32);
+    let mut sc = abi::InputCursor::new(|i| private[i as usize], 1);
+    assert_eq!(
+        abi::decode_input(&mut ws.input, &mut pc, &mut sc),
+        Err(abi::ParseError::Truncated)
+    );
+    // A private vector that parses but is not a serialized instruction is refused too — the cursors
+    // are only half of what makes a pair of vectors a call.
+    let not_a_region = sbpf::SbpfCall { elf: call.elf.clone(), input: b"the input".to_vec() };
+    let junk = not_a_region.input_words();
+    let mut pc = abi::InputCursor::new(|i| public[i as usize], public.len() as u32);
+    let mut sc = abi::InputCursor::new(|i| junk[i as usize], junk.len() as u32);
+    assert_eq!(
+        abi::decode_input(&mut ws.input, &mut pc, &mut sc),
+        Err(abi::ParseError::MalformedRegion)
+    );
     // An ELF or input length above its cap is refused without ever reading that many words.
-    let big = [u32::MAX, 0, 0];
-    let mut c = abi::InputCursor::new(|i| big[i as usize], 3);
-    assert_eq!(abi::decode_input(&mut ws.input, &mut c), Err(abi::ParseError::ElfTooLong));
-    let big = [0u32, u32::MAX];
-    let mut c = abi::InputCursor::new(|i| big[i as usize], 2);
-    assert_eq!(abi::decode_input(&mut ws.input, &mut c), Err(abi::ParseError::InputTooLong));
+    let big = [u32::MAX];
+    let mut pc = abi::InputCursor::new(|i| big[i as usize], 1);
+    let mut sc = abi::InputCursor::new(|i| private[i as usize], private.len() as u32);
+    assert_eq!(
+        abi::decode_input(&mut ws.input, &mut pc, &mut sc),
+        Err(abi::ParseError::ElfTooLong)
+    );
+    let mut pc = abi::InputCursor::new(|i| public[i as usize], public.len() as u32);
+    let mut sc = abi::InputCursor::new(|i| big[i as usize], 1);
+    assert_eq!(
+        abi::decode_input(&mut ws.input, &mut pc, &mut sc),
+        Err(abi::ParseError::InputTooLong)
+    );
 }
 
 #[test]
@@ -222,12 +255,24 @@ fn a_malformed_input_vector_is_status_two_with_a_canonical_digest() {
     let mut h = HostRef;
     let mut ws = Box::new(abi::Workspace::ZERO);
     let words = [7u32, 0];
-    let out = abi::run_call(&mut h, &mut ws, |i| words[i as usize], words.len() as u32);
-    assert_eq!(out[0], 2);
-    // The canonical malformed output: status 2 over three all-zero digests, so a verifier that
-    // recomputes the digest from the ELF and input it meant to run gets something else.
     let z = [0u8; 32];
-    assert_eq!(out, abi::public_output(&mut h, 2, &z, &z, &z));
+    // The canonical malformed output: status 2 over two all-zero digests, so a verifier that
+    // recomputes the digest from the instruction it meant to run gets something else.
+    let want = abi::public_output(&mut h, 2, &z, &z);
+    // A public vector that ends mid-ELF…
+    let out = abi::run_call(
+        &mut h,
+        &mut ws,
+        |i| words[i as usize],
+        words.len() as u32,
+        |_| 0,
+        1,
+    );
+    assert_eq!(out[0], 2);
+    assert_eq!(out, want);
+    // …and a private one that ends mid-instruction, which is the same non-call.
+    let out = abi::run_call(&mut h, &mut ws, |_| 0, 1, |i| words[i as usize], words.len() as u32);
+    assert_eq!(out, want);
 }
 
 /// The documented preimage, computed independently of `abi::output_hash`: per **entry** in the
@@ -292,6 +337,271 @@ fn output_hash_resolves_a_duplicate_against_the_full_entry_list() {
     assert_eq!(abi::output_hash(&mut h, &buf), expected_output_hash(&[&a]));
 }
 
+/// `canonical_input_hash` drives the *same* walk `output_hash` does, so the two can never disagree
+/// about which account a duplicate entry means — the failure mode that made the walk worth sharing.
+/// Checked against the host twin, which resolves duplicates by cloning the deserialized account.
+#[test]
+fn canonical_input_hash_walks_duplicates_exactly_as_output_hash_does() {
+    let mut h = HostRef;
+    let (a, b, c) = (account(1, 16), account(2, 24), account(3, 32));
+    let id = [0x42u8; 32];
+    for shape in [
+        vec![a.clone()],
+        vec![a.clone(), a.clone()],
+        vec![a.clone(), a.clone(), b.clone(), b.clone()],
+        vec![a.clone(), a.clone(), b.clone(), c.clone(), b.clone()],
+        vec![a.clone(), a.clone(), a.clone()],
+    ] {
+        let buf = sbpf::serialize_aligned(&shape, b"ix data", &id);
+        assert_eq!(abi::program_id(&buf), id);
+        assert_eq!(
+            abi::canonical_input_hash(&mut h, &buf, &id),
+            sbpf::canonical_input_hash_of(&buf),
+            "{} entries",
+            shape.len()
+        );
+        // The encoding really does re-encode a duplicate in full, at the position it occupies: its
+        // length is the sum over *entries*, not over distinct accounts.
+        let want: usize = 32
+            + 8
+            + shape.iter().map(|x| 1 + 32 + 32 + 8 + 8 + x.data.len() + 3 + 8).sum::<usize>()
+            + 8
+            + 7;
+        assert_eq!(sbpf::canonical_preimage(&buf).len(), want);
+    }
+
+    // `rent_epoch` is in the preimage: a running program reads it through its `AccountInfo`, so a
+    // prover must not be able to vary it under a digest the verifier still accepts. (This assertion
+    // is the inverse of the one M4.4's first cut had, which pinned its *exclusion*.)
+    let mut other = a.clone();
+    other.rent_epoch = 7;
+    let base = sbpf::serialize_aligned(&[a.clone()], b"ix data", &id);
+    assert_ne!(a.rent_epoch, 7, "the fixture would not otherwise prove anything");
+    assert_ne!(
+        abi::canonical_input_hash(&mut h, &sbpf::serialize_aligned(&[other], b"ix data", &id), &id),
+        abi::canonical_input_hash(&mut h, &base, &id),
+    );
+    let mut flagged = a.clone();
+    flagged.is_writable = !a.is_writable;
+    assert_ne!(
+        abi::canonical_input_hash(
+            &mut h,
+            &sbpf::serialize_aligned(&[flagged], b"ix data", &id),
+            &id
+        ),
+        abi::canonical_input_hash(&mut h, &base, &id),
+    );
+    // …and so are the instruction data and the program id, which `output_hash` deliberately omits.
+    assert_ne!(
+        abi::canonical_input_hash(
+            &mut h,
+            &sbpf::serialize_aligned(&[a.clone()], b"ix dat!", &id),
+            &id
+        ),
+        abi::canonical_input_hash(&mut h, &base, &id),
+    );
+    assert_ne!(
+        abi::canonical_input_hash(&mut h, &base, &[7u8; 32]),
+        abi::canonical_input_hash(&mut h, &base, &id),
+    );
+
+    // A region that is not a serialized instruction yields a digest rather than a panic, exactly as
+    // `output_hash` does, and an unparseable one has no program id to find.
+    for junk in [&[][..], &[0xff][..], &[7, 0, 0, 0, 0, 0, 0, 0][..], &[0xff; 200][..]] {
+        let _ = abi::canonical_input_hash(&mut h, junk, &abi::program_id(junk));
+        assert_eq!(abi::program_id(junk), [0u8; 32]);
+    }
+}
+
+/// Every byte of an accepted region is either in the canonical preimage or pinned to zero. The
+/// bytes nothing hashes — the `original_data_len` slot, the 10 240-byte realloc headroom, the
+/// alignment padding, a duplicate entry's seven padding bytes, anything past the program id — are
+/// all inside the region `r1` points at, so a prover free to choose them could change what an
+/// honest-looking run does while the verifier's recomputed `input_hash` still matched. The runtime
+/// writes zeros there; the guest refuses anything else, and so does the host twin.
+#[test]
+fn a_region_with_a_non_zero_pinned_byte_is_refused_by_guest_and_host() {
+    let a = account(5, 4);
+    let id = [7u8; 32];
+    let elf = build_elf(
+        &asm(&[insn(opc::MOV64_IMM, 0, 0, 0, 0), insn(opc::EXIT, 0, 0, 0, 0)]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+    let base = sbpf::serialize_aligned(&[a.clone()], b"ix", &id);
+    // The honest region is accepted, by both, and runs.
+    assert_eq!(abi::check_region(&base), Ok(()));
+    assert!(sbpf::try_canonical_preimage(&base).is_some());
+    assert_eq!(run(&elf, &base).0[0], 1);
+
+    // account 0's data ends at 8 (count) + 88 (header) + 4 (data).
+    let data_end = 8 + 88 + a.data.len();
+    let headroom_end = data_end + MAX_PERMITTED_DATA_INCREASE;
+    let padded_end = (headroom_end + 7) & !7;
+    assert!(padded_end > headroom_end, "the fixture must exercise alignment padding too");
+    let dup = sbpf::serialize_aligned(&[a.clone(), a.clone()], b"ix", &id);
+    let dup_at = dup.len() - 32 - 2 - 8 - 8; // the second entry's marker byte
+
+    for (what, region) in [
+        ("the original_data_len slot", {
+            let mut b = base.clone();
+            b[12] = 1;
+            b
+        }),
+        ("the first realloc headroom byte", {
+            let mut b = base.clone();
+            b[data_end] = 1;
+            b
+        }),
+        ("the last realloc headroom byte", {
+            let mut b = base.clone();
+            b[headroom_end - 1] = 1;
+            b
+        }),
+        ("the alignment padding", {
+            let mut b = base.clone();
+            b[padded_end - 1] = 1;
+            b
+        }),
+        ("a duplicate entry's padding", {
+            let mut b = dup.clone();
+            assert_eq!(b[dup_at], 0, "the second entry's marker");
+            b[dup_at + 3] = 1;
+            b
+        }),
+        ("a flag byte above 1", {
+            let mut b = base.clone();
+            b[9] = 2; // is_signer
+            b
+        }),
+        ("the executable flag above 1", {
+            let mut b = base.clone();
+            b[11] = 3;
+            b
+        }),
+        ("a byte past the program id", {
+            let mut b = base.clone();
+            b.push(0);
+            b
+        }),
+        ("a truncated tail", {
+            let mut b = base.clone();
+            b.truncate(b.len() - 1);
+            b
+        }),
+    ] {
+        assert_eq!(
+            abi::check_region(&region),
+            Err(abi::ParseError::MalformedRegion),
+            "the guest must refuse {what}"
+        );
+        assert!(sbpf::try_canonical_preimage(&region).is_none(), "the host must refuse {what}");
+        // And it is a status-2 call, not a run over a region nobody checked.
+        let (out, result, _) = run(&elf, &region);
+        assert_eq!(out[0], 2, "{what}");
+        assert_eq!(result, Err(Halt::BadElf), "{what}");
+        let z = [0u8; 32];
+        assert_eq!(out, abi::public_output(&mut HostRef, 2, &z, &z), "{what}");
+    }
+}
+
+/// The *shape* of the account list is bound, not just its contents: a duplicate entry aliases the
+/// buffer it duplicates, a repeated full entry does not, and the program can tell the two apart. So
+/// two regions whose accounts deserialize identically must still hash differently when their entry
+/// markers differ — which is what hashing the raw marker byte per entry buys.
+#[test]
+fn a_duplicate_entry_and_a_repeated_full_entry_are_different_calls() {
+    let mut h = HostRef;
+    let a = account(5, 4);
+    let id = [7u8; 32];
+    // `serialize_aligned` deduplicates by key, so `[a, a]` is a full entry then a duplicate of it.
+    let with_dup = sbpf::serialize_aligned(&[a.clone(), a.clone()], b"ix", &id);
+    // The same two accounts as two *full* entries: serialize them with distinct keys, then patch
+    // the second entry's fields back so every account field matches the duplicate region's.
+    let mut two_full = sbpf::serialize_aligned(&[a.clone(), account(6, 4)], b"ix", &id);
+    let off1 = ((8 + 88 + a.data.len() + MAX_PERMITTED_DATA_INCREASE + 7) & !7) + 8;
+    assert_eq!(two_full[off1], 0xff, "the second entry must be a full one");
+    two_full[off1 + 8..off1 + 40].copy_from_slice(&a.key);
+    two_full[off1 + 40..off1 + 72].copy_from_slice(&a.owner);
+    two_full[off1 + 72..off1 + 80].copy_from_slice(&a.lamports.to_le_bytes());
+    two_full[off1 + 88..off1 + 88 + a.data.len()].copy_from_slice(&a.data);
+    two_full[off1 + 1] = u8::from(a.is_signer);
+    two_full[off1 + 2] = u8::from(a.is_writable);
+    two_full[off1 + 3] = u8::from(a.executable);
+
+    // Both are canonical, and both deserialize to the same two accounts…
+    assert_eq!(abi::check_region(&with_dup), Ok(()));
+    assert_eq!(abi::check_region(&two_full), Ok(()));
+    assert_eq!(
+        sbpf::deserialize_accounts(&with_dup),
+        sbpf::deserialize_accounts(&two_full),
+        "the fixture only proves something if the account fields match"
+    );
+    // …but they are not the same call, on the guest or on the host.
+    assert_ne!(
+        abi::canonical_input_hash(&mut h, &with_dup, &id),
+        abi::canonical_input_hash(&mut h, &two_full, &id),
+    );
+    assert_ne!(
+        sbpf::canonical_input_hash_of(&with_dup),
+        sbpf::canonical_input_hash_of(&two_full),
+    );
+    // The markers are what differ, and the host twin reports them.
+    let markers = |r: &[u8]| {
+        sbpf::try_deserialize_entries(r).unwrap().iter().map(|(m, _)| *m).collect::<Vec<u8>>()
+    };
+    assert_eq!(markers(&with_dup), vec![0xff, 0]);
+    assert_eq!(markers(&two_full), vec![0xff, 0xff]);
+
+    // And a duplicate *of a duplicate* is a third shape: `serialize_aligned` points every duplicate
+    // at the first entry with that key, so `[A, A, A]`'s last marker is 0; pointing it at entry 1
+    // instead resolves to the same account through a different chain, and is not the same region.
+    let mut chain = sbpf::serialize_aligned(&[a.clone(), a.clone(), a.clone()], b"ix", &id);
+    let last = chain.len() - 32 - 2 - 8 - 8;
+    assert_eq!(chain[last], 0, "the third entry duplicates the first");
+    let via_first = abi::canonical_input_hash(&mut h, &chain, &id);
+    assert_eq!(via_first, sbpf::canonical_input_hash_of(&chain));
+    chain[last] = 1;
+    assert_eq!(abi::check_region(&chain), Ok(()));
+    let via_second = abi::canonical_input_hash(&mut h, &chain, &id);
+    assert_eq!(sbpf::deserialize_accounts(&chain), vec![a.clone(), a.clone(), a.clone()]);
+    assert_ne!(via_first, via_second);
+    assert_eq!(via_second, sbpf::canonical_input_hash_of(&chain));
+}
+
+/// An account count above `MAX_ACCOUNTS` is refused, never clamped: clamping made a region claiming
+/// 64 and one claiming 2^40 hash identically, because the preimage carried the clamped number.
+#[test]
+fn an_account_count_above_the_maximum_is_refused_rather_than_clamped() {
+    let a = account(5, 4);
+    let id = [7u8; 32];
+    let elf = build_elf(
+        &asm(&[insn(opc::MOV64_IMM, 0, 0, 0, 0), insn(opc::EXIT, 0, 0, 0, 0)]),
+        &[],
+        &[],
+        &[],
+        0,
+    );
+    // 64 entries that fit the input cap: one real account and 63 duplicates of it, 8 bytes each.
+    let shape: Vec<Account> = core::iter::repeat(a.clone()).take(abi::MAX_ACCOUNTS).collect();
+    let mut buf = sbpf::serialize_aligned(&shape, b"ix", &id);
+    assert!(buf.len() <= abi::MAX_INPUT_BYTES, "{} bytes", buf.len());
+    // Exactly `MAX_ACCOUNTS` is fine, at the boundary.
+    assert_eq!(abi::check_region(&buf), Ok(()));
+    assert_eq!(sbpf::try_deserialize_accounts(&buf).map(|v| v.len()), Some(abi::MAX_ACCOUNTS));
+    assert_eq!(run(&elf, &buf).0[0], 1);
+
+    for claimed in [abi::MAX_ACCOUNTS as u64 + 1, 1 << 40, u64::MAX] {
+        buf[0..8].copy_from_slice(&claimed.to_le_bytes());
+        assert_eq!(abi::check_region(&buf), Err(abi::ParseError::MalformedRegion));
+        assert!(sbpf::try_deserialize_accounts(&buf).is_none());
+        assert!(sbpf::try_canonical_preimage(&buf).is_none());
+        assert_eq!(run(&elf, &buf).0[0], 2, "claimed {claimed}");
+    }
+}
+
 #[test]
 fn output_hash_refuses_an_account_count_that_would_truncate() {
     // A count above `u32::MAX` must not be narrowed into a small, plausible-looking number on the
@@ -325,11 +635,18 @@ fn lamports_writer(lamports: u64, tail: &[[u8; 8]]) -> Vec<u8> {
 /// Runs one whole call the way the guest will: the input vector through `abi::run_call_with`.
 fn run(elf: &[u8], input: &[u8]) -> ([u32; 8], Result<u64, Halt>, Vec<u8>) {
     let call = sbpf::SbpfCall { elf: elf.to_vec(), input: input.to_vec() };
-    let words = call.input_words();
+    let public = call.public_words();
+    let private = call.input_words();
     let mut ws = Box::new(abi::Workspace::ZERO);
     let mut h = HostRef;
-    let (out, result) =
-        abi::run_call_with(&mut h, &mut ws, |i| words[i as usize], words.len() as u32);
+    let (out, result) = abi::run_call_with(
+        &mut h,
+        &mut ws,
+        |i| public[i as usize],
+        public.len() as u32,
+        |i| private[i as usize],
+        private.len() as u32,
+    );
     (out, result, ws.input.input[..ws.input.input_len].to_vec())
 }
 
@@ -366,13 +683,7 @@ fn a_successful_run_publishes_status_one_and_the_post_state() {
     assert_eq!(post_hash, expected_output_hash(&[&expected_post]));
     assert_eq!(
         out,
-        abi::public_output(
-            &mut h,
-            1,
-            &rand_zkvm::sha256::sha256(&elf),
-            &rand_zkvm::sha256::sha256(&input),
-            &post_hash,
-        )
+        abi::public_output(&mut h, 1, &sbpf::canonical_input_hash_of(&input), &post_hash)
     );
 }
 
@@ -401,8 +712,7 @@ fn a_nonzero_return_publishes_status_zero_over_the_pre_state() {
         abi::public_output(
             &mut h,
             0,
-            &rand_zkvm::sha256::sha256(&elf),
-            &rand_zkvm::sha256::sha256(&input),
+            &sbpf::canonical_input_hash_of(&input),
             &pre_hash, // the PRE-state
         )
     );
@@ -417,8 +727,11 @@ fn a_nonzero_return_publishes_status_zero_over_the_pre_state() {
     );
     let (out_other, result_other, _) = run(&other, &input);
     assert_eq!(result_other, Ok(43));
-    // Only because the two ELFs differ do the digests differ; the status word is the same.
-    assert_eq!(out_other[0], out[0]);
+    // And since the ELF left the digest's preimage, two *different programs* over the same
+    // instruction publish the same eight words when both fail: what distinguishes them is `H_PUB`
+    // over the public segment, which the chain checks against the ELF it published — not anything
+    // the guest computes.
+    assert_eq!(out_other, out);
 }
 
 #[test]
@@ -442,33 +755,22 @@ fn an_exceptional_halt_publishes_status_two_over_the_pre_state() {
     assert_eq!(out[0], 2, "an exceptional halt is status 2");
     assert_eq!(sbpf::deserialize_accounts(&post)[0].lamports, 999, "the write did happen");
     let pre_hash = abi::output_hash(&mut h, &input);
-    assert_eq!(
-        out,
-        abi::public_output(
-            &mut h,
-            2,
-            &rand_zkvm::sha256::sha256(&elf),
-            &rand_zkvm::sha256::sha256(&input),
-            &pre_hash, // the PRE-state, not the mutated region
-        )
+    let want = abi::public_output(
+        &mut h,
+        2,
+        &sbpf::canonical_input_hash_of(&input),
+        &pre_hash, // the PRE-state, not the mutated region
     );
+    assert_eq!(out, want);
 
-    // An ELF that does not load at all is status 2 the same way, over the same pre-state.
+    // An ELF that does not load at all is status 2 the same way, over the same pre-state — and now
+    // that the ELF is not in the preimage, byte-identically so.
     let mut broken = elf.clone();
     broken[18] = 0xff; // e_machine
     let (out, result, _) = run(&broken, &input);
     assert_eq!(result, Err(Halt::BadElf));
     assert_eq!(out[0], 2);
-    assert_eq!(
-        out,
-        abi::public_output(
-            &mut h,
-            2,
-            &rand_zkvm::sha256::sha256(&broken),
-            &rand_zkvm::sha256::sha256(&input),
-            &pre_hash,
-        )
-    );
+    assert_eq!(out, want);
 }
 
 #[test]
@@ -552,9 +854,16 @@ fn a_workspace_can_be_reused_without_carrying_state_over() {
     let mut h = HostRef;
     for elf in [&writer, &leaky] {
         let call = sbpf::SbpfCall { elf: elf.clone(), input: input.clone() };
-        let words = call.input_words();
-        let (out, result) =
-            abi::run_call_with(&mut h, &mut ws, |i| words[i as usize], words.len() as u32);
+        let public = call.public_words();
+        let private = call.input_words();
+        let (out, result) = abi::run_call_with(
+            &mut h,
+            &mut ws,
+            |i| public[i as usize],
+            public.len() as u32,
+            |i| private[i as usize],
+            private.len() as u32,
+        );
         if elf == &leaky {
             assert_eq!(result, Ok(0), "the previous run's frame did not leak into this one");
             assert_eq!(out, fresh.0);
@@ -619,10 +928,14 @@ fn the_spl_token_transfer_fixture_runs_natively() {
     // The post-state region is the post accounts re-serialized: the same bytes the run left behind.
     let mut h = HostRef;
     let post_region = sbpf::serialize_aligned(&post, &data, &id);
-    let program_hash = sbpf_core::sha256(&mut h, SPL_TOKEN_ELF);
-    let input_hash = sbpf_core::sha256(&mut h, &call.input);
+    assert_eq!(post_region, call.input_post_state(), "the run left exactly these bytes");
+    // `input_hash` is the canonical unpadded encoding, built here from the deserialized accounts
+    // rather than by `sbpf-core`'s walk; `output_hash` is over the post-state region.
+    let input_hash = sbpf::canonical_input_hash_of(&call.input);
+    assert_eq!(input_hash, abi::canonical_input_hash(&mut h, &call.input, &SPL_TOKEN_ID));
+    assert_eq!(abi::program_id(&call.input), SPL_TOKEN_ID);
     let out_hash = abi::output_hash(&mut h, &post_region);
-    let want = abi::public_output(&mut h, 1, &program_hash, &input_hash, &out_hash);
+    let want = abi::public_output(&mut h, 1, &input_hash, &out_hash);
     assert_eq!(out, want);
     assert_ne!(out[1..], [0u32; 7], "the digest words must not be zero");
 
@@ -683,4 +996,59 @@ fn an_spl_token_transfer_of_too_much_changes_nothing() {
     // would publish, but with status 0 rather than 1 — which is what makes the failure legible.
     let ok = spl_transfer(0);
     assert_ne!(ok.expected().0, out);
+}
+
+/// The canonical input encoding, field by field, against a hand-built expectation — and the
+/// measurement that justifies it: the aligned region's 98 % realloc padding is gone.
+#[test]
+fn canonical_input_hash_is_the_unpadded_encoding_and_is_two_orders_smaller() {
+    use rand_zkvm::sbpf::{
+        call_instruction_data_len, canonical_preimage, deserialize_accounts, spl_transfer,
+        SPL_TOKEN_ID,
+    };
+    let call = spl_transfer(250);
+    let pre = canonical_preimage(&call.input);
+    // program id, u64 n_accounts, then per entry marker‖key‖owner‖lamports‖data_len‖data‖3 flag
+    // bytes‖rent_epoch, then u64 instruction_data_len ‖ instruction data.
+    assert_eq!(&pre[..32], &SPL_TOKEN_ID[..]);
+    let accounts = deserialize_accounts(&call.input);
+    assert_eq!(u64::from_le_bytes(pre[32..40].try_into().unwrap()), accounts.len() as u64);
+    let want: usize = 32
+        + 8
+        + accounts.iter().map(|a| 1 + 32 + 32 + 8 + 8 + a.data.len() + 3 + 8).sum::<usize>()
+        + 8
+        + call_instruction_data_len(&call.input);
+    assert_eq!(pre.len(), want);
+    // The number this change exists for: 41 825 aligned bytes -> under a kilobyte.
+    assert!(pre.len() < 1_024, "canonical preimage is {} bytes", pre.len());
+    assert!(pre.len().div_ceil(64) + 1 <= 16, "at most ~14 compressions, was 654");
+}
+
+/// Two segments: the ELF is read with `read_public`, the instruction with `read_input`, and the
+/// guest's eight output words are the digest over the *two* hashes, not three.
+#[test]
+fn the_sbpf_abi_reads_the_elf_from_the_public_segment() {
+    use rand_zkvm::sbpf::spl_transfer;
+    let call = spl_transfer(250);
+    let public = call.public_words();
+    let private = call.input_words();
+    assert_eq!(public[0] as usize, call.elf.len());
+    assert_eq!(private[0] as usize, call.input.len());
+    assert!(
+        private.len() < 12_000,
+        "the ELF is no longer on the private tape: {} words",
+        private.len()
+    );
+    let (out, r0, _post) = call.expected();
+    assert_eq!(r0, Ok(0));
+    assert_eq!(out[0], 1);
+    // out1..7 is hash(SBPF_OUT, [input_hash ‖ output_hash]) — 16 words, not 24.
+    let mut h = rand_zkvm::sbpf::HostRef;
+    let want = sbpf_core::abi::public_output(
+        &mut h,
+        1,
+        &rand_zkvm::sbpf::canonical_input_hash_of(&call.input),
+        &rand_zkvm::sbpf::output_hash_of(&call.input_post_state()),
+    );
+    assert_eq!(out, want);
 }

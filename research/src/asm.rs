@@ -70,6 +70,9 @@ pub mod ops {
     }
     /// Result lands in a0.
     pub fn read_input(idx: u32) -> Vec<Instr> { let mut v = li(REG_A7, SYS_READ_INPUT as i32); v.extend(li(REG_A0, idx as i32)); v.push(ecall()); v }
+    /// Constraint set 6: `read_input` on the **public** segment — the unsalted words committed
+    /// to `H_PUB` (`pv::PUB0..7`). Result lands in a0.
+    pub fn read_public(idx: u32) -> Vec<Instr> { let mut v = li(REG_A7, SYS_READ_PUBLIC as i32); v.extend(li(REG_A0, idx as i32)); v.push(ecall()); v }
     /// M3.2: hashes `n` words at word address `ptr_words` (`a0`, the `MEM_ADDR` word-address
     /// convention) with the `POSEIDON2` sponge, overwriting `ptr_words..ptr_words+8` with the
     /// 8-word digest in place.
