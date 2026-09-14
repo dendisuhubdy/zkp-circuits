@@ -215,6 +215,7 @@ pub fn replay(
         shape.input_log_height,
         shape.keccak_log_height,
         shape.sha256_log_height,
+        shape.public_log_height,
     );
     let global = common.preprocessed.as_ref().ok_or(ReplayError::Key)?;
     if global.commitment.roots() != key.cap.as_slice() {

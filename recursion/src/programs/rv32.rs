@@ -276,8 +276,8 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     // ── phase 8: acceptance and spec §4.4's public values ──────────────────────────────────────
     //
     // `inner_vk_digest`, recomputed in-program from the compile-time shape words and the key's
-    // cap (so it is bound by the program digest twice over), then `N = 1`, then the 26 inner
-    // public values read in phase 2.
+    // cap (so it is bound by the program digest twice over), then `N = 1`, then the 34 inner
+    // public values read in phase 2 (constraint set 6 grew them by `PUB0..7`).
     let words = shape.shape_words();
     let mut msg = Vec::with_capacity(1 + words.len() + CAP_WORDS);
     msg.push(F::from_u64(RVM_VK_DOMAIN));

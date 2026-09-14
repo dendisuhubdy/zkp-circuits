@@ -20,7 +20,7 @@ fn accept_all(profile: FriProfile, n: usize) -> Vec<usize> {
     let mut program = None;
     for p in &proofs {
         let shape = InnerShape::of(profile, p.proof.tier, p.proof.program_log_height,
-            p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height,
+            p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height,
             p.proof.mem_log_height);
         let key = InnerKey::of(profile, &shape);
         let vp = program.get_or_insert_with(|| verify_rv32(&shape, &key, Checkpoints::Off));
@@ -132,7 +132,7 @@ fn refuse_all(profile: FriProfile, n: usize) {
     let table = tamper_table();
     for (k, p) in proofs.iter().enumerate() {
         let shape = InnerShape::of(profile, p.proof.tier, p.proof.program_log_height,
-            p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height,
+            p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height,
             p.proof.mem_log_height);
         let key = InnerKey::of(profile, &shape);
         let vp = verify_rv32(&shape, &key, Checkpoints::Off);
@@ -170,7 +170,7 @@ fn fifty_tampered_production_proofs_are_refused_at_the_same_step_as_the_native_v
 fn the_cycle_budget_per_inner_proof_is_pinned() {
     let p = common::bundle_proofs(FriProfile::Production, 1).pop().unwrap();
     let shape = InnerShape::of(FriProfile::Production, p.proof.tier, p.proof.program_log_height,
-        p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height,
+        p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height,
         p.proof.mem_log_height);
     let key = InnerKey::of(FriProfile::Production, &shape);
     let vp = verify_rv32(&shape, &key, Checkpoints::Off);
@@ -215,7 +215,7 @@ fn the_cycle_budget_per_inner_proof_is_pinned() {
 fn the_committed_program_digest_is_reproducible() {
     let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
     let shape = InnerShape::of(FriProfile::Test, p.proof.tier, p.proof.program_log_height,
-        p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height,
+        p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height,
         p.proof.mem_log_height);
     let key = InnerKey::of(FriProfile::Test, &shape);
     let a = verify_rv32(&shape, &key, Checkpoints::Off);

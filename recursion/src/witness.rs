@@ -38,11 +38,16 @@ pub const SALT_ELEMS: usize = 4;
 /// `"commit phase root[i]"`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Segment {
-    /// `tier`, the five declared log-heights, `num_queries`, then one word per FRI round's
-    /// `log_arity`. Read off the *proof* and pinned against the program's own shape word by word,
-    /// so a proof of another shape is refused here rather than misparsed later.
+    /// `tier`, the six declared log-heights (program, input, keccak, sha256, **public**, mem —
+    /// constraint set 6's mandatory public table sits between the two optional hash heights and
+    /// memory, matching the machine's argument order), `num_queries`, then one word per FRI
+    /// round's `log_arity`. Read off the *proof* and pinned against the program's own shape word
+    /// by word, so a proof of another shape is refused here rather than misparsed later.
     Header,
-    /// The 26 inner public values.
+    /// The 34 inner public values (constraint set 6: `PC_ENTRY`, `TIER`, `OUT0..7`, `HC0..7`,
+    /// `IN0..7`, then `PUB0..7` — the unsalted `H_PUB`, which for the empty public segment these
+    /// fixtures prove is a prover-computed constant of the shape, carried as ordinary public
+    /// values; no public-segment words enter the tape).
     PublicValues,
     /// The `main`, `permutation`, `quotient_chunks` and `random` caps: four times sixteen elements.
     Commitments,
@@ -177,6 +182,7 @@ impl WitnessTape {
         w.usize(proof.input_log_height as usize);
         w.usize(proof.keccak_log_height as usize);
         w.usize(proof.sha256_log_height as usize);
+        w.usize(proof.public_log_height as usize);
         w.usize(proof.mem_log_height as usize);
         w.usize(shape.num_queries);
         for &la in &r.log_arities {

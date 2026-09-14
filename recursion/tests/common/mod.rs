@@ -159,6 +159,7 @@ pub fn measure_production_inner_proof() -> recursion::programs::CycleReport {
         p.proof.input_log_height,
         p.proof.keccak_log_height,
         p.proof.sha256_log_height,
+        p.proof.public_log_height,
         p.proof.mem_log_height,
     );
     let key = InnerKey::of(FriProfile::Production, &shape);
@@ -187,6 +188,7 @@ pub fn committed_digest() -> String {
         p.proof.input_log_height,
         p.proof.keccak_log_height,
         p.proof.sha256_log_height,
+        p.proof.public_log_height,
         p.proof.mem_log_height,
     );
     let key = InnerKey::of(FriProfile::Production, &shape);
@@ -243,7 +245,10 @@ pub fn bundle_proofs(profile: FriProfile, n: usize) -> Vec<BundleProof> {
             ];
             let inputs_vec =
                 notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
-            let (proof, _) = m.prove(&ledger.bundle_program, &inputs_vec, None).unwrap();
+            // The public segment is empty for bundle proofs: the chain admits only
+        // `verify_public(hc, &[], _)`, so the fixtures prove with `&[]` — and `H_PUB` is then
+        // the prover-computed digest of the empty segment, carried as ordinary public values.
+        let (proof, _) = m.prove(&ledger.bundle_program, &inputs_vec, &[], None).unwrap();
             let hc = ledger.bundle_program.digest();
             m.verify(&hc, &proof).expect("a fixture proof must verify natively");
             let p = BundleProof { proof, hc };

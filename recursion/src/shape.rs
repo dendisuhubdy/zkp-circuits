@@ -62,6 +62,9 @@ pub struct InnerShape {
     pub input_log_height: u8,
     pub keccak_log_height: u8,
     pub sha256_log_height: u8,
+    /// Constraint set 6: the mandatory public table's declared height. No `0` "no such table"
+    /// value exists — the public instance is in every batch, last in `chips()` order.
+    pub public_log_height: u8,
     pub mem_log_height: u8,
     pub num_queries: usize,
     pub query_pow_bits: usize,
@@ -121,7 +124,7 @@ pub enum ShapeError {
 }
 
 impl InnerShape {
-    /// The shape of any proof at `(profile, tier, the five declared heights)`.
+    /// The shape of any proof at `(profile, tier, the six declared heights)`.
     ///
     /// Panics when the heights are ones `Machine::verify` would refuse outright
     /// (`check_declared_heights`), because a verifier program for a shape no proof can have is a
@@ -134,6 +137,7 @@ impl InnerShape {
         input_log_height: u8,
         keccak_log_height: u8,
         sha256_log_height: u8,
+        public_log_height: u8,
         mem_log_height: u8,
     ) -> Self {
         Self::try_of(
@@ -143,6 +147,7 @@ impl InnerShape {
             input_log_height,
             keccak_log_height,
             sha256_log_height,
+            public_log_height,
             mem_log_height,
         )
         .expect("a verifier program is built for a shape a proof can actually have")
@@ -156,6 +161,7 @@ impl InnerShape {
         input_log_height: u8,
         keccak_log_height: u8,
         sha256_log_height: u8,
+        public_log_height: u8,
         mem_log_height: u8,
     ) -> Result<Self, ShapeError> {
         rand_zkvm::machine::check_declared_heights(
@@ -164,6 +170,7 @@ impl InnerShape {
             input_log_height,
             keccak_log_height,
             sha256_log_height,
+            public_log_height,
             mem_log_height,
         )
         .map_err(|e| ShapeError::DeclaredHeights(format!("{e:?}")))?;
@@ -177,6 +184,7 @@ impl InnerShape {
             input_log_height,
             keccak_log_height,
             sha256_log_height,
+            public_log_height,
             mem_log_height,
         );
         let common = machine.verifier_key(
@@ -185,6 +193,7 @@ impl InnerShape {
             input_log_height,
             keccak_log_height,
             sha256_log_height,
+            public_log_height,
         );
 
         let widths: Vec<usize> = airs.iter().map(BaseAir::<Val>::width).collect();
@@ -230,6 +239,7 @@ impl InnerShape {
             input_log_height,
             keccak_log_height,
             sha256_log_height,
+            public_log_height,
             mem_log_height,
             num_queries: profile.num_queries(),
             query_pow_bits: profile.pow_bits(),
@@ -315,6 +325,7 @@ impl InnerShape {
             self.input_log_height,
             self.keccak_log_height,
             self.sha256_log_height,
+            self.public_log_height,
         )
     }
 
@@ -333,6 +344,7 @@ impl InnerShape {
             self.input_log_height as usize,
             self.keccak_log_height as usize,
             self.sha256_log_height as usize,
+            self.public_log_height as usize,
             self.mem_log_height as usize,
             self.num_queries,
             self.query_pow_bits,
@@ -354,7 +366,7 @@ impl InnerShape {
 
     /// The `Header` segment's contents, which the program reads and pins word by word:
     /// `[tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height,
-    ///   mem_log_height, num_queries, log_arities…]`.
+    ///   public_log_height, mem_log_height, num_queries, log_arities…]`.
     ///
     /// These are exactly the words a *proof* carries (or, for `num_queries`, that the profile
     /// fixes and the schedule that the proof's `commit_phase_openings` declare), so the program's
@@ -367,6 +379,7 @@ impl InnerShape {
             self.input_log_height as usize,
             self.keccak_log_height as usize,
             self.sha256_log_height as usize,
+            self.public_log_height as usize,
             self.mem_log_height as usize,
             self.num_queries,
         ];
@@ -386,6 +399,7 @@ impl InnerShape {
             && proof.input_log_height == self.input_log_height
             && proof.keccak_log_height == self.keccak_log_height
             && proof.sha256_log_height == self.sha256_log_height
+            && proof.public_log_height == self.public_log_height
             && proof.mem_log_height == self.mem_log_height
             && proof.batch.degree_bits == self.degree_bits
             && proof.public_values.len() == self.num_public_values[PV_INSTANCE]
@@ -457,6 +471,7 @@ impl InnerKey {
             shape.input_log_height,
             shape.keccak_log_height,
             shape.sha256_log_height,
+            shape.public_log_height,
         );
         let roots = common
             .preprocessed

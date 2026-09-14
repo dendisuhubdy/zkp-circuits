@@ -27,7 +27,7 @@ fn one_test_proof() -> (common::BundleProof, InnerShape, InnerKey) {
         p.proof.program_log_height,
         p.proof.input_log_height,
         p.proof.keccak_log_height,
-        p.proof.sha256_log_height,
+        p.proof.sha256_log_height, p.proof.public_log_height,
         p.proof.mem_log_height,
     );
     let key = InnerKey::of(FriProfile::Test, &shape);
@@ -602,7 +602,8 @@ fn the_quotient_identity_holds_in_the_program_for_a_real_proof() {
     let vp = verify_rv32(&shape, &key, Checkpoints::Off);
     let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
     let exec = execute(&vp.program, &tape.words, 200_000_000).expect("accepts a real proof");
-    // Spec §4.4's own list, exactly: `4 + 1 + 26`. (At Task 5's boundary the `Off` build published
+    // Spec §4.4's own list, exactly: `4 + 1 + 34` (constraint set 6 grew the inner list to 34).
+    // (At Task 5's boundary the `Off` build published
     // nothing yet; Task 6's finished program publishes these.)
     let mut want = recursion::shape::inner_vk_digest(&shape, &key).to_vec();
     want.push(F::ONE);
@@ -708,8 +709,9 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
     // Hashing: phases 0–4 cost the challenger's 51 duplexes and phase 5 hashes nothing; the rest
     // is the query phase — the FRI transcript's duplexes, the five input rounds' leaf sponges,
     // walks and injections, and the commit-phase rows and walks. Pinned at the measured
-    // Test-profile number; the production one lives in `docs/00-recursion-vm.md` and `pins.json`.
-    assert_eq!(exec.permutations(), 10_451, "51 transcript duplexes in phases 0–4, the rest is the query phase");
+    // Test-profile number (constraint set 6's shape); the production one lives in
+    // `docs/00-recursion-vm.md` and `pins.json`.
+    assert_eq!(exec.permutations(), 11_195, "51 transcript duplexes in phases 0–4, the rest is the query phase");
 }
 
 /// Every assertion phase 5 makes is a *named* checkpoint, and the names are the interface Task 6's

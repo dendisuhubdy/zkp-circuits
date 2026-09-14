@@ -1,6 +1,6 @@
 # Rand zkVM milestone 5 — the recursion VM (rVM)
 
-Status: **design approved in conversation 2026-09-13; spec reviewed and approved by the user 2026-09-14. M5.1 built (2026-09-14): 50 real bundle proofs verified in-circuit at 5 250 623 cpu rows per inner proof — over the 2^19 point; Task 7's precompiles provably cannot close the gap (~3%), so it did not run. See `recursion/docs/00-recursion-vm.md`.**
+Status: **design approved in conversation 2026-09-13; spec reviewed and approved by the user 2026-09-14. M5.1 built (2026-09-14), against constraint set 6: 50 real bundle proofs verified in-circuit at 5 682 847 cpu rows per inner proof — over the 2^19 point; Task 7's precompiles provably cannot close the gap (~3%), so it did not run. See `recursion/docs/00-recursion-vm.md`.**
 Decided by the user on 2026-09-13 after the feasibility spike in `spike-recursive-verifier`:
 block-level proof aggregation needs a recursion coprocessor, and the coprocessor is a second
 machine with a native Goldilocks instruction set ("recursion VM"), not a hardwired verifier AIR.
@@ -297,11 +297,14 @@ Writing the M5.1 plan against the code corrected five details of this spec; the 
    `TruncatedPermutation<_, 2, 4, 8>`); a commitment is a `MerkleCap` of four digests (16 elements).
    `Digest = [Felt; 4]`; the published inner verifier key digest is a 4-element sponge over
    `[RVM_VK_DOMAIN ‖ shape words ‖ cap(16)]`, recomputed identically by the node and in-program.
-2. **Public values: all 26 per inner proof, not eight.** `PUBLIC` emits every `pv` value of each
-   inner proof in `pv` order (`PC_ENTRY`, `TIER`, `OUT0..7`, `HC0..7`, `IN0..7`). Dropping `HC0..7`
-   would let an aggregate accept a proof of a different guest. Layout: `[vk_digest(4), N, then
-   26·N]`. The fullnode's aggregate admission recomputes the list from the covered bundles' public
-   fields and its registered `hc`.
+2. **Public values: all of them per inner proof, not eight.** `PUBLIC` emits every `pv` value of
+   each inner proof in `pv` order. That was 26 at the plan's writing (`PC_ENTRY`, `TIER`,
+   `OUT0..7`, `HC0..7`, `IN0..7`); **constraint set 6 makes it 34** — the unsalted `H_PUB`
+   (`PUB0..7`) joins the list — and makes the `public` table a mandatory ninth instance of every
+   shape (so every shape carries a sixth declared height, `public_log_height`, and
+   `Machine::verifier_key` a sixth component). Dropping `HC0..7` would let an aggregate accept a
+   proof of a different guest. Layout: `[vk_digest(4), N, then 34·N]`. The fullnode's aggregate
+   admission recomputes the list from the covered bundles' public fields and its registered `hc`.
 3. **Witness order is consumption order, not postcard order.** FRI needs each round's arity and the
    query indices before the openings they index; the tape is a pinned 14-segment layout with
    postcard order inside each segment (plan Task 4).
