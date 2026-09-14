@@ -162,3 +162,35 @@ fn the_interface_digest_is_capacity_seeded_and_binds_length() {
     // The domain does not collide with the program (15) or inner-vk (16) domains.
     assert_eq!(RVM_PUB_DOMAIN, 17);
 }
+
+// ── Task 6: the cpu table's width and every table's max constraint degree, pinned ─────────────
+use recursion::isa::{Instr, Op, Program};
+use recursion::machine::Tier;
+use recursion::tables::{cpu, memory, poseidon2, program as program_table, public as public_table, range};
+
+#[test]
+fn the_table_widths_and_constraint_degrees_are_pinned() {
+    assert_eq!(cpu::col::WIDTH, 61, "the cpu's designed width (Tasks 8–9 append to it)");
+    assert_eq!(memory::col::WIDTH, 11);
+    assert_eq!(program_table::col::WIDTH, 3);
+    assert_eq!(program_table::pre::WIDTH, 4);
+    assert_eq!(public_table::col::WIDTH, 7);
+    assert_eq!(poseidon2::col::WIDTH, 341);
+    assert_eq!(range::col::WIDTH, 1);
+    let p = Program {
+        instrs: vec![
+            Instr { op: Op::Faddi, rd: 1, ra: 0, b: F::from_u64(7) },
+            Instr { op: Op::Halt, rd: 0, ra: 0, b: F::ZERO },
+        ],
+        checkpoints: vec![],
+    };
+    // In `chips()` order: program, cpu, reg_memory, ram_memory, poseidon2, public, range.
+    let degs = recursion::machine::max_constraint_degrees(&p, Tier(8));
+    assert_eq!(degs.len(), 7);
+    // Pinned at the measured values (the symbolic checker over the real, same-bus-packed lookup
+    // contexts); a change here means a changed quotient-chunk count and belongs in the docs.
+    // The cpu's 8 comes from the packed lookup fraction-pins, not its row logic (the same
+    // finding `research/tests/tables.rs` records for the RV32 cpu, also 8 — and 8 is this
+    // config's budget ceiling, `log2_ceil(degree - 1) <= log_blowup = 3`).
+    assert_eq!(degs, vec![2, 8, 4, 4, 4, 2, 2]);
+}

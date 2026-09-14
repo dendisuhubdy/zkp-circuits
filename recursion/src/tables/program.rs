@@ -11,7 +11,7 @@
 //! in-circuit decoder.
 use super::{bus, pad_height, F};
 use crate::emulator::Event;
-use crate::isa::{Instr, Program};
+use crate::isa::Program;
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_lookup::InteractionBuilder;

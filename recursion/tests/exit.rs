@@ -257,3 +257,33 @@ fn the_committed_program_digest_is_reproducible() {
         j += 1;
     }
 }
+
+// ── M5.2 Task 6: the machine's rehearsal ──────────────────────────────────────────────────────
+
+/// The Task-6 gate: **the full M5.1 verifier program over one test-profile bundle proof, proved
+/// and verified natively** by the rVM machine — the pre-cut program, 1 210 045 rows, tier 21.
+/// `#[ignore]`d for its cost, with the sizing from the M5.2 plan: ~32 GB of committed oracle,
+/// ~40 GB peak resident, ~10–20 min on the development machine. This is the "the machine proves
+/// the real thing" gate before the row-cut tasks (7–9), and the exact shape of Task 10's exit.
+#[test]
+#[ignore = "the M5.2 Task-6 rehearsal: tier 21, ~40 GB peak, ~10-20 min; run: cargo +1.98.1 test -p recursion --test exit rehearsal -- --ignored --nocapture"]
+fn rehearsal_the_verifier_program_over_one_test_profile_proof_proves_and_verifies_natively() {
+    let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
+    let shape = InnerShape::of(FriProfile::Test, p.proof.tier, p.proof.program_log_height,
+        p.proof.input_log_height, p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height,
+        p.proof.mem_log_height);
+    let key = InnerKey::of(FriProfile::Test, &shape);
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let m = recursion::machine::Machine::new(FriProfile::Test);
+    let t0 = std::time::Instant::now();
+    let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
+    let prove_s = t0.elapsed().as_secs_f64();
+    assert_eq!(exec.cpu_rows(), 1_210_045, "the rehearsal proves the pre-cut program as measured");
+    assert_eq!(rvm_proof.tier, recursion::machine::Tier(21));
+    let t1 = std::time::Instant::now();
+    m.verify(&vp.program, &rvm_proof).unwrap();
+    println!("rehearsal: prove {prove_s:.1}s, verify {:.1}s, proof {} bytes, public values {:?}",
+             t1.elapsed().as_secs_f64(), rvm_proof.size(), rvm_proof.public_values);
+    assert_eq!(rvm_proof.public_values.len(), 4);
+}

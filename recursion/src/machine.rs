@@ -7,13 +7,15 @@
 //! new is the chip set and that the verifier key is **program-dependent** (plan R1/R6): the
 //! program table is preprocessed, so the preprocessed cap binds every program word and there is
 //! no in-circuit `hc` digest.
-use p3_batch_stark::{BatchProof, CommonData, ProverData};
+use p3_batch_stark::{prove_batch, verify_batch, BatchProof, CommonData, ProverData, StarkInstance};
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
-use p3_field::PrimeField64;
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_fri::HidingFriPcs;
 use p3_lookup::InteractionBuilder;
-use p3_uni_stark::StarkConfig;
+use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::Matrix;
+use p3_uni_stark::{StarkConfig, StarkGenericConfig};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -31,14 +33,15 @@ pub type Pcs = HidingFriPcs<Val, Dft, ValMmcs, ChallengeMmcs, StdRng>;
 type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
 pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
 
-use crate::emulator::ExecError;
+use crate::emulator::{execute, ExecError, Execution};
 use crate::isa::{DecodeError, Instr, Op, Program, NUM_REGS};
-use crate::tables::memory::MemoryAir;
+use crate::tables::cpu::{cpu_trace, perm_events, ram_accesses, register_accesses, CpuAir};
+use crate::tables::memory::{memory_trace, MemoryAir};
 use crate::tables::pad_height;
-use crate::tables::poseidon2::Poseidon2Air;
-use crate::tables::program::ProgramAir;
-use crate::tables::public::PublicAir;
-use crate::tables::range::RangeAir;
+use crate::tables::poseidon2::{poseidon2_log_height, poseidon2_trace, Poseidon2Air};
+use crate::tables::program::{program_trace, ProgramAir};
+use crate::tables::public::{public_trace, PublicAir, NUM_PUBLIC_VALUES};
+use crate::tables::range::{range_trace, RangeAir, RangeCounts};
 
 /// Fixed seed for the rVM's `key_config` RNGs — the role of `research`'s `machine::KEY_SEED`
 /// (a deterministic preprocessed commitment any verifier can recompute standalone), over a
@@ -239,7 +242,10 @@ impl Machine {
         if let Some(hit) = self.keys.lock().unwrap().get(&key) { return hit; }
         let arc = Arc::new(program.clone());
         let airs = chips(&arc, tier, if reduce { MIN_LOG_HEIGHT } else { 0 });
-        let degrees = current_degree_bits(program, tier);
+        // The declared heights the key is built with are the *floors*: no table here but
+        // `program` and `range` has preprocessed columns, so `CommonData` is invariant to the
+        // declared heights — the RV32 `mem_log_height` argument, verbatim (R6).
+        let degrees = log_ext_degrees(program, tier, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, 0);
         let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &airs, &degrees).common);
         self.keys.lock().unwrap().insert(key, common.clone());
         common
@@ -284,6 +290,168 @@ fn check_instr(instr: &Instr) -> Result<(), DecodeError> {
     Ok(())
 }
 
+
+/// The traces of one proving run, in `chips()` order — the RV32 `Traces`'s role, with the
+/// declared heights carried alongside so `prove_traces` and the eventual `Proof` agree on
+/// exactly the values `build_traces` chose (the `program_log_height` doc comment's rule,
+/// applied to every proof-declared table).
+pub struct Traces {
+    pub program: RowMajorMatrix<Val>,
+    pub cpu: RowMajorMatrix<Val>,
+    pub reg: RowMajorMatrix<Val>,
+    pub ram: RowMajorMatrix<Val>,
+    pub poseidon2: RowMajorMatrix<Val>,
+    pub public: RowMajorMatrix<Val>,
+    pub range: RowMajorMatrix<Val>,
+    /// Always exactly 4 (R5): the program's interface digest, `Execution::public`.
+    pub public_values: Vec<Val>,
+    pub reg_log_height: u8,
+    pub ram_log_height: u8,
+    pub poseidon2_log_height: u8,
+}
+impl Traces {
+    /// The traces in `chips()` order; the `i`-th entry pairs with the `i`-th chip, which is what
+    /// keeps `PUBLIC_VALUES_INDEX` correct.
+    pub fn as_slice(&self) -> Vec<&RowMajorMatrix<Val>> {
+        vec![&self.program, &self.cpu, &self.reg, &self.ram, &self.poseidon2, &self.public, &self.range]
+    }
+    pub fn heights(&self) -> Vec<usize> { self.as_slice().iter().map(|m| m.height()).collect() }
+}
+
+/// Build every table's trace from the execution: the cpu rows, the synthesized register traffic
+/// and the emulator's RAM log split across the two memory tables, the chip's permutations, the
+/// program's fetch counts, the published digest, and the shared range counts. The declared
+/// heights are sized from the workload itself (`pad_height(count + 1, floor)`), the RV32
+/// declared-height rule.
+pub fn build_traces(program: &Program, exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
+    let mut counts = RangeCounts::default();
+    let cpu = cpu_trace(&exec.events, tier.cpu_height(), &mut counts);
+    let reg_acc = register_accesses(&exec.events);
+    let reg_log_height = pad_height(reg_acc.len() + 1, 1 << MIN_LOG_HEIGHT).trailing_zeros() as u8;
+    let reg = memory_trace(&reg_acc, 1 << reg_log_height, &mut counts);
+    let ram_acc = ram_accesses(&exec.events);
+    let ram_log_height = pad_height(ram_acc.len() + 1, 1 << MIN_LOG_HEIGHT).trailing_zeros() as u8;
+    let ram = memory_trace(&ram_acc, 1 << ram_log_height, &mut counts);
+    let perms = perm_events(&exec.events);
+    let p2_log = poseidon2_log_height(perms.len());
+    let poseidon2 = poseidon2_trace(&perms, 1 << p2_log);
+    let program_t = program_trace(program, &exec.events, 1 << program_log_height(program.instrs.len()));
+    let public = public_trace(&exec.public, crate::tables::public::HEIGHT);
+    let range = range_trace(&counts);
+    Ok(Traces {
+        program: program_t,
+        cpu,
+        reg,
+        ram,
+        poseidon2,
+        public,
+        range,
+        public_values: exec.public.clone(),
+        reg_log_height,
+        ram_log_height,
+        poseidon2_log_height: p2_log,
+    })
+}
+
+impl Machine {
+    /// Run the program and prove the run (plan Task 6). No salt, no input commitment (spec §2):
+    /// the witness is a public tape — the only entropy drawn is the hiding PCS's own, inside
+    /// `make_config`, per proving call.
+    pub fn prove(&self, program: &Program, witness: &[Val], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
+        // Registration-time legality (R1): the preprocessed table commits to every word.
+        Self::check_program(program).map_err(ProveError::Decode)?;
+        // Run up to the largest tier's cycle budget; a program that has not halted by then can
+        // never be proved, so `OutOfCycles` and `NoTier` agree on the limit.
+        let exec = execute(program, witness, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
+        let tier = match tier {
+            Some(t) if TIERS.contains(&t.0) => t,
+            // The prove-side mirror of `check_declared_heights`' `TIERS.contains` guard.
+            Some(t) => return Err(ProveError::BadTier(t.0)),
+            None => Tier::for_cycles(exec.cpu_rows()).ok_or(ProveError::NoTier(exec.cpu_rows()))?,
+        };
+        let traces = build_traces(program, &exec, tier)?;
+        Ok((self.prove_traces(program, &traces, tier), exec))
+    }
+
+    /// The body of `prove`, over already-built traces — the cheating tests' entry point, exactly
+    /// the RV32 `prove_traces`'s role: a tampered trace goes in, and `prove_batch`'s debug
+    /// constraint checker (or the batch verifier on the produced proof) is what must catch it.
+    pub fn prove_traces(&self, program: &Program, traces: &Traces, tier: Tier) -> Proof {
+        let arc = Arc::new(program.clone());
+        let airs = chips(&arc, tier, 0);
+        let mats = traces.as_slice();
+        assert_eq!(airs.len(), mats.len(), "one trace per chip");
+        let instances: Vec<StarkInstance<'_, Config, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
+            air, trace, public_values: if i == PUBLIC_VALUES_INDEX { traces.public_values.clone() } else { vec![] },
+        }).collect();
+        // Built with `key_config` so the preprocessed tree's commitment matches exactly what a
+        // verifier recomputes via `verifier_key`; `prove_batch` itself runs against
+        // `self.config` (fresh entropy) for the main/quotient/permutation commitments.
+        let key_cfg = key_config(self.profile);
+        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &log_ext_degrees(program, tier, traces.reg_log_height, traces.ram_log_height, traces.poseidon2_log_height, 0));
+        let batch = prove_batch(&self.config, &instances, &prover_data);
+        Proof {
+            tier,
+            reg_log_height: traces.reg_log_height,
+            ram_log_height: traces.ram_log_height,
+            poseidon2_log_height: traces.poseidon2_log_height,
+            reduce_log_height: 0,
+            public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(),
+            batch,
+        }
+    }
+
+    /// R6: the verifier holds the registered program; the preprocessed cap is the binding (there
+    /// is no `hc` public value to check — that is what a preprocessed program table means).
+    pub fn verify(&self, program: &Program, proof: &Proof) -> Result<(), VerifyError> {
+        if proof.public_values.len() != NUM_PUBLIC_VALUES { return Err(VerifyError::PublicValues); }
+        // `public_values` is deserialized from untrusted bytes as raw `u64`s, and
+        // `Val::from_u64` does not reduce: insist on the canonical representative so a proof has
+        // exactly one encoding of its interface digest.
+        if proof.public_values.iter().any(|x| *x >= <Val as PrimeField64>::ORDER_U64) { return Err(VerifyError::PublicValues); }
+        // Every range check on the proof's declared shape, before anything is sized from it.
+        check_declared_heights(proof.tier, proof.reg_log_height, proof.ram_log_height, proof.poseidon2_log_height, proof.reduce_log_height)?;
+        // A `Vec` comparison: simultaneously the batch's instance-count check and every declared
+        // height's.
+        if proof.batch.degree_bits != log_ext_degrees(program, proof.tier, proof.reg_log_height, proof.ram_log_height, proof.poseidon2_log_height, proof.reduce_log_height) { return Err(VerifyError::Tier); }
+        let arc = Arc::new(program.clone());
+        let airs = chips(&arc, proof.tier, proof.reduce_log_height);
+        let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
+        let pvs: Vec<Vec<Val>> = (0..airs.len()).map(|i| if i == PUBLIC_VALUES_INDEX { pv_vals.clone() } else { vec![] }).collect();
+        let common = self.verifier_key(program, proof.tier, proof.reduce_log_height != 0);
+        verify_batch(&self.config, &airs, &proof.batch, &pvs, &common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
+    }
+}
+
+/// Symbolic max constraint degree of each chip, in `chips()` order — computed the same way
+/// `ProverData::from_airs_and_degrees` derives each instance's quotient-chunk count, against the
+/// real, same-bus-packed lookup contexts. Exists to back the per-table degree regression tests
+/// (`research`'s `max_constraint_degrees`'s role, over a program-carrying chip set).
+pub fn max_constraint_degrees(program: &Program, tier: Tier) -> Vec<usize> {
+    let machine = Machine::new(FriProfile::Test);
+    let key_cfg = key_config(machine.profile);
+    let arc = Arc::new(program.clone());
+    let airs = chips(&arc, tier, 0);
+    let is_zk = machine.config.is_zk();
+    let ext_degrees = log_ext_degrees(program, tier, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, 0);
+    let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &ext_degrees);
+    let lookup_gadget = p3_lookup::LogUpGadget::new();
+    airs.iter()
+        .zip(prover_data.common.lookups.iter())
+        .zip(ext_degrees.iter())
+        .map(|((air, lookups), &ext_db)| {
+            let trace_len = 1usize << (ext_db - is_zk);
+            p3_batch_stark::symbolic::get_max_constraint_degree::<Val, Challenge, Chip, _>(
+                air,
+                p3_air::symbolic::AirLayout::from_air(air),
+                trace_len,
+                lookups,
+                &lookup_gadget,
+            )
+        })
+        .collect()
+}
+
 /// The machine's chips, in the final `chips()` order's relative positions: `program, cpu,
 /// reg_memory, ram_memory, poseidon2, public, range`, `reduce` last when declared. The set grows
 /// per task (Task 2: `program` + `range`) — the order is load-bearing: the public table owns the
@@ -291,6 +459,7 @@ fn check_instr(instr: &Instr) -> Result<(), DecodeError> {
 pub fn chips(program: &Arc<Program>, _tier: Tier, _reduce_log_height: u8) -> Vec<Chip> {
     vec![
         Chip::Program(ProgramAir::new(program.clone())),
+        Chip::Cpu(CpuAir),
         Chip::RegMemory(MemoryAir { register: true }),
         Chip::RamMemory(MemoryAir { register: false }),
         Chip::Poseidon2(Poseidon2Air),
@@ -299,25 +468,16 @@ pub fn chips(program: &Arc<Program>, _tier: Tier, _reduce_log_height: u8) -> Vec
     ]
 }
 
-/// The degree bits matching the *current* `chips()` set, ZK-doubled. Converges on
-/// [`log_ext_degrees`] as the chip set completes (Task 6); until then it is the per-task
-/// intermediate — the key is cached per task's set, and nothing cross-checks keys across tasks.
-fn current_degree_bits(program: &Program, _tier: Tier) -> Vec<usize> {
-    let zk = 1usize;
-    vec![
-        program_log_height(program.instrs.len()) as usize + zk,
-        MIN_LOG_HEIGHT as usize + zk,
-        MIN_LOG_HEIGHT as usize + zk,
-        MIN_LOG_HEIGHT as usize + zk,
-        PUBLIC_LOG_HEIGHT as usize + zk,
-        crate::tables::range::HEIGHT.trailing_zeros() as usize + zk,
-    ]
-}
+/// The batch instance that owns the public values: `chips()[5]` is the public table (R5), and
+/// `prove`/`verify` hard-code the slot, exactly the RV32 machine's `i == 1` discipline — Task 8's
+/// reduce chip goes last, so it cannot disturb this index.
+pub const PUBLIC_VALUES_INDEX: usize = 5;
 
 /// The machine's chips. Later tables append their variants in the final `chips()` order.
 #[derive(Clone, Debug)]
 pub enum Chip {
     Program(ProgramAir),
+    Cpu(CpuAir),
     RegMemory(MemoryAir),
     RamMemory(MemoryAir),
     Poseidon2(Poseidon2Air),
@@ -329,6 +489,7 @@ impl p3_air::BaseAir<Val> for Chip {
     fn width(&self) -> usize {
         match self {
             Chip::Program(a) => p3_air::BaseAir::<Val>::width(a),
+            Chip::Cpu(a) => p3_air::BaseAir::<Val>::width(a),
             Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::BaseAir::<Val>::width(a),
             Chip::Poseidon2(a) => p3_air::BaseAir::<Val>::width(a),
             Chip::Public(a) => p3_air::BaseAir::<Val>::width(a),
@@ -338,6 +499,7 @@ impl p3_air::BaseAir<Val> for Chip {
     fn preprocessed_width(&self) -> usize {
         match self {
             Chip::Program(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
+            Chip::Cpu(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
             Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
             Chip::Poseidon2(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
             Chip::Public(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
@@ -347,6 +509,7 @@ impl p3_air::BaseAir<Val> for Chip {
     fn preprocessed_trace(&self) -> Option<p3_matrix::dense::RowMajorMatrix<Val>> {
         match self {
             Chip::Program(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
+            Chip::Cpu(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
             Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
             Chip::Poseidon2(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
             Chip::Public(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
@@ -369,6 +532,7 @@ where
     fn eval(&self, b: &mut AB) {
         match self {
             Chip::Program(a) => p3_air::Air::eval(a, b),
+            Chip::Cpu(a) => p3_air::Air::eval(a, b),
             Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::Air::eval(a, b),
             Chip::Poseidon2(a) => p3_air::Air::eval(a, b),
             Chip::Public(a) => p3_air::Air::eval(a, b),
