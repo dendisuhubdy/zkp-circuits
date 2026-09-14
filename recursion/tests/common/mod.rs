@@ -82,6 +82,134 @@ fn store_cached(profile: FriProfile, k: usize, p: &BundleProof) {
     let _ = std::fs::write(cache_path(profile, k), bytes);
 }
 
+/// The pin file the cycle-budget test reads: written on the first run, committed, asserted after.
+// `common` is compiled into every test binary; these are used only by `exit.rs` (and Task 7's
+// `precompiles.rs`), so the other binaries would report them as dead.
+#[allow(dead_code)]
+pub struct Pins {
+    pub cpu_rows: usize,
+    pub permutations: usize,
+    pub mem_accesses: usize,
+    pub witness_words: usize,
+    pub program_instrs: usize,
+}
+
+#[allow(dead_code)]
+fn pins_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pins.json")
+}
+
+/// `recursion/tests/pins.json`, parsed. When the file is absent this *is* the measurement run: it
+/// measures, writes the file (which the task then commits) and returns the same values, so the run
+/// that produces the pin passes with it and every later run is a diff against it.
+#[allow(dead_code)]
+pub fn pins() -> Pins {
+    if let Ok(s) = std::fs::read_to_string(pins_path()) {
+        return parse_pins(&s);
+    }
+    let r = measure_production_inner_proof();
+    let p = Pins {
+        cpu_rows: r.cpu_rows,
+        permutations: r.permutations,
+        mem_accesses: r.mem_accesses,
+        witness_words: r.witness_words,
+        program_instrs: r.program_instrs,
+    };
+    let json = format!(
+        "{{\n  \"cpu_rows\": {},\n  \"permutations\": {},\n  \"mem_accesses\": {},\n  \
+         \"witness_words\": {},\n  \"program_instrs\": {}\n}}\n",
+        p.cpu_rows, p.permutations, p.mem_accesses, p.witness_words, p.program_instrs
+    );
+    std::fs::write(pins_path(), json).expect("the pin file is writable");
+    p
+}
+
+/// The five numeric fields of the hand-rolled pin JSON, in the order [`pins`] writes them.
+#[allow(dead_code)]
+fn parse_pins(s: &str) -> Pins {
+    let get = |key: &str| -> usize {
+        s.split(&format!("\"{key}\": "))
+            .nth(1)
+            .and_then(|rest| rest.split([',', '\n', ' ', '}']).next())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("pins.json: no numeric field {key:?}: {s}"))
+    };
+    Pins {
+        cpu_rows: get("cpu_rows"),
+        permutations: get("permutations"),
+        mem_accesses: get("mem_accesses"),
+        witness_words: get("witness_words"),
+        program_instrs: get("program_instrs"),
+    }
+}
+
+/// Task 6's measurement, reused by Task 7's re-measurement: one production-profile inner proof
+/// through the shipped (`Checkpoints::Off`) program.
+#[allow(dead_code)]
+pub fn measure_production_inner_proof() -> recursion::programs::CycleReport {
+    use recursion::dsl::Checkpoints;
+    use recursion::programs::verify_rv32;
+    use recursion::shape::{InnerKey, InnerShape};
+    use recursion::witness::WitnessTape;
+    let p = bundle_proofs(FriProfile::Production, 1).pop().unwrap();
+    let shape = InnerShape::of(
+        FriProfile::Production,
+        p.proof.tier,
+        p.proof.program_log_height,
+        p.proof.input_log_height,
+        p.proof.keccak_log_height,
+        p.proof.sha256_log_height,
+        p.proof.mem_log_height,
+    );
+    let key = InnerKey::of(FriProfile::Production, &shape);
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let tape = WitnessTape::build(FriProfile::Production, &shape, &key, &p.proof).unwrap();
+    let exec = recursion::emulator::execute(&vp.program, &tape.words, 1 << 24).unwrap();
+    recursion::programs::cycle_report(&vp, &exec)
+}
+
+/// `src/programs/verify_rv32.digest`, trimmed — written on the first measurement run and committed.
+#[allow(dead_code)]
+pub fn committed_digest() -> String {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/programs/verify_rv32.digest");
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        return s.trim().to_string();
+    }
+    use recursion::dsl::Checkpoints;
+    use recursion::programs::verify_rv32;
+    use recursion::shape::{InnerKey, InnerShape};
+    let p = bundle_proofs(FriProfile::Production, 1).pop().unwrap();
+    let shape = InnerShape::of(
+        FriProfile::Production,
+        p.proof.tier,
+        p.proof.program_log_height,
+        p.proof.input_log_height,
+        p.proof.keccak_log_height,
+        p.proof.sha256_log_height,
+        p.proof.mem_log_height,
+    );
+    let key = InnerKey::of(FriProfile::Production, &shape);
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let hex = recursion::programs::digest_hex(&vp.program);
+    std::fs::write(&path, format!("{hex}\n")).expect("the digest file is writable");
+    hex
+}
+
+#[allow(dead_code)]
+pub fn random_felt(rng: &mut impl rand::Rng) -> recursion::isa::F {
+    use p3_field::{PrimeCharacteristicRing, PrimeField64};
+    use rand::RngExt;
+    recursion::isa::F::from_u64(rng.random::<u64>() % recursion::isa::F::ORDER_U64)
+}
+
+#[allow(dead_code)]
+pub fn random_ext(rng: &mut impl rand::Rng) -> recursion::isa::EF {
+    use p3_field::BasedVectorSpace;
+    let c = [random_felt(rng), random_felt(rng)];
+    recursion::isa::EF::from_basis_coefficients_slice(&c).expect("an extension element is two coefficients")
+}
+
 /// `n` distinct honest bundle proofs at `profile`, cached on disk by `(profile, k)`.
 pub fn bundle_proofs(profile: FriProfile, n: usize) -> Vec<BundleProof> {
     let m = Machine::new(profile);

@@ -108,11 +108,14 @@ fn the_program_reproduces_the_lookup_challenges_alpha_and_zeta() {
     assert_eq!(cp["lookup_beta"], r.lookup_beta);
     assert_eq!(cp["alpha"], r.alpha);
     assert_eq!(cp["zeta"], r.zeta);
-    // Phases 0–5 consume exactly the first five segments and stop — which is the invariant that
-    // makes the tape's segment boundaries real rather than decorative. Task 6's measurement asserts
-    // the finished program consumes *all* of it; this is the same claim at this task's boundary.
-    let consumed: usize = tape.segments[..5].iter().map(|(_, _, len)| len).sum();
-    assert_eq!(exec.hints_read, consumed, "phases 0–5 read Header..OpenedValues, no more");
+    assert_eq!(cp["fri_alpha"], r.fri_alpha);
+    for (i, beta) in r.betas.iter().enumerate() {
+        assert_eq!(cp[&format!("beta[{i}]")], *beta, "beta[{i}]");
+    }
+    // The finished program consumes the *whole* tape — which is the invariant that makes the
+    // tape's segment boundaries real rather than decorative. (At Task 4's boundary this asserted
+    // the first five segments; Task 6's finished program reads all fourteen.)
+    assert_eq!(exec.hints_read, tape.len(), "the program reads every segment, no more");
 }
 
 /// The one assertion phases 0–4 make beyond the declared shape: `LogUpGadget::verify_terminal_sum`.
@@ -599,15 +602,15 @@ fn the_quotient_identity_holds_in_the_program_for_a_real_proof() {
     let vp = verify_rv32(&shape, &key, Checkpoints::Off);
     let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
     let exec = execute(&vp.program, &tape.words, 200_000_000).expect("accepts a real proof");
-    // The brief expects `4 + 1 + 26` here — spec §4.4's own list. That is phase 8, which is Task 6:
-    // the `Off` build of *this* program publishes nothing at all yet, and asserting the final layout
-    // now would be asserting a step that does not exist. Task 6 restores the `4 + 1 + 26`.
-    assert!(exec.public.is_empty(), "phase 8 (spec §4.4's public values) is Task 6");
-    // And it got there by *reading the openings*, not by stopping short of them: the run consumes the
-    // whole `Header..OpenedValues` prefix of the tape. Without that this test would pass on a program
-    // with no phase 5 at all.
-    let consumed: usize = tape.segments[..5].iter().map(|(_, _, len)| len).sum();
-    assert_eq!(exec.hints_read, consumed);
+    // Spec §4.4's own list, exactly: `4 + 1 + 26`. (At Task 5's boundary the `Off` build published
+    // nothing yet; Task 6's finished program publishes these.)
+    let mut want = recursion::shape::inner_vk_digest(&shape, &key).to_vec();
+    want.push(F::ONE);
+    want.extend(p.proof.public_values.iter().map(|x| F::from_u64(*x)));
+    assert_eq!(exec.public, want, "§4.4's public values, exactly");
+    // And it got there by reading the *whole* tape, not by stopping short of it: without that this
+    // test would pass on a program with no query phase at all.
+    assert_eq!(exec.hints_read, tape.len());
 }
 
 /// One word of one opened value moved, and the quotient identity of *that instance* fails — at the
@@ -702,8 +705,11 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
         "phase 5 costs {phase5_instrs} rows per inner proof, past the 100 000 the milestone's \
          budget allots it out of 2^19"
     );
-    // No hashing happens in phases 0–5 beyond the challenger's own duplexing.
-    assert_eq!(exec.permutations(), 51, "phases 0–4's 51 challenger duplexes, and phase 5 hashes nothing");
+    // Hashing: phases 0–4 cost the challenger's 51 duplexes and phase 5 hashes nothing; the rest
+    // is the query phase — the FRI transcript's duplexes, the five input rounds' leaf sponges,
+    // walks and injections, and the commit-phase rows and walks. Pinned at the measured
+    // Test-profile number; the production one lives in `docs/00-recursion-vm.md` and `pins.json`.
+    assert_eq!(exec.permutations(), 10_451, "51 transcript duplexes in phases 0–4, the rest is the query phase");
 }
 
 /// Every assertion phase 5 makes is a *named* checkpoint, and the names are the interface Task 6's

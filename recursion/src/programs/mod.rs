@@ -13,7 +13,7 @@
 pub mod constraints;
 mod rv32;
 
-pub use rv32::verify_rv32;
+pub use rv32::{cycle_report, digest_hex, verify_rv32, CycleReport};
 
 use crate::dsl::{Checkpoints, Stats};
 use constraints::Phase5Cost;
@@ -36,6 +36,13 @@ pub struct VerifierProgram {
     /// milestone's exit is a *measured* number: it is a byproduct of building the program, not an
     /// estimate made about it.
     pub phase5: Vec<Phase5Cost>,
+    /// The program's instruction count split by phase, in emission order — phases 0–4 (header,
+    /// transcript, commitments, challenges), 5 (constraint evaluation), the phase-6 preamble
+    /// (claimed-evaluation observation, betas, final poly, arity schedule, the query PoW and the
+    /// index sampling), the four query-major segment reads, the unrolled query loop, and phase 8
+    /// (the §4.4 public values). The program is straight-line apart from its assertion traps, so
+    /// for an accepting run these are also the cpu rows per phase.
+    pub phase_rows: Vec<(&'static str, usize)>,
     /// The checkpoint names in emission order — the same list under `Off` and `On`, which is what
     /// makes the two builds comparable. Needed because `Builder::checkpoint_names` does not survive
     /// `Builder::finish`, and [`checkpoint_values`] is nothing without it.

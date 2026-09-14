@@ -31,14 +31,15 @@ use crate::isa::{Instr, Op, Program, EF, F, MEM_LIMIT, NUM_REGS};
 
 /// The first cell a user allocation can use. Cells `0..MEM_BASE` are the spill arena.
 ///
-/// `2^20`, a sixteenth of the `2^24`-cell address space. A spilled handle keeps its cell for the
+/// `2^22`, a quarter of the `2^24`-cell address space. A spilled handle keeps its cell for the
 /// rest of the program (there is no liveness analysis and no promotion back into a register), so the
 /// arena has to hold *every handle the program ever spills* — and the verifier program spills on the
-/// order of `10^5` of them. Cells cost nothing on their own: the rVM's memory is addressed, not
-/// materialised, so an unused cell is neither a row nor a trace entry. Raising this number moves
-/// every user allocation and therefore **changes every program digest**, which is why it is set
-/// once, generously, here rather than nudged upwards later.
-pub const MEM_BASE: u64 = 1 << 20;
+/// order of `10^6` of them (the FRI reduction alone creates ~10 handle slots per opened column per
+/// query). Cells cost nothing on their own: the rVM's memory is addressed, not materialised, so an
+/// unused cell is neither a row nor a trace entry. Raising this number moves every user allocation
+/// and therefore **changes every program digest**, which is why it is set once, generously, here
+/// rather than nudged upwards later. (`2^20` sufficed through phase 5 and overflows in phase 6.)
+pub const MEM_BASE: u64 = 1 << 22;
 
 /// The registers handles are allocated from, in allocation-preference order. Width-2 handles take an
 /// aligned pair, so `r25` is reachable only by a width-1 handle: twelve pairs, twenty-five singles.
