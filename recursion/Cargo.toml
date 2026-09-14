@@ -1,0 +1,44 @@
+[package]
+name = "recursion"
+version = "0.1.0"
+edition = "2021"
+description = "Rand recursion VM (rVM): a field-native machine whose programs verify Rand zkVM proofs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Exactly research's pins; the rVM shares the field, the permutation and the proof system.
+p3-goldilocks = "=0.7.0"
+p3-field = "=0.7.0"
+p3-symmetric = "=0.7.0"
+p3-challenger = "=0.7.0"
+p3-poseidon2 = "=0.7.0"
+p3-air = "=0.7.0"
+p3-batch-stark = "=0.7.0"
+p3-lookup = "=0.7.0"
+p3-uni-stark = "=0.7.0"
+p3-fri = "=0.7.0"
+p3-merkle-tree = "=0.7.0"
+p3-commit = "=0.7.0"
+p3-matrix = "=0.7.0"
+p3-util = "=0.7.0"
+rand = { version = "0.10", features = ["std_rng"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+# The reference verifier this crate's first program mirrors, the reference permutation it hashes
+# with, the Chip AIRs its constraint emitter walks, and the bundle guest its fixtures prove.
+rand_zkvm = { path = "../research" }
+
+[dev-dependencies]
+hex = "0.4"
+
+# `research`'s profiles, verbatim. This crate is its own package root, so cargo reads *these*
+# tables and not `research/`'s — and without the dependency override every p3 crate and
+# `rand_zkvm` itself would build at `opt-level = 0` under `cargo test`, which makes proving a
+# fixture bundle proof (the only proofs this crate's tests verify) take hours instead of seconds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test]
+opt-level = 1
