@@ -33,6 +33,7 @@ pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
 
 use crate::emulator::ExecError;
 use crate::isa::{DecodeError, Instr, Op, Program, NUM_REGS};
+use crate::tables::memory::MemoryAir;
 use crate::tables::pad_height;
 use crate::tables::program::ProgramAir;
 use crate::tables::range::RangeAir;
@@ -288,6 +289,8 @@ fn check_instr(instr: &Instr) -> Result<(), DecodeError> {
 pub fn chips(program: &Arc<Program>, _tier: Tier, _reduce_log_height: u8) -> Vec<Chip> {
     vec![
         Chip::Program(ProgramAir::new(program.clone())),
+        Chip::RegMemory(MemoryAir { register: true }),
+        Chip::RamMemory(MemoryAir { register: false }),
         Chip::Range(RangeAir),
     ]
 }
@@ -299,6 +302,8 @@ fn current_degree_bits(program: &Program, _tier: Tier) -> Vec<usize> {
     let zk = 1usize;
     vec![
         program_log_height(program.instrs.len()) as usize + zk,
+        MIN_LOG_HEIGHT as usize + zk,
+        MIN_LOG_HEIGHT as usize + zk,
         crate::tables::range::HEIGHT.trailing_zeros() as usize + zk,
     ]
 }
@@ -307,6 +312,8 @@ fn current_degree_bits(program: &Program, _tier: Tier) -> Vec<usize> {
 #[derive(Clone, Debug)]
 pub enum Chip {
     Program(ProgramAir),
+    RegMemory(MemoryAir),
+    RamMemory(MemoryAir),
     Range(RangeAir),
 }
 
@@ -314,18 +321,21 @@ impl p3_air::BaseAir<Val> for Chip {
     fn width(&self) -> usize {
         match self {
             Chip::Program(a) => p3_air::BaseAir::<Val>::width(a),
+            Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::BaseAir::<Val>::width(a),
             Chip::Range(a) => p3_air::BaseAir::<Val>::width(a),
         }
     }
     fn preprocessed_width(&self) -> usize {
         match self {
             Chip::Program(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
+            Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
             Chip::Range(a) => p3_air::BaseAir::<Val>::preprocessed_width(a),
         }
     }
     fn preprocessed_trace(&self) -> Option<p3_matrix::dense::RowMajorMatrix<Val>> {
         match self {
             Chip::Program(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
+            Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
             Chip::Range(a) => p3_air::BaseAir::<Val>::preprocessed_trace(a),
         }
     }
@@ -338,6 +348,7 @@ where
     fn eval(&self, b: &mut AB) {
         match self {
             Chip::Program(a) => p3_air::Air::eval(a, b),
+            Chip::RegMemory(a) | Chip::RamMemory(a) => p3_air::Air::eval(a, b),
             Chip::Range(a) => p3_air::Air::eval(a, b),
         }
     }
