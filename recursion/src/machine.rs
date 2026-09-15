@@ -49,12 +49,41 @@ use crate::tables::reduce::{reduce_events, reduce_log_height, reduce_trace, Redu
 /// different artifact family, so a different arbitrary constant: "RVM_M5_2".
 const KEY_SEED: u64 = 0x5256_4d5f_4d35_5f32;
 
+/// The alternative proving backends' Plonky3 configurations (M5.4 Task 1):
+/// `research/src/machine.rs`'s `reference_cfg`/`cuda_cfg`, mirrored on the rVM's own
+/// `generic_config`.
+#[cfg(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda"))]
+pub mod backend;
+
+/// Builds a `Config` from two explicit RNGs: `mmcs_rng` seeds the value MMCS's per-commit
+/// hiding salts (used for *every* commit through it, preprocessed traces included), `pcs_rng`
+/// seeds the PCS's own random codewords/quotient blinding. Kept private: callers pick a seeding
+/// strategy through `make_config` (fresh OS entropy, for proving) or `key_config`
+/// (deterministic, for a preprocessed commitment any verifier can recompute).
 fn build_config(profile: FriProfile, mmcs_rng: StdRng, pcs_rng: StdRng) -> Config {
     let perm = permutation();
     let hash = Hash::new(perm.clone());
     let compress = Compress::new(perm);
     let val_mmcs = ValMmcs::new(hash, compress, 2, mmcs_rng);
-    let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
+    generic_config(profile, Dft::default(), val_mmcs, pcs_rng)
+}
+
+/// The FRI/PCS setup, written once over any value-MMCS and DFT. Every backend goes through
+/// here, so "the reference backend uses the same FRI parameters as the CPU one" is not a
+/// comment that can drift — `build_config` is literally this function with the Plonky3
+/// `ValMmcs`/`Radix2DitParallel` pair, and `backend`'s `reference_config`/`cuda_config` call it
+/// with theirs (`research/src/machine.rs`'s `generic_config`, mirrored).
+fn generic_config<D, M>(
+    profile: FriProfile,
+    dft: D,
+    val_mmcs: M,
+    pcs_rng: StdRng,
+) -> StarkConfig<HidingFriPcs<Val, D, M, ExtensionMmcs<Val, Challenge, M>, StdRng>, Challenge, Challenger>
+where
+    D: p3_dft::TwoAdicSubgroupDft<Val>,
+    M: p3_commit::Mmcs<Val, MultiProof: Sync, Error: Sync> + Clone,
+{
+    let challenge_mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let fri = p3_fri::FriParameters {
         log_blowup: 3,
         log_final_poly_len: 0,
@@ -64,7 +93,7 @@ fn build_config(profile: FriProfile, mmcs_rng: StdRng, pcs_rng: StdRng) -> Confi
         query_proof_of_work_bits: profile.pow_bits(),
         mmcs: challenge_mmcs,
     };
-    let pcs = Pcs::new(Dft::default(), val_mmcs, fri, 4, pcs_rng);
+    let pcs = HidingFriPcs::new(dft, val_mmcs, fri, 4, pcs_rng);
     StarkConfig::new(pcs, Challenger::new(permutation()))
 }
 
@@ -173,6 +202,32 @@ pub enum ProveError {
     /// legality — the preprocessed table commits to the program, so its words are checked at the
     /// one place they enter the machine).
     Decode(DecodeError),
+    /// An alternative proving backend failed: the device path (`Backend::Cuda`) or an engine
+    /// panic inside `prove_batch` — `research`'s `ProveError::Backend`, mirrored (M5.4).
+    #[cfg(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda"))]
+    Backend(String),
+}
+
+/// The proving backend (M5.4 Task 1): `Cpu` is the stock Plonky3 engine pair this machine has
+/// always used; `Reference` is `rand-zkvm-cuda`'s CPU-twin engines; `Cuda` is the GPU path
+/// (a real device, or the mock driver under `mock-cuda`). `research`'s `Backend`, mirrored.
+#[cfg(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda"))]
+#[derive(Clone, Copy, Debug)]
+pub enum Backend {
+    Cpu,
+    #[cfg(feature = "reference-backend")]
+    Reference,
+    #[cfg(any(feature = "cuda", feature = "mock-cuda"))]
+    Cuda,
+}
+
+/// Best-effort text of a caught panic payload: `panic!("{e}")` and `panic!("literal")` cover
+/// every panic the backend engines raise (`research`'s helper, verbatim).
+#[cfg(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda"))]
+fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<String>() { return format!("backend panicked: {s}"); }
+    if let Some(s) = p.downcast_ref::<&str>() { return format!("backend panicked: {s}"); }
+    "backend panicked".to_string()
 }
 
 #[derive(Debug)]
@@ -182,8 +237,7 @@ pub enum VerifyError {
     Batch(String),
     RegHeight,
     RamHeight,
-    Poseidon2Height,
-    ReduceHeight,
+    Poseidon2Height,    ReduceHeight,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -414,6 +468,95 @@ impl Machine {
             public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(),
             batch,
         }
+    }
+
+    /// Prove on `backend` (M5.4 Task 1). `Backend::Cpu` is exactly `prove`; the other backends
+    /// run the same batch STARK with `rand-zkvm-cuda`'s engines and hand back a `Proof` that
+    /// this `Machine`'s own `verify` accepts (`research/src/machine.rs`'s `prove_with`,
+    /// mirrored).
+    #[cfg(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda"))]
+    pub fn prove_with(&self, backend: Backend, program: &Program, witness: &[Val], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
+        match backend {
+            Backend::Cpu => self.prove(program, witness, tier),
+            #[cfg(feature = "reference-backend")]
+            Backend::Reference => {
+                // Fresh entropy for the proving config (hiding), deterministic for the key
+                // config — the same split `make_config`/`key_config` make on the CPU.
+                let cfg = backend::reference_config(self.profile, StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()));
+                let (mmcs_rng, pcs_rng) = key_rngs();
+                let key = backend::reference_config(self.profile, mmcs_rng, pcs_rng);
+                self.prove_on(&cfg, &key, program, witness, tier)
+            }
+            #[cfg(any(feature = "cuda", feature = "mock-cuda"))]
+            Backend::Cuda => {
+                let gpu = rand_zkvm_cuda::gpu::GpuProver::probe(backend::PERM_SEED).map_err(|e| ProveError::Backend(e.to_string()))?;
+                let cfg = backend::cuda_config(self.profile, gpu.clone(), StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()));
+                let (mmcs_rng, pcs_rng) = key_rngs();
+                let key = backend::cuda_config(self.profile, gpu, mmcs_rng, pcs_rng);
+                self.prove_on(&cfg, &key, program, witness, tier)
+            }
+        }
+    }
+
+    /// The body of `prove` over any structurally compatible config. The proof is converted to
+    /// the CPU `Config` by a postcard round trip: the alternative configs commit with the same
+    /// Poseidon2 permutation, the same salt stream and the same FRI parameters, so the wire
+    /// encodings of their commitments and opening proofs are byte-identical to the CPU ones and
+    /// the decode is a pure retyping.
+    ///
+    /// `key_cfg` must be seeded from `key_rngs`: the preprocessed commitment is what the
+    /// verifier recomputes on the CPU via `verifier_key`, and the backend has to reproduce it
+    /// exactly or verification fails at the first check.
+    ///
+    /// NOTE: this body is a deliberate duplicate of `prove`/`prove_traces`'s (which cannot be
+    /// generic over `SC` because `Proof` names the CPU `Config`). Instance construction, the
+    /// public-values placement, and the `key_cfg`/`cfg` split must stay identical in all three,
+    /// or a backend proof stops matching what the CPU verifier recomputes. Change one, change
+    /// the others.
+    #[cfg(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda"))]
+    fn prove_on<SC>(&self, cfg: &SC, key_cfg: &SC, program: &Program, witness: &[Val], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError>
+    where
+        SC: StarkGenericConfig<Challenge = Challenge, Challenger = Challenger>,
+        // Bounds copied from `p3_batch_stark::prove_batch`'s signature, plus the pin that
+        // makes this config's base field our `Val` so `Chip`'s `Air` impls apply.
+        SC::Pcs: p3_commit::Pcs<Challenge, Challenger, Domain: p3_commit::PolynomialSpace<Val = Val>> + Sync,
+        p3_batch_stark::Domain<SC>: Send + Sync,
+        <SC::Pcs as p3_commit::Pcs<Challenge, Challenger>>::ProverData: Sync,
+        <SC::Pcs as p3_commit::Pcs<Challenge, Challenger>>::Commitment: Sync,
+    {
+        // Registration-time legality (R1): the preprocessed table commits to every word.
+        Self::check_program(program).map_err(ProveError::Decode)?;
+        // Run up to the largest tier's cycle budget, exactly as `prove` does.
+        let exec = execute(program, witness, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
+        let tier = match tier {
+            Some(t) if TIERS.contains(&t.0) => t,
+            Some(t) => return Err(ProveError::BadTier(t.0)),
+            None => Tier::for_cycles(exec.cpu_rows()).ok_or(ProveError::NoTier(exec.cpu_rows()))?,
+        };
+        let traces = build_traces(program, &exec, tier)?;
+        let arc = Arc::new(program.clone());
+        let airs = chips(&arc, tier, traces.reduce_log_height);
+        let mats = traces.as_slice();
+        assert_eq!(airs.len(), mats.len(), "one trace per chip");
+        let instances: Vec<StarkInstance<'_, SC, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
+            air, trace, public_values: if i == PUBLIC_VALUES_INDEX { traces.public_values.clone() } else { vec![] },
+        }).collect();
+        let prover_data = ProverData::from_airs_and_degrees(key_cfg, &airs, &log_ext_degrees(program, tier, traces.reg_log_height, traces.ram_log_height, traces.poseidon2_log_height, traces.reduce_log_height));
+        // The engines panic (rather than return) on a device failure — `CudaHashEngine::ok`
+        // and friends — so a backend fault must not take the caller's process down with it.
+        let batch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_batch(cfg, &instances, &prover_data)))
+            .map_err(|p| ProveError::Backend(panic_message(p)))?;
+        let bytes = postcard::to_allocvec(&batch).map_err(|e| ProveError::Backend(format!("proof serialise: {e}")))?;
+        let batch: BatchProof<Config> = postcard::from_bytes(&bytes).map_err(|e| ProveError::Backend(format!("proof convert: {e}")))?;
+        Ok((Proof {
+            tier,
+            reg_log_height: traces.reg_log_height,
+            ram_log_height: traces.ram_log_height,
+            poseidon2_log_height: traces.poseidon2_log_height,
+            reduce_log_height: traces.reduce_log_height,
+            public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(),
+            batch,
+        }, exec))
     }
 
     /// R6: the verifier holds the registered program; the preprocessed cap is the binding (there
