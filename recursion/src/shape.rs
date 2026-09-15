@@ -502,7 +502,10 @@ impl InnerKey {
 /// than a digest at all — so both halves are hashed into one value the node and the program compute
 /// with the same function. The program recomputes it from its own compile-time constants and
 /// `PUBLIC`s it, so the aggregate says which inner verifier it ran.
-pub fn inner_vk_digest(shape: &InnerShape, key: &InnerKey) -> [F; 4] {
+///
+/// Generic over [`VerifierShape`] (M5.4, T5): the RV32 machine's shape and the rVM's own
+/// [`RvmShape`] hash through the same call.
+pub fn inner_vk_digest<S: VerifierShape>(shape: &S, key: &S::Key) -> [F; 4] {
     let sponge = PaddingFreeSponge::<Perm, 8, 4, 4>::new(rand_zkvm::machine::permutation());
     let mut msg = vec![F::from_u64(RVM_VK_DOMAIN)];
     msg.extend(shape.shape_words());
@@ -548,4 +551,630 @@ pub(crate) fn natural_domain(
         cfg.pcs(),
         size,
     )
+}
+
+// ─────────────────────────────────────────────────────────────── the shape trait (M5.4, T5)
+
+use p3_batch_stark::BatchProof;
+
+/// One proof's carrier across the two machines' `Proof` types: the batch and the public values
+/// every shape's replay and tape builder read, and the declared-shape words the tape's `Header`
+/// segment opens with, in the shape's own order. Implemented for `rand_zkvm::machine::Proof`
+/// (the RV32 machine's) and `crate::machine::Proof` (the rVM's own).
+pub trait ProofBatch {
+    fn batch(&self) -> &BatchProof<Config>;
+    fn public_values_u64(&self) -> &[u64];
+    /// The declared-shape words, in the shape's own order, read off the proof (so a wrong-shape
+    /// proof is refused at the header the program pins against its own constants).
+    fn tape_header(&self) -> Vec<u64>;
+}
+
+impl ProofBatch for Proof {
+    fn batch(&self) -> &BatchProof<Config> {
+        &self.batch
+    }
+    fn public_values_u64(&self) -> &[u64] {
+        &self.public_values
+    }
+    fn tape_header(&self) -> Vec<u64> {
+        vec![
+            self.tier.0 as u64,
+            self.program_log_height as u64,
+            self.input_log_height as u64,
+            self.keccak_log_height as u64,
+            self.sha256_log_height as u64,
+            self.public_log_height as u64,
+            self.mem_log_height as u64,
+        ]
+    }
+}
+
+impl ProofBatch for crate::machine::Proof {
+    fn batch(&self) -> &BatchProof<Config> {
+        &self.batch
+    }
+    fn public_values_u64(&self) -> &[u64] {
+        &self.public_values
+    }
+    fn tape_header(&self) -> Vec<u64> {
+        vec![
+            self.tier.0 as u64,
+            self.reg_log_height as u64,
+            self.ram_log_height as u64,
+            self.poseidon2_log_height as u64,
+            self.reduce_log_height as u64,
+        ]
+    }
+}
+
+/// A shape's preprocessed-commitment key: the sixteen field elements the program carries as
+/// immediates, and the `flatten` the vk digest hashes.
+pub trait ShapeKey: Clone + PartialEq + Eq + std::fmt::Debug {
+    fn cap(&self) -> &[[F; 4]; 4];
+    fn flatten(&self) -> Vec<F>;
+}
+
+impl ShapeKey for InnerKey {
+    fn cap(&self) -> &[[F; 4]; 4] {
+        &self.cap
+    }
+    fn flatten(&self) -> Vec<F> {
+        self.cap.iter().flatten().copied().collect()
+    }
+}
+
+/// A shape a verifier program is specialised to, across the two machines (M5.4, T5): the
+/// per-instance numbers the batch transcript needs, the FRI schedule, the declared-shape pin
+/// the tape's header carries, and the program-log height of the committed program.
+/// [`InnerShape`] (the RV32 machine's proofs) and [`RvmShape`] (the rVM's own) implement it;
+/// the program (`programs::verify_rv32_with`), the replay (`reference::replay`) and the tape
+/// (`witness::WitnessTape`) are generic over it.
+pub trait VerifierShape: Clone + PartialEq + Eq + std::fmt::Debug {
+    type Proof: ProofBatch;
+    type Air;
+    type Key: ShapeKey;
+
+    fn instances(&self) -> usize;
+    fn profile(&self) -> FriProfile;
+    fn widths(&self) -> &[usize];
+    fn num_public_values(&self) -> &[usize];
+    fn preprocessed_widths(&self) -> &[usize];
+    fn main_next(&self) -> &[bool];
+    fn pre_next(&self) -> &[bool];
+    /// The global preprocessed commitment's matrix order: `matrix_to_instance[m]` is the
+    /// instance whose preprocessed trace is matrix `m`.
+    fn preprocessed_matrix_to_instance(&self) -> &[usize];
+    fn degree_bits(&self) -> &[usize];
+    fn log_num_quotient_chunks(&self) -> &[usize];
+    fn num_lookups(&self) -> &[usize];
+    fn num_queries(&self) -> usize;
+    fn query_pow_bits(&self) -> usize;
+    fn log_arities(&self) -> &[usize];
+    fn log_global_max_height(&self) -> usize;
+    /// The instance that owns the batch's public values (`PV_INSTANCE` on the RV32 machine,
+    /// `machine::PUBLIC_VALUES_INDEX` on the rVM).
+    fn pv_instance(&self) -> usize;
+    fn program_log_height(&self) -> u8;
+    fn air_layout(&self, i: usize, air: &Self::Air) -> AirLayout;
+    fn common_data(&self) -> std::sync::Arc<p3_batch_stark::CommonData<Config>>;
+    /// The real chip set the constraint evaluation runs against (`chips()`'s order — instance
+    /// order).
+    fn constraint_chips(&self) -> Vec<Self::Air>;
+    fn shape_words(&self) -> Vec<F>;
+    fn header_words(&self) -> Vec<F>;
+    fn matches(&self, proof: &Self::Proof) -> bool;
+    /// The header words that come from the shape rather than the proof, spliced into the tape's
+    /// `Header` segment after the proof's own [`ProofBatch::tape_header`] words and before
+    /// `num_queries`. The rVM's `program_log_height` (a constant of the committed program — its
+    /// proofs do not declare it); empty on the RV32 machine, whose proofs declare every word.
+    fn header_shape_constants(&self) -> Vec<u64>;
+}
+
+impl VerifierShape for InnerShape {
+    type Proof = Proof;
+    type Air = Chip;
+    type Key = InnerKey;
+
+    fn instances(&self) -> usize {
+        self.instances()
+    }
+    fn profile(&self) -> FriProfile {
+        self.profile()
+    }
+    fn widths(&self) -> &[usize] {
+        &self.widths
+    }
+    fn num_public_values(&self) -> &[usize] {
+        &self.num_public_values
+    }
+    fn preprocessed_widths(&self) -> &[usize] {
+        &self.preprocessed_widths
+    }
+    fn main_next(&self) -> &[bool] {
+        &self.main_next
+    }
+    fn pre_next(&self) -> &[bool] {
+        &self.pre_next
+    }
+    fn preprocessed_matrix_to_instance(&self) -> &[usize] {
+        &self.preprocessed_matrix_to_instance
+    }
+    fn degree_bits(&self) -> &[usize] {
+        &self.degree_bits
+    }
+    fn log_num_quotient_chunks(&self) -> &[usize] {
+        &self.log_num_quotient_chunks
+    }
+    fn num_lookups(&self) -> &[usize] {
+        &self.num_lookups
+    }
+    fn num_queries(&self) -> usize {
+        self.num_queries
+    }
+    fn query_pow_bits(&self) -> usize {
+        self.query_pow_bits
+    }
+    fn log_arities(&self) -> &[usize] {
+        &self.log_arities
+    }
+    fn log_global_max_height(&self) -> usize {
+        self.log_global_max_height()
+    }
+    fn pv_instance(&self) -> usize {
+        PV_INSTANCE
+    }
+    fn program_log_height(&self) -> u8 {
+        self.program_log_height
+    }
+    fn air_layout(&self, i: usize, air: &Chip) -> AirLayout {
+        self.air_layout(i, air)
+    }
+    fn common_data(&self) -> std::sync::Arc<p3_batch_stark::CommonData<Config>> {
+        self.common_data()
+    }
+    fn constraint_chips(&self) -> Vec<Chip> {
+        chips(Tier(self.tier), self.keccak_log_height, self.sha256_log_height)
+    }
+    fn shape_words(&self) -> Vec<F> {
+        self.shape_words()
+    }
+    fn header_words(&self) -> Vec<F> {
+        self.header_words()
+    }
+    fn matches(&self, proof: &Proof) -> bool {
+        self.matches(proof)
+    }
+    fn header_shape_constants(&self) -> Vec<u64> {
+        Vec::new()
+    }
+}
+
+/// The arity schedule of a proof, as `verify_fri` extracts it (bounds unchecked here; the tape
+/// builder and the program both compare it against the shape's own) — [`proof_log_arities`]
+/// generic over the proof carrier, which both machines' `Proof` types are.
+pub(crate) fn proof_log_arities_generic<P: ProofBatch>(proof: &P) -> Vec<usize> {
+    proof
+        .batch()
+        .opening_proof
+        .1
+        .commit_phase_openings
+        .iter()
+        .map(|o| o.log_arity as usize)
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────── the rVM's own shape (M5.4, T5)
+
+/// The shape of one **rVM proof**: its declared heights, the committed program, and everything
+/// the batch transcript and the opening argument derive from them — [`InnerShape`]'s sibling
+/// for the self-verifier (M5.4's R7: a sibling, not a generalisation; the program, replay and
+/// tape are shared through [`VerifierShape`], which is where the sharing lives).
+///
+/// The header a proof of this shape declares is
+/// `[tier, reg_log_height, ram_log_height, poseidon2_log_height, reduce_log_height,
+///   program_log_height, num_queries, log_arities…]`
+/// — the rVM proof's own fields first, then the committed program's height (a constant of the
+/// shape, since the program table is preprocessed), then the profile's query count and the
+/// schedule. `PartialEq` is load-bearing exactly as [`InnerShape`]'s is — implemented by hand
+/// because `isa::Program` has none: two shapes are equal when every scalar and every vector
+/// agrees, and the committed programs have the same digest (the program's identity *is* its
+/// digest — the preprocessed table commits to it).
+#[derive(Clone, Debug)]
+pub struct RvmShape {
+    pub profile: FriProfile,
+    pub tier: usize,
+    pub reg_log_height: u8,
+    pub ram_log_height: u8,
+    pub poseidon2_log_height: u8,
+    pub reduce_log_height: u8,
+    /// The committed program — the self-verifier's inner verifier is a *specific* program, so
+    /// the shape carries it (the program table is preprocessed; its commitment is the key's cap).
+    pub program: std::sync::Arc<crate::isa::Program>,
+    pub program_log_height: u8,
+    pub num_queries: usize,
+    pub query_pow_bits: usize,
+    /// Per instance, `log2(|extended trace domain|)` — `machine::log_ext_degrees`.
+    pub degree_bits: Vec<usize>,
+    pub widths: Vec<usize>,
+    pub preprocessed_widths: Vec<usize>,
+    pub log_num_quotient_chunks: Vec<usize>,
+    pub num_lookups: Vec<usize>,
+    pub num_public_values: Vec<usize>,
+    pub main_next: Vec<bool>,
+    pub pre_next: Vec<bool>,
+    pub preprocessed_matrix_to_instance: Vec<usize>,
+    /// The FRI arity schedule, derived from the distinct degree bits exactly as
+    /// [`InnerShape`]'s is.
+    pub log_arities: Vec<usize>,
+}
+
+impl PartialEq for RvmShape {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile == other.profile
+            && self.tier == other.tier
+            && self.reg_log_height == other.reg_log_height
+            && self.ram_log_height == other.ram_log_height
+            && self.poseidon2_log_height == other.poseidon2_log_height
+            && self.reduce_log_height == other.reduce_log_height
+            && self.program.digest() == other.program.digest()
+            && self.program_log_height == other.program_log_height
+            && self.num_queries == other.num_queries
+            && self.query_pow_bits == other.query_pow_bits
+            && self.degree_bits == other.degree_bits
+            && self.widths == other.widths
+            && self.preprocessed_widths == other.preprocessed_widths
+            && self.log_num_quotient_chunks == other.log_num_quotient_chunks
+            && self.num_lookups == other.num_lookups
+            && self.num_public_values == other.num_public_values
+            && self.main_next == other.main_next
+            && self.pre_next == other.pre_next
+            && self.preprocessed_matrix_to_instance == other.preprocessed_matrix_to_instance
+            && self.log_arities == other.log_arities
+    }
+}
+impl Eq for RvmShape {}
+
+/// The rVM preprocessed commitment for `(program, tier, reduce)`: sixteen field elements,
+/// recomputable by anyone through `machine::Machine::verifier_key` (seeded from the fixed
+/// `KEY_SEED` precisely so that it is).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RvmKey {
+    pub cap: [[F; 4]; 4],
+}
+
+impl RvmShape {
+    /// The shape of any rVM proof at `(profile, program, tier, the four declared heights)`.
+    ///
+    /// Panics when the heights are ones `machine::Machine::verify` would refuse outright
+    /// (`check_declared_heights`) — a verifier program for a shape no proof can have is a
+    /// build-time mistake. [`RvmShape::try_of`] is the fallible form.
+    pub fn of(
+        profile: FriProfile,
+        program: &std::sync::Arc<crate::isa::Program>,
+        tier: crate::machine::Tier,
+        reg_log_height: u8,
+        ram_log_height: u8,
+        poseidon2_log_height: u8,
+        reduce_log_height: u8,
+    ) -> Self {
+        Self::try_of(profile, program, tier, reg_log_height, ram_log_height, poseidon2_log_height, reduce_log_height)
+            .expect("a verifier program is built for a shape a proof can actually have")
+    }
+
+    /// [`RvmShape::of`], reporting rather than panicking — [`InnerShape::try_of`]'s exact
+    /// construction over the rVM's own `chips`, `log_ext_degrees` and `verifier_key`.
+    pub fn try_of(
+        profile: FriProfile,
+        program: &std::sync::Arc<crate::isa::Program>,
+        tier: crate::machine::Tier,
+        reg_log_height: u8,
+        ram_log_height: u8,
+        poseidon2_log_height: u8,
+        reduce_log_height: u8,
+    ) -> Result<Self, ShapeError> {
+        crate::machine::check_declared_heights(
+            tier,
+            reg_log_height,
+            ram_log_height,
+            poseidon2_log_height,
+            reduce_log_height,
+        )
+        .map_err(|e| ShapeError::DeclaredHeights(format!("{e:?}")))?;
+
+        let m = rvm_machine(profile);
+        let is_zk = m.config.is_zk() as usize;
+        let airs = crate::machine::chips(program, tier, reduce_log_height);
+        let degree_bits = crate::machine::log_ext_degrees(
+            program,
+            tier,
+            reg_log_height,
+            ram_log_height,
+            poseidon2_log_height,
+            reduce_log_height,
+        );
+        let common = m.verifier_key(program, tier, reduce_log_height != 0);
+
+        let widths: Vec<usize> = airs.iter().map(BaseAir::<Val>::width).collect();
+        let num_public_values: Vec<usize> =
+            airs.iter().map(BaseAir::<Val>::num_public_values).collect();
+        let main_next: Vec<bool> = airs
+            .iter()
+            .map(|a| !BaseAir::<Val>::main_next_row_columns(a).is_empty())
+            .collect();
+        let pre_next: Vec<bool> = airs
+            .iter()
+            .map(|a| !BaseAir::<Val>::preprocessed_next_row_columns(a).is_empty())
+            .collect();
+        let num_lookups: Vec<usize> = common.lookups.iter().map(|l| l.len()).collect();
+
+        // The preprocessed widths and matrix order come from `CommonData`, exactly as
+        // `verify_batch`'s own precompute loop takes them (`InnerShape::try_of`'s rule,
+        // verbatim).
+        let (preprocessed_widths, preprocessed_matrix_to_instance, cap_roots) =
+            match &common.preprocessed {
+                Some(global) => (
+                    global
+                        .instances
+                        .iter()
+                        .map(|m| m.as_ref().map_or(0, |m| m.width))
+                        .collect::<Vec<_>>(),
+                    global.matrix_to_instance.clone(),
+                    global.commitment.num_roots(),
+                ),
+                None => (vec![0; airs.len()], Vec::new(), 1 << CAP_HEIGHT),
+            };
+        if cap_roots != 1 << CAP_HEIGHT {
+            return Err(ShapeError::CapShape(cap_roots));
+        }
+
+        let lookup_gadget = LogUpGadget::new();
+        let log_arities = fri_schedule(&degree_bits)?;
+
+        let mut shape = RvmShape {
+            profile,
+            tier: tier.0,
+            reg_log_height,
+            ram_log_height,
+            poseidon2_log_height,
+            reduce_log_height,
+            program: program.clone(),
+            program_log_height: crate::machine::program_log_height(program.instrs.len()),
+            num_queries: profile.num_queries(),
+            query_pow_bits: profile.pow_bits(),
+            degree_bits,
+            widths,
+            preprocessed_widths,
+            log_num_quotient_chunks: Vec::new(),
+            num_lookups,
+            num_public_values,
+            main_next,
+            pre_next,
+            preprocessed_matrix_to_instance,
+            log_arities,
+        };
+        shape.log_num_quotient_chunks = airs
+            .iter()
+            .enumerate()
+            .map(|(i, air)| {
+                p3_batch_stark::symbolic::get_log_num_quotient_chunks::<Val, Challenge, _, _>(
+                    air,
+                    shape.air_layout(i, air),
+                    1usize << (shape.degree_bits[i] - is_zk),
+                    &common.lookups[i],
+                    m.config.is_zk(),
+                    &lookup_gadget,
+                )
+            })
+            .collect();
+        Ok(shape)
+    }
+
+    /// The `AirLayout` `verify_batch`'s precompute loop builds for instance `i` —
+    /// [`InnerShape::air_layout`], verbatim.
+    pub fn air_layout(&self, i: usize, air: &crate::machine::Chip) -> AirLayout {
+        AirLayout {
+            preprocessed_width: self.preprocessed_widths[i],
+            main_width: self.widths[i],
+            num_public_values: self.num_public_values[i],
+            num_periodic_columns: BaseAir::<Val>::num_periodic_columns(air),
+            ..Default::default()
+        }
+    }
+
+    /// The batch's `CommonData` (the lookup contexts and the preprocessed commitment), a pure
+    /// function of `(program, tier, reduce)` — `InnerShape::common_data`'s role.
+    #[doc(hidden)]
+    pub fn common_data(&self) -> std::sync::Arc<p3_batch_stark::CommonData<Config>> {
+        rvm_machine(self.profile).verifier_key(
+            &self.program,
+            crate::machine::Tier(self.tier),
+            self.reduce_log_height != 0,
+        )
+    }
+
+    /// `max(degree_bits) + LOG_BLOWUP`.
+    pub fn log_global_max_height(&self) -> usize {
+        self.degree_bits.iter().copied().max().expect("a batch has instances") + LOG_BLOWUP
+    }
+
+    /// The canonical flattening hashed into the vk digest: the rVM prefix
+    /// `[tier, program, reg, ram, poseidon2, reduce, num_queries, query_pow_bits, instances]`,
+    /// then the per-instance eight-tuple, then the arity schedule — [`InnerShape::shape_words`]'s
+    /// layout, minus the two RV32-only heights (input, keccak, sha256, public, mem → the rVM's
+    /// reg, ram, poseidon2, reduce).
+    pub fn shape_words(&self) -> Vec<F> {
+        let mut w = vec![
+            self.tier,
+            self.program_log_height as usize,
+            self.reg_log_height as usize,
+            self.ram_log_height as usize,
+            self.poseidon2_log_height as usize,
+            self.reduce_log_height as usize,
+            self.num_queries,
+            self.query_pow_bits,
+            self.degree_bits.len(),
+        ];
+        for i in 0..self.degree_bits.len() {
+            w.push(self.degree_bits[i]);
+            w.push(self.widths[i]);
+            w.push(self.preprocessed_widths[i]);
+            w.push(self.log_num_quotient_chunks[i]);
+            w.push(self.num_lookups[i]);
+            w.push(self.num_public_values[i]);
+            w.push(self.main_next[i] as usize);
+            w.push(self.pre_next[i] as usize);
+        }
+        w.extend(self.log_arities.iter().copied());
+        w.into_iter().map(F::from_usize).collect()
+    }
+
+    /// The `Header` segment's contents, which the self-verifier program reads and pins word by
+    /// word: `[tier, reg, ram, poseidon2, reduce, program_log_height, num_queries,
+    /// log_arities…]`. The program's first act is to compare the proof's declared shape against
+    /// its own — a proof of another shape is refused at `"header word k"`.
+    pub fn header_words(&self) -> Vec<F> {
+        let mut w = vec![
+            self.tier,
+            self.reg_log_height as usize,
+            self.ram_log_height as usize,
+            self.poseidon2_log_height as usize,
+            self.reduce_log_height as usize,
+            self.program_log_height as usize,
+            self.num_queries,
+        ];
+        w.extend(self.log_arities.iter().copied());
+        w.into_iter().map(F::from_usize).collect()
+    }
+
+    /// Whether `proof` is one a program of this shape verifies: the declared heights, the
+    /// instance count (degree bits), the canonical public values and the arity schedule —
+    /// [`InnerShape::matches`]'s rule, over the rVM proof's own fields.
+    pub fn matches(&self, proof: &crate::machine::Proof) -> bool {
+        proof.tier.0 == self.tier
+            && proof.reg_log_height == self.reg_log_height
+            && proof.ram_log_height == self.ram_log_height
+            && proof.poseidon2_log_height == self.poseidon2_log_height
+            && proof.reduce_log_height == self.reduce_log_height
+            && proof.batch.degree_bits == self.degree_bits
+            && proof.public_values.len() == self.num_public_values[crate::machine::PUBLIC_VALUES_INDEX]
+            && proof.public_values.iter().all(|x| *x < <Val as p3_field::PrimeField64>::ORDER_U64)
+            && proof_log_arities_generic(proof) == self.log_arities
+    }
+}
+
+impl RvmKey {
+    /// The rVM's preprocessed `MerkleCap` at `(program, tier, reduce)` — [`InnerKey::of`]'s
+    /// construction over `machine::Machine::verifier_key`.
+    pub fn of(_profile: FriProfile, shape: &RvmShape) -> Self {
+        let common = shape.common_data();
+        let roots = common
+            .preprocessed
+            .as_ref()
+            .expect("this machine's batch always has preprocessed columns")
+            .commitment
+            .roots();
+        assert_eq!(roots.len(), 1 << CAP_HEIGHT, "cap_height is 2");
+        RvmKey { cap: std::array::from_fn(|i| roots[i]) }
+    }
+}
+
+impl ShapeKey for RvmKey {
+    fn cap(&self) -> &[[F; 4]; 4] {
+        &self.cap
+    }
+    fn flatten(&self) -> Vec<F> {
+        self.cap.iter().flatten().copied().collect()
+    }
+}
+
+impl VerifierShape for RvmShape {
+    type Proof = crate::machine::Proof;
+    type Air = crate::machine::Chip;
+    type Key = RvmKey;
+
+    fn instances(&self) -> usize {
+        self.degree_bits.len()
+    }
+    fn profile(&self) -> FriProfile {
+        self.profile
+    }
+    fn widths(&self) -> &[usize] {
+        &self.widths
+    }
+    fn num_public_values(&self) -> &[usize] {
+        &self.num_public_values
+    }
+    fn preprocessed_widths(&self) -> &[usize] {
+        &self.preprocessed_widths
+    }
+    fn main_next(&self) -> &[bool] {
+        &self.main_next
+    }
+    fn pre_next(&self) -> &[bool] {
+        &self.pre_next
+    }
+    fn preprocessed_matrix_to_instance(&self) -> &[usize] {
+        &self.preprocessed_matrix_to_instance
+    }
+    fn degree_bits(&self) -> &[usize] {
+        &self.degree_bits
+    }
+    fn log_num_quotient_chunks(&self) -> &[usize] {
+        &self.log_num_quotient_chunks
+    }
+    fn num_lookups(&self) -> &[usize] {
+        &self.num_lookups
+    }
+    fn num_queries(&self) -> usize {
+        self.num_queries
+    }
+    fn query_pow_bits(&self) -> usize {
+        self.query_pow_bits
+    }
+    fn log_arities(&self) -> &[usize] {
+        &self.log_arities
+    }
+    fn log_global_max_height(&self) -> usize {
+        self.log_global_max_height()
+    }
+    fn pv_instance(&self) -> usize {
+        crate::machine::PUBLIC_VALUES_INDEX
+    }
+    fn program_log_height(&self) -> u8 {
+        self.program_log_height
+    }
+    fn air_layout(&self, i: usize, air: &crate::machine::Chip) -> AirLayout {
+        self.air_layout(i, air)
+    }
+    fn common_data(&self) -> std::sync::Arc<p3_batch_stark::CommonData<Config>> {
+        self.common_data()
+    }
+    fn constraint_chips(&self) -> Vec<crate::machine::Chip> {
+        crate::machine::chips(&self.program, crate::machine::Tier(self.tier), self.reduce_log_height)
+    }
+    fn shape_words(&self) -> Vec<F> {
+        self.shape_words()
+    }
+    fn header_words(&self) -> Vec<F> {
+        self.header_words()
+    }
+    fn matches(&self, proof: &crate::machine::Proof) -> bool {
+        self.matches(proof)
+    }
+    fn header_shape_constants(&self) -> Vec<u64> {
+        vec![self.program_log_height as u64]
+    }
+}
+
+/// The one rVM `machine::Machine` this crate's self-verifier shapes are built against, per
+/// profile, built once — [`machine`]'s twin (`verifier_key`'s preprocessed recomputation is a
+/// cache-miss cost, amortised in the machine's own cache).
+pub(crate) fn rvm_machine(profile: FriProfile) -> &'static crate::machine::Machine {
+    static TEST: std::sync::OnceLock<crate::machine::Machine> = std::sync::OnceLock::new();
+    static PRODUCTION: std::sync::OnceLock<crate::machine::Machine> = std::sync::OnceLock::new();
+    let cell = match profile {
+        FriProfile::Test => &TEST,
+        FriProfile::Production => &PRODUCTION,
+    };
+    cell.get_or_init(|| crate::machine::Machine::new(profile))
 }

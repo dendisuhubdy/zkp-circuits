@@ -30,9 +30,25 @@ postcard = { version = "1", features = ["alloc"] }
 # The reference verifier this crate's first program mirrors, the reference permutation it hashes
 # with, the Chip AIRs its constraint emitter walks, and the bundle guest its fixtures prove.
 rand_zkvm = { path = "../research" }
+# The GPU (CUDA) and CPU-twin NTT/Poseidon2-Merkle engines the proving backends run on —
+# research's dependency, consumed as-is (M5.4 R1: the rVM's shapes need no new kernels).
+rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
 
 [dev-dependencies]
 hex = "0.4"
+
+[features]
+# `rand-zkvm-cuda`'s CPU-twin engines (the reference backend). Research's feature, mirrored.
+reference-backend = ["dep:rand-zkvm-cuda"]
+# `cuda` and `mock-cuda` are mutually exclusive: enabling both is a hard `compile_error!` in
+# rand-zkvm-cuda, so the host mock can never be silently substituted for the GPU.
+# `Backend::Cuda` against a real device. Pulls `cuda-core`, which needs a CUDA 13 toolkit
+# (`rand-zkvm-cuda/ptx/PTX_BUILD.md`): a fleet-GPU-node build, never this box's.
+cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/cuda"]
+# Deliberately *not* `["cuda", ...]` — `rand-zkvm-cuda/cuda` is what pulls `cuda-core`, so
+# enabling it would put a CUDA toolkit back in the way of a no-GPU test run. The two features
+# exercise the identical `Backend::Cuda` path.
+mock-cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/mock-driver"]
 
 # `research`'s profiles, verbatim. This crate is its own package root, so cargo reads *these*
 # tables and not `research/`'s — and without the dependency override every p3 crate and

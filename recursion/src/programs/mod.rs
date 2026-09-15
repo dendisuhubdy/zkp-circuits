@@ -13,24 +13,28 @@
 pub mod constraints;
 mod rv32;
 mod rv32n;
+mod rv32r;
 
 pub use rv32::{cycle_report, digest_hex, reduce_compiled, run_reduce_sequence, verify_rv32, verify_rv32_with, CycleReport, Precompiles};
 pub use rv32n::{aggregate_program_digest, verify_rv32n};
+pub use rv32r::{self_program_digest, verify_rv32r};
 
 use crate::dsl::{Checkpoints, Stats};
 use constraints::Phase5Cost;
 use crate::emulator::Execution;
 use crate::isa::{Program, EF, F};
-use crate::shape::{InnerKey, InnerShape};
+use crate::shape::{InnerShape, VerifierShape};
 use p3_field::BasedVectorSpace;
 use std::collections::BTreeMap;
 
-/// A built program, together with everything needed to feed and interpret it.
+/// A built program, together with everything needed to feed and interpret it. Generic over
+/// [`VerifierShape`] (M5.4, T5) with the RV32 machine's shape as the default, so every existing
+/// use means `VerifierProgram<InnerShape>`.
 #[derive(Clone, Debug)]
-pub struct VerifierProgram {
+pub struct VerifierProgram<S: VerifierShape = InnerShape> {
     pub program: Program,
-    pub shape: InnerShape,
-    pub key: InnerKey,
+    pub shape: S,
+    pub key: S::Key,
     pub checkpoints: Checkpoints,
     pub stats: Stats,
     /// Per instance, what its phase-5 constraint block cost — the DAG-sharing statistics and the
@@ -58,7 +62,7 @@ pub struct VerifierProgram {
 /// phase 8 — so the `i`-th name pairs with `public[2i..2i+2]`. Panics if the two do not line up,
 /// which they cannot unless a checkpoint was added without a name or the program did not run to
 /// completion.
-pub fn checkpoint_values(vp: &VerifierProgram, exec: &Execution) -> BTreeMap<String, EF> {
+pub fn checkpoint_values<S: VerifierShape>(vp: &VerifierProgram<S>, exec: &Execution) -> BTreeMap<String, EF> {
     assert_eq!(
         vp.checkpoints,
         Checkpoints::On,
