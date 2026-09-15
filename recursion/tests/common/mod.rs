@@ -169,6 +169,102 @@ pub fn measure_production_inner_proof() -> recursion::programs::CycleReport {
     recursion::programs::cycle_report(&vp, &exec)
 }
 
+// ── M5.3's per-N aggregate pins ──────────────────────────────────────────────────────────────
+
+/// The aggregate of `n` fixture proofs through the shipped N-generic program, returned as a
+/// `CycleReport` (cpu rows, permutations, mem accesses, program instrs, witness words) — M5.3
+/// Task 5's measurement.
+#[allow(dead_code)]
+pub fn measure_aggregate(n: usize, profile: FriProfile) -> recursion::programs::CycleReport {
+    use recursion::dsl::Checkpoints;
+    use recursion::programs::verify_rv32n;
+    use recursion::shape::{InnerKey, InnerShape};
+    use recursion::witness::WitnessTape;
+    let proofs: Vec<Proof> = bundle_proofs(profile, n).into_iter().map(|p| p.proof).collect();
+    let pr = &proofs[0];
+    let shape = InnerShape::of(
+        profile,
+        pr.tier,
+        pr.program_log_height,
+        pr.input_log_height,
+        pr.keccak_log_height,
+        pr.sha256_log_height,
+        pr.public_log_height,
+        pr.mem_log_height,
+    );
+    let key = InnerKey::of(profile, &shape);
+    let vp = verify_rv32n(&shape, &key, Checkpoints::Off);
+    let tape = WitnessTape::build_n(profile, &shape, &key, &proofs).unwrap();
+    let exec = recursion::emulator::execute(&vp.program, &tape.words, 1 << 24).unwrap();
+    recursion::programs::cycle_report(&vp, &exec)
+}
+
+/// The per-N aggregate pins (test profile, N = 1, 2, 3), kept beside the single-proof
+/// production pins in `tests/pins.json`.
+#[allow(dead_code)]
+pub struct AggregatePins {
+    pub cpu_rows: [usize; 3],
+    pub permutations: [usize; 3],
+    pub mem_accesses: [usize; 3],
+    pub witness_words: [usize; 3],
+}
+
+/// `tests/pins.json`'s aggregate section, parsed. When any aggregate key is absent this *is*
+/// the measurement run: it measures N = 1, 2, 3 at the test profile (emulation, minutes for the
+/// fixtures at worst, seconds when they are cached), rewrites the file with the legacy five
+/// fields preserved, and returns the same values — [`pins`]' own discipline, so a changed
+/// number is a failing diff against a committed value.
+#[allow(dead_code)]
+pub fn aggregate_pins() -> AggregatePins {
+    let legacy = pins();
+    let path = pins_path();
+    let s = std::fs::read_to_string(&path).unwrap_or_default();
+    let get = |key: &str| -> Option<usize> {
+        s.split(&format!("\"{key}\": "))
+            .nth(1)
+            .and_then(|rest| rest.split([',', '\n', ' ', '}']).next())
+            .and_then(|v| v.parse().ok())
+    };
+    let fields = ["cpu_rows", "permutations", "mem_accesses", "witness_words"];
+    if fields.iter().all(|f| (1..=3).all(|n| get(&format!("aggregate_test_n{n}_{f}")).is_some())) {
+        let at = |f: &str, n: usize| get(&format!("aggregate_test_n{n}_{f}")).unwrap();
+        return AggregatePins {
+            cpu_rows: [at("cpu_rows", 1), at("cpu_rows", 2), at("cpu_rows", 3)],
+            permutations: [at("permutations", 1), at("permutations", 2), at("permutations", 3)],
+            mem_accesses: [at("mem_accesses", 1), at("mem_accesses", 2), at("mem_accesses", 3)],
+            witness_words: [at("witness_words", 1), at("witness_words", 2), at("witness_words", 3)],
+        };
+    }
+    let rs = [
+        measure_aggregate(1, FriProfile::Test),
+        measure_aggregate(2, FriProfile::Test),
+        measure_aggregate(3, FriProfile::Test),
+    ];
+    let mut json = format!(
+        "{{\n  \"cpu_rows\": {},\n  \"permutations\": {},\n  \"mem_accesses\": {},\n  \
+         \"witness_words\": {},\n  \"program_instrs\": {},\n",
+        legacy.cpu_rows, legacy.permutations, legacy.mem_accesses, legacy.witness_words,
+        legacy.program_instrs
+    );
+    for (i, r) in rs.iter().enumerate() {
+        let n = i + 1;
+        let comma = if n == 3 { "" } else { "," };
+        json += &format!(
+            "  \"aggregate_test_n{n}_cpu_rows\": {},\n  \"aggregate_test_n{n}_permutations\": {},\n  \
+             \"aggregate_test_n{n}_mem_accesses\": {},\n  \"aggregate_test_n{n}_witness_words\": {}{comma}\n",
+            r.cpu_rows, r.permutations, r.mem_accesses, r.witness_words
+        );
+    }
+    json += "}\n";
+    std::fs::write(&path, json).expect("the pin file is writable");
+    AggregatePins {
+        cpu_rows: [rs[0].cpu_rows, rs[1].cpu_rows, rs[2].cpu_rows],
+        permutations: [rs[0].permutations, rs[1].permutations, rs[2].permutations],
+        mem_accesses: [rs[0].mem_accesses, rs[1].mem_accesses, rs[2].mem_accesses],
+        witness_words: [rs[0].witness_words, rs[1].witness_words, rs[2].witness_words],
+    }
+}
+
 /// `src/programs/verify_rv32.digest`, trimmed — written on the first measurement run and committed.
 #[allow(dead_code)]
 pub fn committed_digest() -> String {

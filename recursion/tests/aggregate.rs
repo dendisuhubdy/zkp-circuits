@@ -455,3 +455,65 @@ fn twin_three_test_profile_bundle_proofs_aggregate_and_verify_natively() {
     );
 }
 
+// ── Task 5: the per-N cycle budget, pinned ───────────────────────────────────────────────────
+
+/// The per-N budget test: rows = `N × per-proof rows + loop overhead`, pinned per N in
+/// `tests/pins.json` — and N=1's pin equals the single-proof rows plus Task 2's recorded loop
+/// overhead, measured live here, so the two pins must agree exactly. That agreement is what
+/// makes the loop's cost a measured number rather than a guess.
+#[test]
+fn the_per_n_cycle_budget_is_pinned() {
+    let pins = common::aggregate_pins();
+    for (i, &want) in pins.cpu_rows.iter().enumerate() {
+        let r = common::measure_aggregate(i + 1, FriProfile::Test);
+        assert_eq!(r.cpu_rows, want, "N={} cpu rows", i + 1);
+        assert_eq!(r.permutations, pins.permutations[i], "N={} permutations", i + 1);
+        assert_eq!(r.mem_accesses, pins.mem_accesses[i], "N={} mem accesses", i + 1);
+        assert_eq!(r.witness_words, pins.witness_words[i], "N={} witness words", i + 1);
+    }
+    let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
+    let (shape, key) = shape_and_key(&p.proof);
+    let single_vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let single_tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let single_rows = execute(&single_vp.program, &single_tape.words, MAX_CYCLES)
+        .unwrap()
+        .cpu_rows();
+    assert_eq!(
+        pins.cpu_rows[0],
+        single_rows + LOOP_OVERHEAD,
+        "the N=1 pin equals the single-proof rows plus Task 2's measured loop overhead"
+    );
+}
+
+/// The production N=1 aggregate, re-confirmed against the M5.2 single-proof pin: the loop
+/// overhead at the production shape (its `log_arities` schedule differs from the test profile's,
+/// so the overhead is not assumed equal — it is measured) and the tier-21 landing, recorded in
+/// `docs/02-aggregate.md`.
+#[test]
+#[ignore = "a production-profile fixture proof plus a ~2M-row emulation: the M5.2 budget test's own cost class"]
+fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
+    let p = common::bundle_proofs(FriProfile::Production, 1).pop().unwrap();
+    let shape = InnerShape::of(
+        FriProfile::Production,
+        p.proof.tier,
+        p.proof.program_log_height,
+        p.proof.input_log_height,
+        p.proof.keccak_log_height,
+        p.proof.sha256_log_height,
+        p.proof.public_log_height,
+        p.proof.mem_log_height,
+    );
+    let key = InnerKey::of(FriProfile::Production, &shape);
+    let single_vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let single_tape = WitnessTape::build(FriProfile::Production, &shape, &key, &p.proof).unwrap();
+    let single_rows = execute(&single_vp.program, &single_tape.words, MAX_CYCLES)
+        .unwrap()
+        .cpu_rows();
+    assert_eq!(single_rows, common::pins().cpu_rows, "the M5.2 pin still holds");
+    let r = common::measure_aggregate(1, FriProfile::Production);
+    eprintln!(
+        "production N=1 aggregate: {} rows (single {single_rows}, overhead {})",
+        r.cpu_rows,
+        r.cpu_rows - single_rows
+    );
+}
