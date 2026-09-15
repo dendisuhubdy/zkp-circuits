@@ -141,6 +141,51 @@ Both flow from the interface digest binding *one* shape, not from preference:
    prove time, so a mixed-shape set cannot *prove*; the admission check is the cheap refusal
    that keeps such a transaction out of the mempool before any rVM work.
 
+## The fullnode admission stub (spec only — implemented by a fullnode session)
+
+A new, small fullnode-side function; no rVM vendoring in M5.3. Exactly:
+
+1. Input: an aggregate transaction (`Aggregate { covers, proof, payout, r }`), the covered
+   bundles' records, and the node's registered aggregate-program digest.
+2. For every covered bundle: read its declared shape (`tier` plus the six declared log-heights
+   — correction 1), and check it equals the aggregate's shape (correction 2).
+3. Compute the `InnerShape`-equivalent words from the shape (the `shape_words` layout in
+   `recursion/src/shape.rs`), the inner cap from
+   `Machine::verifier_key(tier, the six heights)`, then
+   `inner_vk_digest = PaddingFreeSponge<Perm, 8, 4, 4>` over
+   `[RVM_VK_DOMAIN = 16 ‖ shape words ‖ cap(16)]`.
+4. Build the interface list `[inner_vk_digest(4) ‖ covers.len() ‖ per bundle its 34 pv in cover
+   order]`, and `public_digest` over it: state `[0,0,0,0, RVM_PUB_DOMAIN = 17, len, 0, 0]`,
+   then one permutation per four words overwriting rate lanes 0..4 (a partial trailing block
+   overwrites only its own lanes), digest = lanes 0..4.
+5. Compare the four words with the aggregate proof's batch public values; mismatch → the
+   aggregate is invalid. Then the ordinary rVM `Machine::verify(&registered_program, proof)`.
+
+**Test vectors** (the 3-proof test-profile fixture set; hex is each word's canonical `u64` as
+16 lowercase hex chars, concatenated in lane order — reproduced by
+`cargo test --release -p recursion --test aggregate the_admission_stub_vectors -- --nocapture`):
+
+- `inner_vk_digest` (a deterministic constant of the fixture shape — the bundle program, input
+  sizes and tier are data-independent, so a regenerated fixture cache reproduces it; pinned in
+  the test):
+  `33a94ec690bb7cbe5a3d4564967460996277ac61b539f6525b5fe7f92992a1c8`
+- the interface list, 107 words: `[vk(4) ‖ 3 ‖ 34·3]`. The fixture notes are random per cache,
+  so the list rides on this checkout's fixtures; its *shape* is pinned — word 4 is `3` (the
+  count), words 5, 39, 73 are `0` (each proof's `PC_ENTRY`), words 6, 40, 74 are `14` (every
+  proof's `TIER`), each proof's `HC0..7` run repeats across the three (same bundle program)
+  while its `IN0..7` run differs (different inputs), and its `PUB0..7` run repeats (the empty
+  public segment's `H_PUB`, a constant of the shape). As measured on this checkout:
+
+  ```
+  33a94ec690bb7cbe5a3d4564967460996277ac61b539f6525b5fe7f92992a1c800000000000000030000000000000000000000000000000e000000005d14ecfe00000000ce79a1da0000000049a7f73400000000272b8ab1000000009e349119000000007b4352f9000000004895d8b90000000019456d2f000000006f35274a000000000371953700000000a8a42560000000004b291c6600000000b7c2de0e00000000d6bf7fcf00000000182b470b00000000fb4abd6c000000001b1c6d7100000000b3fe016a00000000dbc589840000000064fe382600000000f65a599500000000b50cb2db00000000879d19c4000000007f2a281900000000934a275900000000d5389ac8000000002e612784000000008639ed090000000085f58a21000000004448d889000000006bb9c915000000000671dc2c0000000000000000000000000000000e0000000074f52033000000008800a94e0000000057a33ba9000000001c26c5e4000000008fe213ef000000001ea2ad220000000019b569a600000000937e3135000000006f35274a000000000371953700000000a8a42560000000004b291c6600000000b7c2de0e00000000d6bf7fcf00000000182b470b00000000fb4abd6c00000000411a8c0500000000cc72996c000000009e3b3c0c00000000db272b6300000000003f7555000000000bab78070000000036480e8f000000003f87a6e000000000934a275900000000d5389ac8000000002e612784000000008639ed090000000085f58a21000000004448d889000000006bb9c915000000000671dc2c0000000000000000000000000000000e00000000d8c8a779000000001ca1010e00000000997e50da00000000288bb2cb00000000a544b803000000009346ee320000000047fe4bfd000000003e98afc0000000006f35274a000000000371953700000000a8a42560000000004b291c6600000000b7c2de0e00000000d6bf7fcf00000000182b470b00000000fb4abd6c00000000ed62b62b000000008dab0ce0000000001523999000000000b36787f2000000000dc6f8bf00000000ef9a31bc00000000a19e9ecb00000000bc07b80f00000000934a275900000000d5389ac8000000002e612784000000008639ed090000000085f58a21000000004448d889000000006bb9c915000000000671dc2c
+  ```
+- the interface digest for the list above:
+  `9f11f1aeb33546be79efe66a4829dc39c28f49f2ebd0bb055ac8a1a3fe088dcd`
+
+The fullnode session's stub must reproduce all three byte-for-byte before it is trusted with
+admission: the vk digest against the pinned constant, the list and digest against the recursion
+crate's printout on the shared cache.
+
 ## What M5.3 hands to M5.4
 
 - **The pinned aggregate program and its digest** — one N-generic program per inner shape, the

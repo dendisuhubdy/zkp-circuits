@@ -455,6 +455,46 @@ fn twin_three_test_profile_bundle_proofs_aggregate_and_verify_natively() {
     );
 }
 
+// ── Task 6: the fullnode admission stub's test vectors ───────────────────────────────────────
+
+fn hex_words(words: &[F]) -> String {
+    use p3_field::PrimeField64;
+    words
+        .iter()
+        .map(|w| format!("{:016x}", w.as_canonical_u64()))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// The pinned vectors for the fullnode-side admission stub (`docs/02-aggregate.md`): for the
+/// 3-proof test-profile fixture set, the expected `inner_vk_digest`, the interface list, and
+/// the interface digest. The vk digest is a constant of the fixture shape — the bundle program,
+/// the input sizes and the tier are data-independent, so a regenerated fixture cache reproduces
+/// it — and that half is pinned here; the list and its digest ride on the fixtures' random
+/// notes, recomputed from the live cache and printed for the doc's worked example.
+#[test]
+fn the_admission_stub_vectors() {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Test, 3).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = shape_and_key(&proofs[0]);
+    let vk_digest = recursion::shape::inner_vk_digest(&shape, &key);
+    assert_eq!(
+        hex_words(&vk_digest),
+        "33a94ec690bb7cbe5a3d4564967460996277ac61b539f6525b5fe7f92992a1c8",
+        "the inner vk digest is a deterministic constant of the fixture shape"
+    );
+    let pvs: Vec<Vec<u64>> = proofs.iter().map(|p| p.public_values.clone()).collect();
+    let list = recursion::public_values::interface_words(&shape, &key, &pvs);
+    assert_eq!(list.len(), 4 + 1 + 34 * 3);
+    let digest = recursion::public_values::public_digest(&list);
+    eprintln!("inner_vk_digest: {}", hex_words(&vk_digest));
+    eprintln!("interface list ({} words), hex: {}", list.len(), hex_words(&list));
+    for (i, w) in list.iter().enumerate() {
+        eprintln!("  [{i:3}] {w:?}");
+    }
+    eprintln!("interface digest: {}", hex_words(&digest));
+}
+
 // ── Task 5: the per-N cycle budget, pinned ───────────────────────────────────────────────────
 
 /// The per-N budget test: rows = `N × per-proof rows + loop overhead`, pinned per N in
