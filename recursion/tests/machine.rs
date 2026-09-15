@@ -26,24 +26,33 @@ fn toy_program() -> Program {
 }
 
 #[test]
-fn the_tier_ladder_is_increasing_and_has_the_exit_rung_but_no_23() {
+fn the_tier_ladder_is_increasing_and_has_the_exit_rung_and_the_gpu_rung() {
     for w in TIERS.windows(2) {
         assert!(w[0] < w[1], "TIERS must be strictly increasing: {TIERS:?}");
     }
     assert!(TIERS.contains(&21), "the exit rung (R2)");
-    assert!(!TIERS.contains(&23), "no 23: the uncut program needs a machine this fleet does not have");
+    assert!(
+        TIERS.contains(&23),
+        "23: the production N=3 aggregate rung, added with the CUDA backend (M5.4) — \
+         host ≥ 160 GB, device 80 GB class; no CPU-only box in this fleet has it"
+    );
 }
 
 #[test]
 fn for_cycles_fits_the_measured_numbers() {
-    // The measured pre-cut production count is 2^22.44: it must be *unofferable* (R2's "no 23").
-    assert_eq!(Tier::for_cycles(5_682_847), None);
+    // The M5.1 measured pre-cut production count, 2^22.44, fits the new rung exactly.
+    assert_eq!(Tier::for_cycles(5_682_847), Some(Tier(23)));
+    // The production N=3 aggregate's derived rows (the M5.3 model, 328 + 3·1 968 454 + 4).
+    assert_eq!(Tier::for_cycles(5_905_862), Some(Tier(23)));
+    // Past the rung the ladder ends.
+    assert_eq!(Tier::for_cycles(9_000_000), None);
     // The post-cut exit target lands at 21.
     assert_eq!(Tier::for_cycles(1_950_000), Some(Tier(21)));
     assert_eq!(Tier::for_cycles(1_209_871), Some(Tier(21))); // pre-cut test-profile rehearsal
     assert_eq!(Tier::for_cycles(400_000), Some(Tier(19))); // post-cut test-profile twin
     assert_eq!(Tier::for_cycles(15), Some(Tier(8)));
     assert_eq!(Tier(21).max_cycles(), (1 << 21) - 1);
+    assert_eq!(Tier(23).max_cycles(), (1 << 23) - 1);
 }
 
 #[test]
@@ -51,7 +60,7 @@ fn declared_heights_are_range_checked_without_panicking() {
     // The exit shape (tier 21, the sizing section's expected declared heights).
     check_declared_heights(Tier(21), 23, 22, 16, 18).unwrap();
     // An out-of-TIERS tier is an error, not a shift panic (research's audit-ZH3 mirror).
-    assert!(matches!(check_declared_heights(Tier(23), 4, 4, 4, 0), Err(VerifyError::Tier)));
+    assert!(matches!(check_declared_heights(Tier(24), 4, 4, 4, 0), Err(VerifyError::Tier)));
     assert!(matches!(check_declared_heights(Tier(99), 4, 4, 4, 0), Err(VerifyError::Tier)));
     // Each declared height is range-checked, reduce's 0 = "no instance" aside.
     assert!(matches!(check_declared_heights(Tier(8), 3, 4, 4, 0), Err(VerifyError::RegHeight)));

@@ -114,8 +114,10 @@ pub fn make_config(profile: FriProfile) -> Config {
 
 /// The rVM tier ladder (plan R2): stride 2 through the cheap-test sizes, then every rung near the
 /// exit — 19 (the post-cut test-profile verifier program), 21 (the production exit), 22 (the
-/// safety rung). No 23: the uncut program needs ~165 GB peak, a machine this fleet does not have.
-pub const TIERS: [usize; 10] = [8, 10, 12, 14, 16, 18, 19, 20, 21, 22];
+/// safety rung). **23 is the production N=3 aggregate rung, added with the CUDA backend (M5.4):
+/// host ≥ 160 GB (M5.3's derived ~127 GB oracle), device 80 GB class (the plan's R3 device
+/// model) — a rung no CPU-only box in this fleet has, pinned by `for_cycles`, not by a proof.**
+pub const TIERS: [usize; 11] = [8, 10, 12, 14, 16, 18, 19, 20, 21, 22, 23];
 
 /// Floor on every proof-declared table log-height: one padding row's worth, mirroring the RV32
 /// machine's per-table `MIN_LOG_HEIGHT`s.

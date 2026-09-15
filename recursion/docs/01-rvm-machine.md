@@ -35,9 +35,12 @@ to zero on rows that do not perform the access (`research/AGENTS.md` invariant 2
 message column is constrained on every row kind that sends it (invariant 1); `tests/cheating.rs`
 proves each one.
 
-**Tiers:** `TIERS = [8, 10, 12, 14, 16, 18, 19, 20, 21, 22]` (plan R2): stride 2 through the cheap
-sizes, 19 the post-cut test-profile verifier rung, 21 the production exit rung, 22 the safety
-rung. No 23 — the uncut program needs ~165 GB peak, a machine this fleet does not have.
+**Tiers:** `TIERS = [8, 10, 12, 14, 16, 18, 19, 20, 21, 22, 23]` (plan R2, amended M5.4): stride
+2 through the cheap sizes, 19 the post-cut test-profile verifier rung, 21 the production exit
+rung, 22 the safety rung, and — added with the CUDA backend (M5.4 Task 2) — **23, the
+production N=3 aggregate rung**: host ≥ 160 GB (M5.3's derived ~127 GB oracle), device 80 GB
+class (`docs/03-gpu-and-self-recursion.md`'s device model). A rung no CPU-only box in this
+fleet has, pinned by `for_cycles`, not by a proof.
 
 ## The measured numbers
 
