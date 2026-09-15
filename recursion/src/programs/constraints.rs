@@ -33,16 +33,16 @@ use p3_air::symbolic::{
     AirLayout, BaseEntry, BaseLeaf, ExtEntry, ExtLeaf, SymbolicExpr, SymbolicExpression,
     SymbolicExpressionExt,
 };
-use p3_air::BaseAir;
+use p3_air::{Air, BaseAir};
 use p3_batch_stark::symbolic::get_symbolic_constraints;
 use p3_commit::PolynomialSpace;
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField64};
-use p3_lookup::{assert_uniform_tuple_width, Kind, LogUpGadget, Lookup};
+use p3_lookup::{assert_uniform_tuple_width, InteractionSymbolicBuilder, Kind, LogUpGadget, Lookup};
 use rand_zkvm::machine::{chips, Chip, Tier, Val};
 
 use crate::dsl::{Array, Builder, Ext, Felt, Ptr};
 use crate::isa::{EF, F};
-use crate::shape::{natural_domain, InnerShape, PV_INSTANCE};
+use crate::shape::{natural_domain, InnerShape, VerifierShape};
 
 /// `<EF as BasedVectorSpace<F>>::DIMENSION`, the width of one base-flattened extension value.
 const DIMENSION: usize = 2;
@@ -142,24 +142,25 @@ pub struct Phase5Cost {
 ///
 /// Every length comes from the [`InnerShape`] and nothing from the proof, which is what
 /// `tests/verifier.rs::the_opened_value_segments_are_sized_by_the_shape_alone` pins.
-pub fn read_openings(
+pub fn read_openings<S: VerifierShape>(
     b: &mut Builder,
-    shape: &InnerShape,
+    shape: &S,
     pvs: Array<Felt>,
     terminals: &[Ext],
     challenges: &[Array<Ext>],
     zeta: Ext,
 ) -> Openings {
     assert_eq!(challenges.len(), shape.instances(), "one challenge array per instance");
-    // Only the cpu table declares public values, so the `pvs` array is sliced to its full length for
-    // that instance and to nothing for every other. A chip that grew its own would otherwise read the
-    // cpu table's, silently.
+    // Only one instance declares public values, so the `pvs` array is sliced to its full length
+    // for that instance and to nothing for every other. A chip that grew its own would otherwise
+    // read the owner's, silently.
     for i in 0..shape.instances() {
         assert!(
-            i == PV_INSTANCE || shape.num_public_values[i] == 0,
-            "instance {i} declares {} public values; only the cpu table (instance {PV_INSTANCE}) \
-             may, because the tape carries exactly one instance's",
-            shape.num_public_values[i]
+            i == shape.pv_instance() || shape.num_public_values()[i] == 0,
+            "instance {i} declares {} public values; only instance {} may, because the tape \
+             carries exactly one instance's",
+            shape.num_public_values()[i],
+            shape.pv_instance()
         );
     }
     // One empty allocation the zero-length arrays point at: `hint_ext_array(0)` would still cost an
@@ -170,15 +171,15 @@ pub fn read_openings(
     let mut instances = Vec::with_capacity(shape.instances());
 
     for (i, challenge) in challenges.iter().enumerate() {
-        let w = shape.widths[i];
-        let pre = shape.preprocessed_widths[i];
+        let w = shape.widths()[i];
+        let pre = shape.preprocessed_widths()[i];
         let n_chunks = committed_chunks(shape, i);
         let aux = aux_width(shape, i);
 
         let trace_local = b.hint_ext_array(w);
-        let trace_next = hint_exts(b, if shape.main_next[i] { w } else { 0 }, nil);
+        let trace_next = hint_exts(b, if shape.main_next()[i] { w } else { 0 }, nil);
         let pre_local = hint_exts(b, pre, nil);
-        let pre_next = hint_exts(b, if shape.pre_next[i] { pre } else { 0 }, nil);
+        let pre_next = hint_exts(b, if shape.pre_next()[i] { pre } else { 0 }, nil);
         let chunk_run = b.hint_ext_array(n_chunks * DIMENSION);
         let quotient_chunks: Vec<Array<Ext>> = (0..n_chunks)
             .map(|c| slice_exts(b, chunk_run, c * DIMENSION, DIMENSION))
@@ -198,7 +199,7 @@ pub fn read_openings(
             perm_next,
         });
 
-        let terminal = if shape.num_lookups[i] > 0 {
+        let terminal = if shape.num_lookups()[i] > 0 {
             let t = terminals[next_terminal];
             next_terminal += 1;
             Some(t)
@@ -212,7 +213,7 @@ pub fn read_openings(
             pre_next,
             perm_local: recompose(b, perm_local, aux, nil),
             perm_next: recompose(b, perm_next, aux, nil),
-            public_values: Array::new(pvs.base, shape.num_public_values[i], pvs.stride),
+            public_values: Array::new(pvs.base, shape.num_public_values()[i], pvs.stride),
             challenges: *challenge,
             terminal,
             selectors: emit_selectors(b, shape, i, zeta),
@@ -224,15 +225,15 @@ pub fn read_openings(
 
 /// The committed quotient-chunk count: `(1 << log_num_quotient_chunks) << is_zk`, and `is_zk() == 1`
 /// for this machine's config (`p3-batch-stark-0.7.0/src/verifier/mod.rs:404-418`).
-pub fn committed_chunks(shape: &InnerShape, i: usize) -> usize {
-    (1usize << shape.log_num_quotient_chunks[i]) << 1
+pub fn committed_chunks<S: VerifierShape>(shape: &S, i: usize) -> usize {
+    (1usize << shape.log_num_quotient_chunks()[i]) << 1
 }
 
 /// `aux_width = num_lookups + 1` — the shared accumulator column plus one fraction column per
 /// lookup — or zero where the chip declares none (`p3-lookup-0.7.0/src/symbolic.rs`).
-pub fn aux_width(shape: &InnerShape, i: usize) -> usize {
-    if shape.num_lookups[i] > 0 {
-        shape.num_lookups[i] + 1
+pub fn aux_width<S: VerifierShape>(shape: &S, i: usize) -> usize {
+    if shape.num_lookups()[i] > 0 {
+        shape.num_lookups()[i] + 1
     } else {
         0
     }
@@ -303,10 +304,10 @@ fn recompose(b: &mut Builder, flat: Array<Ext>, aux: usize, nil: Ptr) -> Array<E
 /// `OodPointInDomain` error the native verifier returns, and it is what makes the other two
 /// divisions safe — `z_h != 0` means `u^n != 1`, hence `u != 1` and `u != g⁻¹`. An in-domain `zeta`
 /// therefore traps at the named checkpoint rather than at an anonymous `EINV` two rows later.
-pub fn emit_selectors(b: &mut Builder, shape: &InnerShape, i: usize, zeta: Ext) -> Selectors {
+pub fn emit_selectors<S: VerifierShape>(b: &mut Builder, shape: &S, i: usize, zeta: Ext) -> Selectors {
     let cfg = &crate::shape::machine(shape.profile()).config;
     // `base_degree_bits = degree_bits[i] - is_zk`; the selectors are the *trace* domain's.
-    let dom = natural_domain(cfg, 1usize << (shape.degree_bits[i] - 1));
+    let dom = natural_domain(cfg, 1usize << (shape.degree_bits()[i] - 1));
     let shift_inv = dom.shift_inverse();
     let g_inv = dom.subgroup_generator().inverse();
 
@@ -347,16 +348,16 @@ pub fn emit_selectors(b: &mut Builder, shape: &InnerShape, i: usize, zeta: Ext) 
 /// shape: `ext_domain.create_disjoint_domain(2^(ext_db + log_chunks)).split_domains(n_chunks)`, which
 /// is the construction `commitments_with_opening_points` performs
 /// (`p3-batch-stark-0.7.0/src/verifier/mod.rs:181-209`).
-pub fn emit_quotient(
+pub fn emit_quotient<S: VerifierShape>(
     b: &mut Builder,
-    shape: &InnerShape,
+    shape: &S,
     i: usize,
     zeta: Ext,
     chunks: &[Array<Ext>],
 ) -> Ext {
     let cfg = &crate::shape::machine(shape.profile()).config;
-    let ext_db = shape.degree_bits[i];
-    let log_chunks = shape.log_num_quotient_chunks[i];
+    let ext_db = shape.degree_bits()[i];
+    let log_chunks = shape.log_num_quotient_chunks()[i];
     let n_chunks = committed_chunks(shape, i);
     assert_eq!(chunks.len(), n_chunks);
     let ext_dom = natural_domain(cfg, 1usize << ext_db);
@@ -444,9 +445,9 @@ fn recompose_one(b: &mut Builder, run: Array<Ext>) -> Ext {
 /// this crate has to restate — the function returns the challenge *values*, not the bus map — so it
 /// is checked against the real function's output element for element in
 /// `tests/verifier.rs::the_emitted_lookup_challenges_are_sample_perm_challenges_own_layout`.
-pub fn emit_lookup_challenges(
+pub fn emit_lookup_challenges<S: VerifierShape>(
     b: &mut Builder,
-    shape: &InnerShape,
+    shape: &S,
     alpha: Ext,
     beta: Ext,
 ) -> Vec<Array<Ext>> {
@@ -476,7 +477,7 @@ pub fn emit_lookup_challenges(
         .iter()
         .enumerate()
         .map(|(i, buses)| {
-            assert_eq!(buses.len(), shape.num_lookups[i], "instance {i}'s lookup count");
+            assert_eq!(buses.len(), shape.num_lookups()[i], "instance {i}'s lookup count");
             if buses.is_empty() {
                 return Array::new(nil, 0, DIMENSION);
             }
@@ -565,31 +566,37 @@ fn ext_pow_const(b: &mut Builder, x: Ext, e: usize) -> Ext {
 
 /// Walks one chip's constraints with Plonky3's symbolic builder and emits the folded accumulator
 /// `((0·alpha + c_0)·alpha + c_1)·alpha + …` into the DSL, sharing every repeated sub-expression.
-pub fn emit_accumulator(
+pub fn emit_accumulator<A>(
     b: &mut Builder,
-    air: &Chip,
+    air: &A,
     layout: AirLayout,
     lookups: &[Lookup<F>],
     o: &InstanceOpenings,
     alpha: Ext,
-) -> Ext {
+) -> Ext
+where
+    A: Air<InteractionSymbolicBuilder<F, EF>>,
+{
     let mut cost = Phase5Cost::default();
     emit_accumulator_counted(b, air, layout, lookups, o, alpha, &mut cost)
 }
 
 /// [`emit_accumulator`], reporting what the walk cost into `cost` (the DAG-sharing statistics the
 /// milestone's row budget is written against).
-pub fn emit_accumulator_counted(
+pub fn emit_accumulator_counted<A>(
     b: &mut Builder,
-    air: &Chip,
+    air: &A,
     layout: AirLayout,
     lookups: &[Lookup<F>],
     o: &InstanceOpenings,
     alpha: Ext,
     cost: &mut Phase5Cost,
-) -> Ext {
+) -> Ext
+where
+    A: Air<InteractionSymbolicBuilder<F, EF>>,
+{
     let (base, ext) =
-        get_symbolic_constraints::<F, EF, Chip, LogUpGadget>(air, layout, lookups, &LogUpGadget::new());
+        get_symbolic_constraints::<F, EF, A, LogUpGadget>(air, layout, lookups, &LogUpGadget::new());
     cost.base_constraints += base.len();
     cost.ext_constraints += ext.len();
     let mut cx = Emit::default();
@@ -840,11 +847,14 @@ fn window(b: &mut Builder, local: Array<Ext>, next: Array<Ext>, offset: usize, i
 // ───────────────────────────────────────────────────────────────── the phase
 
 /// What every instance's constraint block is emitted against: the shape, its chips and their lookup
-/// contexts, and the two challenges the fold and the evaluation point come from.
-pub struct Batch<'a> {
-    pub shape: &'a InnerShape,
-    /// `chips()` in instance order — [`shape_airs`].
-    pub airs: &'a [Chip],
+/// contexts, and the two challenges the fold and the evaluation point come from. Generic over
+/// [`VerifierShape`] (M5.4, T5): the RV32 machine's chips and the rVM's own drive the same
+/// emitter, since `Emit` walks any AIR's `SymbolicExpression` DAG.
+pub struct Batch<'a, S: VerifierShape> {
+    pub shape: &'a S,
+    /// `chips()` in instance order — [`shape_airs`] for the RV32 machine's shape,
+    /// `VerifierShape::constraint_chips` everywhere.
+    pub airs: &'a [S::Air],
     /// `CommonData::lookups` in instance order.
     pub lookups: &'a [&'a [Lookup<F>]],
     /// The constraint-folding challenge, drawn in phase 3.
@@ -860,13 +870,15 @@ pub struct Batch<'a> {
 /// `assert_eq_ext`'s `"… (c0)"`/`"… (c1)"` pair: either failing means the same thing — this
 /// instance's constraints do not divide by the vanishing polynomial into the committed quotient — and
 /// the tamper tests name the step, not the coefficient.
-pub fn emit_instance(
+pub fn emit_instance<S: VerifierShape>(
     b: &mut Builder,
-    batch: &Batch<'_>,
+    batch: &Batch<'_, S>,
     o: &Openings,
     i: usize,
     cost: &mut Phase5Cost,
-) {
+) where
+    S::Air: BaseAir<F> + Air<InteractionSymbolicBuilder<F, EF>>,
+{
     let (shape, air) = (batch.shape, &batch.airs[i]);
     let inst = &o.instances[i];
     let acc = emit_accumulator_counted(
@@ -900,7 +912,7 @@ pub fn shape_airs(shape: &InnerShape) -> Vec<Chip> {
     let airs = chips(Tier(shape.tier), shape.keccak_log_height, shape.sha256_log_height);
     assert_eq!(airs.len(), shape.instances(), "one chip per batch instance");
     for (i, air) in airs.iter().enumerate() {
-        assert_eq!(BaseAir::<Val>::width(air), shape.widths[i], "instance {i}'s trace width");
+        assert_eq!(BaseAir::<Val>::width(air), shape.widths()[i], "instance {i}'s trace width");
         assert_eq!(
             BaseAir::<Val>::num_periodic_columns(air),
             0,

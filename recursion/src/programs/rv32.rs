@@ -23,16 +23,18 @@ use crate::emulator::Execution;
 use crate::isa::{Program, EF, F};
 use crate::public_values::RVM_PUB_DOMAIN;
 use crate::shape::{
-    natural_domain, InnerKey, InnerShape, CAP_HEIGHT, LOG_BLOWUP, NUM_RANDOM_CODEWORDS,
-    PV_INSTANCE, RVM_VK_DOMAIN,
+    natural_domain, InnerKey, InnerShape, ShapeKey, VerifierShape, CAP_HEIGHT, LOG_BLOWUP,
+    NUM_RANDOM_CODEWORDS, RVM_VK_DOMAIN,
 };
+use p3_air::{Air, BaseAir};
 use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
+use p3_lookup::InteractionSymbolicBuilder;
 use p3_util::reverse_bits_len;
 use std::collections::BTreeMap;
 
 use super::constraints::{
-    aux_width, committed_chunks, emit_instance, emit_lookup_challenges, read_openings, shape_airs,
-    Batch, Openings, Phase5Cost,
+    aux_width, committed_chunks, emit_instance, emit_lookup_challenges, read_openings, Batch,
+    Openings, Phase5Cost,
 };
 use super::VerifierProgram;
 
@@ -74,11 +76,14 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
 /// [`verify_rv32_with`] emits it once, straight-line; the aggregate program
 /// (`super::rv32n::verify_rv32n`, M5.3) emits it as the counted loop's body, where every run
 /// re-executes it against the next proof's tape region.
-pub(super) fn emit_proof(
+pub(super) fn emit_proof<S: VerifierShape>(
     b: &mut Builder,
-    shape: &InnerShape,
-    key: &InnerKey,
-) -> (Array<Felt>, Vec<Phase5Cost>) {
+    shape: &S,
+    key: &S::Key,
+) -> (Array<Felt>, Vec<Phase5Cost>)
+where
+    S::Air: BaseAir<F> + Air<InteractionSymbolicBuilder<F, EF>>,
+{
     let n = shape.instances();
     let mark = |b: &mut Builder, name: &'static str| b.note_phase(name);
 
@@ -92,7 +97,7 @@ pub(super) fn emit_proof(
 
     // ── the tape's next four segments, read in tape order and observed below in transcript order.
     // `PublicValues`: instance 1 (the cpu table) owns all of them.
-    let pvs = b.hint_array(shape.num_public_values[PV_INSTANCE]);
+    let pvs = b.hint_array(shape.num_public_values()[shape.pv_instance()]);
     // `Commitments`: main, permutation, quotient_chunks, random — `BatchCommitments`' field order,
     // which is also the order the transcript observes them in.
     let main_cap = read_cap(b);
@@ -102,7 +107,7 @@ pub(super) fn emit_proof(
     // `LookupTerminals`: one extension element per instance that declares lookups, in instance
     // order — `lookup_terminals.iter().flatten()`.
     let terminals: Vec<_> = (0..n)
-        .filter(|&i| shape.num_lookups[i] > 0)
+        .filter(|&i| shape.num_lookups()[i] > 0)
         .map(|_| b.hint_ext())
         .collect();
 
@@ -110,25 +115,25 @@ pub(super) fn emit_proof(
     let mut ch = DslChallenger::new(b);
     ch.observe_usize(b, n);
     for i in 0..n {
-        let ext_db = shape.degree_bits[i];
+        let ext_db = shape.degree_bits()[i];
         ch.observe_usize(b, ext_db);
-        // `base_db = ext_db - is_zk`, and `is_zk() == true` for this machine's config.
+        // `base_db = ext_db - is_zk`, and `is_zk() == true for this machine's config.
         ch.observe_usize(b, ext_db - 1);
-        ch.observe_usize(b, shape.widths[i]);
+        ch.observe_usize(b, shape.widths()[i]);
         // The *committed* chunk count: `(1 << log_num_quotient_chunks) << is_zk`.
-        ch.observe_usize(b, (1 << shape.log_num_quotient_chunks[i]) << 1);
+        ch.observe_usize(b, (1 << shape.log_num_quotient_chunks()[i]) << 1);
     }
 
     // ── phase 2: the main commitment, the public values, the preprocessed widths and cap.
     ch.observe_cap(b, &main_cap);
-    for k in 0..shape.num_public_values[PV_INSTANCE] {
+    for k in 0..shape.num_public_values()[shape.pv_instance()] {
         let v = b.get(pvs, k);
         ch.observe(b, v);
     }
     for i in 0..n {
-        ch.observe_usize(b, shape.preprocessed_widths[i]);
+        ch.observe_usize(b, shape.preprocessed_widths()[i]);
     }
-    let pre_cap = constant_cap(b, &key.cap);
+    let pre_cap = constant_cap(b, key.cap());
     ch.observe_cap(b, &pre_cap);
 
     // ── phase 3: the lookup challenges, the permutation commitment, the terminals, alpha.
@@ -177,7 +182,7 @@ pub(super) fn emit_proof(
     // `Segment::OpenedValues`, read once in tape order. The query phase re-observes every one of
     // these as a claimed evaluation, which is why `openings` keeps the raw runs too.
     let openings = read_openings(b, shape, pvs, &terminals, &challenges, zeta);
-    let airs = shape_airs(shape);
+    let airs = shape.constraint_chips();
     let common = shape.common_data();
     let lookups: Vec<&[_]> = common.lookups.iter().map(|l| l.as_ref()).collect();
     let batch = Batch { shape, airs: &airs, lookups: &lookups, alpha, zeta };
@@ -200,7 +205,7 @@ pub(super) fn emit_proof(
     let cfg = &crate::shape::machine(shape.profile()).config;
     let zeta_nexts: Vec<Ext> = (0..n)
         .map(|i| {
-            let dom = natural_domain(cfg, 1usize << (shape.degree_bits[i] - 1));
+            let dom = natural_domain(cfg, 1usize << (shape.degree_bits()[i] - 1));
             let g = b.constant(dom.subgroup_generator());
             b.ext_mul_base(zeta, g)
         })
@@ -215,9 +220,9 @@ pub(super) fn emit_proof(
     b.checkpoint("fri_alpha", fri_alpha);
 
     // 2. The commit phase — per round: the cap, the discarded PoW witness, one `beta` draw.
-    let mut fri_caps = Vec::with_capacity(shape.log_arities.len());
-    let mut betas = Vec::with_capacity(shape.log_arities.len());
-    for r in 0..shape.log_arities.len() {
+    let mut fri_caps = Vec::with_capacity(shape.log_arities().len());
+    let mut betas = Vec::with_capacity(shape.log_arities().len());
+    for r in 0..shape.log_arities().len() {
         let cap = read_cap(b);
         ch.observe_cap(b, &cap);
         // `commit_proof_of_work_bits == 0` on this machine, and `check_witness(0, w)` observes
@@ -237,18 +242,18 @@ pub(super) fn emit_proof(
 
     // 4. The arity schedule — one *single* base absorb per round (`verifier.rs:335`), from the
     // program's compile-time schedule. Not `observe_usize`: that would be two absorbs.
-    for &la in &shape.log_arities {
+    for &la in shape.log_arities() {
         let h = b.constant(F::from_usize(la));
         ch.observe(b, h);
     }
 
     // 5. The query proof-of-work.
     let pow = b.hint();
-    ch.check_witness(b, shape.query_pow_bits, pow, "query pow");
+    ch.check_witness(b, shape.query_pow_bits(), pow, "query pow");
 
     // 6. The query indices — little-endian bit handles, `sample_bits(log_global_max_height)` each
     // (`TwoAdicFriFolding::extra_query_index_bits() == 0`).
-    let index_bits: Vec<Vec<Felt>> = (0..shape.num_queries)
+    let index_bits: Vec<Vec<Felt>> = (0..shape.num_queries())
         .map(|_| ch.sample_bits(b, log_global))
         .collect();
     mark(b, "phase 6 preamble: claimed evals, betas, final poly, pow, indices");
@@ -257,24 +262,24 @@ pub(super) fn emit_proof(
     // loop would force every intermediate through memory for no benefit. The four query-major
     // segments are read first, in tape order — each segment holds *every* query's run, so a
     // per-query read would land on the next query's rows, not this query's paths.
-    let mut all_rows = Vec::with_capacity(shape.num_queries);
-    let mut all_paths = Vec::with_capacity(shape.num_queries);
-    let mut all_commit_openings = Vec::with_capacity(shape.num_queries);
-    let mut all_commit_paths = Vec::with_capacity(shape.num_queries);
-    for _ in 0..shape.num_queries {
+    let mut all_rows = Vec::with_capacity(shape.num_queries());
+    let mut all_paths = Vec::with_capacity(shape.num_queries());
+    let mut all_commit_openings = Vec::with_capacity(shape.num_queries());
+    let mut all_commit_paths = Vec::with_capacity(shape.num_queries());
+    for _ in 0..shape.num_queries() {
         all_rows.push(read_input_openings(b, &opened));
     }
-    for _ in 0..shape.num_queries {
+    for _ in 0..shape.num_queries() {
         all_paths.push(read_input_paths(b, &opened));
     }
-    for _ in 0..shape.num_queries {
+    for _ in 0..shape.num_queries() {
         all_commit_openings.push(read_commit_openings(b, shape));
     }
-    for _ in 0..shape.num_queries {
+    for _ in 0..shape.num_queries() {
         all_commit_paths.push(read_commit_paths(b, shape));
     }
     mark(b, "query segments: tape reads");
-    b.unrolled(shape.num_queries, |b, q| {
+    b.unrolled(shape.num_queries(), |b, q| {
         emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
                    &index_bits[q], &all_rows[q], &all_paths[q], &all_commit_openings[q],
                    &all_commit_paths[q]);
@@ -289,7 +294,7 @@ pub(super) fn emit_proof(
 /// (`shape::inner_vk_digest`'s host twin pins it). Recomputed in-program so it is bound by the
 /// program digest twice over — nothing a prover supplies can move it. Phase 8 (and the aggregate
 /// program's preamble) absorbs it into the interface list.
-pub(super) fn vk_digest_in_program(b: &mut Builder, shape: &InnerShape, key: &InnerKey) -> Digest {
+pub(super) fn vk_digest_in_program<S: VerifierShape>(b: &mut Builder, shape: &S, key: &S::Key) -> Digest {
     let words = shape.shape_words();
     let mut msg = Vec::with_capacity(1 + words.len() + CAP_WORDS);
     msg.push(F::from_u64(RVM_VK_DOMAIN));
@@ -327,7 +332,7 @@ pub fn verify_rv32_with(
     // the node recomputes the list from the covered bundles' public fields and compares digests
     // (the cs6 `H_PUB` pattern). What used to be thirty-nine `PUBLIC` rows is the digest's four.
     let vk = vk_digest_in_program(&mut b, shape, key);
-    let n_list = DIGEST_ELEMS + 1 + shape.num_public_values[PV_INSTANCE];
+    let n_list = DIGEST_ELEMS + 1 + shape.num_public_values()[shape.pv_instance()];
     let list = b.alloc(n_list as u64);
     for lane in 0..DIGEST_ELEMS as i64 {
         let v = b.load(vk.0, lane);
@@ -335,7 +340,7 @@ pub fn verify_rv32_with(
     }
     let one = b.constant(F::ONE);
     b.store(list, DIGEST_ELEMS as i64, one);
-    for k in 0..shape.num_public_values[PV_INSTANCE] {
+    for k in 0..shape.num_public_values()[shape.pv_instance()] {
         let v = b.get(pvs, k);
         b.store(list, (DIGEST_ELEMS + 1 + k) as i64, v);
     }
@@ -410,10 +415,10 @@ struct RoundCaps {
 /// Each point's merged `[public ‖ hidden]` run is copied into one fresh array: the reduction
 /// indexes it per column, and keeping the two halves in different arrays would make that indexing
 /// two code paths for no saving.
-fn observe_claimed(
+fn observe_claimed<S: VerifierShape>(
     b: &mut Builder,
     ch: &mut DslChallenger,
-    shape: &InnerShape,
+    shape: &S,
     zeta: Ext,
     zeta_nexts: &[Ext],
     o: &Openings,
@@ -446,7 +451,7 @@ fn observe_claimed(
         (z, Array::new(out, public.len + n_hidden, 2))
     };
 
-    let h_of = |i: usize| shape.degree_bits[i] + LOG_BLOWUP;
+    let h_of = |i: usize| shape.degree_bits()[i] + LOG_BLOWUP;
     let n = shape.instances();
     let mut rounds = Vec::with_capacity(5);
     let mut metas = Vec::with_capacity(5);
@@ -465,7 +470,7 @@ fn observe_claimed(
     let mut mats = Vec::with_capacity(n);
     for i in 0..n {
         let mut pts = vec![point(b, ch, zeta, o.raw[i].trace_local, NUM_RANDOM_CODEWORDS)];
-        if shape.main_next[i] {
+        if shape.main_next()[i] {
             pts.push(point(b, ch, zeta_nexts[i], o.raw[i].trace_next, NUM_RANDOM_CODEWORDS));
         }
         mats.push(MatrixOpening { log_height: h_of(i), points: pts });
@@ -489,9 +494,9 @@ fn observe_claimed(
     // commitment's matrix order. `commit_preprocessing` does not widen, so there are no hidden
     // values (`hiding_pcs.rs:138-158`) — and `Segment::RandomOpenings` carries none for it.
     let mut mats = Vec::new();
-    for &inst in &shape.preprocessed_matrix_to_instance {
+    for &inst in shape.preprocessed_matrix_to_instance() {
         let mut pts = vec![point(b, ch, zeta, o.raw[inst].pre_local, 0)];
-        if shape.pre_next[inst] {
+        if shape.pre_next()[inst] {
             pts.push(point(b, ch, zeta_nexts[inst], o.raw[inst].pre_next, 0));
         }
         mats.push(MatrixOpening { log_height: h_of(inst), points: pts });
@@ -546,19 +551,19 @@ fn read_input_paths(b: &mut Builder, opened: &QueryOpenings) -> Vec<Array<Felt>>
 
 /// One query's run of `Segment::CommitPhaseOpenings`: per round, the `arity − 1` sibling values
 /// and the row's four salts.
-fn read_commit_openings(b: &mut Builder, shape: &InnerShape) -> Vec<Array<Felt>> {
+fn read_commit_openings<S: VerifierShape>(b: &mut Builder, shape: &S) -> Vec<Array<Felt>> {
     shape
-        .log_arities
+        .log_arities()
         .iter()
         .map(|&la| b.hint_array(((1usize << la) - 1) * 2 + SALT_ELEMS))
         .collect()
 }
 
 /// One query's run of `Segment::CommitPhasePaths`: per round, the restored path's siblings.
-fn read_commit_paths(b: &mut Builder, shape: &InnerShape) -> Vec<Array<Felt>> {
+fn read_commit_paths<S: VerifierShape>(b: &mut Builder, shape: &S) -> Vec<Array<Felt>> {
     let mut log_folded = shape.log_global_max_height();
     shape
-        .log_arities
+        .log_arities()
         .iter()
         .map(|&la| {
             log_folded -= la;
@@ -571,9 +576,9 @@ fn read_commit_paths(b: &mut Builder, shape: &InnerShape) -> Vec<Array<Felt>> {
 /// batch-opening reduction, the fold chain with each round's reconstructed row authenticated
 /// against its commitment, and the final-polynomial check.
 #[allow(clippy::too_many_arguments)]
-fn emit_query(
+fn emit_query<S: VerifierShape>(
     b: &mut Builder,
-    shape: &InnerShape,
+    shape: &S,
     opened: &QueryOpenings,
     metas: &[RoundMeta],
     fri_caps: &[[Digest; 4]],
@@ -603,7 +608,7 @@ fn emit_query(
         .remove(&log_global)
         .expect("open_inputs' first reduced opening is at the global max height");
     let mut shift = 0usize;
-    for (r, &la) in shape.log_arities.iter().enumerate() {
+    for (r, &la) in shape.log_arities().iter().enumerate() {
         let arity = 1usize << la;
         let log_folded = log_global - shift - la;
         // `index_in_group = index % arity`: the low `log_arity` bits of the current index.
@@ -815,9 +820,9 @@ fn bit_indicator(b: &mut Builder, bits: &[Felt], v: usize) -> Felt {
 /// instances have equal `zeta_next`s), and the reference's per-(batch, matrix, point) inverses
 /// are then the same elements — its `batch_multiplicative_inverse` is an optimisation, not
 /// semantics.
-fn emit_reduced_openings(
+fn emit_reduced_openings<S: VerifierShape>(
     b: &mut Builder,
-    shape: &InnerShape,
+    shape: &S,
     index_bits: &[Felt],
     fri_alpha: Ext,
     opened: &QueryOpenings,
@@ -1040,7 +1045,7 @@ pub struct CycleReport {
 }
 
 /// The [`CycleReport`] of one run of a built program.
-pub fn cycle_report(vp: &VerifierProgram, exec: &Execution) -> CycleReport {
+pub fn cycle_report<S: VerifierShape>(vp: &VerifierProgram<S>, exec: &Execution) -> CycleReport {
     CycleReport {
         cpu_rows: exec.cpu_rows(),
         permutations: exec.permutations(),

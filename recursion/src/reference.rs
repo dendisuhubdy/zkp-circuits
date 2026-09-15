@@ -19,7 +19,7 @@
 
 use crate::isa::EF;
 use crate::shape::{
-    InnerKey, InnerShape, CAP_HEIGHT, LOG_BLOWUP, LOG_FINAL_POLY_LEN, MAX_LOG_ARITY, PV_INSTANCE,
+    ProofBatch, ShapeKey, VerifierShape, CAP_HEIGHT, LOG_BLOWUP, LOG_FINAL_POLY_LEN, MAX_LOG_ARITY,
 };
 use p3_air::BaseAir;
 use p3_batch_stark::BatchTranscript;
@@ -39,9 +39,7 @@ use p3_matrix::stack::VerticalPair;
 use p3_matrix::Dimensions;
 use p3_uni_stark::{recompose_quotient_from_chunks, StarkGenericConfig, VerifierConstraintFolder};
 use p3_util::{log2_strict_usize, reverse_bits_len};
-use rand_zkvm::machine::{
-    chips, Challenge, Config, FriProfile, Proof, Tier, Val, ValMmcs,
-};
+use rand_zkvm::machine::{Challenge, Config, FriProfile, Val, ValMmcs};
 use std::marker::PhantomData;
 
 /// The commit-phase MMCS: `research`'s `ChallengeMmcs`, which is private there and therefore
@@ -184,45 +182,46 @@ impl BaseAir<Val> for ShapeAir {
 }
 
 /// `research`'s `FriParameters`, rebuilt: the `Config`'s PCS owns the only copy and keeps it private.
-fn fri_params(shape: &InnerShape, val_mmcs: &ValMmcs) -> FriParameters<ChallengeMmcs> {
+fn fri_params<S: VerifierShape>(shape: &S, val_mmcs: &ValMmcs) -> FriParameters<ChallengeMmcs> {
     FriParameters {
         log_blowup: LOG_BLOWUP,
         log_final_poly_len: LOG_FINAL_POLY_LEN,
         max_log_arity: MAX_LOG_ARITY,
-        num_queries: shape.num_queries,
+        num_queries: shape.num_queries(),
         commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: shape.query_pow_bits,
+        query_proof_of_work_bits: shape.query_pow_bits(),
         mmcs: ChallengeMmcs::new(val_mmcs.clone()),
     }
 }
 
 /// Replays `verify_batch` on `proof`, reporting every intermediate the program is compared against.
-pub fn replay(
+///
+/// Generic over [`VerifierShape`] (M5.4, T5): the RV32 machine's shape and the rVM's own
+/// [`crate::shape::RvmShape`] replay through the same code — the machines share the field, the
+/// challenger and the batch machinery (`crate::shape::machine`'s `Config` is the same type on
+/// both), and everything machine-specific comes in through the trait.
+pub fn replay<S: VerifierShape>(
     profile: FriProfile,
-    shape: &InnerShape,
-    key: &InnerKey,
-    proof: &Proof,
-) -> Result<Replay, ReplayError> {
+    shape: &S,
+    key: &S::Key,
+    proof: &S::Proof,
+) -> Result<Replay, ReplayError>
+where
+    S::Air: BaseAir<Val> + for<'a> p3_air::Air<p3_lookup::folder::VerifierConstraintFolderWithLookups<'a, Config>>,
+{
     if !shape.matches(proof) {
         return Err(ReplayError::Shape);
     }
     let machine = crate::shape::machine(profile);
     let cfg = &machine.config;
     let is_zk = cfg.is_zk();
-    let common = machine.verifier_key(
-        Tier(shape.tier),
-        shape.program_log_height,
-        shape.input_log_height,
-        shape.keccak_log_height,
-        shape.sha256_log_height,
-        shape.public_log_height,
-    );
+    let common = shape.common_data();
     let global = common.preprocessed.as_ref().ok_or(ReplayError::Key)?;
-    if global.commitment.roots() != key.cap.as_slice() {
+    if global.commitment.roots() != key.cap().as_slice() {
         return Err(ReplayError::Key);
     }
 
-    let batch = &proof.batch;
+    let batch = proof.batch();
     let commitments = &batch.commitments;
     if commitments.permutation.is_none() || commitments.random.is_none() {
         return Err(ReplayError::Randomization);
@@ -231,15 +230,15 @@ pub fn replay(
     let n = shape.instances();
     let airs: Vec<ShapeAir> = (0..n)
         .map(|i| ShapeAir {
-            width: shape.widths[i],
-            main_next: shape.main_next[i],
-            pre_next: shape.pre_next[i],
-            npv: shape.num_public_values[i],
+            width: shape.widths()[i],
+            main_next: shape.main_next()[i],
+            pre_next: shape.pre_next()[i],
+            npv: shape.num_public_values()[i],
         })
         .collect();
-    let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
+    let pv_vals: Vec<Val> = proof.public_values_u64().iter().map(|x| Val::from_u64(*x)).collect();
     let pvs: Vec<Vec<Val>> = (0..n)
-        .map(|i| if i == PV_INSTANCE { pv_vals.clone() } else { Vec::new() })
+        .map(|i| if i == shape.pv_instance() { pv_vals.clone() } else { Vec::new() })
         .collect();
 
     // ── the eight transcript steps, `verify_batch`'s own helpers ────────────────────────────────
@@ -247,16 +246,16 @@ pub fn replay(
     let mut transcript = BatchTranscript::<Config>::new(cfg.initialise_challenger());
     transcript.observe_instance_count(n);
     for i in 0..n {
-        let ext_db = shape.degree_bits[i];
+        let ext_db = shape.degree_bits()[i];
         transcript.observe_instance_binding(
             ext_db,
             ext_db - is_zk,
-            shape.widths[i],
-            (1usize << shape.log_num_quotient_chunks[i]) << is_zk,
+            shape.widths()[i],
+            (1usize << shape.log_num_quotient_chunks()[i]) << is_zk,
         );
     }
     transcript.observe_main(&commitments.main, &pvs);
-    transcript.observe_preprocessed(&shape.preprocessed_widths, Some(global));
+    transcript.observe_preprocessed(&shape.preprocessed_widths(), Some(global));
 
     // `sample_perm_challenges` draws exactly the one `(alpha, beta)` pair and nothing else — every
     // bus offset it returns is arithmetic on that pair (`p3-batch-stark-0.7.0/src/transcript.rs`).
@@ -283,8 +282,8 @@ pub fn replay(
         &batch.opened_values,
         &common,
         &batch.degree_bits,
-        &shape.preprocessed_widths,
-        &shape.log_num_quotient_chunks,
+        shape.preprocessed_widths(),
+        shape.log_num_quotient_chunks(),
     )
     .map_err(|e| ReplayError::OpeningArgument(format!("{e:?}")))?;
 
@@ -292,14 +291,10 @@ pub fn replay(
     let mut quotients = Vec::with_capacity(n);
     let mut accumulators = Vec::with_capacity(n);
     let mut selectors = Vec::with_capacity(n);
-    let real_airs = chips(
-        Tier(shape.tier),
-        shape.keccak_log_height,
-        shape.sha256_log_height,
-    );
+    let real_airs = shape.constraint_chips();
     for i in 0..n {
         let trace_domain =
-            crate::shape::natural_domain(cfg, 1usize << (shape.degree_bits[i] - is_zk));
+            crate::shape::natural_domain(cfg, 1usize << (shape.degree_bits()[i] - is_zk));
         if trace_domain.vanishing_poly_at_point(zeta).is_zero() {
             return Err(ReplayError::OodPointInDomain(i));
         }
@@ -312,12 +307,12 @@ pub fn replay(
         // `VerifierData::verify_constraints_with_lookups`'s folder, field for field: its own struct
         // is `pub(crate)` in `p3-batch-stark`, so the folder it builds is built here instead — and
         // the constraints are then evaluated by `p3_lookup`'s own `eval_air_and_lookups` against
-        // `research`'s own `Chip` AIR, not against anything restated.
+        // the shape's own `Chip` AIRs, not against anything restated.
         let trace_next_zeros;
         let trace_next: &[EF] = match &base.trace_next {
             Some(v) => v,
             None => {
-                trace_next_zeros = EF::zero_vec(shape.widths[i]);
+                trace_next_zeros = EF::zero_vec(shape.widths()[i]);
                 &trace_next_zeros
             }
         };
@@ -325,12 +320,12 @@ pub fn replay(
         let pre_next: &[EF] = match &base.preprocessed_next {
             Some(v) => v,
             None => {
-                pre_next_zeros = EF::zero_vec(shape.preprocessed_widths[i]);
+                pre_next_zeros = EF::zero_vec(shape.preprocessed_widths()[i]);
                 &pre_next_zeros
             }
         };
-        let perm_local = recompose_ext(&inst.permutation_local, shape.num_lookups[i]);
-        let perm_next = recompose_ext(&inst.permutation_next, shape.num_lookups[i]);
+        let perm_local = recompose_ext(&inst.permutation_local, shape.num_lookups()[i]);
+        let perm_next = recompose_ext(&inst.permutation_next, shape.num_lookups()[i]);
         let perm_vals: Vec<EF> = batch.lookup_terminals[i].iter().map(|t| t.0).collect();
         let periodic_columns = BaseAir::<Val>::periodic_columns(&real_airs[i]);
         let periodic_values: Vec<EF> =

@@ -21,11 +21,12 @@
 
 use crate::isa::{EF, F};
 use crate::reference::{replay, InputRound, ReplayError};
-use crate::shape::{InnerKey, InnerShape, CAP_HEIGHT};
+use crate::shape::{InnerKey, InnerShape, ProofBatch, ShapeKey, VerifierShape, CAP_HEIGHT};
+use p3_air::BaseAir;
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use p3_matrix::Dimensions;
 use p3_util::log2_ceil_usize;
-use rand_zkvm::machine::{FriProfile, Proof, Val};
+use rand_zkvm::machine::{Config, FriProfile, Proof, Val};
 
 /// The salt elements the hiding MMCS appends to every committed row. `crate::dsl::hash::SALT_ELEMS`
 /// is the same constant seen from the program's side.
@@ -185,9 +186,7 @@ impl WitnessTape {
         key: &InnerKey,
         proof: &Proof,
     ) -> Result<Self, TapeError> {
-        let mut w = Writer::new();
-        write_proof(&mut w, profile, shape, key, proof)?;
-        Ok(WitnessTape { words: w.words, segments: w.segments })
+        Self::build_for(profile, shape, key, proof)
     }
 
     /// The tape of N proofs of one shape: one count word — the aggregate program's loop trip
@@ -204,6 +203,37 @@ impl WitnessTape {
         key: &InnerKey,
         proofs: &[Proof],
     ) -> Result<Self, TapeError> {
+        Self::build_n_for(profile, shape, key, proofs)
+    }
+
+    /// [`WitnessTape::build`], generic over [`VerifierShape`] (M5.4, T5): the same fourteen
+    /// segments for the rVM's own shape (`RvmShape`/`RvmKey`, an rVM `machine::Proof`) as for
+    /// the RV32 machine's — the self-verifier's input tape.
+    pub fn build_for<S: VerifierShape>(
+        profile: FriProfile,
+        shape: &S,
+        key: &S::Key,
+        proof: &S::Proof,
+    ) -> Result<Self, TapeError>
+    where
+        S::Air: BaseAir<Val> + for<'a> p3_air::Air<p3_lookup::folder::VerifierConstraintFolderWithLookups<'a, Config>>,
+    {
+        let mut w = Writer::new();
+        write_proof(&mut w, profile, shape, key, proof)?;
+        Ok(WitnessTape { words: w.words, segments: w.segments })
+    }
+
+    /// [`WitnessTape::build_n`], generic over [`VerifierShape`]: the count word, then each
+    /// proof's region in the pinned order.
+    pub fn build_n_for<S: VerifierShape>(
+        profile: FriProfile,
+        shape: &S,
+        key: &S::Key,
+        proofs: &[S::Proof],
+    ) -> Result<Self, TapeError>
+    where
+        S::Air: BaseAir<Val> + for<'a> p3_air::Air<p3_lookup::folder::VerifierConstraintFolderWithLookups<'a, Config>>,
+    {
         for proof in proofs {
             if !shape.matches(proof) {
                 return Err(ReplayError::Shape.into());
@@ -235,30 +265,31 @@ impl WitnessTape {
     }
 }
 
-/// One proof's fourteen segments, appended to `w` in the program's consumption order — the two
-/// constructors' shared writer.
-fn write_proof(
+/// One proof's fourteen segments, appended to `w` in the program's consumption order — the
+/// constructors' shared writer, generic over [`VerifierShape`] (M5.4, T5).
+fn write_proof<S: VerifierShape>(
     w: &mut Writer,
     profile: FriProfile,
-    shape: &InnerShape,
-    key: &InnerKey,
-    proof: &Proof,
-) -> Result<(), TapeError> {
+    shape: &S,
+    key: &S::Key,
+    proof: &S::Proof,
+) -> Result<(), TapeError>
+where
+    S::Air: BaseAir<Val> + for<'a> p3_air::Air<p3_lookup::folder::VerifierConstraintFolderWithLookups<'a, Config>>,
+{
         let r = replay(profile, shape, key, proof)?;
-        let batch = &proof.batch;
+        let batch = proof.batch();
         let (rand_openings, fri) = &batch.opening_proof;
         let n = shape.instances();
 
-        // 1 ── the proof's own declared shape.
+        // 1 ── the proof's own declared shape, read off the proof (so a wrong-shape proof is
+        // refused here, pinned against the program's own constants), then the profile's query
+        // count and the replay's arity schedule.
         w.begin(Segment::Header);
-        w.usize(proof.tier.0);
-        w.usize(proof.program_log_height as usize);
-        w.usize(proof.input_log_height as usize);
-        w.usize(proof.keccak_log_height as usize);
-        w.usize(proof.sha256_log_height as usize);
-        w.usize(proof.public_log_height as usize);
-        w.usize(proof.mem_log_height as usize);
-        w.usize(shape.num_queries);
+        for &h in proof.tape_header().iter().chain(shape.header_shape_constants().iter()) {
+            w.usize(h as usize);
+        }
+        w.usize(shape.num_queries());
         for &la in &r.log_arities {
             w.usize(la);
         }
@@ -266,7 +297,7 @@ fn write_proof(
 
         // 2 ── the inner public values.
         w.begin(Segment::PublicValues);
-        for v in &proof.public_values {
+        for v in proof.public_values_u64() {
             w.f(Val::from_u64(*v));
         }
         w.end();
@@ -397,7 +428,7 @@ fn write_proof(
         // 11 ── per query, per input round, per matrix: the opened row then its four salts, which is
         // the leaf message the hiding MMCS hashes (`hiding_mmcs.rs:232-275`).
         w.begin(Segment::InputOpenings);
-        for q in 0..shape.num_queries {
+        for q in 0..shape.num_queries() {
             for round in 0..r.input_rounds.len() {
                 let opening = &fri.input_openings[round];
                 let salts = &opening.opening_proof.0[q];
@@ -412,7 +443,7 @@ fn write_proof(
 
         // 12 ── the same rounds' restored paths, level 0 first.
         w.begin(Segment::InputPaths);
-        for q in 0..shape.num_queries {
+        for q in 0..shape.num_queries() {
             for paths in &input_paths {
                 for sib in &paths[q].siblings {
                     w.base(sib);
@@ -430,7 +461,7 @@ fn write_proof(
         // an input round's is (`hiding_mmcs.rs:232-275`). Without them the program could not
         // recompute a commit-phase leaf at all.
         w.begin(Segment::CommitPhaseOpenings);
-        for q in 0..shape.num_queries {
+        for q in 0..shape.num_queries() {
             for step in &fri.commit_phase_openings {
                 w.exts(&step.sibling_values[q]);
                 // One matrix per commit-phase round, so one salt set per query.
@@ -443,7 +474,7 @@ fn write_proof(
 
         // 14 ── and their restored paths.
         w.begin(Segment::CommitPhasePaths);
-        for q in 0..shape.num_queries {
+        for q in 0..shape.num_queries() {
             for paths in &commit_paths {
                 for sib in &paths[q].siblings {
                     w.base(sib);
