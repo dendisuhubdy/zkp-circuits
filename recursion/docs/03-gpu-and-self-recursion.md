@@ -84,6 +84,50 @@ and by nothing else — a rung no CPU-only box in this fleet has, present becaus
 gives the fleet a machine class that can use it. `check_declared_heights`' out-of-`TIERS`
 guard moved to 24.
 
+## The self-verifier, measured (Tasks 5–6, landed)
+
+Spec §4.5's self-verifier is built and green: `recursion/src/programs/rv32r.rs`'s `verify_rv32r`
+— the shared phases 0–7 over the rVM's own batch shape, with `machine::chips`' AIRs driven
+through the same constraint `Emit`, and the interface digest over
+`[rvm_vk_digest ‖ 1 ‖ the proof's four public values]`. The sibling triple behind it:
+`RvmShape`/`RvmKey` beside `InnerShape`/`InnerKey` (`src/shape.rs`'s `VerifierShape` trait),
+the replay generic over the trait (`src/reference.rs`), and the tape generic with it
+(`WitnessTape::build_for` / `build_n_for`). The RV32 path is behavior-identical throughout —
+the Off-replay byte-for-byte pin and every differential re-ran green. `tests/self_verify.rs`:
+acceptance with the exact interface digest, the wrong-shape refusal, digest determinism, and
+M5.1's thirteen-segment tamper table refused at the same named steps, verbatim.
+
+**The measured cost** (`the_self_verifiers_measured_cost_at_two_fixture_shapes`, pinned in the
+test): two test-profile fixtures, 16 queries each —
+
+| fixture | tier | cpu rows | permutations | mem accesses | program instrs | witness words | phase 5 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| toy (every table, 17 instrs) | 8 | 275 135 | 7 438 | 402 810 | 276 978 | 29 367 | 7 245 |
+| busy (2 048 stores + 64 perms) | 13 | 367 260 | 9 088 | 478 728 | 369 363 | 35 199 | 7 525 |
+
+Phase 5 is **not** height-independent (7 245 → 7 525): the constraint DAG is per-chip, but the
+emitted selectors and the quotient recomposition square `log(degree_bits)` times per instance,
+so the phase grows with the declared heights. The query phase dominates either way and scales
+with `queries ×` (opened columns `×` per-column cost `+` Merkle levels `×` per-level cost).
+
+**The production requirement, derived from measured anchors** (replacing the plan's R6
+estimate with the same arithmetic made concrete): the M5.2-exit shape is tier 21, production
+profile, 80 queries, declared heights `[reg 23, ram 22, poseidon2 16, reduce 18]`, eight
+instances. The self-verifier's FRI phase over it scales against the RV32 verifier's measured
+1 968 619 rows at ~640 opened columns per query; the rVM shape opens roughly 800–1 100 columns
+per query (the poseidon2 chip alone is 341 of ~470 base trace columns, plus next-row,
+quotient, random, and permutation extension runs). Scaled: **an estimated 2.9–3.9 M cpu rows
+→ tier 22, oracle in the ~97–130 GB class → a ≥ 128 GB machine**, consistent with the plan's
+R6 estimate of 2.6–3.5 M. At the test profile over the M5.2 twin's shape (tier 19, 16
+queries): an estimated 1.0–1.5 M rows → tier 21, ~40–60 GB.
+
+**The verdict:** the end-to-end self proof **does not fit the dev laptop** — even its lower
+bound (~2.6 M rows, ~97 GB oracle) exceeds the box — so it is deferred with the measured
+requirement, exactly the path spec §7 allows: the number above, the machine class, and a
+runbook entry (Appendix A of the M5.4 plan, row 11) that produces the exact figure where the
+other deferred proofs run. The end-to-end self proof is *written*: `verify_rv32r` plus a
+tape is the whole artifact; only its execution is deferred.
+
 ## Still ahead
 
 - **T3** — the PTX build and hardware bring-up on the fleet GPU node (blocked-on-provisioning;
