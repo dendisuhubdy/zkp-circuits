@@ -128,12 +128,56 @@ runbook entry (Appendix A of the M5.4 plan, row 11) that produces the exact figu
 other deferred proofs run. The end-to-end self proof is *written*: `verify_rv32r` plus a
 tape is the whole artifact; only its execution is deferred.
 
-## Still ahead
+## The consolidated big-machine runbook (Appendix A, current)
 
-- **T3** — the PTX build and hardware bring-up on the fleet GPU node (blocked-on-provisioning;
-  `rand-zkvm-cuda/ptx/PTX_BUILD.md`'s checklist, in order).
+Sequencing per the 2026-09-15 ruling: the production-profile proofs execute **after chain-side
+aggregation lands**; the GPU measurement runs (T4) are not chain proofs and run when the GPU
+node exists. Estimates marked *derived* are arithmetic from measured inputs, not measurements;
+T5/T6 changed only the last row.
+
+| # | run | command | class | est. time | memory (observed/derived) |
+|---|---|---|---|---|---|
+| 1 | M4.3's ERC-20 `transfer` proof (research e2e) | `cd research && cargo +1.98.1 test --release --test e2e -- --ignored --nocapture` | ≥ 64 GB CPU | *derived* ~30–60 min | SIGKILLed 3× at 28.5–28.9 GB on the 48 GB box; requirement above that |
+| 2 | M4.4's SPL token proof (tier 20, 694 498 cycles) | same binary, the tier-20 ignore | ≥ 64 GB CPU | *derived* ~1 h | tier-18's ~4× rows |
+| 3 | M5.2's rVM exit: the verifier program over one production bundle proof (tier 21) | `cd recursion && cargo +1.98.1 test --release --test exit -- --ignored --nocapture` | ≥ 64 GB CPU | ~20–40 min (its ignore note) | 48.6 GB oracle committed; est. 43–61 GB peak |
+| 4 | M5.3's N=2 test-profile aggregate (tier 20) | `cargo test --release -p recursion --test aggregate two_test_profile -- --ignored --nocapture` | ≥ 64 GB CPU | *derived* ~50–60 min (2× the N=1 wall) | 33.7 GB sampled before jetsam; true peak above |
+| 5 | M5.3's N=3 test-profile twin (tier 21) | `cargo test --release -p recursion --test aggregate twin -- --ignored --nocapture` | ≥ 64 GB CPU | *derived* ~45–90 min | ~38–42 GB derived from the tier-20 peak |
+| 6 | Production N=1 aggregate (tier 21) | the M5.4 T4 vehicle on CPU, or a runbook binary | ≥ 64 GB CPU | *derived* ~1–2 h | 48.6 GB oracle (M5.2's derivation) |
+| 7 | Production N=2 aggregate (tier 22) | the M5.4 T4 vehicle, `Some(Tier(22))` | ≥ 128 GB host | *derived* hours on CPU; T4's GPU number replaces it | ~95.3 GB oracle |
+| 8 | Production N=3 aggregate (tier 23 — T2's rung) | the M5.4 T4 vehicle, `Some(Tier(23))` | ≥ 160 GB host + 80 GB device | T4's GPU number | ~127 GB host oracle; the device model above |
+| 9 | The PTX first run + `cuda-hw` suite (T3) | `rand-zkvm-cuda/ptx/PTX_BUILD.md`'s checklist | GPU node (R8) | ~1 h bring-up | — |
+| 10 | N re-measured on GPU (T4) | T4's `#[ignore]`d test | GPU node, ≥ 160 GB host | T4's numbers | per R3/R5 |
+| 11 | The self-verifier end-to-end proof | T6's twin: `verify_rv32r` over the M5.2-exit-shape tape | ≥ 128 GB host (production input, *derived* 2.9–3.9 M rows → tier 22); ≥ 64 GB at the test-profile shape (*derived* 1.0–1.5 M → tier 21) | *derived* hours on CPU | ~97–130 GB host oracle |
+
+Runs 1–6 clear on the ≥ 64 GB machine in one session (in order; ~4–6 h total); 7–8 want the
+bigger host (or the GPU node for 8); 9–10 want the GPU node; 11 lands wherever its first
+fixture proof exists — the M5.2 exit's production proof (row 3) is the production-input tape,
+so 11 follows 3 on the same machine.
+
+## What M5.4 hands to the chain-side phase (and M5.5)
+
+- **The backend split, built and tested** — `Backend::{Cpu, Reference, Cuda}` with
+  `prove_with`/`prove_on` under the postcard-retype discipline; the mock-driven equivalence
+  suite green on both feature flags. The production runs in the runbook can start on the
+  reference backend the day a big machine exists — the GPU only accelerates them (T3/T4).
+- **The measured device model** — the corrected chunk table (20 columns per pass at 80 GiB for
+  the tier-23 cpu LDE height) and the upload-guard boundaries (a 24 GiB card refuses tier 23's
+  cpu matrix; 40 GiB passes at guard level); the phase-composed peak is T3's measurement.
+- **The tier-23 rung** — in `TIERS`, with its machine class on record (≥ 160 GB host, 80 GB
+  device class).
+- **The self-verifier, built and measured** — `verify_rv32r` with its tamper differential, and
+  its requirement measured at two fixtures and derived for the M5.2-exit shape: tier 22,
+  ~97–130 GB, ≥ 128 GB host — the tree-of-aggregates question answered to a number, with the
+  end-to-end proof written and scheduled in the runbook (row 11).
+- **The consolidated runbook itself**, above: every deferred proof, its command, its class, its
+  estimate — one ≥ 64 GB session clears runs 1–6 after chain-side aggregation lands, and the
+  GPU node clears 9–10 (and accelerates 6–8, 11) when provisioned.
+
+## Still ahead (blocked-on-provisioning)
+
+- **T3** — the PTX build and hardware bring-up on the fleet GPU node
+  (`rand-zkvm-cuda/ptx/PTX_BUILD.md`'s checklist, in order; Linux, R580+ driver, CUDA 13,
+  LLVM 21, sm_80-class or newer, 80 GB device class, ≥ 160 GB host).
 - **T4** — N re-measured at production on the GPU (the per-N table of `docs/02-aggregate.md`
-  completed with GPU columns).
-- **T5/T6** — the self-verifier program and its measured requirement (the verdict's number
-  replaces the plan's derivation).
-- **T7** — this document's completion and the big-machine runbook's final form.
+  completed with GPU columns), on that node.
+
