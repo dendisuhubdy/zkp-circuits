@@ -130,3 +130,13 @@ chip run, a declared-no-table degree mismatch; the absorb row's wrong source cel
 absorb, a sponge row claiming the plain kind). The permutation-equality contract — the chip's
 permutation equals the reference on 1 000 random states — is a proof in `tests/cpu.rs`, its
 sponge twin in `tests/precompiles.rs`.
+
+## What M5.3 adds
+
+`docs/02-aggregate.md`: the N-generic aggregate program — one counted loop over `N` inner
+proofs of one shape, the interface digest over `[inner_vk_digest ‖ N ‖ 34·N]`, one registered
+program digest per shape — with the measured per-N economics (test profile N=1..3 in
+`tests/pins.json`), the chain-facing `aggregate` / `verify_aggregate` API, the two chain-side
+corrections (sealed history carries every covered bundle's declared shape; admission
+shape-checks every covered bundle), and the fullnode admission stub's specification and test
+vectors.

@@ -161,6 +161,22 @@ impl Writer {
     }
 }
 
+/// The fourteen segments one proof contributes to a tape — the count [`SegmentRef`] grouping
+/// relies on, and the number [`Writer`] always produces per proof because `write_proof` writes
+/// exactly one of each [`Segment`].
+pub const SEGMENTS_PER_PROOF: usize = 14;
+
+/// One segment of one proof's region of a tape: which proof (in
+/// [`WitnessTape::build_n`]'s argument order), which segment, where its words start, and how
+/// many there are. The tamper tests index a word to corrupt by one of these.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SegmentRef {
+    pub proof: usize,
+    pub segment: Segment,
+    pub start: usize,
+    pub len: usize,
+}
+
 impl WitnessTape {
     /// Flattens one `Proof` in the order the program consumes it.
     pub fn build(
@@ -169,11 +185,69 @@ impl WitnessTape {
         key: &InnerKey,
         proof: &Proof,
     ) -> Result<Self, TapeError> {
+        let mut w = Writer::new();
+        write_proof(&mut w, profile, shape, key, proof)?;
+        Ok(WitnessTape { words: w.words, segments: w.segments })
+    }
+
+    /// The tape of N proofs of one shape: one count word — the aggregate program's loop trip
+    /// count — then each proof's fourteen segments in [`build`](WitnessTape::build)'s pinned
+    /// order, consumed sequentially by the looped program (M5.3 ruling R2). A region is
+    /// byte-identical to that proof's single-proof tape, so an N=1 tape is `[1] ‖ build(proof)`.
+    ///
+    /// Every proof must match the shape: the shape checks run over the whole set up front —
+    /// cheapest refusal first, mirroring `InnerShape::matches`'s own order — so a wrong-shape
+    /// proof is a `TapeError`, never a misparse or a half-built tape.
+    pub fn build_n(
+        profile: FriProfile,
+        shape: &InnerShape,
+        key: &InnerKey,
+        proofs: &[Proof],
+    ) -> Result<Self, TapeError> {
+        for proof in proofs {
+            if !shape.matches(proof) {
+                return Err(ReplayError::Shape.into());
+            }
+        }
+        let mut w = Writer::new();
+        w.usize(proofs.len());
+        for proof in proofs {
+            write_proof(&mut w, profile, shape, key, proof)?;
+        }
+        Ok(WitnessTape { words: w.words, segments: w.segments })
+    }
+
+    /// The flat segment table as `(proof, segment, start, len)` per proof in order — every
+    /// word of the tape past the count word covered exactly once. A single-proof tape is proof
+    /// 0's fourteen; `segments` keeps its per-proof layout, so the single-proof call sites that
+    /// `find` a segment by name are untouched.
+    pub fn segment_refs(&self) -> Vec<SegmentRef> {
+        self.segments
+            .iter()
+            .enumerate()
+            .map(|(i, &(segment, start, len))| SegmentRef {
+                proof: i / SEGMENTS_PER_PROOF,
+                segment,
+                start,
+                len,
+            })
+            .collect()
+    }
+}
+
+/// One proof's fourteen segments, appended to `w` in the program's consumption order — the two
+/// constructors' shared writer.
+fn write_proof(
+    w: &mut Writer,
+    profile: FriProfile,
+    shape: &InnerShape,
+    key: &InnerKey,
+    proof: &Proof,
+) -> Result<(), TapeError> {
         let r = replay(profile, shape, key, proof)?;
         let batch = &proof.batch;
         let (rand_openings, fri) = &batch.opening_proof;
         let n = shape.instances();
-        let mut w = Writer::new();
 
         // 1 ── the proof's own declared shape.
         w.begin(Segment::Header);
@@ -378,9 +452,10 @@ impl WitnessTape {
         }
         w.end();
 
-        Ok(WitnessTape { words: w.words, segments: w.segments })
-    }
+        Ok(())
+}
 
+impl WitnessTape {
     pub fn len(&self) -> usize {
         self.words.len()
     }

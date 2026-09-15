@@ -66,18 +66,20 @@ pub fn verify_rv32(shape: &InnerShape, key: &InnerKey, cp: Checkpoints) -> Verif
     verify_rv32_with(shape, key, cp, crate::dsl::Liveness::On, Precompiles::On)
 }
 
-/// [`verify_rv32`] with the allocator's liveness policy and the precompiles chosen: `Off`
-/// reproduces the pre-Task-7 program byte for byte (the differential reference), `On` is what
-/// ships.
-pub fn verify_rv32_with(
+/// Phases 0–7 for one proof, read off the tape at its current position with a fresh challenger:
+/// the declared-shape header pin, the batch transcript, the terminal sum, the constraint
+/// evaluation at `zeta`, and the FRI query phase. Returns the proof's public-values array — the
+/// interface list's per-proof run — and the per-instance phase-5 costs.
+///
+/// [`verify_rv32_with`] emits it once, straight-line; the aggregate program
+/// (`super::rv32n::verify_rv32n`, M5.3) emits it as the counted loop's body, where every run
+/// re-executes it against the next proof's tape region.
+pub(super) fn emit_proof(
+    b: &mut Builder,
     shape: &InnerShape,
     key: &InnerKey,
-    cp: Checkpoints,
-    liveness: crate::dsl::Liveness,
-    pc: Precompiles,
-) -> VerifierProgram {
+) -> (Array<Felt>, Vec<Phase5Cost>) {
     let n = shape.instances();
-    let mut b = Builder::with_opts(cp, liveness, pc);
     let mark = |b: &mut Builder, name: &'static str| b.note_phase(name);
 
     // ── phase 0: the header. Read the proof's declared shape and pin it to this program's own, so
@@ -93,10 +95,10 @@ pub fn verify_rv32_with(
     let pvs = b.hint_array(shape.num_public_values[PV_INSTANCE]);
     // `Commitments`: main, permutation, quotient_chunks, random — `BatchCommitments`' field order,
     // which is also the order the transcript observes them in.
-    let main_cap = read_cap(&mut b);
-    let perm_cap = read_cap(&mut b);
-    let q_cap = read_cap(&mut b);
-    let r_cap = read_cap(&mut b);
+    let main_cap = read_cap(b);
+    let perm_cap = read_cap(b);
+    let q_cap = read_cap(b);
+    let r_cap = read_cap(b);
     // `LookupTerminals`: one extension element per instance that declares lookups, in instance
     // order — `lookup_terminals.iter().flatten()`.
     let terminals: Vec<_> = (0..n)
@@ -105,48 +107,48 @@ pub fn verify_rv32_with(
         .collect();
 
     // ── phase 1: the challenger, the instance count and the per-instance binding.
-    let mut ch = DslChallenger::new(&mut b);
-    ch.observe_usize(&mut b, n);
+    let mut ch = DslChallenger::new(b);
+    ch.observe_usize(b, n);
     for i in 0..n {
         let ext_db = shape.degree_bits[i];
-        ch.observe_usize(&mut b, ext_db);
+        ch.observe_usize(b, ext_db);
         // `base_db = ext_db - is_zk`, and `is_zk() == true` for this machine's config.
-        ch.observe_usize(&mut b, ext_db - 1);
-        ch.observe_usize(&mut b, shape.widths[i]);
+        ch.observe_usize(b, ext_db - 1);
+        ch.observe_usize(b, shape.widths[i]);
         // The *committed* chunk count: `(1 << log_num_quotient_chunks) << is_zk`.
-        ch.observe_usize(&mut b, (1 << shape.log_num_quotient_chunks[i]) << 1);
+        ch.observe_usize(b, (1 << shape.log_num_quotient_chunks[i]) << 1);
     }
 
     // ── phase 2: the main commitment, the public values, the preprocessed widths and cap.
-    ch.observe_cap(&mut b, &main_cap);
+    ch.observe_cap(b, &main_cap);
     for k in 0..shape.num_public_values[PV_INSTANCE] {
         let v = b.get(pvs, k);
-        ch.observe(&mut b, v);
+        ch.observe(b, v);
     }
     for i in 0..n {
-        ch.observe_usize(&mut b, shape.preprocessed_widths[i]);
+        ch.observe_usize(b, shape.preprocessed_widths[i]);
     }
-    let pre_cap = constant_cap(&mut b, &key.cap);
-    ch.observe_cap(&mut b, &pre_cap);
+    let pre_cap = constant_cap(b, &key.cap);
+    ch.observe_cap(b, &pre_cap);
 
     // ── phase 3: the lookup challenges, the permutation commitment, the terminals, alpha.
     // `sample_perm_challenges` draws exactly this pair; every bus offset it derives is arithmetic on
     // it, which is phase 5's job (`emit_lookup_challenges`).
-    let lookup_alpha = ch.sample_ext(&mut b);
+    let lookup_alpha = ch.sample_ext(b);
     b.checkpoint("lookup_alpha", lookup_alpha);
-    let lookup_beta = ch.sample_ext(&mut b);
+    let lookup_beta = ch.sample_ext(b);
     b.checkpoint("lookup_beta", lookup_beta);
-    ch.observe_cap(&mut b, &perm_cap);
+    ch.observe_cap(b, &perm_cap);
     for t in &terminals {
-        ch.observe_ext(&mut b, *t);
+        ch.observe_ext(b, *t);
     }
-    let alpha = ch.sample_ext(&mut b);
+    let alpha = ch.sample_ext(b);
     b.checkpoint("alpha", alpha);
 
     // ── phase 4: the quotient and random commitments, then zeta.
-    ch.observe_cap(&mut b, &q_cap);
-    ch.observe_cap(&mut b, &r_cap);
-    let zeta = ch.sample_ext(&mut b);
+    ch.observe_cap(b, &q_cap);
+    ch.observe_cap(b, &r_cap);
+    let zeta = ch.sample_ext(b);
     b.checkpoint("zeta", zeta);
 
     // ── the cross-AIR terminal sum (`LogUpGadget::verify_terminal_sum`): the sum over instances must
@@ -164,17 +166,17 @@ pub fn verify_rv32_with(
     let zero = b.zero();
     b.assert_eq(c0, zero, "lookup terminal sum");
     b.assert_eq(c1, zero, "lookup terminal sum");
-    mark(&mut b, "phases 0-4: header, transcript, commitments, terminal sum");
+    mark(b, "phases 0-4: header, transcript, commitments, terminal sum");
 
     // ── phase 5: the generated constraint evaluation at `zeta` (spec §4.3).
     //
     // The per-lookup challenge pairs come first, because they are the `ExtEntry::Challenge` leaves of
     // every lookup constraint below — `sample_perm_challenges` derives the whole layout from the pair
     // drawn in phase 3, and so does this.
-    let challenges = emit_lookup_challenges(&mut b, shape, lookup_alpha, lookup_beta);
+    let challenges = emit_lookup_challenges(b, shape, lookup_alpha, lookup_beta);
     // `Segment::OpenedValues`, read once in tape order. The query phase re-observes every one of
     // these as a claimed evaluation, which is why `openings` keeps the raw runs too.
-    let openings = read_openings(&mut b, shape, pvs, &terminals, &challenges, zeta);
+    let openings = read_openings(b, shape, pvs, &terminals, &challenges, zeta);
     let airs = shape_airs(shape);
     let common = shape.common_data();
     let lookups: Vec<&[_]> = common.lookups.iter().map(|l| l.as_ref()).collect();
@@ -183,11 +185,11 @@ pub fn verify_rv32_with(
     for i in 0..n {
         let before = b.emitted();
         let mut cost = Phase5Cost::default();
-        emit_instance(&mut b, &batch, &openings, i, &mut cost);
+        emit_instance(b, &batch, &openings, i, &mut cost);
         cost.instrs = b.emitted() - before;
         phase5.push(cost);
     }
-    mark(&mut b, "phase 5: constraint evaluation at zeta");
+    mark(b, "phase 5: constraint evaluation at zeta");
 
     // ── phase 6: the FRI query phase (`p3-fri-0.7.0/src/verifier.rs:207-426`, in that order) ──
     //
@@ -205,25 +207,25 @@ pub fn verify_rv32_with(
         .collect();
     let round_caps = RoundCaps { random: r_cap, main: main_cap, quotient: q_cap,
                                  preprocessed: pre_cap, permutation: perm_cap };
-    let (opened, metas) = observe_claimed(&mut b, &mut ch, shape, zeta, &zeta_nexts, &openings,
+    let (opened, metas) = observe_claimed(b, &mut ch, shape, zeta, &zeta_nexts, &openings,
                                           &round_caps);
 
     // 1. `fri_alpha` — one extension draw.
-    let fri_alpha = ch.sample_ext(&mut b);
+    let fri_alpha = ch.sample_ext(b);
     b.checkpoint("fri_alpha", fri_alpha);
 
     // 2. The commit phase — per round: the cap, the discarded PoW witness, one `beta` draw.
     let mut fri_caps = Vec::with_capacity(shape.log_arities.len());
     let mut betas = Vec::with_capacity(shape.log_arities.len());
     for r in 0..shape.log_arities.len() {
-        let cap = read_cap(&mut b);
-        ch.observe_cap(&mut b, &cap);
+        let cap = read_cap(b);
+        ch.observe_cap(b, &cap);
         // `commit_proof_of_work_bits == 0` on this machine, and `check_witness(0, w)` observes
         // nothing — it returns `true` without touching the transcript
         // (`grinding_challenger.rs:44-49`). The witness element is therefore read off the tape
         // and discarded, exactly as the native verifier discards it.
         let _discarded = b.hint();
-        let beta = ch.sample_ext(&mut b);
+        let beta = ch.sample_ext(b);
         b.checkpoint(&format!("beta[{r}]"), beta);
         fri_caps.push(cap);
         betas.push(beta);
@@ -231,25 +233,25 @@ pub fn verify_rv32_with(
 
     // 3. `final_poly` — `log_final_poly_len == 0`, so exactly one extension coefficient.
     let final_poly = b.hint_ext();
-    ch.observe_ext(&mut b, final_poly);
+    ch.observe_ext(b, final_poly);
 
     // 4. The arity schedule — one *single* base absorb per round (`verifier.rs:335`), from the
     // program's compile-time schedule. Not `observe_usize`: that would be two absorbs.
     for &la in &shape.log_arities {
         let h = b.constant(F::from_usize(la));
-        ch.observe(&mut b, h);
+        ch.observe(b, h);
     }
 
     // 5. The query proof-of-work.
     let pow = b.hint();
-    ch.check_witness(&mut b, shape.query_pow_bits, pow, "query pow");
+    ch.check_witness(b, shape.query_pow_bits, pow, "query pow");
 
     // 6. The query indices — little-endian bit handles, `sample_bits(log_global_max_height)` each
     // (`TwoAdicFriFolding::extra_query_index_bits() == 0`).
     let index_bits: Vec<Vec<Felt>> = (0..shape.num_queries)
-        .map(|_| ch.sample_bits(&mut b, log_global))
+        .map(|_| ch.sample_bits(b, log_global))
         .collect();
-    mark(&mut b, "phase 6 preamble: claimed evals, betas, final poly, pow, indices");
+    mark(b, "phase 6 preamble: claimed evals, betas, final poly, pow, indices");
 
     // 7. Per query, unrolled: the count is a compile-time constant of the shape, and a counted
     // loop would force every intermediate through memory for no benefit. The four query-major
@@ -260,33 +262,34 @@ pub fn verify_rv32_with(
     let mut all_commit_openings = Vec::with_capacity(shape.num_queries);
     let mut all_commit_paths = Vec::with_capacity(shape.num_queries);
     for _ in 0..shape.num_queries {
-        all_rows.push(read_input_openings(&mut b, &opened));
+        all_rows.push(read_input_openings(b, &opened));
     }
     for _ in 0..shape.num_queries {
-        all_paths.push(read_input_paths(&mut b, &opened));
+        all_paths.push(read_input_paths(b, &opened));
     }
     for _ in 0..shape.num_queries {
-        all_commit_openings.push(read_commit_openings(&mut b, shape));
+        all_commit_openings.push(read_commit_openings(b, shape));
     }
     for _ in 0..shape.num_queries {
-        all_commit_paths.push(read_commit_paths(&mut b, shape));
+        all_commit_paths.push(read_commit_paths(b, shape));
     }
-    mark(&mut b, "query segments: tape reads");
+    mark(b, "query segments: tape reads");
     b.unrolled(shape.num_queries, |b, q| {
         emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
                    &index_bits[q], &all_rows[q], &all_paths[q], &all_commit_openings[q],
                    &all_commit_paths[q]);
     });
-    mark(&mut b, "queries: merkle walks, reduction, folds");
+    mark(b, "queries: merkle walks, reduction, folds");
 
-    // ── phase 8: acceptance and the interface digest (R5) ────────────────────────────────────
-    //
-    // `inner_vk_digest`, recomputed in-program from the compile-time shape words and the key's
-    // cap (so it is bound by the program digest twice over), then the §4.4 list — the vk digest,
-    // `N = 1`, the 34 inner public values — stored, sponged with the capacity header, and the
-    // digest's four lanes published. The batch public values are always exactly those four (R5):
-    // the node recomputes the list from the covered bundles' public fields and compares digests
-    // (the cs6 `H_PUB` pattern). What used to be thirty-nine `PUBLIC` rows is the digest's four.
+    (pvs, phase5)
+}
+
+/// The inner verifier-key digest, computed in-program from the compile-time shape words and the
+/// key's cap: the `RVM_VK_DOMAIN` header in the capacity lanes, one padding-free sponge
+/// (`shape::inner_vk_digest`'s host twin pins it). Recomputed in-program so it is bound by the
+/// program digest twice over — nothing a prover supplies can move it. Phase 8 (and the aggregate
+/// program's preamble) absorbs it into the interface list.
+pub(super) fn vk_digest_in_program(b: &mut Builder, shape: &InnerShape, key: &InnerKey) -> Digest {
     let words = shape.shape_words();
     let mut msg = Vec::with_capacity(1 + words.len() + CAP_WORDS);
     msg.push(F::from_u64(RVM_VK_DOMAIN));
@@ -298,7 +301,32 @@ pub fn verify_rv32_with(
         b.store(src, k as i64, c);
     }
     let vk = Digest(b.alloc(DIGEST_ELEMS as u64));
-    hash::sponge(&mut b, src, msg.len(), vk);
+    hash::sponge(b, src, msg.len(), vk);
+    vk
+}
+
+/// [`verify_rv32`] with the allocator's liveness policy and the precompiles chosen: `Off`
+/// reproduces the pre-Task-7 program byte for byte (the differential reference), `On` is what
+/// ships.
+pub fn verify_rv32_with(
+    shape: &InnerShape,
+    key: &InnerKey,
+    cp: Checkpoints,
+    liveness: crate::dsl::Liveness,
+    pc: Precompiles,
+) -> VerifierProgram {
+    let mut b = Builder::with_opts(cp, liveness, pc);
+    let (pvs, phase5) = emit_proof(&mut b, shape, key);
+
+    // ── phase 8: acceptance and the interface digest (R5) ────────────────────────────────────
+    //
+    // `inner_vk_digest`, recomputed in-program from the compile-time shape words and the key's
+    // cap (so it is bound by the program digest twice over), then the §4.4 list — the vk digest,
+    // `N = 1`, the 34 inner public values — stored, sponged with the capacity header, and the
+    // digest's four lanes published. The batch public values are always exactly those four (R5):
+    // the node recomputes the list from the covered bundles' public fields and compares digests
+    // (the cs6 `H_PUB` pattern). What used to be thirty-nine `PUBLIC` rows is the digest's four.
+    let vk = vk_digest_in_program(&mut b, shape, key);
     let n_list = DIGEST_ELEMS + 1 + shape.num_public_values[PV_INSTANCE];
     let list = b.alloc(n_list as u64);
     for lane in 0..DIGEST_ELEMS as i64 {
@@ -317,7 +345,7 @@ pub fn verify_rv32_with(
         let v = b.load(interface.0, lane);
         b.public(v);
     }
-    mark(&mut b, "phase 8: the interface digest (R5)");
+    b.note_phase("phase 8: the interface digest (R5)");
 
     let checkpoint_names = b.checkpoint_names().to_vec();
     let (program, mut stats) = b.finish_stats();
