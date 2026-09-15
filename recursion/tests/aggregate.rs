@@ -286,6 +286,7 @@ fn a_one_proof_aggregate_round_trips_and_tampered_variants_are_refused() {
     let a = aggregate(&m, &vk, std::slice::from_ref(&p.proof), None)
         .expect("one real bundle proof aggregates");
     assert_eq!(a.proof.tier, RvmTier(19), "the test-profile N=1 aggregate lands at tier 19");
+    eprintln!("N=1 aggregate proof: {} bytes", a.proof.size());
     let program = aggregate_program(&vk);
     let outs = verify_aggregate(&m, &program, &a).expect("the aggregate verifies");
     let want: [u32; 8] =
@@ -342,5 +343,115 @@ fn a_wrong_shape_proof_in_the_set_is_named_by_index_before_any_tape_work() {
         Err(e) => panic!("expected WrongShape at index 1, got {e:?}"),
         Ok(_) => panic!("expected WrongShape at index 1, got an aggregate"),
     }
+}
+
+// ── Task 4: the refusal suite, the in-suite aggregate, and the N=3 twin ──────────────────────
+
+/// (a) an inner proof tampered inside the set makes `aggregate` fail — never an aggregate. The
+/// tamper is one of the 34 public values of proof 1: `matches` still passes (length and
+/// canonicality are all it checks), so the refusal lands in the tape builder's transcript
+/// replay, where the native verifier's own checks run.
+#[test]
+fn a_tampered_inner_proof_never_yields_an_aggregate() {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Test, 2).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = shape_and_key(&proofs[0]);
+    let vk = inner_vk(&shape, &key);
+    let m = RvmMachine::new(FriProfile::Test);
+    let mut set = proofs;
+    set[1].public_values[pv::OUT0] += 1; // still 34 canonical words; no longer its transcript
+    match aggregate(&m, &vk, &set, None) {
+        Err(AggregateError::Tape(_)) => {}
+        Err(e) => panic!("a tampered inner proof must fail at the tape replay, got {e:?}"),
+        Ok(_) => panic!("a tampered inner proof must never yield an aggregate"),
+    }
+}
+
+/// (a′) the same M5.1-table tamper, one level down: the tape itself corrupted at
+/// `(proof 1, Segment::OpenedValues)` makes the *prove* fail — the program's named refusal
+/// escalated to `ProveError::Exec`, which is what `AggregateError::Prove` exists to carry.
+#[test]
+fn a_tampered_tape_fails_the_prove_at_the_named_step() {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Test, 2).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = shape_and_key(&proofs[0]);
+    let mut tape = WitnessTape::build_n(FriProfile::Test, &shape, &key, &proofs).unwrap();
+    let r = *tape
+        .segment_refs()
+        .iter()
+        .find(|r| r.proof == 1 && r.segment == Segment::OpenedValues)
+        .unwrap();
+    tape.words[r.start] += F::ONE;
+    let program = verify_rv32n(&shape, &key, Checkpoints::Off);
+    let m = RvmMachine::new(FriProfile::Test);
+    match m.prove(&program.program, &tape.words, None) {
+        Err(recursion::machine::ProveError::Exec(ExecError::InverseOfZero { pc })) => {
+            assert_eq!(
+                program.program.checkpoint_at(pc),
+                Some("quotient identity[0]"),
+                "the prove fails at the tamper's named step"
+            );
+        }
+        Err(e) => panic!("expected ProveError::Exec at quotient identity[0], got {e:?}"),
+        Ok(_) => panic!("expected ProveError::Exec at quotient identity[0], got a proof"),
+    }
+}
+
+/// (e) the in-suite aggregate: two real test-profile bundle proofs prove and verify natively —
+/// tier 20 on this fixture shape. `#[ignore]`d after two jetsam deaths on the shared box: the
+/// prove peaks above the box's practical line (~33 GB today; 33.7 GB measured before the
+/// SIGKILL, twice), so the suite's heaviest *proven* aggregate is the N=1 round-trip at tier 19,
+/// and this runs alone, watchdog-guarded, the way the twin does.
+#[test]
+#[ignore = "the N=2 in-suite aggregate: tier 20, ~34 GB peak observed before jetsam on the \
+            shared box (twice); run alone: cargo test --release -p recursion --test aggregate \
+            two_test_profile -- --ignored --nocapture"]
+fn two_test_profile_bundle_proofs_aggregate_and_verify_natively() {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Test, 2).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = shape_and_key(&proofs[0]);
+    let vk = inner_vk(&shape, &key);
+    let m = RvmMachine::new(FriProfile::Test);
+    let a = aggregate(&m, &vk, &proofs, None).expect("two real bundle proofs aggregate");
+    assert_eq!(a.proof.tier, RvmTier(20), "the test-profile N=2 aggregate lands at tier 20");
+    eprintln!("N=2 aggregate proof: {} bytes", a.proof.size());
+    let outs = verify_aggregate(&m, &aggregate_program(&vk), &a).expect("the aggregate verifies");
+    assert_eq!(outs.len(), 2);
+    for (j, out) in outs.iter().enumerate() {
+        let want: [u32; 8] = std::array::from_fn(|k| {
+            u32::try_from(proofs[j].public_values[pv::OUT0 + k]).unwrap()
+        });
+        assert_eq!(*out, want, "bundle {j}'s OUT0..7");
+    }
+}
+
+/// The M5.3 exit (spec §7, R4's profile ruling): an aggregate of **3 real test-profile bundle
+/// proofs** verifies natively — tier 21, ~38 GB on this tree's prover (the tier-20 prove's
+/// measured peak is 33.7 GB). Timed and measured: wall time, proof size, verify time; the RSS
+/// watchdog runs outside the process (see the ignore note). On a box that jetsams the largest
+/// process at ~33 GB the attempt is expected to die there — the peak it reaches is the
+/// measurement, and the plan's fallback records N=1 (tier 19, completed) as the in-scope proof.
+#[test]
+#[ignore = "the N=3 exit twin: tier 21, ~38 GB, est. ~2-4 h contended; watchdog-guarded; \
+            run alone: cargo test --release -p recursion --test aggregate twin -- --ignored --nocapture"]
+fn twin_three_test_profile_bundle_proofs_aggregate_and_verify_natively() {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Test, 3).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = shape_and_key(&proofs[0]);
+    let vk = inner_vk(&shape, &key);
+    let m = RvmMachine::new(FriProfile::Test);
+    let t0 = std::time::Instant::now();
+    let a = aggregate(&m, &vk, &proofs, None).expect("three real bundle proofs aggregate");
+    let prove_s = t0.elapsed().as_secs_f64();
+    assert_eq!(a.proof.tier, RvmTier(21), "the test-profile N=3 aggregate lands at tier 21");
+    let t1 = std::time::Instant::now();
+    let outs = verify_aggregate(&m, &aggregate_program(&vk), &a).expect("the aggregate verifies");
+    let verify_s = t1.elapsed().as_secs_f64();
+    assert_eq!(outs.len(), 3);
+    eprintln!(
+        "M5.3 exit twin: N=3 test profile — prove {prove_s:.1} s, verify {verify_s:.2} s, \
+         proof {} bytes",
+        a.proof.size()
+    );
 }
 
