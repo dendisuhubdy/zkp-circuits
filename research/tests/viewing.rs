@@ -474,3 +474,22 @@ fn spend_keys_are_256_bits_and_nk_hashes_all_eight_words() {
     assert_eq!(rand_zkvm::notes::bundle_input::IN1_FROM, 8);
     assert_eq!(rand_zkvm::notes::bundle_input::COUNT, 612);
 }
+
+/// Short shielded addresses (fullnode spec 2026-09-17 §7, ruling R1): a wallet can rotate its
+/// ML-KEM key without losing the ability to open anything sealed under an earlier one. Version
+/// 0 must be exactly today's unversioned key, so every wallet and every envelope already sealed
+/// keeps working; every later version is a distinct key that a version-0 (or any other wrong
+/// version) key cannot open.
+#[test]
+fn kem_key_versions_differ_and_version_zero_is_the_unversioned_key() {
+    let vk = SpendKey([5; 8]).viewing_key();
+    assert_eq!(vk.address_at(0), vk.address(), "version 0 is today's key: old wallets and envelopes are unaffected");
+    assert_ne!(vk.address_at(1).kem_ek, vk.address().kem_ek);
+    assert_eq!(vk.address_at(1).pk, vk.address().pk, "pk never changes with the KEM version");
+    let sender = SpendKey([6; 8]).viewing_key();
+    let note = Note::new(vk.pk(), [0; 8], 50, 0, 3);
+    let env = Envelope::seal(&sender, &vk.address_at(1), &note, &TxKey::random());
+    assert!(env.open_as_receiver(note.commitment(), &vk).is_none(), "the version-0 key cannot open a version-1 envelope");
+    let (_, opened) = env.open_as_receiver_at(note.commitment(), &vk, 1).expect("the version-1 key opens it");
+    assert_eq!(opened, note);
+}
