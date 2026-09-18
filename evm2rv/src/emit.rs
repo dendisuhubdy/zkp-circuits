@@ -379,7 +379,8 @@ fn static_target(v: &[u8; 32]) -> Option<usize> {
 }
 
 /// The block head: the stack check and the static charge (`blocks.rs`'s numbers, the call
-/// family at its real arity).
+/// family at its real arity). The checks are braced: the next line starts with an op's comment,
+/// which an unbraced `if` would make -Wmisleading-indentation's case.
 fn head_c(b: &Block) -> String {
     let mut h = format!(
         "/* [{:#06x}, {:#06x}) min_depth {}, max_growth {}, static gas {} */\n",
@@ -388,14 +389,14 @@ fn head_c(b: &Block) -> String {
     if b.min_depth > 0 {
         let _ = writeln!(
             h,
-            "    if (evm_sp < {}u) evm_halt(EVM_HALT_STACK_UNDERFLOW, 0);",
+            "    if (evm_sp < {}u) {{ evm_halt(EVM_HALT_STACK_UNDERFLOW, 0); }}",
             b.min_depth
         );
     }
     if b.max_growth > 0 {
         let _ = writeln!(
             h,
-            "    if (evm_sp + {}u > STACK_LIMIT) evm_halt(EVM_HALT_STACK_OVERFLOW, 0);",
+            "    if (evm_sp + {}u > STACK_LIMIT) {{ evm_halt(EVM_HALT_STACK_OVERFLOW, 0); }}",
             b.max_growth
         );
     }

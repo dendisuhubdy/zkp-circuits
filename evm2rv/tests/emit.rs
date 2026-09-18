@@ -379,7 +379,7 @@ fn a_call_on_a_shallow_stack_underflows_at_the_block_head() {
         .unwrap()
         .c;
     assert!(
-        c.contains("if (evm_sp < 6u) evm_halt(EVM_HALT_STACK_UNDERFLOW, 0);"),
+        c.contains("if (evm_sp < 6u) { evm_halt(EVM_HALT_STACK_UNDERFLOW, 0); }"),
         "{c}"
     );
     assert!(
@@ -441,7 +441,7 @@ fn the_block_head_checks_the_stack_then_charges() {
         .unwrap()
         .c;
     let under = c
-        .find("if (evm_sp < 2u) evm_halt(EVM_HALT_STACK_UNDERFLOW, 0);")
+        .find("if (evm_sp < 2u) { evm_halt(EVM_HALT_STACK_UNDERFLOW, 0); }")
         .expect(&c);
     let charge = c.find("evm_charge(5);").expect(&c);
     assert!(under < charge);
@@ -451,7 +451,7 @@ fn the_block_head_checks_the_stack_then_charges() {
         .unwrap()
         .c;
     assert!(
-        c.contains("if (evm_sp + 2u > STACK_LIMIT) evm_halt(EVM_HALT_STACK_OVERFLOW, 0);"),
+        c.contains("if (evm_sp + 2u > STACK_LIMIT) { evm_halt(EVM_HALT_STACK_OVERFLOW, 0); }"),
         "{c}"
     );
     assert!(!c.contains("EVM_HALT_STACK_UNDERFLOW"), "{c}");
@@ -577,6 +577,59 @@ fn the_erc20_compiles_clean_for_rv32im() {
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// Every one-opcode contract compiles clean for rv32im under -Wall -Wextra -Werror (Task 6: the
+/// fuzzer's host build found a block head whose unbraced `if` was followed, on the next line, by
+/// an op comment and its statement — clang's -Wmisleading-indentation — in a block with no static
+/// charge, such as a lone `EXP`). Each byte, a PUSHn with its immediate, in one file.
+#[test]
+fn every_one_opcode_contract_compiles_clean_for_rv32im() {
+    let mut all = String::new();
+    for op in 0..=255u8 {
+        let mut code = vec![op];
+        if (0x60..=0x7f).contains(&op) {
+            code.extend(std::iter::repeat_n(0x11, (op - 0x5f) as usize));
+        }
+        let c = translate(&code, &Options { chain_id: Some(1) }).unwrap().c;
+        let c = c.replace(
+            "void evm_entry(void)",
+            &format!("void evm_entry_{op}(void)"),
+        );
+        if op == 0 {
+            all.push_str(&c);
+        } else {
+            all.push_str(&c.replace("#include <stdint.h>\n#include \"evm_rt.h\"\n", ""));
+        }
+    }
+    let dir = root().join("evm2rv/target/emit-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("one-opcode.c");
+    std::fs::write(&file, &all).unwrap();
+    let o = Command::new(riscv_clang())
+        .args(C_FLAGS)
+        .args(["-fsyntax-only", "-Wall", "-Wextra", "-Werror", "-I"])
+        .arg(root().join("evm-rt"))
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// A clang with a riscv32 target: Homebrew's, `clang`, or `$CLANG`.
+fn riscv_clang() -> PathBuf {
+    ["/opt/homebrew/opt/llvm/bin/clang", "clang"]
+        .into_iter()
+        .map(PathBuf::from)
+        .chain(std::env::var_os("CLANG").map(PathBuf::from))
+        .find(|c| {
+            Command::new(c)
+                .arg("--print-targets")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains("riscv32"))
+                .unwrap_or(false)
+        })
+        .expect("a clang with a riscv32 target (brew install llvm, or set CLANG)")
 }
 
 /// The shim's C flags are rand-guest's, flag for flag: `clang_flags` in rand-guest/src/build.rs
