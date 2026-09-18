@@ -190,11 +190,13 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
     // Absolute from here on, for `build_rust`'s reason: the paths below go into the object files
     // and the linker command line, and must not depend on the caller's cwd.
     let dir = &dir.canonicalize().with_context(|| format!("no such guest directory: {}", dir.display()))?;
-    // A guest's own `guest.h` or `start.S` would shadow the toolchain's copy of the same name
-    // written into `target/rand-guest/` below and put on the include path: `#include "guest.h"`
-    // would resolve to the guest's stale copy silently, with no compiler diagnostic. Checked before
-    // `find_clang`/`checkout_root` so the failure is cheap and does not depend on either being
-    // available.
+    // A guest's own `guest.h` or `start.S` fails silently in a different way each: a local
+    // `guest.h` would shadow the toolchain's copy written into `target/rand-guest/` below, since
+    // the quote-include form searches the including file's own directory before `-I`; a local
+    // `start.S` would not be compiled at all — the loop below only globs `.c` files — so the
+    // guest's intended entry point would be silently dropped in favour of the bundled one. Checked
+    // before `find_clang`/`checkout_root` so the failure is cheap and does not depend on either
+    // being available.
     for name in ["guest.h", "start.S"] {
         if dir.join(name).exists() {
             bail!("{} carries its own {name}, which would shadow the toolchain's copy written into target/rand-guest/; remove it", dir.display());

@@ -2,7 +2,12 @@
 
 Built with the toolchain, never by hand:
 
-    cd rand-guest && cargo run -- build ../guests-compiled/<guest> --out ../guests-compiled/bin/<guest>.bin
+    cd rand-guest && cargo run -- build ../guests-compiled/<guest> --out ../guests-compiled/bin/<guest>.bin --max-words 65535
+
+`--max-words 65535` is needed for `evm` and `sbpf`: both interpreter guests are far over the
+chain's default 4096-word cap (`rand-guest/README.md`'s "The cap"), which is a genesis parameter
+on the v0.4 chain, not yet raised for either of them; `fib`, `keccak256`, and `c-fib` fit under
+the default and do not need the flag, but passing it always is harmless.
 
 `rand-guest build` compiles with the pinned toolchain and the fixed flags, checks the ELF
 against the machine, packs the image and prints its `hc`. `bin/<guest>.bin.sha256` pins each

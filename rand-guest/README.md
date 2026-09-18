@@ -98,9 +98,10 @@ The default, `4096`, is the fullnode's deploy cap today. Both loaders (`Program:
 `Program::from_flat_binary`) refuse anything over **65 535** words outright (`LoadError::TooLong`)
 regardless of `--max-words` — the hard ceiling the v0.4 chain is expected to raise the deploy cap
 to. The two committed interpreters are already over the default: `evm.bin` is 18 009 words and
-`sbpf.bin` is bigger still, so building or checking either needs `--max-words 65535` (as the
-committed guests' own build script and `rand-guest/tests/build.rs` pass it); `fib`, `keccak256`,
-and `c-fib` all fit comfortably under 4096.
+`sbpf.bin` is bigger still, so building or checking either needs `--max-words 65535` — as
+`rand-guest/tests/build.rs` passes it, and as a developer building `evm` or `sbpf` by hand must
+pass it too, there being no build script that does it for them (`guests-compiled/README.md`'s
+own example command shows it). `fib`, `keccak256`, and `c-fib` all fit comfortably under 4096.
 
 ## The two image forms
 
@@ -133,8 +134,11 @@ A C guest writes `#include "guest.h"` for the syscall wrappers (`rand_read_input
 `rand_sha256_compress`, `rand_halt`) and needs no `_start` of its own — both are written into the
 guest's `target/rand-guest/` and put on the include path, so a C guest directory is its own
 source and nothing else. Because of that, `build --lang c` refuses a guest directory that already
-has its own `guest.h` or `start.S`: either would shadow the toolchain's copy silently, since the
-include path and the link line would find the local one first.
+has its own `guest.h` or `start.S`. The two fail silently in different ways: a local `guest.h`
+would shadow the toolchain's copy, since `#include "guest.h"`'s quote form searches the including
+file's own directory before the `-I` path; a local `start.S` would not be compiled at all — `build_c`
+only globs `.c` files — so the guest's intended entry point would be silently dropped in favour of
+the bundled one.
 
 ## Byte/program identity for the committed guests
 
