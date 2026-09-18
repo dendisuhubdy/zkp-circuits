@@ -9,14 +9,17 @@
 //! that file: the software signature checks stay out, since the interpreter implements neither
 //! syscall — with the `cc` crate, `rand-guest`'s pinned clang and exactly its C flags),
 //! `src/main.rs`, `shim.ld` (`guests-compiled/sbpf/sbpf.ld`: the origin at `0x10000`, leaving the
-//! loader room for the data prologue, and 1 MiB for the 368 KiB `Workspace` and the 256 KiB staged
-//! tape in `.bss`), and `program.c` itself.
+//! loader room for the data prologue, and 1 MiB for the 368 KiB `Workspace` and the guard's 16 KiB
+//! hash buffer in `.bss`), and `program.c` itself.
 //!
-//! The ELF guard: the ELF still arrives on the public tape, and the harness reads `rodata`, the
-//! addresses and the entry from it, so the image refuses any ELF but the one it was translated
-//! from. `program.c` ends with [`elf_digest`] of the source ELF (`sbpf_elf_digest`); `main` stages
-//! the tape's words as `decode_input` reads them, and the executor hashes them the same way before
-//! running anything, returning `Halt::BadElf` (status 2) on a mismatch. With it `hc` binds the ELF.
+//! The ELF guard: the ELF still arrives on the public tape, and the harness hands the translated
+//! code the text, `rodata` and their addresses loaded from it, while the interpreter would also
+//! start at its entry — so the image refuses any ELF that loads to a different program.
+//! `program.c` ends with [`view_digest`] of the program `elf::load` makes of the source ELF
+//! (`sbpf_view_digest`: the loaded text, rodata, addresses and entry, [`view_words`]); the
+//! executor hashes the program it is handed the same way before running anything, returning
+//! `Halt::BadElf` (status 2) on a mismatch. With it `hc` binds the loaded program: everything a
+//! run can observe of the ELF.
 //!
 //! Reproducibility: a verifier rebuilds this crate from the published ELF to check `hc`, so nothing
 //! machine-specific may reach the image. The paths to the checkout are relative (the crate must sit
@@ -26,6 +29,7 @@
 //! passes `--no-default-config`, and every crates.io dependency is pinned to one exact version.
 
 use anyhow::{bail, Context, Result};
+use sbpf_core::elf::Program;
 use std::path::{Path, PathBuf};
 
 /// `cc`, and the two crates it pulls in, each pinned exactly (they drive clang; none reaches the
@@ -39,47 +43,90 @@ const FIND_MSVC_TOOLS_VERSION: &str = "0.1.12";
 /// override.
 pub const CLANG_VERSION: &str = "23.1.1";
 
-/// Words per `POSEIDON2` call (`isa::POSEIDON2_MAX_WORDS`): the ELF guard hashes the tape in chunks
-/// of this many words, each after the first beginning with the previous chunk's 8-word digest.
+/// Words per `POSEIDON2` call (`isa::POSEIDON2_MAX_WORDS`): the ELF guard hashes its word stream in
+/// chunks of this many words, each after the first beginning with the previous chunk's 8-word digest.
 pub const DIGEST_CHUNK: usize = 4096;
 
-/// The public tape `sbpf-core`'s `decode_input` reads the ELF from: `[n, bytes…]`, the bytes packed
-/// four per word little-endian and zero-padded (`rand_zkvm::sbpf::SbpfCall::public_words`).
-pub fn elf_tape(elf: &[u8]) -> Vec<u32> {
-    let mut words = vec![elf.len() as u32];
-    words.extend(elf.chunks(4).map(|c| {
-        let mut w = [0u8; 4];
-        w[..c.len()].copy_from_slice(c);
-        u32::from_le_bytes(w)
-    }));
-    words
+/// `text_off`'s value in [`view_words`] when the text is not a span of the read-only run.
+pub const TEXT_NOT_IN_RODATA: u32 = u32::MAX;
+
+/// The loaded program view the ELF guard binds: every field of `sbpf_core::elf::Program` that the
+/// shim, `sbpf-rt` or the interpreter reads at run time, as the word stream that is hashed.
+///
+/// * the header: `text_va` (low, high), `text.len()`, `rodata_va` (low, high), `rodata.len()`,
+///   `entry_pc`, and `text_off` — where the text sits inside the read-only run when it is a span
+///   of the same bytes (every v1 file: the run begins at `.text`), else [`TEXT_NOT_IN_RODATA`];
+/// * the read-only run's bytes, packed four per word little-endian, the last word zero-padded;
+/// * the text's bytes the same way, only when `text_off` is [`TEXT_NOT_IN_RODATA`] — otherwise
+///   they are `rodata[text_off..][..text.len()]`, already hashed.
+///
+/// Read at run time: `execute` hands `sbpf-rt` the text, the read-only run and both addresses
+/// (`sbpf_r`, the program region's loads and `callx`'s `(addr - text_va) / 8`); the interpreter also
+/// starts at `entry_pc`, which the translation bakes, so a different entry would run different code
+/// on the two sides. `relocs_applied` is read by nobody and is left out.
+pub fn view_words(p: &Program<'_>) -> Vec<u32> {
+    let text_off = p
+        .text_va
+        .checked_sub(p.rodata_va)
+        .and_then(|o| usize::try_from(o).ok())
+        .filter(|&o| {
+            o.checked_add(p.text.len())
+                .is_some_and(|end| end <= p.rodata.len())
+                && p.rodata.as_ptr().wrapping_add(o) == p.text.as_ptr()
+        });
+    let mut w = vec![
+        p.text_va as u32,
+        (p.text_va >> 32) as u32,
+        p.text.len() as u32,
+        p.rodata_va as u32,
+        (p.rodata_va >> 32) as u32,
+        p.rodata.len() as u32,
+        p.entry_pc as u32,
+        text_off.map_or(TEXT_NOT_IN_RODATA, |o| o as u32),
+    ];
+    let pack = |w: &mut Vec<u32>, bytes: &[u8]| {
+        w.extend(bytes.chunks(4).map(|c| {
+            let mut b = [0u8; 4];
+            b[..c.len()].copy_from_slice(c);
+            u32::from_le_bytes(b)
+        }))
+    };
+    pack(&mut w, p.rodata);
+    if text_off.is_none() {
+        pack(&mut w, p.text);
+    }
+    w
 }
 
-/// The ELF guard's digest of `elf` (the source bytes, before any relocation): the `POSEIDON2`
-/// sponge over [`elf_tape`], chained in [`DIGEST_CHUNK`]-word calls — the first over the tape's
-/// first 4 096 words, each later one over the previous digest followed by the next 4 088. The shim
-/// computes exactly this over the tape it read, with the padding bytes of the last word cleared,
-/// and refuses any other ELF (`Halt::BadElf`, status 2), so `hc` binds the ELF.
-pub fn elf_digest(elf: &[u8]) -> [u32; 8] {
-    let tape = elf_tape(elf);
-    let first = tape.len().min(DIGEST_CHUNK);
-    let mut digest = rand_zkvm::hash::sponge_hash(&tape[..first]);
+/// The `POSEIDON2` sponge over `words`, chained in [`DIGEST_CHUNK`]-word calls: the first over the
+/// first 4 096 words, each later one over the previous digest followed by the next 4 088. Exactly
+/// what the shim's guard computes, one syscall per chunk.
+pub fn chained_digest(words: &[u32]) -> [u32; 8] {
+    let first = words.len().min(DIGEST_CHUNK);
+    let mut digest = rand_zkvm::hash::sponge_hash(&words[..first]);
     let mut pos = first;
-    while pos < tape.len() {
-        let take = (tape.len() - pos).min(DIGEST_CHUNK - 8);
+    while pos < words.len() {
+        let take = (words.len() - pos).min(DIGEST_CHUNK - 8);
         let mut msg = digest.to_vec();
-        msg.extend_from_slice(&tape[pos..pos + take]);
+        msg.extend_from_slice(&words[pos..pos + take]);
         digest = rand_zkvm::hash::sponge_hash(&msg);
         pos += take;
     }
     digest
 }
 
+/// The ELF guard's digest: [`chained_digest`] of [`view_words`] of the program `elf::load` made of
+/// the source ELF. The shim computes the same over the program it loads from the public tape and
+/// refuses any other (`Halt::BadElf`, status 2), so `hc` binds the loaded program.
+pub fn view_digest(p: &Program<'_>) -> [u32; 8] {
+    chained_digest(&view_words(p))
+}
+
 /// The C definition of the guard's constant, appended to `program.c`.
-pub fn elf_digest_c(digest: &[u32; 8]) -> String {
+pub fn view_digest_c(digest: &[u32; 8]) -> String {
     let words: Vec<String> = digest.iter().map(|w| format!("0x{w:08x}u")).collect();
     format!(
-        "\n/* The ELF guard (sbpf2rv::shim::elf_digest): the digest of the ELF this file was translated\n   from. The shim hashes the ELF on the public tape the same way and refuses any other (BadElf). */\nconst uint32_t sbpf_elf_digest[8] = {{{}}};\n",
+        "\n/* The ELF guard (sbpf2rv::shim::view_digest): the digest of the loaded program (text, rodata,\n   addresses, entry) this file was translated from. The shim hashes the program it loads from the\n   public tape the same way and refuses any other (BadElf). */\nconst uint32_t sbpf_view_digest[8] = {{{}}};\n",
         words.join(", ")
     )
 }
@@ -374,7 +421,8 @@ pub const MAIN_RS: &str = r#"#![no_std]
 
 //! Generated by sbpf2rv: `guests-compiled/sbpf`'s main with two changes — the loaded program runs as
 //! the translated C in `program.c` (through `sbpf-rt`) instead of on `sbpf-core`'s interpreter, and
-//! the ELF guard refuses (`BadElf`, status 2) any ELF but the one `program.c` was translated from.
+//! the ELF guard refuses (`BadElf`, status 2) any ELF that does not load to the program `program.c`
+//! was translated from.
 //! Everything around the run is `sbpf_core::abi::run_call_with_executor`: the ELF from the public
 //! segment and the instruction from the private one, `check_region`, both digests, the zeroed stack
 //! and heap, and the status mapping — so the eight output words are the interpreter guest's.
@@ -445,55 +493,163 @@ fn halt_from(code: u32, arg: u64) -> Halt {
     }
 }
 
-/// The public tape as `decode_input` read it, `[n, ELF bytes packed four per word]`, word `i` at
-/// index `i`. `run_call_with_executor` relocates the ELF in place before the executor runs, so the
-/// guard cannot hash the `Workspace`'s copy; `main`'s public reader keeps the words as they arrive.
-const TAPE_WORDS: usize = 1 + sbpf_core::abi::MAX_ELF_BYTES / 4;
-static mut TAPE: [u32; TAPE_WORDS] = [0; TAPE_WORDS];
-
 extern "C" {
-    /// `program.c`'s ELF guard constant: `sbpf2rv::shim::elf_digest` of the ELF it was translated
-    /// from.
-    static sbpf_elf_digest: [u32; 8];
+    /// `program.c`'s ELF guard constant: `sbpf2rv::shim::view_digest` of the program it was
+    /// translated from.
+    static sbpf_view_digest: [u32; 8];
 }
 
-/// The ELF guard: whether the ELF on the public tape is the one `program.c` was translated from. The
-/// translated code is baked into this image, but the harness still reads `rodata`, the addresses and
-/// the entry from the tape's ELF, so a different ELF would run this code over someone else's data.
-/// The tape's words are hashed exactly as `sbpf2rv::shim::elf_digest` hashes the source ELF — the
-/// `POSEIDON2` sponge in chained 4 096-word calls, in place in `TAPE` — and compared.
-fn elf_is_the_translated_one() -> bool {
-    const CHUNK: usize = 4096;
-    let t = addr_of_mut!(TAPE) as *mut u32;
-    // SAFETY: the tape has been read (`decode_input` is done) and nothing holds a reference into
-    // `TAPE`. Every offset below is under `total <= TAPE_WORDS`, checked first; the raw pointers
-    // keep bounds checks (and the panic paths they would link) out of an image with few words
-    // to spare.
+/// One `POSEIDON2` call's worth of words (`isa::POSEIDON2_MAX_WORDS`).
+const CHUNK: usize = 4096;
+/// The guard's hash buffer. The syscall writes its digest over the first 8 words it hashed, so it
+/// cannot run over the program's own (borrowed, read-only) bytes: they are copied here a chunk at a
+/// time, and each digest stays in place as the next chunk's first 8 words.
+static mut HASH_BUF: [u32; CHUNK] = [0; CHUNK];
+
+/// `sbpf2rv::shim::chained_digest`, streamed: words go into `HASH_BUF`, and a full buffer is hashed
+/// only when another word arrives, so the last call is always `finish`'s.
+struct Stream {
+    buf: *mut u32,
+    fill: usize,
+    hashed: bool,
+}
+
+impl Stream {
+    fn new() -> Self {
+        Stream { buf: addr_of_mut!(HASH_BUF) as *mut u32, fill: 0, hashed: false }
+    }
+
+    /// Makes room: hashes a full buffer, leaving its digest as the first 8 words.
+    #[inline(always)]
+    fn room(&mut self) -> usize {
+        if self.fill == CHUNK {
+            guest_sdk::poseidon2(self.buf, CHUNK);
+            self.fill = 8;
+            self.hashed = true;
+        }
+        CHUNK - self.fill
+    }
+
+    fn word(&mut self, w: u32) {
+        self.room();
+        // SAFETY: `room` left `fill < CHUNK`; `HASH_BUF` is only reached through `self.buf`.
+        unsafe { self.buf.add(self.fill).write(w) };
+        self.fill += 1;
+    }
+
+    /// `bytes`, four per word little-endian, the last word zero-padded. Whole words are copied a
+    /// run at a time (an unaligned run a word at a time, through byte loads); no slicing, so no
+    /// panic path reaches an image with few words to spare. Inlined into its one call site.
+    #[inline(always)]
+    fn bytes(&mut self, bytes: &[u8]) {
+        let (ptr, len) = (bytes.as_ptr(), bytes.len());
+        let whole = len / 4;
+        let aligned = ptr as usize % 4 == 0;
+        let mut i = 0;
+        while i < whole {
+            let n = self.room().min(whole - i);
+            // SAFETY: words `i..i + n` lie inside `bytes`, and `n` fits the buffer's room.
+            unsafe {
+                let src = ptr.add(4 * i) as *const u32;
+                let dst = self.buf.add(self.fill);
+                if aligned {
+                    copy_words(src, dst, n);
+                } else {
+                    for k in 0..n {
+                        dst.add(k).write(src.add(k).read_unaligned());
+                    }
+                }
+            }
+            self.fill += n;
+            i += n;
+        }
+        let rest = len - 4 * whole;
+        if rest != 0 {
+            let mut w = 0u32;
+            for k in 0..rest {
+                // SAFETY: byte `4 * whole + k < len`.
+                w |= (unsafe { *ptr.add(4 * whole + k) } as u32) << (8 * k);
+            }
+            self.word(w);
+        }
+    }
+
+    /// The digest: the last call over what is left (unless the last full buffer was the end).
+    fn finish(mut self) -> *const u32 {
+        if !self.hashed || self.fill > 8 {
+            guest_sdk::poseidon2(self.buf, self.fill);
+        }
+        self.fill = 0;
+        self.buf
+    }
+}
+
+/// `n` words from `src` to `dst`, eight at a time. The loads are volatile so the compiler cannot
+/// turn the loop into a `memcpy` call (compiler_builtins' byte loop, ~9.5 cycles a byte here).
+///
+/// SAFETY: `src` and `dst` aligned, `n` words valid at each, not overlapping.
+#[inline(always)]
+unsafe fn copy_words(src: *const u32, dst: *mut u32, n: usize) {
+    let mut i = 0;
+    while i + 8 <= n {
+        let w = [
+            src.add(i).read_volatile(),
+            src.add(i + 1).read_volatile(),
+            src.add(i + 2).read_volatile(),
+            src.add(i + 3).read_volatile(),
+            src.add(i + 4).read_volatile(),
+            src.add(i + 5).read_volatile(),
+            src.add(i + 6).read_volatile(),
+            src.add(i + 7).read_volatile(),
+        ];
+        for (k, x) in w.into_iter().enumerate() {
+            dst.add(i + k).write(x);
+        }
+        i += 8;
+    }
+    while i < n {
+        dst.add(i).write(src.add(i).read_volatile());
+        i += 1;
+    }
+}
+
+/// The ELF guard: whether the program loaded from the public tape is the one `program.c` was
+/// translated from. The translated code is baked into this image, but the harness hands it the
+/// loaded `.rodata`, the text, their addresses and the interpreter's entry from the tape's ELF, so
+/// a different ELF would run this code over someone else's program. That view — exactly
+/// `sbpf2rv::shim::view_words` — is hashed as `sbpf2rv::shim::chained_digest` hashes it, and
+/// compared.
+fn is_the_translated_program(p: &Program<'_>) -> bool {
+    let text_off = p
+        .text_va
+        .checked_sub(p.rodata_va)
+        .and_then(|o| usize::try_from(o).ok())
+        .filter(|&o| {
+            o.checked_add(p.text.len()).is_some_and(|end| end <= p.rodata.len())
+                && p.rodata.as_ptr().wrapping_add(o) == p.text.as_ptr()
+        });
+    let mut h = Stream::new();
+    for w in [
+        p.text_va as u32,
+        (p.text_va >> 32) as u32,
+        p.text.len() as u32,
+        p.rodata_va as u32,
+        (p.rodata_va >> 32) as u32,
+        p.rodata.len() as u32,
+        p.entry_pc as u32,
+        text_off.map_or(u32::MAX, |o| o as u32),
+    ] {
+        h.word(w);
+    }
+    // The text's bytes only when they are not a span of the run already hashed.
+    let text: &[u8] = if text_off.is_none() { p.text } else { &[] };
+    for part in [p.rodata, text] {
+        h.bytes(part);
+    }
+    let digest = h.finish();
+    // SAFETY: `digest` is `HASH_BUF`'s first 8 words; `sbpf_view_digest` is an immutable C constant.
     unsafe {
-        let n = *t as usize;
-        if n > sbpf_core::abi::MAX_ELF_BYTES {
-            return false;
-        }
-        let total = 1 + n.div_ceil(4);
-        // The bytes past `n` in the last word are the tape's padding, which `decode_input` ignores:
-        // the digest is of the ELF's bytes, so they are cleared, as `elf_tape` writes them.
-        if n % 4 != 0 {
-            *t.add(total - 1) &= (1u32 << (8 * (n % 4))) - 1;
-        }
-        let first = if total < CHUNK { total } else { CHUNK };
-        guest_sdk::poseidon2(t, first);
-        let (mut digest, mut pos) = (t, first);
-        while pos < total {
-            // The previous digest goes in the 8 words before the next chunk (already hashed), and
-            // the call over both writes the new digest where it put them.
-            let at = t.add(pos - 8);
-            core::ptr::copy_nonoverlapping(digest, at, 8);
-            let take = if total - pos < CHUNK - 8 { total - pos } else { CHUNK - 8 };
-            guest_sdk::poseidon2(at, 8 + take);
-            digest = at;
-            pos += take;
-        }
-        let want = &*addr_of!(sbpf_elf_digest);
+        let want = &*addr_of!(sbpf_view_digest);
         let mut same = true;
         for (i, w) in want.iter().enumerate() {
             same &= *digest.add(i) == *w;
@@ -502,13 +658,13 @@ fn elf_is_the_translated_one() -> bool {
     }
 }
 
-/// The executor: refuses an ELF other than the translated one (`BadElf`, status 2 — accepted
-/// divergence #3: the interpreter would run it), then points `sbpf-rt`'s regions at the
+/// The executor: refuses a loaded program other than the translated one (`BadElf`, status 2 —
+/// accepted divergence #3: the interpreter would run it), then points `sbpf-rt`'s regions at the
 /// interpreter's own memory (text and read-only data from the loaded ELF, the stack and heap from
 /// the `Workspace`, the instruction region), resets the per-run state, and runs the translated
 /// entry.
 fn execute(_h: &mut Syscalls, p: &Program<'_>, mem: Memory<'_>) -> Result<u64, Halt> {
-    if !elf_is_the_translated_one() {
+    if !is_the_translated_program(p) {
         return Err(Halt::BadElf);
     }
     let Memory { stack, heap, input, .. } = mem;
@@ -542,30 +698,10 @@ static mut W: Workspace = Workspace::ZERO;
 pub extern "C" fn main() -> ! {
     let w = unsafe { &mut *addr_of_mut!(W) };
     let mut exec = execute;
-    // `guest_sdk::read_public`, also staging each word in `TAPE` for the ELF guard. `decode_input`
-    // reads the length word and then the ELF's words, each once and in order, so the k-th read is
-    // tape word k; the cursor is a raw pointer, bounds-checked against the end, that stays in a
-    // register across the copy loop (a store and an increment per word, rather than an indexed
-    // store behind an index check).
-    let mut staged = addr_of_mut!(TAPE) as *mut u32;
-    // SAFETY: one past the end of `TAPE`.
-    let end = unsafe { staged.add(TAPE_WORDS) };
-    let read_public = move |idx: u32| {
-        let word = guest_sdk::read_public(idx);
-        if staged < end {
-            // SAFETY: in bounds; `TAPE` is only ever touched through pointers taken from the
-            // static, never through a reference held across this, and the guest is single-threaded.
-            unsafe {
-                staged.write(word);
-                staged = staged.add(1);
-            }
-        }
-        word
-    };
     let (out, result) = run_call_with_executor(
         &mut Syscalls,
         w,
-        read_public,
+        guest_sdk::read_public,
         u32::MAX,
         guest_sdk::read_input,
         u32::MAX,
@@ -609,7 +745,7 @@ fn halt_words(status: u32, r: &Result<u64, Halt>) -> [u32; 8] {
 pub const LINKER_SCRIPT: &str = r#"/* Generated by sbpf2rv: guests-compiled/sbpf/sbpf.ld. ORIGIN is 0x10000 rather than guest.ld's
    0x1000, leaving the loader room below the text for the data prologue (the Rust harness's and
    program.c's read-only data); the 1 MiB of RAM holds sbpf-core's Workspace (368 KiB) and the ELF
-   guard's staged tape (256 KiB) in .bss, the translated program's text, and the 64 KiB RV32 stack. */
+   guard's 16 KiB hash buffer in .bss, the translated program's text, and the 64 KiB RV32 stack. */
 
 ENTRY(_start)
 
@@ -634,18 +770,14 @@ SECTIONS {
 "#;
 
 /// Writes the crate into `out` (created if needed): `program.c` — the emitted C followed by the ELF
-/// guard's constant, [`elf_digest`] of `elf`, the source ELF's bytes before relocation — and the
-/// shim's files.
-pub fn write_crate(out: &Path, name: &str, program_c: &str, elf: &[u8]) -> Result<()> {
+/// guard's constant, `digest` ([`view_digest`] of the loaded source ELF) — and the shim's files.
+pub fn write_crate(out: &Path, name: &str, program_c: &str, digest: &[u32; 8]) -> Result<()> {
     std::fs::create_dir_all(out.join("src"))
         .with_context(|| format!("creating {}", out.display()))?;
     let root = checkout_root(out)?;
     let rel = relative_root(out, &root)?;
     let files: [(&str, String); 6] = [
-        (
-            "program.c",
-            format!("{program_c}{}", elf_digest_c(&elf_digest(elf))),
-        ),
+        ("program.c", format!("{program_c}{}", view_digest_c(digest))),
         ("Cargo.toml", cargo_toml(name, &rel)),
         ("Cargo.lock", cargo_lock(name)),
         ("build.rs", build_rs(&rel)),

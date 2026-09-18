@@ -70,18 +70,20 @@ raise-only-on-execution rule. Three accepted divergences, each erring on the saf
 README lists them): any `callx` target outside the set the scanner found gives `BadJump` (where
 the interpreter might run real code; fuzzed 117-for-117 sound); a deferred budget check can change
 the halt kind inside the one limit-crossing block; and an image refuses (`BadElf`, status 2) any
-ELF but the one it was translated from. The committed SPL Token `Transfer`, `MintTo` and `Burn` all
-match the interpreter word for word — the eight public output words and the halt — at **64 945**
+ELF that loads to a program other than the one it was translated from. The committed SPL Token `Transfer`, `MintTo` and `Burn` all
+match the interpreter word for word — the eight public output words and the halt — at **65 096**
 of the 65 535-word cap. Translated execution itself is about 2.4–2.5× cheaper per sBPF
 instruction, but the harness `sbpf-core::abi` shares with the interpreter is about 98% of every
-run's cycles, and the ELF guard adds 116 k (staging the public tape, then hashing it with
-`POSEIDON2`), so the translated SPL Token transfer is 809 k cycles against the interpreter's 694 k;
+run's cycles, and the ELF guard adds 73 k (copying the loaded program into a buffer and hashing it
+with `POSEIDON2`), so the translated SPL Token transfer is 766 k cycles against the interpreter's 694 k;
 both stay in tier 20, and translation only pays for compute-heavy programs. Software Ed25519 (RFC 8032) and secp256k1 recovery exist in
 `sbpf-rt/` but ship unlinked — both cost tens of millions of cycles, above any tier, and the
 interpreter traps both syscalls for parity — as a coprocessor backlog for a future machine
 milestone. Trust: the ELF is on the public tape, so `H_PUB` binds it (`public_output` has no ELF
 in its preimage, and `program_id` comes from the instruction region); the image bakes the text and
-a digest of the source ELF and refuses any other, so `hc` binds the ELF by itself. Whether `hc` is
+the digest of the loaded program (text, rodata, addresses, entry) and refuses any other, so `hc`
+binds the loaded program — everything a run can observe of the ELF, on either side, so two ELFs
+that load to the same program run identically and both are accepted. Whether `hc` is
 the faithful translation is checked by rebuilding with the pinned toolchain (Rust 1.98.1, clang
 23.1.1, `cc` 1.4.6) and comparing `hc`; the chain does not record the ELF's hash. A real proof of
 the translated transfer was attempted once and stopped by a 24 GB watchdog at 30.77 GB peak — the

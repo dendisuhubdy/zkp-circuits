@@ -563,8 +563,8 @@ fn spl_burn(amount: u64) -> SbpfCall {
 
 /// `hc` of the translated SPL Token image (Homebrew clang 23.1.1, rustc 1.98.1), and its program
 /// words (the loader's count, against the 65 535-word cap).
-const SPL_TOKEN_HC: &str = "e78a8e7faca155368869db460e6c46f421009d0c429305deb07d06c84b19a63e";
-const SPL_TOKEN_WORDS: usize = 64_945;
+const SPL_TOKEN_HC: &str = "8ca905ae3c62f503de7de86829040f323e098b53dba5fffe09b42f1aad16758b";
+const SPL_TOKEN_WORDS: usize = 65_096;
 
 /// The SPL Token translation, built once per test binary: several tests use it, and two builds of
 /// the same crate directory at once would race.
@@ -727,11 +727,11 @@ fn section(elf: &[u8], name: &str) -> (usize, usize) {
         .unwrap_or_else(|| panic!("no {name} section"))
 }
 
-/// Accepted divergence #3, the ELF guard: the image carries a digest of the ELF it was translated
-/// from and refuses any other with `BadElf` (status 2 over the pre-state), where the interpreter
-/// runs whatever ELF it is given. Here the other ELF is SPL Token with one `.rodata` byte changed —
-/// a byte the transfer never reads, so the interpreter runs it to the very same eight words — and
-/// the translation refuses it.
+/// Accepted divergence #3, the ELF guard: the image carries a digest of the loaded program (text,
+/// rodata, addresses, entry) it was translated from and refuses an ELF that loads to any other with
+/// `BadElf` (status 2 over the pre-state), where the interpreter runs whatever ELF it is given. Here
+/// the other ELF is SPL Token with one `.rodata` byte changed — a byte the transfer never reads, so
+/// the interpreter runs it to the very same eight words — and the translation refuses it.
 #[test]
 fn an_elf_one_rodata_byte_away_is_refused_where_the_interpreter_runs_it() {
     let t = spl_token();
@@ -786,6 +786,46 @@ fn an_elf_one_rodata_byte_away_is_refused_where_the_interpreter_runs_it() {
     );
     // And the ELF it was translated from runs.
     assert_eq!(run(&t.image, &good).0, good_want);
+}
+
+/// The guard binds the loaded program, not the file: two different ELFs that `elf::load` turns into
+/// the same program (the same text, rodata, addresses and entry) both run on the translation, to
+/// the interpreter's words — they are the same program to every part of a run. Here the second ELF
+/// differs from SPL Token in the file header's `e_ident` padding, which nothing reads.
+#[test]
+fn two_elfs_that_load_to_the_same_program_both_run() {
+    let t = spl_token();
+    let good = spl_transfer(250);
+    let mut elf = good.elf.clone();
+    elf[12] ^= 0x5a; // EI_PAD
+    assert_ne!(elf, good.elf);
+    let other = SbpfCall {
+        elf,
+        input: good.input.clone(),
+    };
+    // Same view, same digest, on the host.
+    let (mut a, mut b) = (good.elf.clone(), other.elf.clone());
+    let (pa, pb) = (
+        sbpf_core::elf::load(&mut a).unwrap(),
+        sbpf_core::elf::load(&mut b).unwrap(),
+    );
+    assert_eq!(
+        sbpf2rv::shim::view_words(&pa),
+        sbpf2rv::shim::view_words(&pb),
+        "the two ELFs load to the same program"
+    );
+    // Different public tapes (so different H_PUB), the same run on both sides.
+    assert_ne!(good.public_words(), other.public_words());
+    let (want, result, _) = other.expected();
+    assert_eq!((want, result), {
+        let (w, r, _) = good.expected();
+        (w, r)
+    });
+    for call in [&good, &other] {
+        assert_eq!(run(&t.image, call).0, want, "translated");
+        assert_eq!(run(&interpreter_guest(), call).0, want, "sbpf.bin");
+        assert_eq!(&run(&t.halt_image, call).0[..2], &[1, 0], "returned 0");
+    }
 }
 
 /// A program that writes account 0's lamports and then loads through `r0` (zero): the write
@@ -1875,8 +1915,8 @@ struct Stage {
 /// stack matches is the cycle's, so a `check_region` inside `decode_input` is `check_region`'s.
 const STAGES: &[Stage] = &[
     Stage {
-        name: "the ELF guard: hash the staged tape (the staging itself is in decode_input)",
-        words: &["elf_is_the_translated_one"],
+        name: "the ELF guard: hash the loaded program view",
+        words: &["is_the_translated_program", "copy_words", "Stream"],
         c_prefixes: &[],
         files: &[],
     },

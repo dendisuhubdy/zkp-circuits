@@ -142,15 +142,20 @@ the ELF guard.
 
 What binds what: the ELF arrives as the **public** input segment, so the proof's `H_PUB` binds it;
 it is not in `public_output`'s preimage, and `program_id` is read from the instruction region, not
-derived from the ELF. The image bakes the translated text, but the harness still reads `.rodata`,
-the addresses and the entry from the tape's ELF, so `program.c` also bakes a digest of the source
-ELF (`sbpf2rv::shim::elf_digest`: the `POSEIDON2` sponge over the tape encoding, chained in
-4 096-word calls). The shim stages the public words as `decode_input` reads them, and the executor
-hashes them and refuses any other ELF with `Halt::BadElf`, status 2 (accepted divergence #3,
-`sbpf2rv/README.md`). So `hc` binds the ELF: a proof that verifies against `hc` is a run of that
-ELF. Whether `hc` is the faithful translation of the ELF is checked by rebuilding it with the pinned
-toolchain — Rust 1.98.1, clang 23.1.1, `cc` 1.4.6 — and comparing `hc`. The chain does not record
-the source ELF's hash. The C file is compiled by `rand-guest` through the crate's `build.rs` (`cc`
+derived from the ELF. The image bakes the translated text, but the harness hands it the text,
+`.rodata` and their addresses loaded from the tape's ELF, and the interpreter would start at its
+entry, so `program.c` also bakes the **digest of the loaded program (text, rodata, addresses,
+entry)** it was translated from (`sbpf2rv::shim::view_digest` over `view_words`: `text_va`,
+`text.len()`, `rodata_va`, `rodata.len()`, `entry_pc`, the run's bytes and — when the text is not a
+span of the run — the text's; the `POSEIDON2` sponge, chained in 4 096-word calls). After
+`elf::load`, the executor hashes the program it is handed the same way and refuses any other with
+`Halt::BadElf`, status 2 (accepted divergence #3, `sbpf2rv/README.md`). So `hc` binds the loaded
+program: a proof that verifies against `hc` is a run of that program. That is the property that
+matters because the loaded program is everything a run can observe of the ELF, on the interpreter
+as on the translation: two ELFs that load to the same program run identically on both, and the
+rest of the file only shapes what `elf::load` produces. Whether `hc` is the faithful translation
+of an ELF is checked by rebuilding it with the pinned toolchain — Rust 1.98.1, clang 23.1.1, `cc`
+1.4.6 — and comparing `hc`. The chain does not record the source ELF's hash. The C file is compiled by `rand-guest` through the crate's `build.rs` (`cc`
 with the toolchain's clang flags and `--no-default-config`; a clang other than 23.1.1 is refused).
 
 ## 5. The runtime

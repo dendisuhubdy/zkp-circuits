@@ -10,7 +10,7 @@
 | `zkp6` | Tornado Cash mixer | arkworks | Merkle-membership withdraw proof, simulated contract with account balances, front-running / double-spend defences |
 | `research` | **Rand reference zkVM** | Plonky3 (Goldilocks, LogUp, hiding FRI) | RV32I guest programs proved under one universal relation; the guidance circuit for the whole protocol |
 | `rand-guest` | the guest toolchain: build (Rust, C), check, pack, run, info | rustc, clang, rust-lld | one binary from a guest's source to the image the chain deploys |
-| `sbpf2rv` | Solana bytecode (sBPF) → RV32 ahead-of-time translator | `sbpf-core`, `rand-guest` | native execution vs. interpretation for the same ABI; an image that refuses any ELF but its source, so `hc` binds the ELF; a real SPL Token walkthrough, byte for byte against the interpreter |
+| `sbpf2rv` | Solana bytecode (sBPF) → RV32 ahead-of-time translator | `sbpf-core`, `rand-guest` | native execution vs. interpretation for the same ABI; an image that refuses any ELF not loading to its source program, so `hc` binds the loaded program; a real SPL Token walkthrough, byte for byte against the interpreter |
 
 Each crate: `cargo run --release` for a narrated demo, `cargo test --release` for the tests —
 except the command-line tools `rand-guest` and `sbpf2rv`, which have no demo: their READMEs walk

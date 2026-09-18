@@ -29,10 +29,8 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let source = std::fs::read(&cli.program)
+    let mut elf = std::fs::read(&cli.program)
         .with_context(|| format!("reading {}", cli.program.display()))?;
-    // `load` relocates in place; the ELF guard's digest is of the bytes as published.
-    let mut elf = source.clone();
     let program = sbpf_core::elf::load(&mut elf).map_err(|halt| {
         anyhow!(
             "{} is not a loadable sBPF v1 ELF: {halt:?}",
@@ -75,7 +73,7 @@ fn main() -> Result<()> {
             }
             None => shim::crate_name(&stem),
         };
-        shim::write_crate(out, &name, &emitted.c, &source)?;
+        shim::write_crate(out, &name, &emitted.c, &shim::view_digest(&program))?;
         println!(
             "wrote {} ({} bytes of C) and the {name} shim crate: rand-guest build {}",
             out.join("program.c").display(),

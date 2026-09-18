@@ -46,17 +46,19 @@ interpreter's own ABI harness so the chain-visible contract does not change. It 
 unknown syscalls, CPI, bad registers/opcodes/jumps become scanner warnings plus the interpreter's
 own runtime trap, never a translation-time refusal, matching `interp.rs`'s raise-only-on-execution
 rule. The committed SPL Token `Transfer`/`MintTo`/`Burn` all match the interpreter word for word
-(the eight public output words and the halt) at 64 945 of the 65 535-word cap. Measured on this
+(the eight public output words and the halt) at 65 096 of the 65 535-word cap. Measured on this
 translated program: about 2.4–2.5× fewer cycles per sBPF instruction, but the shared harness
 (decoding both tapes, `elf::load`, the region scan) is about 98% of every run's cycles either way,
-and the translated image adds 116 k for its ELF guard, so for SPL Token the translation is dearer
-(809 k cycles against 694 k for the transfer) and both sides land in tier 20 — translation only
+and the translated image adds 73 k for its ELF guard, so for SPL Token the translation is dearer
+(766 k cycles against 694 k for the transfer) and both sides land in tier 20 — translation only
 pays off once a program's own execution, not the harness, dominates the run. The ELF guard is what
-makes `hc` bind the ELF: the ELF is on the public tape (bound by `H_PUB`, not by `public_output`,
-whose preimage has no ELF; `program_id` comes from the instruction region), and the image bakes a
-digest of its source ELF and refuses any other with `BadElf`. `sbpf2rv/README.md` has the full
+makes `hc` bind what ran: the ELF is on the public tape (bound by `H_PUB`, not by
+`public_output`, whose preimage has no ELF; `program_id` comes from the instruction region), and the
+image bakes the digest of the loaded program (text, rodata, addresses, entry) it was translated
+from and refuses any other with `BadElf` — the loaded program being everything a run observes of
+the ELF. `sbpf2rv/README.md` has the full
 walkthrough with real command output, the trust rule (a proof against `hc` is a run of the source
-ELF; rebuild with Rust 1.98.1, clang 23.1.1 and `cc` 1.4.6 to check `hc == translate(ELF)`; the
+ELF's loaded program; rebuild with Rust 1.98.1, clang 23.1.1 and `cc` 1.4.6 to check `hc == translate(ELF)`; the
 chain does not record the ELF's hash), and the coprocessor backlog below. Coprocessors this
 path wants:
 
