@@ -92,13 +92,18 @@ Use the file's existing helper names for the host, workspace and readers.
 
 **Interfaces:**
 
-**Amended 2026-09-18, twice, both same-day rulings on this task's own findings (see the task-2
-report's fix notes for the full reasoning — parity with the interpreter, which never checks any of
-this except when it executes the instruction in question, and the committed SPL Token ELF contains
-unreached code that fails every one of these checks). `scan` is now infallible: there is no
-`Refusal` type. Everything the first ruling (below) still lists as a refusal was refused only
-because pass 1 checked it before pass 2 even began; the second ruling removed pass 1's checks
-entirely and folded them into pass 2, where every other check already lived.**
+**Amended 2026-09-18, three same-day rounds — two rulings on this task's own findings, then a
+review (see the task-2 report's fix notes for the full reasoning).** Rulings 1–2: parity with the
+interpreter, which never checks a syscall/register/opcode/jump validity except when it executes
+the instruction in question, and the committed SPL Token ELF contains unreached code that fails
+every one of these checks, so none of it refuses the scan — `scan` is infallible, there is no
+`Refusal` type. Review round 1: a Critical finding (functions reached *only* through `callx` were
+invisible — `lddw_and_rodata_function_roots`, below) plus three Important fixes — whether a
+trapping block's last instruction ran before the trap is now explicit (`TrapKind`'s two docs), a
+jump/call onto an `lddw`'s second slot is decoded fresh rather than assumed bad (pass 1 registers
+it independently), and a `call imm` with `src` in `2..=10` is its own `Warning` — plus a
+`jump_targets` fix for two distinct straight-line paths silently converging into one block without
+either being an explicit jump target (checked at the top of the reachability walk's inner loop).
 
 - Produces:
 
@@ -108,7 +113,7 @@ pub struct Block { pub start: usize, pub end: usize, pub insns: Vec<sbpf_core::i
 pub enum Term { Fallthrough(usize), Jump(usize), CondJump { taken: usize, not: usize }, Exit, Call { target: usize, next: usize }, Syscall { hash: u32, next: usize }, CallX { next: usize }, Trap(TrapKind) }
 pub enum TrapKind { BadInsn(u8), BadJump }             // exactly interp.rs's Halt, so Task 4 needs no cross-reference
 pub struct Scan { pub functions: Vec<Function>, pub entry: usize, pub callx_targets: Vec<usize>, pub warnings: Vec<Warning> }
-pub enum Warning { UnknownSyscall { pc: usize, hash: u32 }, Cpi { pc: usize, name: &'static str }, RegisterOutOfRange { pc: usize, opc: u8 }, UnknownOpcode { pc: usize, opc: u8 }, JumpOutOfText { pc: usize, target: i64 } }
+pub enum Warning { UnknownSyscall { pc: usize, hash: u32 }, Cpi { pc: usize, name: &'static str }, RegisterOutOfRange { pc: usize, opc: u8 }, UnknownOpcode { pc: usize, opc: u8 }, JumpOutOfText { pc: usize, target: i64 }, BadCallImmSrc { pc: usize, src: u8 } }
 pub fn scan(program: &sbpf_core::elf::Program<'_>) -> Scan;                          // infallible
 ```
 
@@ -117,7 +122,24 @@ synthetic pc (one past its text's last real slot) that a bad edge redirects to i
 with no instructions and `term: Term::Trap(TrapKind::BadJump)`. The one exception is an internal
 call whose *target* (not its return point) is bad: there is no function to call, so the call site
 traps directly (`Term::Trap`, no `Term::Call` at all) rather than naming a non-function as a
-target.
+target — still including the `call imm` instruction itself in `insns`, since `interp.rs` pushes
+the frame (the depth check) before fetching the bad target.
+
+`Block::insns` leaves out the instruction at `end` exactly when `term` is
+`Term::Trap(TrapKind::BadInsn(_))` — `interp.rs::step` returns before dispatching to any
+instruction's semantics on a bad register/opcode/`call imm` `src`, so it never ran. Every other
+`term`, including `Term::Trap(TrapKind::BadJump)`, means it did run (`Block`'s own doc comment has
+the full accounting, including the `le`/`be`-width and instruction-limit notes that are Task 4's
+job, not this scanner's).
+
+`lddw_and_rodata_function_roots` (module-private, called from `scan` before the reachability walk)
+scans two sources for `callx` candidates beyond what `call imm` sites find: every `lddw`'s full
+64-bit immediate anywhere in the text (regardless of reachability — a function pointer can be
+built by code no call target reaches yet), and every 8-byte-aligned word of the read-only data past
+the text (`program.rodata[program.text.len()..]`, where an `R_BPF_64_RELATIVE` relocation writes a
+jump-table address). A candidate is kept as an extra function root only if, converted to a slot
+with `interp.rs`'s own `callx` arithmetic (`addr.wrapping_sub(text_va) / 8`), it lands 8-aligned on
+a real instruction start.
 
 - [x] **Step 1: Write the failing tests** — build tiny programs with `sbpf_core::isa::encode` (an
   `exit`; a function with a `call` to a second function; a `ja` past the text; a `mov r11, 0`; a
@@ -128,18 +150,23 @@ target.
 
 - [x] **Step 2: Run to verify they fail.**
 
-- [x] **Step 3: Implement `scan`** — decode every slot with `isa::decode` (an `lddw` occupies two);
-  walk from the entry and every internal call target, splitting blocks at jump targets and after
-  terminators; classify a `call imm` as internal when `src == 0` and as a syscall when `src == 1`,
-  the immediate a `syscalls::SUPPORTED` hash if implemented, else a `Warning` either way (`Cpi` for
-  a `sol_invoke*` name this scanner can check a hash against, `UnknownSyscall` otherwise) plus an
-  ordinary `Term::Syscall` regardless — Task 4 emits a runtime trap for an unrecognised hash rather
-  than a real call; collect `callx` targets as every function entry; every register-range,
+- [x] **Step 3: Implement `scan`** — decode every slot with `isa::decode` (an `lddw` occupies two,
+  and its second slot is *also* decoded independently and registered, so a jump/call landing there
+  is treated as its own instruction start rather than assumed invalid); seed the reachability
+  walk's roots with the entrypoint, every `lddw`/read-only-data `callx` candidate
+  (`lddw_and_rodata_function_roots`), and every internal call target discovered along the way,
+  splitting blocks at jump targets — including a pc reached by two distinct straight-line paths
+  that converge without either being an explicit jump target — and after terminators; classify a
+  `call imm` as internal when `src == 0`, a syscall when `src == 1` (a `syscalls::SUPPORTED` hash
+  if implemented, else a `Warning` — `Cpi` for a `sol_invoke*` name this scanner can check a hash
+  against, `UnknownSyscall` otherwise — plus an ordinary `Term::Syscall` regardless), or its own
+  `Warning::BadCallImmSrc` when `src` is neither; collect `callx` targets as every known function
+  entry (`call imm` targets and `lddw`/read-only-data candidates alike); every register-range,
   opcode-validity and jump/call-target check happens once per reachable pc in this same walk (not
   in a separate whole-text pass), producing a `Warning` plus `Term::Trap` rather than refusing.
 
 - [x] **Step 4: Run the tests; commit** — `sbpf2rv: the scanner — functions, blocks, targets, and
-  the four refusals`, then the two same-day amendment commits.
+  the four refusals`, then the two same-day amendment commits, then the review round 1 fix commit.
 
 ---
 

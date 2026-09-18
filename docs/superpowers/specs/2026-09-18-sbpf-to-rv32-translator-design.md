@@ -38,13 +38,17 @@ interpreter would refuse (`elf.rs`'s errors) is refused here with the same messa
 
 ## 3. The translation
 
-**Functions.** The entrypoint and every `call` target found by a scan over the text become one C
-function each: `static uint64_t f_<pc>(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4,
-uint64_t r5)` returning `r0`. `r6..r9` are C locals saved and restored around calls, which is
-the sBPF calling convention; `r10` (the frame pointer) is a local advanced by `STACK_FRAME` per
-call depth. Unreachable text is not translated. Registers are `uint64_t` locals, so clang, not
-this tool, chooses the RV32 register pairs and spills — the "direct lowering with register
-pairs" of the approved design, done by the compiler.
+**Functions.** The entrypoint, every `call` target found by a scan over the text, and every
+`callx`-plausible constant (**amended 2026-09-18, review round 1**: a post-relocation `lddw`
+immediate or a read-only-data word past the text that points 8-aligned at a real instruction
+start — `sbpf2rv/src/scan.rs`'s `lddw_and_rodata_function_roots`; a function reached *only*
+through `callx`, never a `call imm`, is otherwise invisible to the scan, which is exactly the
+committed SPL Token ELF's pc 12244) become one C function each: `static uint64_t f_<pc>(uint64_t
+r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5)` returning `r0`. `r6..r9` are C locals
+saved and restored around calls, which is the sBPF calling convention; `r10` (the frame pointer)
+is a local advanced by `STACK_FRAME` per call depth. Unreachable text is not translated.
+Registers are `uint64_t` locals, so clang, not this tool, chooses the RV32 register pairs and
+spills — the "direct lowering with register pairs" of the approved design, done by the compiler.
 
 **Instructions.** Every opcode in `isa.rs`, one C statement each, in `classify`'s classes:
 
@@ -58,7 +62,7 @@ pairs" of the approved design, done by the compiler.
 | `ja` / `jeq` / `jgt` / `jge` / `jlt` / `jle` / `jset` / `jne` / `jsgt` / `jsge` / `jslt` / `jsle` (imm and reg) | `if (…) goto L_<pc>;` |
 | `call imm` (internal) | `r0 = f_<target>(r1..r5)` after the depth check |
 | `call imm` (syscall by hash) | `r0 = sol_<name>(r1..r5)` from the runtime (§5) |
-| `callx` | `switch (reg) { case <pc>: r0 = f_<pc>(…); break; … default: trap(BadInsn) }` over the known function set |
+| `callx` | `switch (reg) { case <pc>: r0 = f_<pc>(…); break; … default: trap(BadJump) }` over the known function set (**amended 2026-09-18, review round 1**: an unknown target is a bad *fetch*, `interp.rs`'s `slot_at` — `Halt::BadJump`, not `BadInsn`; an earlier draft of this row said `BadInsn`) |
 | `exit` | `return r0` |
 
 Every instruction that can trap does so through `sbpf_trap(code)`, which unwinds to the harness
