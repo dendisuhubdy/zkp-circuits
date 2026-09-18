@@ -1,6 +1,7 @@
 //! `sbpf2rv <program.so>`: loads an sBPF ELF and reports the scan — functions, blocks and any
-//! refusal. The emitter (`program.c`, the shim crate) is a later task; this stub is enough to
-//! exercise the scanner end to end against a real ELF from the command line.
+//! warning. The scan itself cannot fail (see `scan::scan`'s docs); only loading the ELF can. The
+//! emitter (`program.c`, the shim crate) is a later task; this stub is enough to exercise the
+//! scanner end to end against a real ELF from the command line.
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -20,7 +21,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("reading {}", cli.program.display()))?;
     let program = sbpf_core::elf::load(&mut elf)
         .map_err(|halt| anyhow!("{} is not a loadable sBPF v1 ELF: {halt:?}", cli.program.display()))?;
-    let scanned = scan(&program).map_err(|refusal| anyhow!("sbpf2rv refuses this program: {refusal:?}"))?;
+    let scanned = scan(&program);
     println!(
         "entry pc {}: {} function(s), {} callx target(s), {} warning(s)",
         scanned.entry,
