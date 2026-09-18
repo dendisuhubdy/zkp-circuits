@@ -786,3 +786,68 @@ pub fn run_call_with<H: Host, FP: FnMut(u32) -> u32, FS: FnMut(u32) -> u32>(
         if status == 1 { output_hash(h, &input[..input_len]) } else { pre_output };
     (public_output(h, status, &input_hash, &post_output), result)
 }
+
+/// What runs the loaded program over the interpreter's memory: `Vm::run` for the interpreter, a
+/// translated program's entry point for `sbpf2rv`. Gets the loaded program (text, rodata, entry)
+/// and the memory it runs over; returns what `Vm::run` returns.
+pub type Executor<'a, H> = &'a mut dyn FnMut(&mut H, &elf::Program<'_>, Memory<'_>) -> Result<u64, Halt>;
+
+/// [`run_call_with`], but the thing that runs the loaded program over the interpreter's `Memory` is
+/// supplied by the caller instead of being `Vm::run` — the hook a translated `sbpf2rv` program's
+/// entry point uses to run over this same harness (decode, the two digests, the stack/heap zeroing,
+/// the status mapping) without going through the interpreter at all. The guest keeps using
+/// [`run_call`]/[`run_call_with`], and their body is untouched and duplicated below rather than
+/// factored through this function, so the pinned `sbpf` guest image cannot move by adding this.
+pub fn run_call_with_executor<H: Host, FP: FnMut(u32) -> u32, FS: FnMut(u32) -> u32>(
+    h: &mut H,
+    ws: &mut Workspace,
+    read_public: FP,
+    n_public: u32,
+    read_private: FS,
+    n_private: u32,
+    exec: Executor<'_, H>,
+) -> ([u32; 8], Result<u64, Halt>) {
+    let mut elf_c = InputCursor::new(read_public, n_public);
+    let mut in_c = InputCursor::new(read_private, n_private);
+    if decode_input(&mut ws.input, &mut elf_c, &mut in_c).is_err() {
+        // Same malformed-vector answer as `run_call_with`: status 2, both digests zero, nothing to
+        // bind.
+        let z = [0u8; 32];
+        return (public_output(h, 2, &z, &z), Err(Halt::BadElf));
+    }
+    let Workspace { input: CallInput { elf, elf_len, input, input_len }, stack, heap } = ws;
+    let elf_len = *elf_len;
+    let input_len = *input_len;
+
+    let input_hash =
+        canonical_input_hash(h, &input[..input_len], &program_id(&input[..input_len]));
+    let pre_output = output_hash(h, &input[..input_len]);
+
+    stack.fill(0);
+    heap.fill(0);
+
+    let result = match elf::load(&mut elf[..elf_len]) {
+        Ok(program) => {
+            let mem = Memory {
+                text: program.text,
+                text_va: program.text_va,
+                rodata: program.rodata,
+                rodata_base: program.rodata_va,
+                stack,
+                heap,
+                input: &mut input[..input_len],
+            };
+            exec(h, &program, mem)
+        }
+        Err(e) => Err(e),
+    };
+
+    let status = match result {
+        Ok(0) => 1,
+        Ok(_) => 0,
+        Err(_) => 2,
+    };
+    let post_output =
+        if status == 1 { output_hash(h, &input[..input_len]) } else { pre_output };
+    (public_output(h, status, &input_hash, &post_output), result)
+}
