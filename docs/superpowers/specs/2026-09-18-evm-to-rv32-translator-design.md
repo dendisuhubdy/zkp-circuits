@@ -1,4 +1,4 @@
-# `evm2rv` — the Solidity bytecode to RV32 translator (v0.3, piece 3 of 3)
+# `evm2rv` — the Solidity bytecode to RV32 translator (v0.4, piece 3 of 3)
 
 Status: **approved by the user 2026-09-18; spec written, plan after piece 1's plan.** Runs as a
 parallel track with piece 2 once `rand-guest` (piece 1) exists.

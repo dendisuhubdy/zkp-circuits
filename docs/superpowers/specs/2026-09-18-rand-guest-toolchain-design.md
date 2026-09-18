@@ -1,6 +1,6 @@
-# `rand-guest` — the zkVM toolchain (v0.3, piece 1 of 3)
+# `rand-guest` — the zkVM toolchain (v0.4, piece 1 of 3)
 
-Status: **approved by the user 2026-09-18; spec written, plan next.** The first of the three v0.3
+Status: **approved by the user 2026-09-18; spec written, plan next.** The first of the three v0.4
 pieces (this, then the sBPF→RV32 and EVM→RV32 transpilers in parallel, each with its own spec).
 Everything here lives in this repo; `fullnode` changes nothing except the deploy cap (§8).
 
@@ -132,11 +132,11 @@ the interpreter's), and the developer's proof-free dry run.
 guest is 18 009 words, and a transpiled contract with its runtime library will be several
 thousand words at least, so nothing piece 2 or 3 produces can be deployed under the cap. The
 user's ruling (2026-09-18): **the cap becomes a genesis parameter, `max_program_words`, raised to
-the loader's own limit of 65 535 words (256 KiB) for the v0.3 chain**, cut together with v0.3.
+the loader's own limit of 65 535 words (256 KiB) for the v0.4 chain**, cut together with v0.4.
 Deploy fees already scale with words; a 256 KiB deploy fits the 4 MiB block. That is a
 `fullnode` change (genesis field, admission reads it, the wallet's `program deploy` reports it)
 and is tracked there, not here; `rand-guest info` reads the cap from a `--max-words` flag
-defaulting to 4096 until the v0.3 chain exists.
+defaulting to 4096 until the v0.4 chain exists.
 
 ## 9. Out of scope
 

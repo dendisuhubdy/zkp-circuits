@@ -1,4 +1,4 @@
-# `sbpf2rv` — the Solana bytecode to RV32 translator (v0.3, piece 2 of 3)
+# `sbpf2rv` — the Solana bytecode to RV32 translator (v0.4, piece 2 of 3)
 
 Status: **approved by the user 2026-09-18; spec written, plan after piece 1's plan.** Runs as a
 parallel track with piece 3 once `rand-guest` (piece 1) exists, because it emits into it.
@@ -117,7 +117,7 @@ message: a proof carries one program's execution, and a multi-program model is a
   statement the table above specifies, over the edge values (zero divisor, shift by width,
   minimum signed values, unaligned region boundaries).
 - **Cycles.** The SPL Token transfer's cycle count under `rand-guest run`, reported against the
-  interpreter's, is the milestone's number; the spec sets no target, since the point of v0.3 is
+  interpreter's, is the milestone's number; the spec sets no target, since the point of v0.4 is
   to measure it.
 - **A real proof.** The translated SPL Token transfer proves under the research prover's test
   profile and verifies, once, as the exit gate.

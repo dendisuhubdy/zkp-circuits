@@ -1079,11 +1079,11 @@ Claude-Session: https://claude.ai/code/session_013dJJAGbDPDmf9i6UsXLxvB"
 
 **Files:**
 - Create: `rand-guest/README.md`
-- Modify: `README.md` (the crate table gains a row), `AGENTS.md` (a dated entry), `research/docs/05-roadmap.md` (v0.3 line)
+- Modify: `README.md` (the crate table gains a row), `AGENTS.md` (a dated entry), `research/docs/05-roadmap.md` (v0.4 line)
 
 - [ ] **Step 1: Write `rand-guest/README.md`**
 
-The five subcommands with one example each, the flags table, "what check rejects", the cap flag and why it defaults to 4096 (fullnode's cap today; 65 535 on the v0.3 chain), the C prerequisites (`brew install llvm`, `rustup component add llvm-tools`), and the byte-identity rule for the committed guests.
+The five subcommands with one example each, the flags table, "what check rejects", the cap flag and why it defaults to 4096 (fullnode's cap today; 65 535 on the v0.4 chain), the C prerequisites (`brew install llvm`, `rustup component add llvm-tools`), and the byte-identity rule for the committed guests.
 
 - [ ] **Step 2: The crate table and AGENTS.md**
 
@@ -1093,7 +1093,7 @@ Add the row `| \`rand-guest\` | the guest toolchain: build (Rust, C), check, pac
 
 ```bash
 git add rand-guest/README.md README.md AGENTS.md research/docs/05-roadmap.md
-git commit -m "docs: rand-guest — the toolchain's README, the crate row, the AGENTS.md entry, the v0.3 roadmap line
+git commit -m "docs: rand-guest — the toolchain's README, the crate row, the AGENTS.md entry, the v0.4 roadmap line
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_013dJJAGbDPDmf9i6UsXLxvB"
