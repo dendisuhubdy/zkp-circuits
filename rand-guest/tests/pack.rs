@@ -1,40 +1,23 @@
-//! The packer reproduces the committed images from the guests' ELFs. The ELFs are built here with
-//! the same cargo invocation the Makefiles use, so this test needs the riscv32im target and
-//! llvm-tools installed (`rustup +1.98.1 target add …`). Cargo merges `--config` rustflags with a
-//! guest's `.cargo/config.toml` rather than replacing them, which is why the harness below invokes
-//! cargo differently per guest (see `build_guest_elf`); Task 3 removes `fib`'s and `keccak256`'s
-//! `.cargo/config.toml` so this tool is the single source of flags and that split goes away.
+//! The packer reproduces the committed images from the guests' ELFs. The ELFs are built here by
+//! `build::build_rust`, the one cargo invocation the tool has, so this test needs the riscv32im
+//! target and llvm-tools installed (`rustup +1.98.1 target add …`).
 
 use std::path::PathBuf;
-use std::process::Command;
 use rand_zkvm::isa::Program;
 
 fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..") }
 
-/// Builds a guest exactly as its Makefile does and returns the ELF path.
-///
-/// `fib` and `keccak256` already carry their rustflags (`-T` + `target-feature`) in
-/// `.cargo/config.toml`, exactly as their Makefile's plain `cargo build` relies on: passing
-/// `--config` here too would *merge* with, not replace, that file's `rustflags` array — cargo
-/// joins array-valued config from different sources rather than letting the higher-priority one
-/// win — duplicating `-T` and breaking the link ("region 'RAM' already defined"). `evm` and `sbpf`
-/// carry no `rustflags` in their `.cargo/config.toml`; their Makefile supplies the whole set,
-/// including the checkout-relative `--remap-path-prefix`, through `--config`, which is what the
-/// branch below mirrors.
-fn build_guest_elf(name: &str, crate_name: &str, ld: &str) -> PathBuf {
+/// Builds a guest and packs it, through the tool itself: `build_rust` generates the whole
+/// rustflags set (`-T`, the target feature, the remap) and passes it as `--config`. No guest
+/// carries rustflags of its own any more — cargo *merges* `--config` rustflags with a
+/// `.cargo/config.toml`'s rather than overriding them, so a guest that also carried them would
+/// link with a duplicate `-T` ("region 'RAM' already defined").
+fn build_guest_image(name: &str) -> Vec<u8> {
     let dir = root().join("guests-compiled").join(name);
-    let mut cmd = Command::new("cargo");
-    cmd.args(["+1.98.1", "build", "--release", "--target", "riscv32im-unknown-none-elf"]);
-    if name == "evm" || name == "sbpf" {
-        let flags = format!(
-            "[\"-C\",\"link-arg=-T{ld}\",\"-C\",\"target-feature=-unaligned-scalar-mem\",\"--remap-path-prefix={}=/rand-circuits\"]",
-            root().canonicalize().unwrap().display()
-        );
-        cmd.arg("--config").arg(format!("target.riscv32im-unknown-none-elf.rustflags={flags}"));
-    }
-    let status = cmd.current_dir(&dir).status().expect("cargo runs");
-    assert!(status.success(), "building {name}");
-    dir.join("target/riscv32im-unknown-none-elf/release").join(crate_name)
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join(format!("{name}.bin"));
+    rand_guest::build::build_rust(&dir, None, &out).expect("building the guest");
+    std::fs::read(&out).unwrap()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -63,14 +46,8 @@ fn the_packer_reproduces_every_committed_image() {
     // segment, but `Program::from_flat_image`'s `n_data = 0` case is defined to decode to the
     // word-for-word same `Program` as `from_flat_binary` on the same text — so `fib`/`keccak256`
     // are gated at the program level instead: same `base_pc`, same `words`, same `digest()`.
-    for (name, elf, ld) in [
-        ("fib", "fib-guest", "../../guest-sdk/guest.ld"),
-        ("keccak256", "keccak256-guest", "../../guest-sdk/guest.ld"),
-        ("evm", "evm-guest", "evm.ld"),
-        ("sbpf", "sbpf-guest", "sbpf.ld"),
-    ] {
-        let elf_bytes = std::fs::read(build_guest_elf(name, elf, ld)).unwrap();
-        let image = rand_guest::pack::pack(&elf_bytes).unwrap();
+    for name in ["fib", "keccak256", "evm", "sbpf"] {
+        let image = build_guest_image(name);
         if name == "fib" || name == "keccak256" {
             let from_image = Program::from_flat_image(&image).unwrap();
             let from_flat = Program::from_flat_binary(0x1000, &pinned_bytes(name)).unwrap();
