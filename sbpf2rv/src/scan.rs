@@ -10,6 +10,8 @@
 //! (`target = pc + 1 + imm`) and `src == 1` is a syscall whose `imm` is the murmur3-32 hash of its
 //! name. This scanner reads exactly that convention — it never re-derives it from relocations,
 //! since a [`Program`] built by [`Program::from_text`] (as every test here does) never had any.
+//! `src` in `2..=10` (`interp.rs`'s catch-all `else { Halt::BadInsn }`) is neither — only a
+//! hand-built program can produce it, since `elf::load` never writes anything but `0` or `1` there.
 //!
 //! # Warnings, not refusals
 //!
@@ -26,32 +28,53 @@
 //! notes). Refusing the whole program over any of this would break parity in the other direction:
 //! a program the interpreter runs successfully would become untranslatable.
 //!
-//! So none of it is a hard refusal (there is, as of this ruling, no `Refusal` type in this module
-//! at all — `scan` cannot fail). Instead, every such site becomes an ordinary [`Term`] the block
-//! it is in ends with, and a [`Warning`] recording why:
+//! So none of it is a hard refusal (there is no `Refusal` type in this module — `scan` cannot
+//! fail). Instead, every such site becomes an ordinary [`Term`] the block it is in ends with, and
+//! a [`Warning`] recording why:
 //!
-//! - A bad register (`dst`/`src` naming `r11..r15`) or an opcode `isa::classify` does not assign:
-//!   [`Warning::RegisterOutOfRange`] / [`Warning::UnknownOpcode`], and the instruction's block ends
-//!   in [`Term::Trap`]`(`[`TrapKind::BadInsn`]`)` — exactly `interp.rs`'s `Halt::BadInsn(opc)`.
-//! - A `ja`/conditional-jump/internal-`call` target outside the text, or one landing on a slot
-//!   that is not the start of an instruction (the second slot of an `lddw`), or simply falling off
-//!   the end of the text after the last instruction: [`Warning::JumpOutOfText`], and
+//! - A bad register (`dst`/`src` naming `r11..r15`), an opcode `isa::classify` does not assign, or
+//!   a `call imm` with `src` in `2..=10`: [`Warning::RegisterOutOfRange`] /
+//!   [`Warning::UnknownOpcode`] / [`Warning::BadCallImmSrc`], and the instruction's block ends in
+//!   [`Term::Trap`]`(`[`TrapKind::BadInsn`]`)` — exactly `interp.rs`'s `Halt::BadInsn(opc)`. None
+//!   of these three ever ran (`interp.rs::step` returns before dispatch), so the instruction is
+//!   *not* in `Block::insns` — see `Block`'s docs.
+//! - A `ja`/conditional-jump/internal-`call` target outside the text, or simply falling off the
+//!   end of the text after the last instruction: [`Warning::JumpOutOfText`], and
 //!   [`Term::Trap`]`(`[`TrapKind::BadJump`]`)` — `interp.rs`'s `Halt::BadJump`. A conditional
 //!   jump's two edges are resolved independently (see [`resolve_edge`]): a bad `taken` target does
 //!   not stop the `not`-taken side from being real code, and vice versa, since only whichever side
-//!   actually runs would ever reach the interpreter's own check.
+//!   actually runs would ever reach the interpreter's own check. A target landing on the second
+//!   slot of an `lddw` is different — see the next paragraph.
 //! - An unrecognised syscall hash, or one naming a cross-program-invocation call: unchanged from
 //!   the previous ruling — [`Warning::UnknownSyscall`] / [`Warning::Cpi`], and an ordinary
 //!   [`Term::Syscall`] (Task 4 emits a runtime trap for it instead of a real call).
 //!
-//! A bad jump/call *target* has nowhere well-formed to point a [`Term`]'s `usize` field at (there
-//! is no C label for a pc outside the text), so every such edge across one [`Function`] is
-//! redirected to one synthetic pc shared by the whole function — one past its text's last real pc
-//! — where [`scan`] plants a single `Block` with no instructions and `term:
-//! Term::Trap(TrapKind::BadJump)`. See [`resolve_edge`].
+//! # `lddw`'s second slot
+//!
+//! The interpreter has no concept of "instruction boundary" beyond wherever a given fetch happens
+//! to land: `slot_at` + `isa::decode` (`interp.rs`) decode *whatever bytes are at a pc*, with no
+//! memory of an earlier `lddw` having "claimed" the next slot as its high half. So a jump or call
+//! that targets the second slot of some `lddw` elsewhere in the text does not automatically trap —
+//! the interpreter decodes that slot fresh, as its own instruction, and either executes it (if
+//! valid) or traps `BadInsn` on it (if not; real toolchain output always has opcode `0` there,
+//! which is unassigned, so this is the common case in practice, but a hand-built slot need not be).
+//! This scanner mirrors that exactly: [`scan`]'s pass 1 decodes every `lddw`'s second slot
+//! independently too (alongside the canonical decode that skips over it), so every downstream
+//! register-range/opcode-validity/edge check treats it like any other instruction start with no
+//! special-casing — it is simply never reached by ordinary sequential fallthrough (only by an
+//! explicit jump/call target), so it is never a block start unless something actually targets it.
+//!
+//! # A bad jump/call *target*
+//!
+//! Has nowhere well-formed to point a [`Term`]'s `usize` field at (there is no C label for a pc
+//! outside the text), so every such edge across one [`Function`] is redirected to one synthetic pc
+//! shared by the whole function — one past its text's last real pc — where [`scan`] plants a
+//! single `Block` with no instructions and `term: Term::Trap(TrapKind::BadJump)`. See
+//! [`resolve_edge`]. The one exception is an internal call whose *target* (not its return point)
+//! is bad: see [`Term::Call`]'s docs and the "depth check, then trap" note on [`TrapKind::BadJump`].
 
 use sbpf_core::elf::Program;
-use sbpf_core::isa::{self, opc, Class, Insn};
+use sbpf_core::isa::{self, lddw_imm64, opc, Class, Insn};
 use sbpf_core::syscalls;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
@@ -65,11 +88,35 @@ pub struct Function {
 
 /// One basic block: `[start, end]` inclusive, both pcs in slots — `end` is the pc of the block's
 /// last instruction (its terminator, if it has one; the instruction right before a forced split
-/// otherwise). `insns` holds one entry per *logical* instruction (an `lddw` contributes one entry
-/// even though it occupies two slots), in program order, including the terminator's own
-/// instruction when `term` is anything but [`Term::Fallthrough`]. The one exception is the
-/// synthetic shared trap block a bad edge can redirect to (see the module docs): `start == end`,
-/// `insns` is empty, and `term` is always `Term::Trap(TrapKind::BadJump)`.
+/// otherwise).
+///
+/// # What `insns` contains
+///
+/// One entry per *logical* instruction (an `lddw` contributes its first slot only — the emitter
+/// re-reads the upper half straight from `program.text` at `end + 1` when translating it, rather
+/// than carrying a 64-bit immediate this type has nowhere to put), in program order — **except**
+/// the instruction at `end` itself is left out when `term` is
+/// `Term::Trap(TrapKind::BadInsn(_))`: `interp.rs::step` returns before dispatching to any
+/// instruction's semantics when the register-range/opcode-validity check at its own top fails, so
+/// that instruction never ran and the emitter must not translate it, only the trap. Every other
+/// `term` — including `Term::Trap(TrapKind::BadJump)` — means the instruction at `end` *did* run
+/// (or, for the shared synthetic trap block a bad jump/call target redirects to, that there is no
+/// real instruction at all: `start == end`, `insns` is empty, and this block represents only the
+/// failed fetch itself). See [`Term::Trap`] and [`TrapKind`] for the two `BadInsn`/`BadJump` cases
+/// in detail, including the internal-call one where a *depth check* runs before the trap.
+///
+/// A `le`/`be` instruction is included like any other Ld/St/Alu instruction, since its opcode and
+/// registers are always valid on their own; the emitter must still place a *runtime* check on the
+/// width immediate (`interp.rs`: only 16/32/64 are valid, anything else is `Halt::BadInsn` in
+/// `interp.rs::step`'s `LE`/`BE` arms specifically, checked separately from the opcode/register gate
+/// every instruction goes through) — this scanner does not check it, since it is a per-*value* — not
+/// per-instruction-shape — question no static scan resolves any more precisely than emitting the
+/// same runtime check the interpreter has.
+///
+/// The shared synthetic trap block (see the module docs) has empty `insns` but is not "free": it
+/// represents one more instruction dispatch attempt (the failed fetch) for the instruction-limit
+/// counter the spec's per-block accounting decrements at the head of each basic block — the
+/// emitter must count it, the same as any block with one real instruction in it would be.
 #[derive(Clone, Debug)]
 pub struct Block {
     pub start: usize,
@@ -82,7 +129,8 @@ pub struct Block {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Term {
     /// Not a branch: the block ends here only because the next pc is some other block's start
-    /// (a forward or backward jump target landing mid-stream).
+    /// (a forward or backward jump target landing mid-stream, or two distinct straight-line paths
+    /// converging on the same pc without either being a jump target itself).
     Fallthrough(usize),
     /// `ja`.
     Jump(usize),
@@ -90,7 +138,11 @@ pub enum Term {
     CondJump { taken: usize, not: usize },
     /// `exit`.
     Exit,
-    /// `call imm`, `src == 0`: an internal call. Execution resumes at `next` on return.
+    /// `call imm`, `src == 0`: an internal call. Execution resumes at `next` on return. Always a
+    /// *valid* target — a `call imm` whose target is not real code traps directly
+    /// (`Term::Trap(TrapKind::BadJump)` at the call's own pc, not this variant with some
+    /// placeholder target) rather than naming a non-function; see [`TrapKind::BadJump`]'s docs for
+    /// why that is still faithful to the interpreter's own (frame-push-then-fetch) order.
     Call { target: usize, next: usize },
     /// `call imm`, `src == 1`: a syscall named by `hash`, `murmur3_32` of its name. Execution
     /// resumes at `next` on return. `hash` may or may not be in `syscalls::SUPPORTED` — a hash
@@ -102,32 +154,46 @@ pub enum Term {
     /// statically. Execution resumes at `next` on return; the possible targets are
     /// [`Scan::callx_targets`].
     CallX { next: usize },
-    /// The interpreter would halt unconditionally executing this pc — no successor. Paired with a
-    /// [`Warning`] at the same pc explaining why, except at the one synthetic shared block a bad
-    /// jump/call *target* redirects to (see the module docs), which carries no `Warning` of its
-    /// own — the warning lives at whichever real instruction's edge was redirected here.
+    /// The interpreter would halt executing this pc — no successor. Paired with a [`Warning`] at
+    /// the same pc explaining why, except at the one synthetic shared block a bad jump/call
+    /// *target* redirects to (see the module docs), which carries no `Warning` of its own — the
+    /// warning lives at whichever real instruction's edge was redirected here. See [`TrapKind`]
+    /// for exactly which `Halt` this is and whether the instruction at `Block::end` ran first.
     Trap(TrapKind),
 }
 
 /// The exact `interp.rs::Halt` a [`Term::Trap`] stands in for, so Task 4 can emit the identical
-/// runtime trap without cross-referencing [`Scan::warnings`].
+/// runtime trap without cross-referencing [`Scan::warnings`]. See `Block`'s docs for whether the
+/// instruction at the block's `end` is itself included in `insns` — it differs between the two.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TrapKind {
     /// `Halt::BadInsn(opc)`: a `dst`/`src` nibble above `r10` (including `callx`'s register-number
-    /// immediate), or a byte `isa::classify` does not assign to any v1 class.
+    /// immediate), a byte `isa::classify` does not assign to any v1 class, or a `call imm` with
+    /// `src` in `2..=10`. `interp.rs::step` returns this *before* dispatching to the instruction's
+    /// semantics in every one of these cases, so the instruction never ran: it is not in
+    /// `Block::insns`.
     BadInsn(u8),
-    /// `Halt::BadJump`: a static jump/call target outside the text, landing on a slot that is not
-    /// the start of an instruction, or simply running off the end of the text.
+    /// `Halt::BadJump`: a static jump/call target outside the text, or simply running off the end
+    /// of the text. Unlike `BadInsn`, whatever instruction is at `Block::end` *did* run before
+    /// this fires — for an ordinary instruction, its own semantics completed and only the next
+    /// *fetch* failed; for an internal call whose target is bad specifically (`Term::Trap` sits
+    /// directly on the `call imm` site, not a `Term::Call`), `interp.rs`'s own order is "the frame
+    /// is pushed first and the target checked after" (`push_frame` before `slot_at`) — so the
+    /// depth check (and, if it passes, the frame push) still has to run before this trap, exactly
+    /// as it would for a call to a real target; only the fetch of the bad target itself fails.
     BadJump,
 }
 
 /// The whole scan: every function reachable from the entrypoint (transitively, through internal
-/// calls), and the static approximation of every `callx`'s possible target.
+/// calls) or from a `callx`-plausible constant (a post-relocation `lddw` immediate, or an
+/// 8-byte-aligned word of the read-only data past the text, that points 8-aligned at a real
+/// instruction start — see [`lddw_and_rodata_function_roots`]), and the static approximation of
+/// every `callx`'s possible target.
 #[derive(Clone, Debug)]
 pub struct Scan {
     /// `functions[0]` is always the entrypoint's function (`functions[0].entry == entry`); every
-    /// other function follows, sorted ascending by its entry pc. Discovery order (which call site
-    /// found a function first) is not preserved.
+    /// other function follows, sorted ascending by its entry pc. Discovery order (which call site,
+    /// or which `lddw`/read-only-data word, found a function first) is not preserved.
     pub functions: Vec<Function>,
     /// `program.entry_pc` — also `functions[0].entry`.
     pub entry: usize,
@@ -162,6 +228,10 @@ pub enum Warning {
     /// instruction, computed to `target` but not a valid instruction-start pc inside the text.
     /// `pc` is the instruction whose edge this was — never the (invalid) `target` itself.
     JumpOutOfText { pc: usize, target: i64 },
+    /// A `call imm` with `src` in `2..=10` — `interp.rs`'s catch-all `else { Halt::BadInsn }` for
+    /// `CALL_IMM` (register range already rules out `11..=15` before this is even reached). Only a
+    /// hand-built program can produce it; `elf::load` never writes anything but `0` or `1` there.
+    BadCallImmSrc { pc: usize, src: u8 },
 }
 
 /// Cross-program-invocation syscall names, checked against a syscall hash to produce
@@ -174,43 +244,55 @@ const CPI_NAMES: &[&str] = &["sol_invoke_signed_c", "sol_invoke_signed_rust"];
 /// Scans `program`'s text into functions and basic blocks. Infallible — see the module docs'
 /// "Warnings, not refusals".
 ///
-/// Two passes:
+/// Three passes:
 ///
 /// 1. **The whole text, unconditionally.** Every slot is decoded (`isa::decode`; an `lddw`
 ///    occupies two slots but yields one logical instruction, exactly as the interpreter's
 ///    instruction counter treats it — `interp.rs`'s "an `lddw` spans two slots but counts once").
 ///    Nothing is validated here — a bad register or an unassigned opcode is only checked once a pc
-///    is actually visited in pass 2, matching "unreachable text is not translated" (spec §3) for
-///    these too, not just for syscalls.
-/// 2. **A reachability walk from the entrypoint and every internal call target found along the
-///    way** (a worklist of function roots, so a call inside a called function discovers a third
-///    function, and so on). Every check — register range, opcode validity, jump/call targets,
-///    syscall hashes — happens exactly once per reachable pc, here.
+///    is actually visited in pass 3, matching "unreachable text is not translated" (spec §3) for
+///    these too, not just for syscalls. Every `lddw`'s second slot is *also* decoded independently
+///    and inserted — see the module docs' "`lddw`'s second slot".
+/// 2. **Every `callx`-plausible constant** (see [`lddw_and_rodata_function_roots`]) becomes an
+///    extra function root alongside the entrypoint, before any reachability walk runs — Critical
+///    finding from the committed SPL Token ELF: a function reached *only* through `callx` (never
+///    through a `call imm`) is invisible to a scan that only follows `call` targets.
+/// 3. **A reachability walk from every root** (a worklist, so a call inside a called function
+///    discovers a further function, and so on). Every check — register range, opcode validity,
+///    jump/call targets, syscall hashes — happens exactly once per reachable pc, here.
 pub fn scan(program: &Program<'_>) -> Scan {
     let text = program.text;
     let n_slots = text.len() / 8;
 
-    // ---- pass 1: decode every slot ------------------------------------------------------------
-    // `insn_len` can overshoot `n_slots` by one for a truncated `lddw` at the very last slot; that
-    // slot itself is still a real, decodable (if malformed) instruction start, so it is still
-    // inserted here — only slots strictly past it are never visited, which is exactly "not the
-    // start of an instruction" for `in_text`'s purposes.
+    // ---- pass 1: decode every slot, and every `lddw`'s second slot independently --------------
     let mut by_pc: BTreeMap<usize, Insn> = BTreeMap::new();
     let mut pc = 0usize;
     while pc < n_slots {
         let insn = isa::decode(read_slot(text, pc));
         by_pc.insert(pc, insn);
+        if insn.opc == opc::LD_DW_IMM && pc + 1 < n_slots {
+            // See the module docs: the interpreter has no notion of "this slot belongs to the
+            // `lddw` at `pc`" — a jump or call landing here decodes it completely fresh, exactly
+            // as this does. Registered unconditionally (even if invalid): the ordinary walk below
+            // already produces `Term::Trap(TrapKind::BadInsn(hi.opc))` for an invalid one, with no
+            // special-casing needed anywhere else, the moment something actually targets it.
+            by_pc.insert(pc + 1, isa::decode(read_slot(text, pc + 1)));
+        }
         pc += insn_len(&insn);
     }
 
-    // ---- pass 2: reachability walk, function by function ---------------------------------------
-    // `known_functions` doubles as "every function entry found so far" (the `callx_targets`
-    // source) and as the worklist's dedup set.
+    // ---- pass 2: every callx-plausible constant becomes an extra root -------------------------
     let mut known_functions: BTreeSet<usize> = BTreeSet::new();
     known_functions.insert(program.entry_pc);
     let mut worklist: VecDeque<usize> = VecDeque::new();
     worklist.push_back(program.entry_pc);
+    for root in lddw_and_rodata_function_roots(program, &by_pc, n_slots) {
+        if known_functions.insert(root) {
+            worklist.push_back(root);
+        }
+    }
 
+    // ---- pass 3: reachability walk, function by function ---------------------------------------
     let mut functions: Vec<Function> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
     while let Some(entry) = worklist.pop_front() {
@@ -226,6 +308,72 @@ pub fn scan(program: &Program<'_>) -> Scan {
     Scan { functions, entry: program.entry_pc, callx_targets, warnings }
 }
 
+/// Every pc `interp.rs`'s `callx` (`CALL_REG`) could statically land on beyond what a `call imm`
+/// scan finds: `interp.rs`'s own arithmetic is `addr.wrapping_sub(text_va) / 8`, taking `addr`
+/// from whichever register the program loaded it into — almost always via `lddw`, from a constant
+/// baked into the ELF at compile time (a function pointer) or read out of a jump/dispatch table in
+/// the read-only data. This scans both sources for candidate addresses and keeps only the ones
+/// that plausibly *are* such a pointer:
+///
+/// - **Every `lddw`'s full 64-bit immediate**, anywhere in the text (`isa::lddw_imm64` over the
+///   low slot pass 1 decoded and a fresh decode of its high slot) — regardless of whether that
+///   `lddw` is itself reachable yet; a function pointer can be constructed by code no call target
+///   has been discovered to reach, which is exactly the committed SPL Token ELF's pc 12244 case
+///   (loaded by `lddw`s at pc 11595 and 12352, never named by any `call imm`).
+/// - **Every 8-byte-aligned word of the read-only data past the text** (`program.rodata` begins at
+///   `.text` — `elf.rs`'s own docs — so `program.rodata[program.text.len()..]` is exactly the
+///   `.rodata`/`.data.rel.ro`/`.eh_frame` bytes `.text` does not cover): a `R_BPF_64_RELATIVE`
+///   relocation writes an address there as eight little-endian bytes (`elf.rs`), which is how a
+///   `callx` jump table is laid out.
+///
+/// A candidate is kept only if, converted to a slot with `interp.rs`'s own division, it lands
+/// exactly 8-aligned (no truncated remainder) on a pc [`Block`]-worth of real code starts at
+/// (`by_pc.contains_key`) — otherwise it is just a value that happens to decode, not a pointer.
+fn lddw_and_rodata_function_roots(
+    program: &Program<'_>,
+    by_pc: &BTreeMap<usize, Insn>,
+    n_slots: usize,
+) -> BTreeSet<usize> {
+    let mut roots = BTreeSet::new();
+    let text = program.text;
+
+    for (&pc, insn) in by_pc.iter() {
+        if insn.opc != opc::LD_DW_IMM || pc + 1 >= n_slots {
+            continue;
+        }
+        let hi = isa::decode(read_slot(text, pc + 1));
+        let value = lddw_imm64(*insn, hi);
+        if let Some(target) = text_slot(value, program.text_va, n_slots, by_pc) {
+            roots.insert(target);
+        }
+    }
+
+    let extra = &program.rodata[text.len()..];
+    for chunk in extra.as_chunks::<8>().0 {
+        let value = u64::from_le_bytes(*chunk);
+        if let Some(target) = text_slot(value, program.text_va, n_slots, by_pc) {
+            roots.insert(target);
+        }
+    }
+
+    roots
+}
+
+/// `value` (a virtual address), converted to a slot exactly as `interp.rs`'s `callx` does
+/// (`addr.wrapping_sub(text_va) / 8`), kept only if it lands 8-aligned on a real instruction start.
+fn text_slot(value: u64, text_va: u64, n_slots: usize, by_pc: &BTreeMap<usize, Insn>) -> Option<usize> {
+    let diff = value.wrapping_sub(text_va);
+    if !diff.is_multiple_of(8) {
+        return None;
+    }
+    let target = diff / 8;
+    if target >= n_slots as u64 {
+        return None;
+    }
+    let target = target as usize;
+    by_pc.contains_key(&target).then_some(target)
+}
+
 /// One slot's instruction span: two for `lddw`, one for everything else.
 fn insn_len(i: &Insn) -> usize {
     if i.opc == opc::LD_DW_IMM {
@@ -235,8 +383,7 @@ fn insn_len(i: &Insn) -> usize {
     }
 }
 
-/// Slot `pc`'s eight bytes, little-endian — bounds already guaranteed by the `pc < n_slots` loop
-/// that calls this.
+/// Slot `pc`'s eight bytes, little-endian — bounds already guaranteed by every caller.
 fn read_slot(text: &[u8], pc: usize) -> u64 {
     let b = &text[pc * 8..pc * 8 + 8];
     u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
@@ -255,9 +402,8 @@ fn call_target(pc: usize, imm: i32) -> i64 {
     pc as i64 + 1 + imm as i64
 }
 
-/// `target`, if it is both inside the text and the start of a real instruction (so a target
-/// landing on the second slot of an `lddw` is `None` too — neither is a pc this scanner, the
-/// emitter, or the interpreter can treat as code).
+/// `target`, if it is both inside the text and the start of a real instruction (an `lddw`'s second
+/// slot counts too — see the module docs — since pass 1 registers it in `by_pc` independently).
 fn in_text(target: i64, n_slots: usize, by_pc: &BTreeMap<usize, Insn>) -> Option<usize> {
     if target >= 0 && (target as usize) < n_slots && by_pc.contains_key(&(target as usize)) {
         Some(target as usize)
@@ -313,13 +459,20 @@ fn classify_syscall(hash: u32) -> SyscallKind {
     SyscallKind::Unknown
 }
 
-/// Scans one function: a reachability walk from `entry` that (a) collects every `ja`/conditional
-/// jump target inside the function, resolving every edge (never failing — see [`resolve_edge`])
-/// and caching the terminator [`Term`] for every pc it visits, then (b) replays the reachable pcs
-/// to lay out blocks, splitting at the collected jump targets and after every terminator. Two
-/// passes over the same reachable set, not one, because a jump can target a pc *earlier* in
-/// program order than the jump itself — the split point has to be known before blocks are built,
-/// or an already-built block would need to be retroactively cut in two.
+/// Scans one function: a reachability walk from `entry` that (a) collects every pc reachable by
+/// straight-line fallthrough or a resolved edge, resolving every edge (never failing — see
+/// [`resolve_edge`]) and caching the terminator [`Term`] for every pc it visits, then (b) replays
+/// the reachable pcs to lay out blocks, splitting at the collected split points and after every
+/// terminator. Two passes over the same reachable set, not one, because a jump can target a pc
+/// *earlier* in program order than the jump itself — the split point has to be known before blocks
+/// are built, or an already-built block would need to be retroactively cut in two.
+///
+/// A pc becomes a split point (`jump_targets`) two ways: it is an explicit `ja`/conditional-jump
+/// target (found the instant that jump is decoded), or — checked at the top of (a)'s inner loop —
+/// it is reached a *second* time by a distinct straight-line run that did not know about the first
+/// (two calls' return points, an `lddw`'s reinterpreted second slot, or any other convergence
+/// `jump_targets` did not already predict). Either way it must become its own block, or whichever
+/// run reaches it first would silently swallow it into a block some other run also has a claim on.
 fn scan_function(
     entry: usize,
     by_pc: &BTreeMap<usize, Insn>,
@@ -339,7 +492,7 @@ fn scan_function(
         return Function { entry, blocks: vec![trap] };
     }
 
-    // ---- (a) reachability + jump targets + terminator classification --------------------------
+    // ---- (a) reachability + split points + terminator classification --------------------------
     let mut reachable: HashSet<usize> = HashSet::new();
     let mut jump_targets: BTreeSet<usize> = BTreeSet::new();
     let mut term_at: BTreeMap<usize, Term> = BTreeMap::new();
@@ -349,6 +502,11 @@ fn scan_function(
         let mut pc = start;
         loop {
             if reachable.contains(&pc) {
+                // A distinct straight-line run already reached this pc — via an explicit jump
+                // target (already in `jump_targets`, so this is a no-op) or via its own ordinary
+                // fallthrough (not yet — see this function's docs). Either way it now has more
+                // than one distinct entry into it and must become its own block.
+                jump_targets.insert(pc);
                 break;
             }
             reachable.insert(pc);
@@ -362,6 +520,7 @@ fn scan_function(
 
             // Register range and opcode validity: `interp.rs::step`'s own first check, made on
             // every instruction regardless of class — so made here the same way, before dispatch.
+            // Neither ever runs the instruction (see `Block`'s docs on `insns`).
             if insn.dst > 10 || insn.src > 10 {
                 warnings.push(Warning::RegisterOutOfRange { pc, opc: insn.opc });
                 term_at.insert(pc, Term::Trap(TrapKind::BadInsn(insn.opc)));
@@ -423,22 +582,26 @@ fn scan_function(
                         }
                         pc = next;
                         continue;
+                    } else if insn.src != 0 {
+                        // `src` in `2..=10` (register range above already ruled out `11..=15`):
+                        // `interp.rs`'s catch-all `else { Halt::BadInsn(i.opc) } — nothing `elf.rs`
+                        // or a hand-built program's `src == 0`/`1` convention produces, but a
+                        // hand-built one *can* hit it directly (module docs).
+                        warnings.push(Warning::BadCallImmSrc { pc, src: insn.src });
+                        term_at.insert(pc, Term::Trap(TrapKind::BadInsn(insn.opc)));
+                        break;
                     }
-                    // src == 0: an internal call (the register check above already ruled out every
-                    // dst/src above 10, and `elf.rs`/`interp.rs` never produce a `call imm` with
-                    // any other src, so this is the only remaining case). Unlike `ja`/a conditional
-                    // jump, the relative offset lives in `imm`, not `off` — `interp.rs`'s
+                    // src == 0: an internal call. Unlike `ja`/a conditional jump, the relative
+                    // offset lives in `imm`, not `off` — `interp.rs`'s
                     // `target = next_pc + i.imm as i64` for `opc::CALL_IMM`, matching `elf.rs`'s
                     // `rel = target_pc - (site_pc + 1)` written into the immediate.
                     //
                     // A bad *target* is not redirected through `resolve_edge`'s shared trap pc like
                     // every other edge here: `Term::Call::target` names a function for the
                     // emitter's `r0 = f_<target>(...)`, and the shared trap pc is not a function.
-                    // The interpreter would push a frame and only then trap trying to fetch the bad
-                    // target (`interp.rs`'s `push_frame` before `slot_at`), but nothing observable
-                    // happens from that frame push before the trap unwinds everything anyway, so
-                    // trapping directly at the call site (no `Term::Call` at all) is the same
-                    // observable outcome without needing a fictitious function to call first.
+                    // See `TrapKind::BadJump`'s docs for why trapping directly at the call site
+                    // (still including it in `insns` — the depth check and frame push still run)
+                    // is the same observable outcome as the interpreter's own push-then-fetch order.
                     let raw_target = call_target(pc, insn.imm);
                     match in_text(raw_target, n_slots, by_pc) {
                         Some(target) => {
@@ -464,7 +627,9 @@ fn scan_function(
                     // CALL_REG (`callx`): v1 takes the target *address* from the register the
                     // immediate names (`interp.rs`), so `imm` is a register number here, not a pc
                     // — checked the same way the generic `dst`/`src` check above is (this is the
-                    // one place `interp.rs` validates a register named outside `dst`/`src`).
+                    // one place `interp.rs` validates a register named outside `dst`/`src`), and
+                    // before any frame push, so (like the generic register check) this instruction
+                    // never ran either.
                     let r = insn.imm as u32 as usize;
                     if r > 10 {
                         warnings.push(Warning::RegisterOutOfRange { pc, opc: insn.opc });
@@ -473,7 +638,8 @@ fn scan_function(
                     }
                     // The target is a runtime register *value*, unknown statically; the static
                     // approximation is every known function entry (`Scan::callx_targets`, filled
-                    // in by `scan` once every function is found).
+                    // in by `scan` once every function is found — including ones found only
+                    // through `lddw`/read-only-data constants, not just `call imm` sites).
                     let next = resolve_edge(pc, next_pc as i64, n_slots, by_pc, &mut term_at, warnings);
                     term_at.insert(pc, Term::CallX { next });
                     if next == n_slots {
@@ -528,9 +694,12 @@ fn scan_function(
         let mut pc = start;
         loop {
             let insn = by_pc[&pc];
-            insns.push(insn);
             if let Some(term) = term_at.get(&pc).copied() {
-                // A terminator: the block ends here.
+                // A terminator: the block ends here. Whether `insn` itself ran before `term` took
+                // effect is `Block`'s docs' business; only `Trap(BadInsn(_))` means it did not.
+                if !matches!(term, Term::Trap(TrapKind::BadInsn(_))) {
+                    insns.push(insn);
+                }
                 for succ in term_successors(&term) {
                     if block_starts.insert(succ) {
                         worklist.push_back(succ);
@@ -539,6 +708,7 @@ fn scan_function(
                 blocks.push(Block { start, end: pc, insns, term });
                 break;
             }
+            insns.push(insn);
             let next_pc = pc + insn_len(&insn);
             if jump_targets.contains(&next_pc) {
                 if block_starts.insert(next_pc) {
