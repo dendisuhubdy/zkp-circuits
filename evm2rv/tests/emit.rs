@@ -759,9 +759,22 @@ fn the_shim_uses_rand_guests_c_flags() {
         .filter_map(|l| l.trim().strip_prefix('"'))
         .filter_map(|l| l.strip_suffix("\".into(),"))
         .collect();
+    // The generated build.rs passes `--no-default-config` itself, ahead of C_FLAGS
+    // (evm2rv/src/shim.rs), so the command line is rand-guest's list flag for flag.
+    let shim: Vec<&str> = std::iter::once("--no-default-config")
+        .chain(C_FLAGS.iter().copied())
+        .collect();
     assert_eq!(
-        listed, C_FLAGS,
-        "rand-guest's clang_flags and the shim's C_FLAGS"
+        listed, shim,
+        "rand-guest's clang_flags and the shim's command line"
+    );
+    // One clang pin: the shim's CLANG_VERSION is rand-guest's.
+    assert!(
+        src.contains(&format!(
+            "pub const CLANG_VERSION: &str = \"{}\";",
+            evm2rv::shim::CLANG_VERSION
+        )),
+        "evm2rv::shim::CLANG_VERSION must equal rand-guest's CLANG_VERSION"
     );
     assert!(body.contains("-ffile-prefix-map={}=/rand-circuits"));
     assert!(!C_FLAGS.iter().any(|f| f.contains("rv32imc")));
