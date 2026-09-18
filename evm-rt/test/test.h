@@ -22,4 +22,6 @@ int u256_tests(void);
 int mem_tests(void);
 int precompile_tests(void);
 int call_tests(void);
+int call_fuzz_tests(void);
+int precompile_fuzz_tests(void);
 #endif
