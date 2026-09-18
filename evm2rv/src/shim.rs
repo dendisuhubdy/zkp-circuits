@@ -333,13 +333,12 @@ fn assert_pinned(clang: &Path) {
     }
 }
 
-/// The `llvm-ar` beside that clang, else the one on PATH.
-fn find_ar(clang: &Path) -> PathBuf {
-    let sibling = clang.with_file_name("llvm-ar");
-    if sibling.exists() {
-        sibling
-    } else {
-        PathBuf::from("llvm-ar")
+/// An LLVM tool beside `clang` (`llvm-ar`, `llvm-ranlib`), else the one on PATH: the host's own
+/// `ar` may not write an archive rust-lld reads.
+fn llvm_tool(clang: &Path, name: &str) -> PathBuf {
+    match clang.parent().map(|d| d.join(name)) {
+        Some(p) if p.exists() => p,
+        _ => PathBuf::from(name),
     }
 }
 
@@ -348,18 +347,30 @@ fn main() {
     if target != "riscv32im-unknown-none-elf" {
         panic!("this shim builds for riscv32im-unknown-none-elf only (`rand-guest build`), not {target}");
     }
+    // The profile is part of the image: it must be the one Cargo.toml states, not one a
+    // builder's CARGO_PROFILE_* environment substituted.
+    assert_eq!(
+        std::env::var("OPT_LEVEL").as_deref(),
+        Ok("3"),
+        "the shim must build at Cargo.toml's opt-level 3"
+    );
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = dir.join(ROOT).canonicalize().expect("the circuits checkout above this crate");
     let rt = root.join("evm-rt");
-    // The image must not depend on the builder's environment: `cc` appends these to every
-    // compile it runs, so they are cleared for this process before it reads them.
-    for v in [
-        "CFLAGS",
-        "TARGET_CFLAGS",
-        "CFLAGS_riscv32im_unknown_none_elf",
-        "CFLAGS_riscv32im-unknown-none-elf",
-    ] {
-        std::env::remove_var(v);
+    // The image must not depend on the builder's environment: `cc` appends CFLAGS (and ARFLAGS,
+    // RANLIBFLAGS) from the environment, under every spelling it reads (cc 1.4.6 `target_envs`),
+    // to every compile or archive it runs, so none of them may reach the image.
+    let target_u = target.replace(['-', '.'], "_");
+    for v in ["CFLAGS", "ARFLAGS", "RANLIBFLAGS"] {
+        for name in [
+            format!("{v}_{target}"),
+            format!("{v}_{target_u}"),
+            format!("TARGET_{v}"),
+            format!("HOST_{v}"),
+            v.to_string(),
+        ] {
+            std::env::remove_var(name);
+        }
     }
     let clang = find_clang();
     assert_pinned(&clang);
@@ -379,8 +390,10 @@ fn main() {
     ];
     let mut b = cc::Build::new();
     b.compiler(&clang)
-        .archiver(find_ar(&clang))
+        .archiver(llvm_tool(&clang, "llvm-ar"))
+        .ranlib(llvm_tool(&clang, "llvm-ranlib"))
         .no_default_flags(true)
+        .inherit_trim_paths(false)
         // cc 1.4.6 otherwise translates some of the Rust target's rustflags into C flags; the C
         // flags are exactly C_FLAGS and nothing else.
         .inherit_rustflags(false)
