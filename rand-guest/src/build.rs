@@ -182,8 +182,15 @@ fn rust_lld() -> Result<PathBuf> {
 ///                      this machine has no registers for — out of the ABI.
 ///  * `-mno-relax`      linker relaxation rewrites `auipc`/`jalr` pairs into `jal` against a `gp`
 ///                      this machine never sets up; the Rust guests are equally unrelaxed.
-///  * `-nostdlib -ffreestanding -fno-builtin`  there is no libc and no compiler runtime here, so
-///                      the compiler must not synthesise calls into either.
+///  * `-nostdlib -ffreestanding -fno-builtin`  there is no libc and no compiler runtime here.
+///                      These stop the compiler *recognising* library functions, not *emitting*
+///                      calls to them: a struct copy still lowers to `memcpy`, a large zero
+///                      initialiser to `memset`, and a 64-bit `/` or `%` by a runtime value to
+///                      `__udivdi3` and friends (RV32IM divides 32-bit values only). This crate's
+///                      `rt.c` defines exactly those and is linked into every C guest.
+///  * `-ffunction-sections -fdata-sections`, with `--gc-sections` at the link  one section per
+///                      function and object, so the linker drops whatever the guest does not
+///                      reach — `rt.c`'s functions included — as it does for the Rust guests.
 ///  * `-ffile-prefix-map` is [`flags`]'s `--remap-path-prefix`: an image reproduces byte for
 ///                      byte wherever the checkout lives. `-fdebug-prefix-map` alone would rewrite
 ///                      only DWARF, but the image container carries `.rodata` into the guest's RAM
@@ -198,18 +205,21 @@ fn clang_flags(root: &Path) -> Vec<String> {
         "-nostdlib".into(),
         "-ffreestanding".into(),
         "-fno-builtin".into(),
+        "-ffunction-sections".into(),
+        "-fdata-sections".into(),
         "-Os".into(),
         format!("-ffile-prefix-map={}=/rand-circuits", root.display()),
     ]
 }
 
-/// The C path: clang over every `.c` in the guest directory plus this crate's own `start.S`,
-/// linked by `rust_lld` against the same `guest.ld` the Rust guests use, then the same pack.
+/// The C path: clang over every `.c` in the guest directory plus this crate's own `start.S` and
+/// `rt.c`, linked by `rust_lld` against the same `guest.ld` the Rust guests use, then the same
+/// pack.
 ///
-/// The guest carries neither the entry point nor the syscall wrappers: `guest.h` and `start.S`
-/// are written into the guest's `target/rand-guest/` and that directory is the include path, so
-/// a C guest is its own source and nothing else — the shape the sBPF and EVM translators will
-/// emit into.
+/// The guest carries neither the entry point, the syscall wrappers nor the runtime: `guest.h`,
+/// `start.S` and `rt.c` are written into the guest's `target/rand-guest/` and that directory is
+/// the include path, so a C guest is its own source and nothing else — the shape the sBPF and EVM
+/// translators will emit into.
 pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput> {
     refuse_legacy_out(out)?;
     // Absolute from here on, for `build_rust`'s reason: the paths below go into the object files
@@ -237,8 +247,10 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
     let target_dir = dir.join("target/rand-guest");
     std::fs::create_dir_all(&target_dir)?;
     let start = target_dir.join("start.S");
+    let rt = target_dir.join("rt.c");
     std::fs::write(target_dir.join("guest.h"), include_str!("../guest.h"))?;
     std::fs::write(&start, include_str!("../start.S"))?;
+    std::fs::write(&rt, include_str!("../rt.c"))?;
     let mut sources: Vec<PathBuf> = std::fs::read_dir(dir)?
         .flatten()
         .map(|e| e.path())
@@ -250,13 +262,19 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
         bail!("no .c files in {}", dir.display());
     }
     let mut objects = Vec::new();
-    // `start.S` last on the command line but first in the image: `guest.ld` puts `.text._start`
-    // at `ORIGIN` whatever order the objects come in.
-    for src in sources.iter().chain(std::iter::once(&start)) {
-        // The generated start object is named `_rand_guest_start.o`, not `start.o`, so a guest
-        // that happens to carry its own `start.c` cannot collide with it; every other object keeps
-        // its source's name.
-        let obj = if src == &start { target_dir.join("_rand_guest_start.o") } else { target_dir.join(src.file_name().unwrap()).with_extension("o") };
+    // `start.S` and `rt.c` last on the command line, `start.S` still first in the image:
+    // `guest.ld` puts `.text._start` at `ORIGIN` whatever order the objects come in.
+    for src in sources.iter().chain([&start, &rt]) {
+        // The generated objects are named `_rand_guest_start.o` and `_rand_guest_rt.o`, not
+        // `start.o`/`rt.o`, so a guest that happens to carry its own `start.c` or `rt.c` cannot
+        // collide with them; every other object keeps its source's name.
+        let obj = if src == &start {
+            target_dir.join("_rand_guest_start.o")
+        } else if src == &rt {
+            target_dir.join("_rand_guest_rt.o")
+        } else {
+            target_dir.join(src.file_name().unwrap()).with_extension("o")
+        };
         let status = Command::new(&clang)
             .args(clang_flags(&root))
             .arg("-c")
@@ -274,7 +292,7 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
     }
     let elf = target_dir.join("guest.elf");
     let status = Command::new(rust_lld()?)
-        .args(["-flavor", "gnu"])
+        .args(["-flavor", "gnu", "--gc-sections"])
         .arg("-T")
         .arg(&ld_abs)
         .args(&objects)

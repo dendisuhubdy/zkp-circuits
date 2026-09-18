@@ -225,3 +225,79 @@ fn build_refuses_to_overwrite_a_legacy_flat_pin() {
     assert_eq!(std::fs::read(&out).unwrap(), pinned_bytes("fib"), "the pin must be left as it was");
     assert!(!tmp.path().join("fib.bin.sha256").exists());
 }
+
+/// The C runtime (`rt.c`): clang lowers a struct copy to a `memcpy` call and a 64-bit division by
+/// a runtime value to `__udivdi3`/`__umoddi3`/`__divdi3`/`__moddi3` even under
+/// `-ffreestanding -fno-builtin`, and before `rt.c` existed such a guest could not link. This one
+/// does both, builds, passes `check` at the default cap, and runs to the outputs computed here.
+#[test]
+fn a_c_guest_that_copies_a_struct_and_divides_a_u64_links_against_the_runtime() {
+    let Some(clang) = rand_guest::build::find_clang() else { eprintln!("no RISC-V clang; skipping"); return; };
+    let guest = tempfile::tempdir_in(root().join("guests-compiled")).unwrap();
+    std::fs::write(
+        guest.path().join("rt_user.c"),
+        r#"#include "guest.h"
+struct rec { uint32_t w[24]; };
+/* Not inlined, so the 96-byte assignment stays a real `memcpy` call. */
+__attribute__((noinline)) static void copy(struct rec *d, const struct rec *s) { *d = *s; }
+/* One operation each and not inlined: beside a division, clang computes `n % d` as `n - q*d`,
+ * which would leave the two remainder helpers untested. */
+__attribute__((noinline)) static uint64_t udiv(uint64_t n, uint64_t d) { return n / d; }
+__attribute__((noinline)) static uint64_t umod(uint64_t n, uint64_t d) { return n % d; }
+__attribute__((noinline)) static int64_t sdiv(int64_t n, int64_t d) { return n / d; }
+__attribute__((noinline)) static int64_t smod(int64_t n, int64_t d) { return n % d; }
+void main(void) {
+    struct rec a, b;
+    uint32_t seed = rand_read_input(0);
+    for (uint32_t i = 0; i < 24; i++) a.w[i] = seed * (i + 1);
+    copy(&b, &a);
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < 24; i++) sum += b.w[i];
+    uint64_t n = ((uint64_t)rand_read_input(1) << 32) | rand_read_input(2);
+    uint64_t d = rand_read_input(3);
+    uint64_t q = udiv(n, d), r = umod(n, d);
+    int64_t sn = -(int64_t)n, sd = (int64_t)d;
+    int64_t sq = sdiv(sn, sd), sr = smod(sn, sd);
+    rand_write_output(0, sum);
+    rand_write_output(1, b.w[23]);
+    rand_write_output(2, (uint32_t)q);
+    rand_write_output(3, (uint32_t)(q >> 32));
+    rand_write_output(4, (uint32_t)r);
+    rand_write_output(5, (uint32_t)(r >> 32));
+    rand_write_output(6, (uint32_t)sq);
+    rand_write_output(7, (uint32_t)sr);
+    rand_halt();
+}
+"#,
+    )
+    .unwrap();
+    let out = guest.path().join("rt_user.bin");
+    let o = Command::new(bin()).args(["build", "--lang", "c"]).arg(guest.path()).arg("--out").arg(&out).output().unwrap();
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&o.stderr));
+    assert!(stdout.contains("OK"), "{stdout}");
+
+    // The guest's own object really does call into the runtime (so this test exercises it), and
+    // the runtime's object calls nothing — checked where an `llvm-nm` sits beside the clang.
+    let nm = clang.with_file_name("llvm-nm");
+    if let Ok(o) = Command::new(&nm).arg(guest.path().join("target/rand-guest/rt_user.o")).output() {
+        let syms = String::from_utf8_lossy(&o.stdout);
+        for f in ["memcpy", "__udivdi3", "__umoddi3", "__divdi3", "__moddi3"] {
+            assert!(syms.contains(&format!("U {f}\n")), "rt_user.o does not call {f}: {syms}");
+        }
+        let rt = Command::new(&nm).arg("--undefined-only").arg(guest.path().join("target/rand-guest/_rand_guest_rt.o")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&rt.stdout), "", "rt.c must call nothing");
+    }
+
+    let (seed, hi, lo, d) = (7u32, 0x1234_5678u32, 0x9abc_def0u32, 1_000_003u32);
+    let n = ((hi as u64) << 32) | lo as u64;
+    let (q, r) = (n / d as u64, n % d as u64);
+    let (sq, sr) = (-(n as i64) / d as i64, -(n as i64) % d as i64);
+    let want: [u32; 8] = [(1..=24).map(|i| seed * i).sum(), seed * 24, q as u32, (q >> 32) as u32, r as u32, (r >> 32) as u32, sq as u32, sr as u32];
+    let run = Command::new(bin()).arg("run").arg(&out).arg("--input").args([seed, hi, lo, d].map(|w| w.to_string())).output().unwrap();
+    let s = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "{s}");
+    for (i, w) in want.iter().enumerate() {
+        assert!(s.contains(&format!("out[{i}] = {w}\n")), "out[{i}] should be {w}: {s}");
+    }
+}

@@ -128,13 +128,22 @@ so callers never need to say which one they have.
 ## The C path
 
 `build --lang c` compiles every `.c` file in the guest directory (sorted, so link order does not
-depend on the directory's) plus this crate's own `start.S`, with `rust-lld` linking against the
-same `guest.ld` the Rust guests use. Prerequisites:
+depend on the directory's) plus this crate's own `start.S` and `rt.c`, with `rust-lld` linking
+against the same `guest.ld` the Rust guests use. Prerequisites:
 
 - a clang that targets `riscv32`: either Homebrew's LLVM (`brew install llvm` — Apple's system
   clang has no RISC-V backend) at its default path, or any other clang set via `$CLANG`
 - `rustup +1.98.1 component add llvm-tools`, for `rust-lld` — the same linker the Rust guests use,
   found in the pinned toolchain's own sysroot, so a C guest needs no separate linker installed
+
+`rt.c` is the C runtime. `-ffreestanding -fno-builtin` stop clang *recognising* library
+functions, not *emitting* calls to them: a struct copy still becomes a `memcpy` call, a large zero
+initialiser a `memset`, and a 64-bit `/` or `%` by a runtime value a call to `__udivdi3`,
+`__umoddi3`, `__divdi3` or `__moddi3` (RV32IM divides 32-bit values only). `rt.c` defines those
+eight — `memcpy`, `memmove`, `memset`, `memcmp` and the four division helpers, as byte loops and
+shift-subtract division that call nothing themselves — and is linked into every C guest. The link
+uses `--gc-sections` over `-ffunction-sections` objects, so only what a guest calls reaches its
+image (`c-fib` is still 25 words). They are slow; copy and divide in words in a hot loop.
 
 A C guest writes `#include "guest.h"` for the syscall wrappers (`rand_read_input`,
 `rand_read_public`, `rand_write_output`, `rand_poseidon2`, `rand_keccak`,
