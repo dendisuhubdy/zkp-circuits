@@ -172,8 +172,12 @@ this toolchain, loaded at the fixed `ORIGIN` `guest-sdk/guest.ld` gives every gu
 (`Program::from_flat_binary(0x1000, …)`). `build` still only knows how to emit the container form
 for them, so rebuilding them does not reproduce their committed bytes; see "Byte/program identity"
 below for what is actually pinned instead. Every subcommand that loads an image (`check`, `run`,
-`info`) tries the container form first and falls back to the flat one on a bare `Magic` mismatch,
-so callers never need to say which one they have.
+`info`) reads the first word and picks the loader from it — `IMAGE_MAGIC` is a container,
+anything else a flat binary (`src/main.rs`'s `load`/`is_container`) — so callers never need to
+say which one they have. This is not "try the container loader and fall back on its `Magic`
+error": that loader checks the length against its six-word header before it would even reach a
+`Magic` check, so a flat binary shorter than six words would come back `Length`, never reaching
+the flat loader — hence reading the magic word directly instead.
 
 ## The C path
 

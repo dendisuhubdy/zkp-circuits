@@ -109,7 +109,10 @@ The part that does not exist today. Over the ELF's `.text` (or an image's text s
 The report is one line per finding with the address, the word, the mnemonic and the rule; the
 exit code is the verdict. A guest that passes `check` cannot fail in-circuit for an encoding,
 syscall-number or layout reason. It can still trap at runtime (a misaligned computed address,
-an out-of-range `READ_INPUT`, running past the tier), which `run` reports with the pc.
+an out-of-range `READ_INPUT`, running past the tier), which `run` reports (§6) — the emulator's
+error names the cause, but, **amended 2026-09-18 (Task 7)**: carries no pc, so `run` cannot print
+one; an earlier draft of this section said it did (`src/main.rs`'s `Cmd::Run` prints `trap:
+{e:?}` verbatim, with its own comment noting the error carries no pc).
 
 ## 5. Packing
 
