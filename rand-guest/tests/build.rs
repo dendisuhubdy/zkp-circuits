@@ -164,7 +164,7 @@ fn the_cap_is_measured_against_the_loaders_word_count_not_an_estimate() {
 /// clang that has a `riscv32` target (`build::find_clang`), since Apple's system clang has none.
 #[test]
 fn a_c_guest_builds_checks_and_runs_like_the_rust_one() {
-    let Some(_) = rand_guest::build::find_clang() else { eprintln!("no RISC-V clang; skipping"); return; };
+    let Ok(_) = rand_guest::build::find_clang() else { eprintln!("no RISC-V clang; skipping"); return; };
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("c-fib.bin");
     let o = Command::new(bin()).args(["build", "--lang", "c"]).arg(root().join("guests-compiled/c-fib")).arg("--out").arg(&out).output().unwrap();
@@ -194,7 +194,7 @@ fn a_guest_with_its_own_guest_h_is_refused() {
 /// the build still fails.
 #[test]
 fn build_names_a_decode_class_rule_instead_of_a_load_error() {
-    let Some(_) = rand_guest::build::find_clang() else { eprintln!("no RISC-V clang; skipping"); return; };
+    let Ok(_) = rand_guest::build::find_clang() else { eprintln!("no RISC-V clang; skipping"); return; };
     let guest = tempfile::tempdir_in(root().join("guests-compiled")).unwrap();
     std::fs::write(
         guest.path().join("fence.c"),
@@ -233,7 +233,7 @@ fn build_refuses_to_overwrite_a_legacy_flat_pin() {
 /// does both, builds, passes `check` at the default cap, and runs to the outputs computed here.
 #[test]
 fn a_c_guest_that_copies_a_struct_and_divides_a_u64_links_against_the_runtime() {
-    let Some(clang) = rand_guest::build::find_clang() else { eprintln!("no RISC-V clang; skipping"); return; };
+    let Ok(clang) = rand_guest::build::find_clang() else { eprintln!("no RISC-V clang; skipping"); return; };
     let guest = tempfile::tempdir_in(root().join("guests-compiled")).unwrap();
     std::fs::write(
         guest.path().join("rt_user.c"),

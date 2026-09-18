@@ -98,3 +98,57 @@ fn a_clean_hand_built_image_and_elf_still_pass() {
         assert!(!out.contains("could not be counted"), "{form}: {out}");
     }
 }
+
+/// Every io and load failure names the file and the step: no bare "No such file or directory",
+/// no bare `Length(8)`.
+#[test]
+fn io_and_load_errors_name_the_file_and_the_step() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("missing.bin");
+    for cmd in ["check", "info", "run", "pack"] {
+        let o = Command::new(bin()).arg(cmd).arg(&missing).output().unwrap();
+        let e = String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success() && e.contains(&format!("reading {}", missing.display())), "{cmd}: {e}");
+    }
+    // A truncated container — the magic and nothing else — is `LoadError::Length(4)`.
+    let short = tmp.path().join("short.bin");
+    std::fs::write(&short, rand_zkvm::isa::IMAGE_MAGIC.to_le_bytes()).unwrap();
+    for cmd in ["info", "run"] {
+        let o = Command::new(bin()).arg(cmd).arg(&short).output().unwrap();
+        let e = String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success() && e.contains(&format!("loading {}", short.display())), "{cmd}: {e}");
+    }
+    let o = Command::new(bin()).arg("check").arg(&short).output().unwrap();
+    let e = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success() && e.contains(&format!("checking {}", short.display())), "check: {e}");
+}
+
+/// `$CLANG` set to something that is not a RISC-V clang is an error naming it, not a silent fall
+/// back to whichever clang the search would have found next.
+#[test]
+fn a_clang_that_fails_the_probe_is_named_not_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("main.c"), "void main(void) {}\n").unwrap();
+    let o = Command::new(bin())
+        .env("CLANG", "/nonexistent/clang")
+        .args(["build", "--lang", "c"])
+        .arg(tmp.path())
+        .arg("--out")
+        .arg(tmp.path().join("out.bin"))
+        .output()
+        .unwrap();
+    let e = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success() && e.contains("$CLANG is /nonexistent/clang"), "{e}");
+}
+
+/// `pack --out ..` names no file; it must be refused, not panic on `file_name()`.
+#[test]
+fn pack_to_a_path_with_no_file_name_is_refused_not_panicked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = tmp.path().join("g.elf");
+    std::fs::write(&elf, elf_with_text(&text_with(Instr::Ecall.encode()))).unwrap();
+    let o = Command::new(bin()).arg("pack").arg(&elf).args(["--out", ".."]).current_dir(tmp.path()).output().unwrap();
+    let e = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{e}");
+    assert!(e.contains("names no file"), "{e}");
+}

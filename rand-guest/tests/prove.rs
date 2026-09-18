@@ -20,7 +20,7 @@ fn root() -> PathBuf {
 #[test]
 #[ignore]
 fn c_fib_proves_and_verifies_under_the_test_profile() {
-    assert!(rand_guest::build::find_clang().is_some(), "needs a clang with a riscv32 target (brew install llvm, or set CLANG)");
+    rand_guest::build::find_clang().expect("needs a clang with a riscv32 target");
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("c-fib.bin");
     let o = Command::new(env!("CARGO_BIN_EXE_rand-guest"))

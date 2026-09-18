@@ -64,7 +64,8 @@ pub fn cargo_config(root: &Path, ld: &Path) -> String {
 
 /// A guest's linker script: the one `.ld` in its directory, else `guest-sdk/guest.ld`.
 pub fn find_ld(dir: &Path, root: &Path) -> Result<PathBuf> {
-    let mut lds: Vec<_> = std::fs::read_dir(dir)?
+    let mut lds: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("listing {} for its linker script", dir.display()))?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().map_or(false, |e| e == "ld"))
@@ -78,7 +79,7 @@ pub fn find_ld(dir: &Path, root: &Path) -> Result<PathBuf> {
 
 /// The directory holding `guest-sdk/`: walk up from the guest.
 pub fn checkout_root(dir: &Path) -> Result<PathBuf> {
-    let mut p = dir.canonicalize()?;
+    let mut p = dir.canonicalize().with_context(|| format!("no such guest directory: {}", dir.display()))?;
     loop {
         if p.join("guest-sdk/guest.ld").exists() {
             return Ok(p);
@@ -143,26 +144,46 @@ pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutp
 /// is on PATH — and only one whose `--print-targets` lists `riscv32`, since Apple's system clang
 /// (the `clang` on PATH here) is built without the RISC-V backend and would fail at the first
 /// source file with a target-not-found error instead.
-pub fn find_clang() -> Option<PathBuf> {
-    let candidates = [
-        std::env::var("CLANG").ok().map(PathBuf::from),
-        Some(PathBuf::from("/opt/homebrew/opt/llvm/bin/clang")),
-        Some(PathBuf::from("clang")),
-    ];
-    candidates.into_iter().flatten().find(|c| {
+///
+/// `$CLANG` is an instruction, not a hint: if it is set and fails the probe this is an error
+/// naming it, never a silent fall back to some other clang.
+pub fn find_clang() -> Result<PathBuf> {
+    let targets_riscv32 = |c: &Path| {
         Command::new(c)
             .arg("--print-targets")
             .output()
             .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("riscv32"))
             .unwrap_or(false)
-    })
+    };
+    if let Some(c) = std::env::var_os("CLANG") {
+        let c = PathBuf::from(c);
+        if !targets_riscv32(&c) {
+            bail!("$CLANG is {}, which does not run or has no riscv32 target (`{} --print-targets`)", c.display(), c.display());
+        }
+        return Ok(c);
+    }
+    [PathBuf::from("/opt/homebrew/opt/llvm/bin/clang"), PathBuf::from("clang")]
+        .into_iter()
+        .find(|c| targets_riscv32(c))
+        .context("no clang with a riscv32 target: brew install llvm, or set CLANG")
 }
 
 /// `rust-lld` from the pinned Rust sysroot's llvm-tools, so a C guest needs only clang installed:
 /// the linker is the same one `build_rust` links with, and the same `guest.ld` drives it.
 fn rust_lld() -> Result<PathBuf> {
-    let sysroot = String::from_utf8(Command::new("rustc").arg(format!("+{TOOLCHAIN}")).args(["--print", "sysroot"]).output()?.stdout)?;
-    let host = String::from_utf8(Command::new("rustc").arg(format!("+{TOOLCHAIN}")).arg("-vV").output()?.stdout)?
+    let rustc = |args: &[&str]| -> Result<String> {
+        let o = Command::new("rustc")
+            .arg(format!("+{TOOLCHAIN}"))
+            .args(args)
+            .output()
+            .with_context(|| format!("running rustc +{TOOLCHAIN} {} to find rust-lld (is the pinned toolchain installed?)", args.join(" ")))?;
+        if !o.status.success() {
+            bail!("rustc +{TOOLCHAIN} {} failed: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim());
+        }
+        String::from_utf8(o.stdout).with_context(|| format!("rustc +{TOOLCHAIN} {} printed non-UTF-8", args.join(" ")))
+    };
+    let sysroot = rustc(&["--print", "sysroot"])?;
+    let host = rustc(&["-vV"])?
         .lines()
         .find_map(|l| l.strip_prefix("host: ").map(str::to_string))
         .context("rustc -vV printed no host line")?;
@@ -237,7 +258,7 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
             bail!("{} carries its own {name}, which would shadow the toolchain's copy written into target/rand-guest/; remove it", dir.display());
         }
     }
-    let clang = find_clang().context("no clang with a riscv32 target: brew install llvm, or set CLANG")?;
+    let clang = find_clang()?;
     let root = checkout_root(dir)?;
     let ld = match ld {
         Some(l) => l.to_path_buf(),
@@ -245,13 +266,15 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
     };
     let ld_abs = if ld.is_absolute() { ld } else { dir.join(ld) };
     let target_dir = dir.join("target/rand-guest");
-    std::fs::create_dir_all(&target_dir)?;
+    std::fs::create_dir_all(&target_dir).with_context(|| format!("creating {}", target_dir.display()))?;
     let start = target_dir.join("start.S");
     let rt = target_dir.join("rt.c");
-    std::fs::write(target_dir.join("guest.h"), include_str!("../guest.h"))?;
-    std::fs::write(&start, include_str!("../start.S"))?;
-    std::fs::write(&rt, include_str!("../rt.c"))?;
-    let mut sources: Vec<PathBuf> = std::fs::read_dir(dir)?
+    for (name, text) in [("guest.h", include_str!("../guest.h")), ("start.S", include_str!("../start.S")), ("rt.c", include_str!("../rt.c"))] {
+        let path = target_dir.join(name);
+        std::fs::write(&path, text).with_context(|| format!("writing the toolchain's {}", path.display()))?;
+    }
+    let mut sources: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("listing {} for its .c files", dir.display()))?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().map_or(false, |e| e == "c"))
@@ -291,14 +314,16 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
         objects.push(obj);
     }
     let elf = target_dir.join("guest.elf");
-    let status = Command::new(rust_lld()?)
+    let lld = rust_lld()?;
+    let status = Command::new(&lld)
         .args(["-flavor", "gnu", "--gc-sections"])
         .arg("-T")
         .arg(&ld_abs)
         .args(&objects)
         .arg("-o")
         .arg(&elf)
-        .status()?;
+        .status()
+        .with_context(|| format!("running {}", lld.display()))?;
     if !status.success() {
         bail!("linking {} failed", elf.display());
     }

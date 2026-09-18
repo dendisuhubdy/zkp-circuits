@@ -275,7 +275,7 @@ fn main() -> Result<()> {
             println!("form: {form}");
             match form {
                 Loaded::Image => {
-                    let (info, text, data) = pack::split(&bytes)?;
+                    let (info, text, data) = pack::split(&bytes).with_context(|| format!("reading {}'s segments", image.display()))?;
                     let nonzero = data.iter().filter(|w| **w != 0).count();
                     println!(
                         "text {} words at {:#x}; data {} words ({} non-zero) at {:#x}; prologue {} words; program {} words from base_pc {:#x}",

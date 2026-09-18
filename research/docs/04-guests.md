@@ -110,7 +110,8 @@ development machine. M4.1 adds one:
   `guest-sdk/guest.ld`'s `ORIGIN` (or a raised one, for a guest with data —
   `docs/01-isa.md`'s "The image container"). Built by the `rand-guest`
   toolchain crate, not by hand — `guests-compiled/README.md` has the exact
-  command and what it pins (compiler, flags, target). The resulting `.bin` is
+  command and what each pin is; `rand-guest/README.md` lists the compiler
+  flags and the target. The resulting `.bin` is
   committed (alongside its own `.sha256`) so a reviewer without the target
   installed can still run every test — `research/src/guests.rs`'s `compiled`
   module loads it with `include_bytes!` + `Program::from_flat_binary(0x1000,

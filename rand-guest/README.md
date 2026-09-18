@@ -87,6 +87,24 @@ segment needs its own `.ld` with `ORIGIN` raised past the loader's `li`/`sw` pro
 `sbpf.ld`: `guest.ld` with the origin moved) — `rand-guest` picks the one `.ld` file it finds in
 the guest's own directory, and refuses to guess if there is more than one (`--ld` names it then).
 
+## The compiler flags
+
+`build` generates these; no guest carries any of them (cargo *merges* `--config` rustflags with a
+guest's `.cargo/config.toml`, so a guest that also carried them would link with a duplicate `-T`).
+`src/build.rs`'s `flags` and `clang_flags` are the only place each set is written down, with the
+reason for every flag.
+
+- **Rust** — `cargo +1.98.1 build --release --target riscv32im-unknown-none-elf --config
+  'target.riscv32im-unknown-none-elf.rustflags=[…]'` with:
+  `-C link-arg=-T<ld>` (the guest's linker script),
+  `-C target-feature=-unaligned-scalar-mem` (a misaligned access is a constraint violation here),
+  `--remap-path-prefix=<checkout>=/rand-circuits` (panic locations in `.rodata` do not depend on
+  where the checkout lives, so images reproduce byte for byte).
+- **C** — `clang --target=riscv32-unknown-none-elf -march=rv32im -mabi=ilp32 -mno-relax -nostdlib
+  -ffreestanding -fno-builtin -ffunction-sections -fdata-sections -Os
+  -ffile-prefix-map=<checkout>=/rand-circuits -c`, per `.c` file plus `start.S` and `rt.c`, then
+  `rust-lld -flavor gnu --gc-sections -T <ld>` from the pinned toolchain's sysroot.
+
 ## What `check` rejects
 
 Every text word goes through the machine's own decoder (`Instr::decode`), so a guest that passes
@@ -137,7 +155,7 @@ The default, `4096`, is the fullnode's deploy cap today. Both loaders (`Program:
 `Program::from_flat_binary`) refuse anything over **65 535** words outright (`LoadError::TooLong`)
 regardless of `--max-words` — the hard ceiling the v0.4 chain is expected to raise the deploy cap
 to. The two committed interpreters are already over the default: `evm.bin` is 18 009 words and
-`sbpf.bin` is bigger still, so building or checking either needs `--max-words 65535` — as
+`sbpf.bin` 8 317, so building or checking either needs `--max-words 65535` — as
 `rand-guest/tests/build.rs` passes it, and as a developer building `evm` or `sbpf` by hand must
 pass it too, there being no build script that does it for them (`guests-compiled/README.md`'s
 own example command shows it). `fib`, `keccak256`, and `c-fib` all fit comfortably under 4096.

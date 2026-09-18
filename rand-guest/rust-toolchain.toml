@@ -1,0 +1,5 @@
+# The toolchain `rand-guest` itself builds and runs with, so a plain `cargo run` / `cargo test` in
+# this directory uses it. The guests are compiled with the same one, named explicitly
+# (`cargo +1.98.1`, `src/build.rs`'s `TOOLCHAIN`).
+[toolchain]
+channel = "1.98.1"

@@ -36,8 +36,8 @@ chain-side aggregation lands, per the user's 2026-09-15 ruling. `recursion/` is
 its own cargo package root (never a workspace member — that would void
 `research`'s `[profile.*]` tables); commands run from inside it.
 
-**`rand-guest`, the sibling guest toolchain, is done through Task 7 and merged
-on 2026-09-18** — v0.4 piece 1 of 3 (the RPC track took v0.3 first; the two
+**`rand-guest`, the sibling guest toolchain, is done through Task 7 (2026-09-18),
+on branch `feat/rand-guest`** — v0.4 piece 1 of 3 (the RPC track took v0.3 first; the two
 translator specs, `sbpf2rv` and `evm2rv`, are pieces 2 and 3): one binary,
 `build`/`check`/`pack`/`run`/`info`, replacing the four former per-guest
 Makefiles and `mkimage.py` (`guests-compiled/README.md`). `build` drives
