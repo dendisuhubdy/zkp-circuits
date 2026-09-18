@@ -9,8 +9,16 @@
  * `__umoddi3` (the interpreter's Rust lowers to the same compiler-builtins calls).
  *
  * Calling convention. Every operation writes its result through the first pointer and reads its
- * operands through the rest; **the result may alias any operand** (the emitter writes results
- * over the stack slot an operand came from). The operand order is the Rust receiver first:
+ * operands through the rest. The operand order is the Rust receiver first (table below).
+ *
+ * The aliasing contract: **every routine allows its result to alias any operand**, and any two
+ * operands to alias each other. Each reads all it needs from its operands before it writes the
+ * result (it computes into a temporary and stores last). Both emitters depend on this: stage one
+ * writes a result over the stack slot an operand came from, and stage two (`evm2rv/src/lift.rs`)
+ * writes it into a local that may hold any of the operands, not just the second. A new routine
+ * must keep this contract.
+ *
+ * The operand order:
  *
  *   opcode      stack top ... (the interpreter pops a, then b, then c)   C call
  *   ADD..SMOD   a, b                      u256_add(r, a, b)  = a op b
