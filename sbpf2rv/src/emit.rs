@@ -746,11 +746,13 @@ fn emit_block(
         Term::Syscall { hash, next } => vec![emit_syscall(hash), goto(next)],
         Term::CallX { next } => {
             let i = last.expect("a callx ends its block");
+            // Every register the copy-back may write goes in too: a target that does not write
+            // one of them hands back what it was given (see `Calls`).
             vec![
                 format!(
                     "SBPF_CALLX(r{}, {}, {});",
                     i.imm as u32,
-                    call_args(calls.callx_live),
+                    call_args(calls.callx_live | calls.callx_mod),
                     copy_back(calls.callx_mod)
                 ),
                 after_call(next),
@@ -842,6 +844,13 @@ pub fn use_def(i: &Insn) -> (u16, u16) {
 /// hands back and the caller copies), and `modified[f]`, the registers of `r0..r5` possibly written before it returns.
 /// Both are least fixpoints over the call graph, `callx` taken as a call to every known function.
 /// `r10` is always passed.
+///
+/// A `callx` copies back `callx_mod`, the union over every target, so it passes `callx_live |
+/// callx_mod`: a target that never writes some register of the union returns it as it came in,
+/// and that has to be the caller's own value, not 0 (fuzz seed 133 — `tests/fuzz.rs`,
+/// `a_callx_passes_every_register_any_target_may_hand_back`). A direct call needs no such widening:
+/// `live_in[f]` already holds every register of `modified[f]` that some path to `exit` leaves
+/// unwritten, since `exit` reads what the caller copies back.
 struct Calls {
     live_in: std::collections::BTreeMap<usize, Regs>,
     modified: std::collections::BTreeMap<usize, Regs>,

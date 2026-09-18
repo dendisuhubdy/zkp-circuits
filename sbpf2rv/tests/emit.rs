@@ -713,3 +713,56 @@ fn use_def_is_what_the_interpreter_reads_and_writes() {
         "every classified opcode but call, callx and exit"
     );
 }
+
+/// Fuzz seed 133 (Task 5), the emitted text: every register a `callx` copies back is also passed in.
+/// A `callx` copies back the union of what all its possible targets may write; a target that does
+/// not write one of those registers returns it as it came in, so it has to come in as the caller's
+/// own value. Here `B` (the target taken) writes only r0 and `A` (the other) writes r2; before the
+/// fix r2 went in as 0 — no target reads it — and came back as 0, where the interpreter keeps the
+/// caller's 7. `tests/fuzz.rs::a_callx_passes_every_register_any_target_may_hand_back` runs it.
+#[test]
+fn a_callx_passes_in_every_register_it_copies_back() {
+    let va = sbpf_core::memory::REGION_PROGRAM;
+    let lddw = |d: u8, v: u64| {
+        [
+            i(opc::LD_DW_IMM, d, 0, 0, v as u32 as i32),
+            i(0, 0, 0, 0, (v >> 32) as i32),
+        ]
+    };
+    let mut p = vec![i(opc::MOV64_IMM, 2, 0, 0, 7)]; // 0: r2 = 7
+    p.extend(lddw(3, va + 8 * 6)); // 1: r3 = &B
+    p.push(i(opc::CALL_REG, 0, 0, 0, 3)); // 3: callx r3
+    p.push(i(opc::MOV64_REG, 0, 2, 0, 0)); // 4: r0 = r2 (7)
+    p.push(i(opc::EXIT, 0, 0, 0, 0)); // 5
+    p.push(i(opc::MOV64_IMM, 0, 0, 0, 1)); // 6: B: r0 = 1
+    p.push(i(opc::EXIT, 0, 0, 0, 0)); // 7
+    p.push(i(opc::MOV64_IMM, 2, 0, 0, 5)); // 8: A: r2 = 5
+    p.push(i(opc::EXIT, 0, 0, 0, 0)); // 9
+    p.extend(lddw(0, va + 8 * 8)); // 10: dead, makes A a callx target
+    let t = text(&p);
+    let prog = Program::from_text(&t).unwrap();
+    let c = emit_program(&prog, &scan(&prog)).c;
+    let line = c
+        .lines()
+        .find(|l| l.contains("SBPF_CALLX(r3, "))
+        .unwrap_or_else(|| panic!("{c}"));
+    let args: Vec<&str> = line["    SBPF_CALLX(r3, (".len()..]
+        .split(')')
+        .next()
+        .unwrap()
+        .split(", ")
+        .collect();
+    let mut copied = 0;
+    for r in 0..6 {
+        if line.contains(&format!("r{r} = x_.r{r};")) {
+            copied += 1;
+            assert_eq!(
+                args[r],
+                format!("r{r}"),
+                "r{r} is copied back but not passed: {line}"
+            );
+        }
+    }
+    assert!(line.contains("r2 = x_.r2;"), "{line}");
+    assert!(copied >= 2, "{line}");
+}
