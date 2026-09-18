@@ -31,7 +31,8 @@ contract.bin (EVM bytecode, solc) ──▶ evm2rv ──▶ <name>/ ├── c
 EVM bytecode up to the interpreter's `MAX_CODE_BYTES` (24 KiB), as `solc` emits it (the
 runtime bytecode, not the creation code). The translator computes the same jumpdest bitmap the
 interpreter computes (`scan_jumpdests`: a `JUMPDEST` inside a `PUSHn` immediate is not a
-destination), and the code hash the digest binds.
+destination). The code hash the digest binds is not the translator's: the harness hashes the
+input vector's code, as the interpreter does (§6).
 
 ## 3. Stage one: the memory-stack translation
 
@@ -55,7 +56,10 @@ so the per-opcode checks disappear in straight-line code.
 | `SLOAD`, `SSTORE` | runtime calls into the interpreter's Merkle-witness `StorageTree` (Rust, exposed to C by `extern "C"` shims), including the warm/cold and refund rules |
 | `JUMP`, `JUMPI` | `switch (dest_low_word) { case <pc>: goto L_<pc>; … default: trap(BadJump) }` over the jumpdest set, after checking the high limbs are zero; `JUMPI` tests the condition first |
 | `PC`, `JUMPDEST`, `GAS` | a constant; nothing (its gas is charged); the runtime's gas counter |
-| environment: `ADDRESS`, `CALLER`, `CALLVALUE`, `CALLDATASIZE`, `CODESIZE`, `RETURNDATASIZE`, `ORIGIN`, `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `CHAINID`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH` | words read from the call input's environment section (the ones the interpreter lacks are added to the input layout **as trailing words, so existing vectors decode unchanged**) |
+| environment: `ADDRESS`, `CALLER`, `CALLVALUE`, `CALLDATASIZE`, `CODESIZE`, `RETURNDATASIZE` | the decoded call's `Env`, calldata and code, exactly as the interpreter reads them; the input vector is the interpreter's, with no extra words |
+| `CHAINID` | a translation-time constant: `evm2rv --chain-id N` bakes `N` into the C, so the image hash `hc` binds it |
+| `ORIGIN` | `CALLER` — the same binding `CALLER` already has (one call, no relayer) |
+| `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH` | the trap the interpreter raises (`Halt::Trap(opcode)`, status 2), until a public-segment binding for them is designed (a follow-up for the user). A private input word is bound only to the salted `H_IN`, which a verifier cannot open, so it cannot carry a chain fact a prover could not forge |
 | `LOG0..4` | runtime calls that append to the logs the harness hashes |
 | `STOP`, `RETURN`, `REVERT`, `INVALID` | set the outcome and leave |
 | precompile calls: `CALL`/`STATICCALL` to addresses 1–9 | the runtime's software implementations (§5) with the precompile's gas |
@@ -91,12 +95,15 @@ measured in cycles and listed as the coprocessor backlog — a machine milestone
 
 ## 6. The shim crate and the ABI
 
-The generated `src/main.rs` is the interpreter's `evm/src/main.rs` with `run_call_with` given
-a closure that enters the translated code at block 0 instead of constructing an `Interpreter`.
-Input decoding, the storage tree's pre-root and witnesses, `logs_hash`, `public_output` and the
-`EVM_OUT` digest are `evm-core::abi` unchanged. The code hash the digest binds is the hash of
-the **EVM bytecode**, computed by the translator and baked into the shim as a constant, so a
-verifier can re-run `evm2rv` on the published bytecode and check `hc`, exactly as for sBPF.
+The generated `src/main.rs` is the interpreter's `evm/src/main.rs` with `run_call_with_executor`
+given a closure that enters the translated code at block 0 instead of constructing an
+`Interpreter`. Input decoding, the storage tree's pre-root and witnesses, `logs_hash`,
+`public_output` and the `EVM_OUT` digest are `evm-core::abi` unchanged. The code hash the digest
+binds is the hash of the **EVM bytecode in the input vector**, computed by the harness as the
+interpreter computes it. A verifier checks both: `hc == translate(bytecode)` (re-running `evm2rv`
+on the published bytecode, with the same `--chain-id`, exactly as for sBPF) and the code hash in
+`EVM_OUT` against the same bytecode — so the translated program and the code it claims to run
+cannot come apart.
 
 ## 7. Testing
 

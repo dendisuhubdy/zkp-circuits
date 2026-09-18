@@ -18,7 +18,8 @@
 - The interpreter's `Halt` variants are the contract: `Stop`, `Return`, `Revert`, `OutOfGas`, `StackUnderflow`, `StackOverflow`, `BadJump`, `Invalid`, `Trap(u8)`, `NoWitness`, `BadWitness`, `OutOfBounds`. `MAX_CODE_BYTES` 24 KiB, the stack 1024 deep, the Shanghai static gas schedule as `interp.rs` has it (its `G_*` constants are copied, not re-derived).
 - Static gas is charged once at each block head; dynamic gas inside runtime calls with the interpreter's exact formulas; an out-of-gas that the interpreter would raise mid-block is raised at the block head with the same `gas_used` (the whole block's static cost) — pinned by the parity tests.
 - The cross-contract family (`CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL` to a non-precompile address, `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, `CREATE`, `CREATE2`, `SELFDESTRUCT`) compiles to the trap the interpreter raises for those opcodes (`Halt::Trap(opcode)`), and `evm2rv` warns at translation naming each one present.
-- Environment words the interpreter lacks (`ORIGIN`, `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `CHAINID`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH`) come from **trailing words appended to the input vector**; an input without them decodes exactly as before and those words read as zero, so every existing vector is unchanged.
+- The translated program takes **the interpreter's exact input vector** — no extra words. Of the environment opcodes the interpreter lacks: `CHAINID` is a translation-time constant (`evm2rv --chain-id N`, baked into the C, bound by `hc`); `ORIGIN` reads as `CALLER`; `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH` trap exactly as the interpreter traps on them (`Halt::Trap(opcode)`) until a public-segment binding is designed. (Review ruling, Task 1: a private `READ_INPUT` word is bound only to the salted `H_IN`, which a verifier cannot open, so it cannot carry a chain fact.)
+- The `EVM_OUT` code hash is the harness's hash of the input vector's code; a verifier checks both `hc == translate(bytecode)` and that code hash.
 - The C is compiled with the toolchain's flags; never `rv32imc`.
 - Commit prefixes `evm2rv:`, `evm-core:`, `evm-rt:`, `docs:`; the two attribution lines from the session's system reminder.
 
@@ -28,7 +29,7 @@
 
 | path | responsibility |
 |---|---|
-| `evm2rv/Cargo.toml`, `src/main.rs`, `src/lib.rs` | CLI: `evm2rv <contract.bin> --out <dir>` |
+| `evm2rv/Cargo.toml`, `src/main.rs`, `src/lib.rs` | CLI: `evm2rv <contract.bin> --out <dir> [--chain-id <N>]` |
 | `evm2rv/src/blocks.rs` | jumpdest scan (the interpreter's rule), basic blocks, per-block static gas and min-depth/max-growth |
 | `evm2rv/src/emit.rs` | stage one: each opcode to C over the memory stack; the jump switch |
 | `evm2rv/src/lift.rs` | stage two: the per-block stack-to-locals pass |
@@ -36,12 +37,20 @@
 | `evm-rt/u256.h`, `u256.c` | the eight-limb library, semantics of `evm-core/src/u256.rs` |
 | `evm-rt/evm_rt.h`, `evm_rt.c` | stack, memory with expansion gas, gas counter, logs, traps, calldata/code copies, keccak via the SDK |
 | `evm-rt/precompiles.c` | ecrecover, sha256, ripemd160, identity, modexp, bn128 add/mul/pairing, blake2f |
-| `guests-compiled/evm-core/src/abi.rs` | `run_call_with_executor`; the trailing environment words; `extern "C"` storage shims in a new `ffi.rs` |
+| `guests-compiled/evm-core/src/abi.rs` | `run_call_with_executor` (appended; no existing line moves); `extern "C"` storage and keccak shims in a new `ffi.rs` behind the `ffi` feature |
 | `evm2rv/tests/parity.rs`, `tests/fuzz.rs`, `tests/opcodes.rs`, `tests/precompiles.rs` | the oracle tests |
 
 ---
 
 ### Task 1: `run_call_with_executor`, the storage FFI and the trailing environment words in `evm-core`
+
+> **Amended by the review ruling (done as commits 094977f + 886653e):** no environment tail —
+> `EnvExt`/`decode_env_ext` were removed, `Executor` is
+> `&mut dyn FnMut(&mut H, &[u8], &[u8], Env, &mut StorageTree, &mut Buffers) -> Outcome`, and
+> `decode_input`/`run_call_with` are untouched. `ffi.rs` is behind the `ffi` cargo feature (off by
+> default: compiled in, it moves the pinned `evm.bin`); `HostBox<'a>(&'a mut dyn Host)`; the halt
+> codes are `ffi::HALT_*` (1..=12, 0 = ok, a trap's opcode as the argument). Shims enable
+> `features = ["ffi"]`. The text below is the original brief.
 
 **Files:**
 - Modify: `guests-compiled/evm-core/src/abi.rs`; Create: `guests-compiled/evm-core/src/ffi.rs`
@@ -120,7 +129,7 @@ pub fn warnings(code: &[u8]) -> Vec<(usize, u8)>;           // the cross-contrac
 - Test: `evm2rv/tests/emit.rs`, `tests/parity.rs`
 
 **Interfaces:**
-- CLI: `evm2rv <contract.bin> --out <dir> [--name <crate>] [--stage 1|2]` → `contract.c`, `Cargo.toml`, `build.rs`, `src/main.rs`; prints blocks, opcodes, warnings.
+- CLI: `evm2rv <contract.bin> --out <dir> [--name <crate>] [--stage 1|2] [--chain-id <N>]` → `contract.c`, `Cargo.toml`, `build.rs`, `src/main.rs`; prints blocks, opcodes, warnings. `--chain-id` is the constant `CHAINID` returns, baked into the C (so `hc` binds it); it is an error to omit it when the code contains `CHAINID`.
 - Emitted C shape:
 
 ```c
@@ -142,7 +151,7 @@ Use a `switch` with `goto` labels (computed gotos are a GNU extension clang supp
 
 - [ ] **Step 1: parity test first** — `tests/parity.rs`: `evm2rv` on the interpreter's ERC-20 test bytecode, `rand-guest build` the output dir, `rand-guest run` with the transfer vector's input words, compare the eight outputs, then decode `gas_used` and status from the vector the harness prints (or from a debug output slot the shim writes in test builds — the harness's `Outcome` is not in the public words; add a `--emit-outcome` shim feature that writes `gas_used` to output slot 7 for tests only, gated by a cargo feature the parity test enables). Same for `approve`, `transferFrom`, a revert (transfer more than the balance), an out-of-gas (a tiny gas limit).
 - [ ] **Step 2: emit tests** — each opcode's C against the spec's table (`ADD` → `u256_add(&evm_stack[evm_sp-2], &evm_stack[evm_sp-2], &evm_stack[evm_sp-1]); evm_sp--;`, etc.).
-- [ ] **Step 3: implement** `emit.rs` (every opcode of the spec's table; the block-head charge and bounds check; the jump switch; `PC` as a constant; the trap opcodes as `evm_halt(HALT_TRAP, opcode)`; the environment opcodes reading `evm_env` and `evm_env_ext` structs the shim fills from `Env`/`EnvExt`), `shim.rs` (the interpreter's `evm/src/main.rs` with `run_call_with_executor` and an executor that fills the C globals, `setjmp`s, calls `evm_entry`, and maps the halt code, gas, return data and logs back into an `Outcome`), and the CLI.
+- [ ] **Step 3: implement** `emit.rs` (every opcode of the spec's table; the block-head charge and bounds check; the jump switch; `PC` as a constant; the trap opcodes as `evm_halt(HALT_TRAP, opcode)`; the environment opcodes: `ADDRESS`/`CALLER`/`CALLVALUE` from an `evm_env` struct the shim fills from `Env`, `ORIGIN` as `CALLER`, `CHAINID` as the `--chain-id` constant, and the nine unbound ones (`GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH`) as `evm_halt(HALT_TRAP, opcode)`), `shim.rs` (the interpreter's `evm/src/main.rs` with `run_call_with_executor` and an executor that fills the C globals, `setjmp`s, calls `evm_entry`, and maps the halt code, gas, return data and logs back into an `Outcome`), and the CLI.
 - [ ] **Step 4: run parity and emit tests; commit** — `evm2rv: the stage-one emitter, the shim and the CLI — the ERC-20 transfer, approve and transferFrom match the interpreter on digest, status and gas`.
 
 ---
