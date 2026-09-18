@@ -126,3 +126,12 @@ pub fn hash_pair<H: Host>(h: &mut H, domain: u32, a: &[u32; 8], b: &[u32; 8]) ->
     }
     out
 }
+
+// The C ABI for `evm2rv`'s translated contracts, behind the `ffi` feature, which only their shims
+// enable. Not merely unused in the interpreter's guest but *absent* from it: compiled in, its
+// `#[no_mangle]` functions are dropped by the linker yet still move the `evm` guest's pinned image
+// (same length, different layout), so the module is cfg'd out rather than left to LTO. Declared
+// last, not beside `abi`, so no line of this file moves either: that image embeds the source line
+// of each bounds-check panic location.
+#[cfg(feature = "ffi")]
+pub mod ffi;

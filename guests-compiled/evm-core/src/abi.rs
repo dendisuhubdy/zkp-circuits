@@ -404,3 +404,174 @@ pub fn run_call_with<H: Host, F: FnMut(u32) -> u32>(
     let out = public_output(h, &i.code[..i.code_len], &i.pre_root, &i.storage.root(), &o);
     (out, o)
 }
+
+// ---- The executor path (`evm2rv`) ----------------------------------------------------------
+//
+// Everything below is new code that the interpreter's guest never calls, appended *after* the
+// interpreter's path rather than woven into it, and the module docs above are left as they were:
+// the `evm` guest's image embeds this file's source lines (each bounds-check panic location), so
+// moving any line above this point moves the pinned `bin/evm.bin` with no code change at all —
+// measured: a twelve-line module-doc addition at the top did exactly that.
+//
+// # The environment tail
+//
+// The input vector may be followed by the tail a translated contract reads and the interpreter
+// does not — [`ENV_EXT_WORDS`] words, [`EnvExt`]'s eleven fields in order, a 256-bit value as its
+// eight limbs and a 64-bit one as one word (as `gas_limit` is):
+//
+// ```text
+// [origin(8), gasprice(8), coinbase(8), timestamp(1), number(1), prevrandao(8), gaslimit(1),
+//  chainid(8), selfbalance(8), basefee(8), blockhash(8)]
+// ```
+//
+// [`decode_input`] stops where the standard layout ends and never looks at the tail, so the
+// interpreter's path ([`run_call`], [`run_call_with`]) is the same with or without it; only
+// [`decode_env_ext`], which [`run_call_with_executor`] calls, reads it.
+
+/// The environment values a translated contract can read and the interpreter cannot (`ORIGIN`,
+/// `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `CHAINID`,
+/// `SELFBALANCE`, `BASEFEE`, `BLOCKHASH`), decoded from the input vector's optional tail by
+/// [`decode_env_ext`]. All zeros when the vector has no tail. `blockhash` is the one value
+/// `BLOCKHASH` returns, whatever block number it is asked for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EnvExt {
+    pub origin: U256,
+    pub gasprice: U256,
+    pub coinbase: U256,
+    pub timestamp: u64,
+    pub number: u64,
+    pub prevrandao: U256,
+    pub gaslimit: u64,
+    pub chainid: U256,
+    pub selfbalance: U256,
+    pub basefee: U256,
+    pub blockhash: U256,
+}
+
+impl EnvExt {
+    /// What a vector without the tail decodes to.
+    pub const ZERO: EnvExt = EnvExt {
+        origin: U256::ZERO,
+        gasprice: U256::ZERO,
+        coinbase: U256::ZERO,
+        timestamp: 0,
+        number: 0,
+        prevrandao: U256::ZERO,
+        gaslimit: 0,
+        chainid: U256::ZERO,
+        selfbalance: U256::ZERO,
+        basefee: U256::ZERO,
+        blockhash: U256::ZERO,
+    };
+}
+
+/// Words in the environment tail: eight 256-bit values of eight words and three 64-bit values of
+/// one word each.
+pub const ENV_EXT_WORDS: usize = 8 * 8 + 3;
+
+/// Read the optional environment tail from a cursor [`decode_input`] has already taken the
+/// standard vector from.
+///
+/// - No words left: the tail is absent, and the result is [`EnvExt::ZERO`].
+/// - All [`ENV_EXT_WORDS`] there: the eleven values, in the module doc's order. Words past the tail
+///   are ignored, as `decode_input` ignores words past the standard vector.
+/// - Some but not all: [`ParseError::Truncated`].
+///
+/// **Absence is only detectable when `len` is finite** — on the host, over a slice. In the guest
+/// `len` is `u32::MAX` (see [`InputCursor`]): this reads all [`ENV_EXT_WORDS`] words, and a
+/// `READ_INPUT` past the committed `n_in` is unsatisfiable, so a guest that calls this must be run
+/// with the tail present (an all-zero tail is the absent one's equivalent).
+///
+/// The interpreter's guest never calls this: [`run_call`] and [`run_call_with`] leave the tail
+/// unread, so the `evm` guest's image does not change with it.
+pub fn decode_env_ext<F: FnMut(u32) -> u32>(c: &mut InputCursor<F>) -> Result<EnvExt, ParseError> {
+    if c.pos >= c.len {
+        return Ok(EnvExt::ZERO);
+    }
+    let e = EnvExt {
+        origin: c.u256(),
+        gasprice: c.u256(),
+        coinbase: c.u256(),
+        timestamp: c.word() as u64,
+        number: c.word() as u64,
+        prevrandao: c.u256(),
+        gaslimit: c.word() as u64,
+        chainid: c.u256(),
+        selfbalance: c.u256(),
+        basefee: c.u256(),
+        blockhash: c.u256(),
+    };
+    if c.truncated() {
+        return Err(ParseError::Truncated);
+    }
+    Ok(e)
+}
+
+/// What runs the decoded call in place of the interpreter: given the host, the code, the calldata,
+/// the environment, the environment tail, the witness tree and the working buffers, produce the
+/// [`Outcome`]. It must leave the post-state in the tree, as the interpreter does — the public
+/// output binds `tree.root()` after it returns.
+pub type Executor<'a, H> = &'a mut dyn FnMut(
+    &mut H,
+    &[u8],
+    &[u8],
+    Env,
+    &EnvExt,
+    &mut StorageTree,
+    &mut Buffers,
+) -> Outcome;
+
+/// [`run_call_with`] with the interpreter replaced by `exec`: decode the input vector and its
+/// optional environment tail ([`decode_env_ext`]), run `exec` over them, and produce the same eight
+/// public output words by the same [`public_output`] rules. With
+/// `Interpreter::new(h, code, calldata, env, tree, bufs).run()` as `exec` the result is exactly
+/// [`run_call_with`]'s on any vector without a tail.
+///
+/// A vector that does not parse — including a partial tail — never reaches `exec` and gives the
+/// canonical malformed output, as in [`run_call_with`]. The tail's `len` caveat is
+/// [`decode_env_ext`]'s.
+///
+/// This is `evm2rv`'s entry point: a translated contract's shim calls it with the compiled code as
+/// the executor. The interpreter's guest calls [`run_call`], and [`run_call_with`] is deliberately
+/// left as it was rather than rewritten over this function, so the pinned `evm` image is untouched.
+pub fn run_call_with_executor<H: Host, F: FnMut(u32) -> u32>(
+    h: &mut H,
+    w: &mut Workspace,
+    read: F,
+    len: u32,
+    exec: Executor<'_, H>,
+) -> ([u32; 8], Outcome) {
+    let mut c = InputCursor::new(read, len);
+    let ext = match decode_input(h, &mut w.input, &mut c).and_then(|()| decode_env_ext(&mut c)) {
+        Ok(ext) => ext,
+        Err(_) => return malformed(h),
+    };
+    let i = &mut w.input;
+    let o = exec(
+        h,
+        &i.code[..i.code_len],
+        &i.calldata[..i.calldata_len],
+        i.env,
+        &ext,
+        &mut i.storage,
+        &mut w.bufs,
+    );
+    let out = public_output(h, &i.code[..i.code_len], &i.pre_root, &i.storage.root(), &o);
+    (out, o)
+}
+
+/// The canonical malformed output and its outcome — [`run_call_with`]'s parse-failure branch,
+/// repeated here for [`run_call_with_executor`] rather than shared, so the interpreter's function
+/// (and the pinned image built from it) stays exactly as it was.
+fn malformed<H: Host>(h: &mut H) -> ([u32; 8], Outcome) {
+    let o = Outcome {
+        halt: Halt::OutOfBounds,
+        gas_used: 0,
+        ret: [0; MAX_RETURN_BYTES],
+        ret_len: 0,
+        logs: [Log::EMPTY; MAX_LOGS],
+        n_logs: 0,
+    };
+    let out = public_output(h, &[], &[0; 8], &[0; 8], &o);
+    (out, o)
+}

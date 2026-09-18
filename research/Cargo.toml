@@ -47,6 +47,9 @@ evm-core = { path = "../guests-compiled/evm-core" }
 sbpf-core = { path = "../guests-compiled/sbpf-core" }
 
 [dev-dependencies]
+# The same `evm-core` with its `ffi` feature, for tests only: `tests/evm_abi.rs` drives the C ABI
+# (`evm_sload`/`evm_sstore`/`evm_keccak256`) `evm2rv`'s translated contracts call.
+evm-core = { path = "../guests-compiled/evm-core", features = ["ffi"] }
 hex = "0.4"
 # The oracle for `evm-core`'s 256-bit arithmetic — host tests only, never in a guest.
 num-bigint = "0.4"
