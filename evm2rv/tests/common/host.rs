@@ -149,12 +149,19 @@ fn opcode_of(name: &str) -> Option<u8> {
 }
 
 /// `c` with its `evm_entry` renamed `evm_entry_<i>` and the coverage counters added.
+///
+/// The op-comment check and the two bad-jump forms are independent `if`s, not `else if`s: a
+/// dynamic `JUMP`/`JUMPI`'s whole body — comment, `u256_hi_zero` guard and `goto dispatch` — is
+/// emitted on one line (`emit.rs`), so that line must both get its `fuzz_cov[op]++` *and* have its
+/// inline `evm_halt(EVM_HALT_BAD_JUMP, …)` counted into `fuzz_dyn_bad`. An `else if` chain would
+/// only ever apply the first match and silently undercount dynamic bad jumps on JUMP/JUMPI lines
+/// (the dispatch table's own `default:` case is a separate line and is unaffected either way).
 pub fn instrument(c: &str, i: usize) -> String {
     let names: Vec<(String, u8)> = (0..=255u8).map(|o| (mnemonic(o), o)).collect();
     let mut out = String::with_capacity(c.len() + c.len() / 4);
     for line in c.lines() {
-        let line = line.replace("void evm_entry(void)", &format!("void evm_entry_{i}(void)"));
-        let t = line.trim_start();
+        let mut line = line.replace("void evm_entry(void)", &format!("void evm_entry_{i}(void)"));
+        let t = line.trim_start().to_string();
         if t.starts_with("/* 0x") {
             // `/* 0x0012 NAME [0x..] */ code`
             let end = t.find("*/").expect("a closed op comment") + 2;
@@ -165,21 +172,23 @@ pub fn instrument(c: &str, i: usize) -> String {
                 .map(|&(_, o)| o)
                 .or_else(|| opcode_of(name))
                 .expect("a known mnemonic");
-            let indent = &line[..line.len() - t.len()];
-            out.push_str(indent);
-            out.push_str(&t[..end]);
-            out.push_str(&format!(" fuzz_cov[{op}]++;"));
-            out.push_str(&t[end..]);
-        } else if t.starts_with("default: evm_halt(EVM_HALT_BAD_JUMP") {
-            out.push_str(&line.replace("default: ", "default: fuzz_dyn_bad++; "));
+            let indent = line[..line.len() - t.len()].to_string();
+            let mut rewritten = String::new();
+            rewritten.push_str(&indent);
+            rewritten.push_str(&t[..end]);
+            rewritten.push_str(&format!(" fuzz_cov[{op}]++;"));
+            rewritten.push_str(&t[end..]);
+            line = rewritten;
+        }
+        if t.starts_with("default: evm_halt(EVM_HALT_BAD_JUMP") {
+            line = line.replace("default: ", "default: fuzz_dyn_bad++; ");
         } else if line.contains("if (!u256_hi_zero(d_)) evm_halt(EVM_HALT_BAD_JUMP, 0);") {
-            out.push_str(&line.replace(
+            line = line.replace(
                 "if (!u256_hi_zero(d_)) evm_halt(EVM_HALT_BAD_JUMP, 0);",
                 "if (!u256_hi_zero(d_)) { fuzz_dyn_bad++; evm_halt(EVM_HALT_BAD_JUMP, 0); }",
-            ));
-        } else {
-            out.push_str(&line);
+            );
         }
+        out.push_str(&line);
         out.push('\n');
     }
     out

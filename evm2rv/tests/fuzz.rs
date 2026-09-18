@@ -51,6 +51,7 @@ use evm2rv::blocks::static_gas;
 use evm2rv::emit::{translate, Options};
 use evm2rv::gen::{case, non_trapping, Case, Gas};
 use evm_core::abi::{run_call_with, Workspace};
+use evm_core::ffi::HALT_INVALID;
 use evm_core::interp::{Halt, Outcome};
 use evm_core::u256::U256;
 use rand_zkvm::evm::{EvmCall, HostRef, SparseTree};
@@ -189,6 +190,13 @@ fn the_translation_matches_the_interpreter_on_the_fuzz_corpus() {
         let (words, want_w, want_o) = interpret(c, &mut ws);
         let (got_w, got_o, extra) = lib.run_words(&mut HostRef, i, &words);
         if extra.reached_precompile {
+            assert!(
+                matches!(want_o.halt, Halt::Trap(0xf1 | 0xf2 | 0xf4 | 0xfa)),
+                "seed {}: a run that reached a precompile must have trapped the interpreter on \
+                 CALL/CALLCODE/DELEGATECALL/STATICCALL, got {:?}",
+                c.seed,
+                want_o.halt,
+            );
             excluded += 1;
             continue;
         }
@@ -722,6 +730,13 @@ fn a_sample_runs_through_the_real_pipeline() {
             c.seed
         );
         assert_eq!(dbg[7] as u64, o.gas_used, "seed {}: gas_used", c.seed);
+        assert!(
+            (dbg[6] & 0xff) != HALT_INVALID || matches!(o.halt, Halt::Invalid),
+            "seed {}: dbg[6] reports EVM_HALT_INVALID ({:#x}) but the interpreter's halt is {:?}",
+            c.seed,
+            dbg[6],
+            o.halt,
+        );
         ran += 1;
         ran_loops += (c.tags.loops > 0) as usize;
     }

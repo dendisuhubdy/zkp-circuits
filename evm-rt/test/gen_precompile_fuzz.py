@@ -15,12 +15,15 @@ The oracles, none of them the C:
   * bn256 add/mul/pairing: py_ecc's bn128 (8.x): multiples of the generators, doubling, P + (-P),
     the point at infinity, scalars 0, 1, r - 1, r, 2^256 - 1, truncated and over-long inputs, and
     invalid encodings (a coordinate >= p, a point off the curve or off the twist); a pairing
-    product that is 1 (e(aP, bQ) e(-abP, Q)) and one that is not.
+    product that is 1 (e(aP, bQ) e(-abP, Q)) and one that is not; and, for the pairing specifically,
+    a G1 point off the curve, a G1 coordinate >= p, and a G2 point on the twist but outside the
+    r-torsion subgroup (`gen_precompile_vectors.find_g2_not_in_subgroup`).
   * blake2f: EIP-152's F written here from RFC 7693, checked first against hashlib.blake2b (a
     one-block message at 12 rounds is one F call); then random states with 0..24 rounds, the final
     flag 0 or 1, and the invalid encodings: a length of 212 or 214, a final flag of 2.
 
 Deterministic: one fixed seed. Needs py_ecc and pycryptodome; refuses to run without them.
+Pinned:  pip install py_ecc==8.0.0 pycryptodome==3.23.0
 Run from this directory:  python3 gen_precompile_fuzz.py > precompile_fuzz_vectors.h
 """
 import hashlib
@@ -274,6 +277,14 @@ def bn_vectors():
     add("pairing: G2 off the twist", 8, bad, b"", 45000 + 34000, 0)
     add("pairing: 0 pairs (= 1)", 8, b"", w32(1), 45000)
     add("pairing: 385 bytes", 8, rb(385), b"", 45000 + 2 * 34000, 0)
+    # A G1 point off the curve, a coordinate >= p, and a G2 point on the twist but outside the
+    # r-torsion subgroup (Task 7, review item 4): the same three invalidity classes
+    # gen_precompile_vectors.py's fixed pairing vectors cover, here with the fuzz file's own
+    # points so the two generators do not share every invalid encoding.
+    add("pairing: G1 (1, 3) off the curve", 8, w32(1) + w32(3) + enc2(Q1), b"", 45000 + 34000, 0)
+    add("pairing: G1 x = p (coordinate >= p)", 8, w32(P) + w32(2) + enc2(Q1), b"", 45000 + 34000, 0)
+    g2_not_in_subgroup = bytes.fromhex(g.find_g2_not_in_subgroup())
+    add("pairing: G2 on the twist, outside the subgroup", 8, enc1(P1) + g2_not_in_subgroup, b"", 45000 + 34000, 0)
 
 
 # ---- blake2f (RFC 7693's F, EIP-152's encoding) ----
