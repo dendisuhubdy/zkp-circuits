@@ -20,13 +20,20 @@
 //! per-opcode accounting.
 //!
 //! **Traps.** The sixteen [`crate::blocks::TRAP_TERM`] opcodes and every byte the interpreter does
-//! not implement are `evm_halt(EVM_HALT_TRAP, op)`. So, in stage one, is the call family (ruling
-//! 5): the interpreter traps on `CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL` after charging
-//! their static gas (zero) and **before touching the stack**, so the emitter ends the block at the
-//! first one — the ops after it are unreachable — and computes that block's head over the prefix
-//! with the call counted as needing nothing: a `CALL` on a two-deep stack traps, as in the
-//! interpreter, rather than underflowing. (`blocks.rs` keeps the call family's real arities for
-//! Task 5, whose precompile calls do pop seven or six words.)
+//! not implement are `evm_halt(EVM_HALT_TRAP, op)`.
+//!
+//! **The call family** (Task 5): `CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL` are
+//! `evm_call(op, &evm_stack[evm_sp-n], gas_after)`, n = 7 or 6, then `evm_sp -= n - 1`: the
+//! runtime runs a precompile (addresses 1-9) and writes the success flag over the deepest operand,
+//! and traps `Trap(op)` on any other target, as the interpreter traps on the whole family. Its
+//! static gas is 0 (the runtime charges everything, and takes the rest of the block's static gas,
+//! `gas_after`, into its all-but-one-64th); the block continues past it, and the head counts its
+//! real arity — so a call on a shallow stack now underflows at the head where the interpreter
+//! trapped, both status 2 with `gas_used = gas_limit` (ruling 6). The interpreter traps on every
+//! call, so a translated contract that calls a precompile is a strict superset of it; one that
+//! makes no call is emitted exactly as before. A contract with a call-family opcode starts with
+//! `evm_calls_begin()` and reads `RETURNDATASIZE`/`RETURNDATACOPY` from the runtime's buffer; one
+//! without keeps the interpreter's constant 0 and `evm_copy_returndata`.
 //!
 //! **Environment** (ruling 8): `ADDRESS`, `CALLER`, `CALLVALUE` read `evm_address`, `evm_caller`,
 //! `evm_callvalue`, which the shim fills from the decoded `Env`; `ORIGIN` reads `evm_caller`;
@@ -40,7 +47,7 @@
 
 use std::fmt::Write as _;
 
-use crate::blocks::{blocks, jumpdests, stack_effect, static_gas, Block, Op, Term, CALL_FAMILY};
+use crate::blocks::{blocks, jumpdests, Block, Op, Term, CALL_FAMILY};
 
 /// What the emitter needs besides the code.
 #[derive(Clone, Copy, Debug, Default)]
@@ -75,60 +82,8 @@ impl std::error::Error for EmitError {}
 pub struct Emitted {
     pub c: String,
     pub blocks: usize,
-    /// Opcodes emitted (the dead tail after a call-family trap is not counted).
+    /// Opcodes emitted.
     pub opcodes: usize,
-}
-
-/// A block as the emitter runs it: its ops cut after the first call-family op (a trap in stage
-/// one), and the head's numbers recomputed over that prefix with the call needing nothing.
-struct Plan<'a> {
-    ops: &'a [Op],
-    static_gas: u64,
-    min_depth: usize,
-    max_growth: usize,
-    /// Per op: the static gas of the ops after it in `ops` (what `GAS` adds back).
-    gas_after: Vec<u64>,
-    /// The block ended at a call-family op (the rest of the block is dead).
-    cut: bool,
-}
-
-/// `blocks::stack_effect`, except that the call family traps before touching the stack.
-fn effect(op: u8) -> (usize, i32) {
-    if CALL_FAMILY.contains(&op) {
-        (0, 0)
-    } else {
-        stack_effect(op)
-    }
-}
-
-fn plan(b: &Block) -> Plan<'_> {
-    let end = b
-        .ops
-        .iter()
-        .position(|o| CALL_FAMILY.contains(&o.opcode))
-        .map_or(b.ops.len(), |i| i + 1);
-    let ops = &b.ops[..end];
-    let (mut depth, mut min_depth, mut max_growth) = (0i64, 0i64, 0i64);
-    for o in ops {
-        let (need, net) = effect(o.opcode);
-        min_depth = min_depth.max(need as i64 - depth);
-        depth += net as i64;
-        max_growth = max_growth.max(depth);
-    }
-    let mut gas_after = vec![0u64; ops.len()];
-    let mut suffix = 0u64;
-    for (i, o) in ops.iter().enumerate().rev() {
-        gas_after[i] = suffix;
-        suffix += static_gas(o.opcode);
-    }
-    Plan {
-        ops,
-        static_gas: suffix,
-        min_depth: min_depth.max(0) as usize,
-        max_growth: max_growth.max(0) as usize,
-        gas_after,
-        cut: end < b.ops.len(),
-    }
 }
 
 /// `&evm_stack[evm_sp-n]`, the n-th word from the top (1 is the top).
@@ -161,14 +116,15 @@ fn push_c(v: &[u8; 32]) -> String {
     }
 }
 
-/// The C for one opcode, given the static gas of the ops after it in its block (`GAS` needs it).
-/// Terminators halt or jump; `JUMP`/`JUMPI` here are the dynamic form (`goto dispatch`) — the
-/// emitter resolves a `PUSHn`-then-jump pair statically in [`translate`] instead.
+/// The C for one opcode, given the static gas of the ops after it in its block (`GAS` and the
+/// call family need it) and whether the contract has a call-family opcode anywhere (`calls`: the
+/// return-data opcodes read the runtime's buffer). Terminators halt or jump; `JUMP`/`JUMPI` here
+/// are the dynamic form (`goto dispatch`) — the emitter resolves a `PUSHn`-then-jump pair
+/// statically in [`translate`] instead.
 ///
-/// An opcode this crate traps on (the sixteen [`crate::blocks::TRAP_TERM`] opcodes, the call
-/// family in stage one, and every byte the interpreter does not implement) is
-/// `evm_halt(EVM_HALT_TRAP, op)`.
-pub fn op_c(op: &Op, gas_after: u64, opts: &Options) -> Result<String, EmitError> {
+/// An opcode this crate traps on (the sixteen [`crate::blocks::TRAP_TERM`] opcodes and every byte
+/// the interpreter does not implement) is `evm_halt(EVM_HALT_TRAP, op)`.
+pub fn op_c(op: &Op, gas_after: u64, opts: &Options, calls: bool) -> Result<String, EmitError> {
     let bin = |f: &str| format!("{f}({}, {}, {}); evm_sp--;", s(2), s(1), s(2));
     let o = op.opcode;
     Ok(match o {
@@ -231,10 +187,17 @@ pub fn op_c(op: &Op, gas_after: u64, opts: &Options) -> Result<String, EmitError
             sat(2),
             sat(3)
         ),
-        // No call is ever made, so the return data is always empty.
+        // Without a call-family opcode no call is ever made: the return data is always empty,
+        // the interpreter's rule. With one, the runtime's buffer.
+        0x3d if calls => "u256_from_u32(&evm_stack[evm_sp++], evm_rdata_len);".into(),
         0x3d => "u256_from_u32(&evm_stack[evm_sp++], 0u);".into(),
         0x3e => format!(
-            "evm_copy_returndata({}, {}, {}); evm_sp -= 3;",
+            "{}({}, {}, {}); evm_sp -= 3;",
+            if calls {
+                "evm_copy_returndata_buf"
+            } else {
+                "evm_copy_returndata"
+            },
             sat(1),
             sat(2),
             sat(3)
@@ -285,6 +248,15 @@ pub fn op_c(op: &Op, gas_after: u64, opts: &Options) -> Result<String, EmitError
                 sat(2),
                 2 + n,
                 2 + n
+            )
+        }
+        // The call family: the operands from the top down are gas, address, [value,] argsOffset,
+        // argsLength, retOffset, retLength; the flag lands on the deepest.
+        0xf1 | 0xf2 | 0xf4 | 0xfa => {
+            let n = if matches!(o, 0xf1 | 0xf2) { 7 } else { 6 };
+            format!(
+                "evm_call({o:#04x}, &evm_stack[evm_sp-{n}], {gas_after}ull); evm_sp -= {};",
+                n - 1
             )
         }
         0xf3 => format!("evm_return({}, {});", sat(1), sat(2)),
@@ -406,37 +378,29 @@ fn static_target(v: &[u8; 32]) -> Option<usize> {
     Some(u32::from_be_bytes([v[28], v[29], v[30], v[31]]) as usize)
 }
 
-/// The block head: the stack check and the static charge.
-fn head_c(b: &Block, p: &Plan<'_>) -> String {
+/// The block head: the stack check and the static charge (`blocks.rs`'s numbers, the call
+/// family at its real arity).
+fn head_c(b: &Block) -> String {
     let mut h = format!(
-        "/* [{:#06x}, {:#06x}) min_depth {}, max_growth {}, static gas {}{} */\n",
-        b.start,
-        b.end,
-        p.min_depth,
-        p.max_growth,
-        p.static_gas,
-        if p.cut {
-            ", cut at a call-family trap"
-        } else {
-            ""
-        }
+        "/* [{:#06x}, {:#06x}) min_depth {}, max_growth {}, static gas {} */\n",
+        b.start, b.end, b.min_depth, b.max_growth, b.static_gas,
     );
-    if p.min_depth > 0 {
+    if b.min_depth > 0 {
         let _ = writeln!(
             h,
             "    if (evm_sp < {}u) evm_halt(EVM_HALT_STACK_UNDERFLOW, 0);",
-            p.min_depth
+            b.min_depth
         );
     }
-    if p.max_growth > 0 {
+    if b.max_growth > 0 {
         let _ = writeln!(
             h,
             "    if (evm_sp + {}u > STACK_LIMIT) evm_halt(EVM_HALT_STACK_OVERFLOW, 0);",
-            p.max_growth
+            b.max_growth
         );
     }
-    if p.static_gas > 0 {
-        let _ = writeln!(h, "    evm_charge({});", p.static_gas);
+    if b.static_gas > 0 {
+        let _ = writeln!(h, "    evm_charge({});", b.static_gas);
     }
     h
 }
@@ -453,6 +417,10 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
     let mut targets: Vec<usize> = vec![bs[0].start];
     let mut opcodes = 0usize;
     let mut dynamic_jumps = false;
+    // A call-family opcode anywhere in the code (a data byte inside a push is not one).
+    let calls = bs
+        .iter()
+        .any(|b| b.ops.iter().any(|o| CALL_FAMILY.contains(&o.opcode)));
     for b in &bs {
         let mut body = String::new();
         if b.term == Term::OutOfBounds {
@@ -464,15 +432,14 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
             pieces.push((b.start, body));
             continue;
         }
-        let p = plan(b);
-        body.push_str(&head_c(b, &p));
-        for (i, op) in p.ops.iter().enumerate() {
+        body.push_str(&head_c(b));
+        for (i, op) in b.ops.iter().enumerate() {
             opcodes += 1;
             // `PUSHn t; JUMP` / `PUSHn t; JUMPI`: the destination is a constant, resolved here.
             // The push is folded into the jump — the word it would write is popped by the very
             // next op and never read — while the head's bounds still count it, so a push onto a
             // full stack overflows exactly as in the interpreter.
-            let next_is_jump = p
+            let next_is_jump = b
                 .ops
                 .get(i + 1)
                 .is_some_and(|n| matches!(n.opcode, 0x56 | 0x57));
@@ -482,7 +449,7 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
             }
             let folded = i
                 .checked_sub(1)
-                .and_then(|j| p.ops[j].push.as_ref())
+                .and_then(|j| b.ops[j].push.as_ref())
                 .map(static_target);
             let c = match (op.opcode, folded) {
                 (0x56, Some(t)) => match t.filter(|&t| is_jd(t)) {
@@ -509,12 +476,7 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
                     if matches!(op.opcode, 0x56 | 0x57) {
                         dynamic_jumps = true;
                     }
-                    if CALL_FAMILY.contains(&op.opcode) {
-                        // Stage one: the call family traps (Task 5 adds the precompiles).
-                        format!("evm_halt(EVM_HALT_TRAP, {:#04x});", op.opcode)
-                    } else {
-                        op_c(op, p.gas_after[i], opts)?
-                    }
+                    op_c(op, op.gas_after, opts, calls)?
                 }
             };
             if c.is_empty() {
@@ -534,7 +496,7 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "/* Generated by evm2rv (stage one) from {} bytes of EVM runtime bytecode: {} blocks, {} jumpdests{}.\n * Do not edit — re-run evm2rv. Built with evm-rt (evm_rt.c, u256.c) by the shim's build.rs. */",
+        "/* Generated by evm2rv (stage one) from {} bytes of EVM runtime bytecode: {} blocks, {} jumpdests{}.\n * Do not edit — re-run evm2rv. Built with evm-rt by the shim's build.rs. */",
         code.len(),
         bs.len(),
         jd.len(),
@@ -546,6 +508,9 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
     out.push_str("#include <stdint.h>\n#include \"evm_rt.h\"\n\n");
     out.push_str("void evm_entry(void);\n\n");
     out.push_str("void evm_entry(void) {\n");
+    if calls {
+        out.push_str("    evm_calls_begin();\n");
+    }
     if dynamic_jumps {
         out.push_str("    uint32_t jd = 0;\n");
     }

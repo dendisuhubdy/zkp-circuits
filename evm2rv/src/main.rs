@@ -3,7 +3,7 @@
 //! Translates the contract's runtime bytecode into `<dir>/contract.c` and writes the shim crate
 //! around it (`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/main.rs`, `shim.ld`), ready for
 //! `rand-guest build <dir> --max-words 65535`. Prints the block and opcode counts and a warning
-//! per trapping opcode present. Without `--out` it only analyses and prints.
+//! per trapping opcode present (a call-family opcode: unless its target is a precompile). Without `--out` it only analyses and prints.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -92,6 +92,10 @@ fn main() -> Result<()> {
             match w {
                 Warning::Trap { pc, opcode } => println!(
                     "  pc {pc:#06x}: {} ({opcode:#04x}) traps (status 2): outside what a single-contract proof can run",
+                    mnemonic(*opcode)
+                ),
+                Warning::Call { pc, opcode } => println!(
+                    "  pc {pc:#06x}: {} ({opcode:#04x}) traps (status 2) unless the target is a precompile (addresses 1-9)",
                     mnemonic(*opcode)
                 ),
                 Warning::CodeTooLarge { len } => println!(

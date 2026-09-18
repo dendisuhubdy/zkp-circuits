@@ -1,7 +1,8 @@
 //! Task 4's emitter tests: each opcode's C against the spec's table (the operand order the
 //! interpreter pops in, offsets and lengths saturated, the runtime's names), the block head, the
-//! jump switch and the statically resolved jumps, `GAS`/`PC`, the traps (the sixteen, undefined
-//! bytes, and the call family, which ends its block), the environment (`ORIGIN` = `CALLER`,
+//! jump switch and the statically resolved jumps, `GAS`/`PC`, the traps (the sixteen and undefined
+//! bytes), the call family (a runtime dispatch to the precompiles, Task 5) and the return-data
+//! buffer, the environment (`ORIGIN` = `CALLER`,
 //! `CHAINID` a required constant), code over the cap, and the generated shim crate. The emitted
 //! ERC-20 must compile clean under `-Wall -Wextra -Werror` for rv32im.
 
@@ -36,8 +37,14 @@ fn op(opcode: u8) -> Op {
     }
 }
 
+/// The C for `opcode` in a contract with no call-family opcode.
 fn c_of(opcode: u8) -> String {
-    op_c(&op(opcode), 0, &Options::default()).unwrap()
+    op_c(&op(opcode), 0, &Options::default(), false).unwrap()
+}
+
+/// ... and in one with a call-family opcode (the return-data buffer is live).
+fn c_of_calls(opcode: u8) -> String {
+    op_c(&op(opcode), 0, &Options::default(), true).unwrap()
 }
 
 const S1: &str = "&evm_stack[evm_sp-1]";
@@ -214,7 +221,7 @@ fn stack_ops_pushes_and_constants() {
             push: Some(v),
             gas_after: 0,
         };
-        op_c(&o, 0, &Options::default()).unwrap()
+        op_c(&o, 0, &Options::default(), false).unwrap()
     };
     assert_eq!(
         push(1, &[0x80]),
@@ -242,7 +249,7 @@ fn gas_adds_back_the_rest_of_the_block() {
         gas_after: 0,
     };
     assert_eq!(
-        op_c(&o, 17, &Options::default()).unwrap(),
+        op_c(&o, 17, &Options::default(), false).unwrap(),
         "u256_from_u64(&evm_stack[evm_sp++], evm_gas + 17ull);"
     );
     // GAS, PUSH1 1, ADD, POP, STOP: after GAS come 3 + 3 + 2 + 0 = 8.
@@ -260,7 +267,7 @@ fn environment_opcodes() {
     assert_eq!(c_of(0x32), c_of(0x33), "ORIGIN reads CALLER");
     assert_eq!(c_of(0x34), "evm_stack[evm_sp++] = evm_callvalue;");
     // CHAINID is the translation's constant, and there is no default.
-    let chain = |id| op_c(&op(0x46), 0, &Options { chain_id: id });
+    let chain = |id| op_c(&op(0x46), 0, &Options { chain_id: id }, false);
     assert_eq!(
         chain(Some(0x2a)).unwrap(),
         "u256_from_u64(&evm_stack[evm_sp++], 0x2aull);"
@@ -319,28 +326,110 @@ fn trapping_opcodes_halt_with_their_opcode() {
     }
 }
 
-/// The call family traps in stage one before touching the stack: its block ends at it, nothing
-/// after it is emitted, and the head neither requires its seven operands nor charges the dead
-/// tail's gas.
+/// The call family (Task 5, ruling 6) is a runtime dispatch: `evm_call` gets the op, its operands
+/// (`&evm_stack[evm_sp-7]` for CALL/CALLCODE, `-6` for DELEGATECALL/STATICCALL, so the top is the
+/// gas) and the static gas of the rest of its block, and the success flag replaces the deepest
+/// operand. Its own static gas is 0 (everything is charged in the runtime), the block continues
+/// past it, and the head counts its real arity. A contract with a call starts `evm_entry` with
+/// `evm_calls_begin()`.
 #[test]
-fn the_call_family_traps_and_ends_its_block() {
-    for call in [0xf1u8, 0xf2, 0xf4, 0xfa] {
-        // PUSH1 1, CALL, ADD, ADD, STOP
-        let c = translate(&[0x60, 0x01, call, 0x01, 0x01, 0x00], &Options::default())
-            .unwrap()
-            .c;
+fn the_call_family_dispatches_at_runtime_and_the_block_continues() {
+    for (call, n) in [(0xf1u8, 7usize), (0xf2, 7), (0xf4, 6), (0xfa, 6)] {
+        // PUSH1 0 (n times), CALL, PUSH1 1, ADD, POP, STOP: after the call, 3 + 3 + 2 + 0 = 8.
+        let mut code = [0x60u8, 0x00].repeat(n);
+        code.extend_from_slice(&[call, 0x60, 0x01, 0x01, 0x50, 0x00]);
+        let c = translate(&code, &Options::default()).unwrap().c;
         assert!(
-            c.contains(&format!("evm_halt(EVM_HALT_TRAP, {call:#04x});")),
+            c.contains(&format!(
+                "evm_call({call:#04x}, &evm_stack[evm_sp-{n}], 8ull); evm_sp -= {};",
+                n - 1
+            )),
             "{c}"
         );
+        assert!(c.contains("u256_add"), "the block continues: {c}");
         assert!(
-            !c.contains("u256_add"),
-            "the tail after the call is dead: {c}"
+            c.contains(&format!("evm_charge({});", 3 * n + 8)),
+            "the pushes and the tail; the call is 0: {c}"
         );
+        assert!(!c.contains("EVM_HALT_TRAP"), "{c}");
         assert!(!c.contains("EVM_HALT_STACK_UNDERFLOW"), "{c}");
-        assert!(c.contains("evm_charge(3);"), "only PUSH1's gas: {c}");
-        assert!(c.contains("cut at a call-family trap"), "{c}");
+        let entry = c.find("void evm_entry(void) {").unwrap();
+        assert!(
+            c[entry..].starts_with("void evm_entry(void) {\n    evm_calls_begin();\n"),
+            "{c}"
+        );
+        assert_eq!(c.matches("evm_calls_begin").count(), 1, "{c}");
+        let b = &evm2rv::blocks::blocks(&code)[0];
+        assert_eq!(
+            (b.min_depth, b.max_growth),
+            (0, n),
+            "{call:#04x}: n pushed, n popped, the flag pushed"
+        );
     }
+}
+
+/// With the call's real arity, a call on a shallow stack underflows at the block head, where the
+/// interpreter halted Trap(op) without touching the stack. Both are status 2 with gas_used =
+/// gas_limit, which the observable contract (Task 4's ruling) accepts; the kind of the halt is
+/// not public (Task 5, ruling 6).
+#[test]
+fn a_call_on_a_shallow_stack_underflows_at_the_block_head() {
+    // PUSH1 1, CALL, STOP: the call needs 7, one is pushed: entry needs 6.
+    let c = translate(&[0x60, 0x01, 0xf1, 0x00], &Options::default())
+        .unwrap()
+        .c;
+    assert!(
+        c.contains("if (evm_sp < 6u) evm_halt(EVM_HALT_STACK_UNDERFLOW, 0);"),
+        "{c}"
+    );
+    assert!(
+        c.contains("evm_call(0xf1, &evm_stack[evm_sp-7], 0ull);"),
+        "{c}"
+    );
+}
+
+/// RETURNDATASIZE/RETURNDATACOPY: in a contract with no call-family opcode, which can never have
+/// made a call, the interpreter's rule exactly (a constant 0, `evm_copy_returndata`), and no
+/// `evm_calls_begin`; in one with a call, the buffer (`evm_rdata_len`,
+/// `evm_copy_returndata_buf`).
+#[test]
+fn the_return_data_buffer_only_in_a_contract_that_calls() {
+    assert_eq!(c_of(0x3d), "u256_from_u32(&evm_stack[evm_sp++], 0u);");
+    assert_eq!(
+        c_of_calls(0x3d),
+        "u256_from_u32(&evm_stack[evm_sp++], evm_rdata_len);"
+    );
+    assert_eq!(
+        c_of_calls(0x3e),
+        format!(
+            "evm_copy_returndata_buf({}, {}, {}); evm_sp -= 3;",
+            sat(S1),
+            sat(S2),
+            sat(S3)
+        )
+    );
+    // RETURNDATASIZE, POP, STOP: no call, no buffer.
+    let c = translate(&[0x3d, 0x50, 0x00], &Options::default())
+        .unwrap()
+        .c;
+    assert!(
+        !c.contains("evm_rdata") && !c.contains("evm_calls_begin"),
+        "{c}"
+    );
+    // ... and with a STATICCALL anywhere in the code, the buffer.
+    let c = translate(&[0x3d, 0x50, 0x00, 0xfa], &Options::default())
+        .unwrap()
+        .c;
+    assert!(
+        c.contains("evm_rdata_len") && c.contains("evm_calls_begin();"),
+        "{c}"
+    );
+    // The ERC-20 makes no call: its C has none of it.
+    let c = translate(&erc20_code(), &Options::default()).unwrap().c;
+    assert!(
+        !c.contains("evm_call(") && !c.contains("evm_calls_begin") && !c.contains("evm_rdata"),
+        "{c}"
+    );
 }
 
 /// The block head: underflow, then overflow, then the static charge, each omitted when it cannot
@@ -550,6 +639,20 @@ fn the_shim_crate() {
         .cargo_lock
         .starts_with("# This file is automatically @generated by Cargo."));
     assert!(f.build_rs.contains(".inherit_rustflags(false)"));
+    // The whole runtime, the precompiles included (the linker keeps only what a contract calls),
+    // and rand-guest's guest.h for the SHA-256 coprocessor.
+    for src in [
+        "\"evm_rt.c\"",
+        "\"u256.c\"",
+        "\"evm_call.c\"",
+        "\"precompiles.c\"",
+        "\"evm_bn.c\"",
+        "\"evm_secp256k1.c\"",
+        "\"evm_bn254.c\"",
+    ] {
+        assert!(f.build_rs.contains(src), "{src}: {}", f.build_rs);
+    }
+    assert!(f.build_rs.contains(".include(root.join(\"rand-guest\"))"));
     assert!(f.build_rs.contains("cargo:warning=evm2rv: clang {version}"));
     // The globals C writes are `static mut` on the Rust side.
     for g in [

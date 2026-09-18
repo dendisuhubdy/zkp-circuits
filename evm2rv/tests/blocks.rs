@@ -204,9 +204,10 @@ fn warnings_reports_call_family_even_though_it_is_not_a_terminator() {
     code.push(0xfa); // STATICCALL, at pc 12
     code.push(0x00); // STOP
     let w = warnings(&code);
+    // Not `Trap`: the call family traps only when its target is not a precompile (Task 5).
     assert_eq!(
         w,
-        vec![Warning::Trap {
+        vec![Warning::Call {
             pc: 12,
             opcode: 0xfa
         }]

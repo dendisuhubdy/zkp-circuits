@@ -25,8 +25,8 @@
 //! Each costs Shanghai's `G_BASE` = 2 in the translation ([`static_gas`]).
 //!
 //! [`warnings`] reports every occurrence (in code order, immediates correctly skipped) of any
-//! opcode in [`WARN_SET`] — [`TRAP_TERM`]'s sixteen plus [`CALL_FAMILY`]'s four — as a
-//! [`Warning::Trap`].
+//! opcode in [`WARN_SET`]: [`TRAP_TERM`]'s sixteen as a [`Warning::Trap`] (they always trap), and
+//! [`CALL_FAMILY`]'s four as a [`Warning::Call`] (they trap unless the target is a precompile).
 //!
 //! **Code longer than [`MAX_CODE_BYTES`]** (EIP-170's cap) is a separate case from every opcode
 //! above: `Interpreter::new` refuses it outright (`pre_halt = Halt::OutOfBounds`) before a single
@@ -115,9 +115,11 @@ pub struct Block {
 /// without refusing to translate the contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
-    /// A [`WARN_SET`] opcode — one of [`TRAP_TERM`]'s sixteen or [`CALL_FAMILY`]'s four — present
-    /// at `pc`.
+    /// One of [`TRAP_TERM`]'s sixteen opcodes, present at `pc`: it always traps.
     Trap { pc: usize, opcode: u8 },
+    /// One of [`CALL_FAMILY`]'s four, present at `pc`: it traps unless its target is a
+    /// precompile (addresses 1-9), which the runtime runs (Task 5).
+    Call { pc: usize, opcode: u8 },
     /// `code` is `len` bytes, longer than [`MAX_CODE_BYTES`] (EIP-170's cap). This is the *only*
     /// warning [`warnings`] reports for such an input: the interpreter's `Interpreter::new` sets
     /// `pre_halt = Halt::OutOfBounds` and runs nothing, so none of the code is ever reachable and
@@ -134,9 +136,10 @@ pub const BLOCK_CTX_TRAPS: [u8; 9] = [0x3a, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 
 /// which has an address to resolve at runtime.
 pub const STORAGE_CREATE_TRAPS: [u8; 7] = [0x31, 0x3b, 0x3c, 0x3f, 0xf0, 0xf5, 0xff];
 
-/// `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL` — resolved by address at runtime (a
-/// precompile call succeeds; anything else is the runtime's own trap). Not block terminators:
-/// ordinary [`Op`]s with the standard EVM stack effect.
+/// `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL` — resolved by address at runtime (`evm_call`:
+/// a precompile, addresses 1-9, runs; any other target traps `Trap(op)`). Not block terminators:
+/// ordinary [`Op`]s with the standard EVM stack effect (7 in or 6 in, the success flag out) and
+/// static gas 0 — their gas is all dynamic, charged in the runtime (Task 5).
 pub const CALL_FAMILY: [u8; 4] = [0xf1, 0xf2, 0xf4, 0xfa];
 
 /// The sixteen opcodes [`blocks`] turns into a [`Term::TrapOp`] block terminator:
@@ -514,7 +517,12 @@ pub fn warnings(code: &[u8]) -> Vec<Warning> {
     let mut pc = 0usize;
     while pc < code.len() {
         let (op, next_pc) = decode(code, pc);
-        if WARN_SET.contains(&op.opcode) {
+        if CALL_FAMILY.contains(&op.opcode) {
+            out.push(Warning::Call {
+                pc: op.pc,
+                opcode: op.opcode,
+            });
+        } else if WARN_SET.contains(&op.opcode) {
             out.push(Warning::Trap {
                 pc: op.pc,
                 opcode: op.opcode,
