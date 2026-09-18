@@ -11,6 +11,11 @@ static void len_arg(uint32_t len) {
     if (len > MAX_MEMORY_BYTES) evm_halt(EVM_HALT_OUT_OF_BOUNDS, 0);
 }
 
+/* A precompile's output (at most PC_OUT_MAX bytes, identity's copy of a memory range) is written
+ * straight into the buffer. */
+_Static_assert(MAX_MEMORY_BYTES <= PC_OUT_MAX && PC_OUT_MAX <= EVM_RETURNDATA_MAX,
+               "the return-data buffer must hold any precompile output, and that any memory range");
+
 uint8_t evm_rdata[EVM_RETURNDATA_MAX];
 uint32_t evm_rdata_len;
 uint32_t evm_rdata_live;
@@ -68,6 +73,11 @@ void evm_call(uint32_t op, u256 *a, uint64_t gas_after) {
     uint64_t cost = evm_precompile_gas(target, in, in_len);
     uint32_t ok = 0;
     if (cost <= pass) {
+        /* Affordable, so the call consumes at least `cost` whatever the precompile does: its cost
+         * on success, the gas passed (>= cost) on failure. When the counter cannot pay that, the
+         * run is out of gas either way; halt before running the precompile, so an out-of-gas run
+         * never spends the precompile's cycles first. */
+        if (cost > evm_gas) evm_halt(EVM_HALT_OUT_OF_GAS, 0);
         uint32_t out_len = 0;
         uint32_t r = evm_precompile_run(target, in, in_len, evm_rdata, &out_len);
         if (r == PC_TOO_BIG) evm_halt(EVM_HALT_OUT_OF_BOUNDS, 0);

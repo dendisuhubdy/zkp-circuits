@@ -261,6 +261,43 @@ static void modexp_over_the_cap(void) {
     CHECK(evm_rt_enter(b_call) == EVM_HALT_STOP && u256_is_zero(&args[0]));
 }
 
+/* A precompile the call can afford (RequiredGas within the gas passed) but the counter cannot
+ * pay: whether it then succeeds (consuming its cost) or fails (consuming the gas passed, which is
+ * at least that cost), the counter runs out. It halts OutOfGas before the precompile runs, so a
+ * run that is out of gas never spends the precompile's cycles first (Task 6 review minor 1). */
+static void out_of_gas_before_running(void) {
+    /* modexp with a 1025-byte base (over the runtime's cap), RequiredGas 129^2 / 3 = 5547. The
+     * counter holds 5546 after the 100 and the input's 3 words (9); gas_after 100000 lets the EVM
+     * pass it all the cost. Run first, it would halt OutOfBounds (the cap); checked first,
+     * OutOfGas. */
+    init(5655 + 100000);
+    evm_gas -= 100000;
+    after_ = 100000;
+    memset(evm_memory, 0, 96);
+    evm_memory[30] = 0x04;
+    evm_memory[31] = 0x01; /* baseLen 1025 */
+    u256 huge = w(0);
+    huge.l[7] = 0xffffffffu;
+    setup(0xfa, huge, w(5), w(0), 0, 96, 0, 0);
+    CHECK(evm_rt_enter(b_call) == EVM_HALT_OUT_OF_GAS);
+    CHECK_EQ_U64(evm_gas_used(), 5655 + 100000);
+    /* One more gas in the counter and the precompile runs, into the cap. */
+    init(5656 + 100000);
+    evm_gas -= 100000;
+    after_ = 100000;
+    memset(evm_memory, 0, 96);
+    evm_memory[30] = 0x04;
+    evm_memory[31] = 0x01;
+    setup(0xfa, huge, w(5), w(0), 0, 96, 0, 0);
+    CHECK(evm_rt_enter(b_call) == EVM_HALT_OUT_OF_BOUNDS);
+    /* The cost above the counter but also above the gas passed: an ordinary failed call, which
+     * consumes only what it was passed (500 of the 1000 left) and continues. */
+    init(1100);
+    setup(0xfa, w(500), w(1), w(0), 0, 0, 0, 0);
+    CHECK(evm_rt_enter(b_call) == EVM_HALT_STOP && u256_is_zero(&args[0]));
+    CHECK_EQ_U64(evm_gas_used(), 600);
+}
+
 static void returndata(void) {
     /* Before any call: the interpreter's rule. */
     init(1000);
@@ -341,6 +378,7 @@ int call_tests(void) {
     invalid_input();
     memory_regions();
     modexp_over_the_cap();
+    out_of_gas_before_running();
     returndata();
     ecrecover_call();
     t_real_keccak = 0;

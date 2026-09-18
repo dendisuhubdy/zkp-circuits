@@ -157,7 +157,7 @@ fn images() -> &'static Images {
 fn words(image: &Path, call: &EvmCall, fits: bool) -> [u32; 8] {
     let input = call.input_words();
     let program = Program::from_flat_image(&std::fs::read(image).unwrap()).unwrap();
-    let (out, n) = count::count(&program, &input, 100_000_000);
+    let (out, n) = count::count(&program, &input, 100_000_000).expect("the counter");
     if fits {
         // Where the run fits, the counter is the emulator: the same words, the same cycles.
         let (got, cycles) = run(image, &input);

@@ -185,7 +185,7 @@ fn precompile_cycles() {
         let v = all.iter().find(|v| v.addr == addr && v.name == name).unwrap_or_else(|| panic!("{addr} {name}"));
         let words = input_words(v);
         let t = std::time::Instant::now();
-        let (out, n) = count(&program, &words, 20_000_000_000);
+        let (out, n) = count(&program, &words, 20_000_000_000).expect("the counter");
         check_outputs(v, &out);
         // Where `rand-guest run` can finish, the count is its count.
         if n < 1 << 20 {
@@ -202,10 +202,170 @@ fn precompile_cycles() {
     // And every vector's verdict under the machine's semantics, the ones past 2^20 included.
     let mut worst: Vec<(u64, String)> = Vec::new();
     for v in &all {
-        let (out, n) = count(&program, &input_words(v), 20_000_000_000);
+        let (out, n) = count(&program, &input_words(v), 20_000_000_000).expect("the counter");
         check_outputs(v, &out);
         worst.push((n, format!("{} {}", v.addr, v.name)));
     }
     worst.sort();
     println!("{} vectors pass under the counter; the most cycles: {:?}", all.len(), &worst[worst.len() - 3..]);
+}
+
+/// `support/count.rs` returns the emulator's own `ExecError` wherever `execute` does (Task 6
+/// review minor 6): each program below is a few instructions ending in the fault, run through
+/// both, and the two results must be equal — outputs and cycles on success, the error otherwise.
+#[test]
+fn the_counter_errs_where_the_emulator_does() {
+    use rand_zkvm::emulator::{execute, KECCAK_PTR_LIMIT, SHA256_PTR_LIMIT};
+    use rand_zkvm::isa::{
+        AluOp, Instr, Width, REG_A0, REG_A1, REG_A7, SYS_HALT, SYS_KECCAK, SYS_POSEIDON2,
+        SYS_READ_INPUT, SYS_READ_PUBLIC, SYS_SHA256, SYS_WRITE_OUTPUT,
+    };
+    // `rd = v` as LUI + ADDI (or ADDI alone when it fits 12 bits).
+    fn li(rd: u32, v: u32) -> Vec<Instr> {
+        let lo = ((v << 20) as i32 >> 20) as u32;
+        let hi = v.wrapping_sub(lo);
+        let mut out = Vec::new();
+        if hi == 0 {
+            out.push(Instr::AluImm {
+                op: AluOp::Add,
+                rd,
+                rs1: 0,
+                imm: lo,
+            });
+        } else {
+            out.push(Instr::Lui { rd, imm: hi });
+            out.push(Instr::AluImm {
+                op: AluOp::Add,
+                rd,
+                rs1: rd,
+                imm: lo,
+            });
+        }
+        out
+    }
+    fn sys(num: u32, a0: u32, a1: u32) -> Vec<Instr> {
+        let mut v = li(REG_A7, num);
+        v.extend(li(REG_A0, a0));
+        v.extend(li(REG_A1, a1));
+        v.push(Instr::Ecall);
+        v
+    }
+    let halt = sys(SYS_HALT, 0, 0);
+    let prog = |parts: &[Vec<Instr>]| {
+        let words: Vec<u32> = parts.iter().flatten().map(Instr::encode).collect();
+        Program::new(0x1000, words)
+    };
+    let lw = |addr: u32| {
+        let mut v = li(REG_A0, addr);
+        v.push(Instr::Load {
+            rd: REG_A1,
+            rs1: REG_A0,
+            imm: 0,
+            width: Width::Word,
+            signed: false,
+        });
+        v
+    };
+    let sh = |addr: u32| {
+        let mut v = li(REG_A0, addr);
+        v.push(Instr::Store {
+            rs1: REG_A0,
+            rs2: REG_A1,
+            imm: 0,
+            width: Width::Half,
+        });
+        v
+    };
+    let cases: Vec<(&str, Program, u64)> = vec![
+        (
+            "success",
+            prog(&[sys(SYS_WRITE_OUTPUT, 3, 77), halt.clone()]),
+            1000,
+        ),
+        (
+            "output slot 8",
+            prog(&[sys(SYS_WRITE_OUTPUT, 8, 1), halt.clone()]),
+            1000,
+        ),
+        (
+            "output written twice",
+            prog(&[
+                sys(SYS_WRITE_OUTPUT, 0, 1),
+                sys(SYS_WRITE_OUTPUT, 0, 2),
+                halt.clone(),
+            ]),
+            1000,
+        ),
+        (
+            "input index past the input",
+            prog(&[sys(SYS_READ_INPUT, 5, 0), halt.clone()]),
+            1000,
+        ),
+        (
+            "read public",
+            prog(&[sys(SYS_READ_PUBLIC, 0, 0), halt.clone()]),
+            1000,
+        ),
+        (
+            "poseidon2 word count",
+            prog(&[sys(SYS_POSEIDON2, 0x4000, 4097), halt.clone()]),
+            1000,
+        ),
+        (
+            "poseidon2 pointer",
+            prog(&[sys(SYS_POSEIDON2, 1 << 30, 8), halt.clone()]),
+            1000,
+        ),
+        (
+            "poseidon2 rows past the budget",
+            prog(&[sys(SYS_POSEIDON2, 0x4000, 64), halt.clone()]),
+            20,
+        ),
+        (
+            "keccak pointer",
+            prog(&[sys(SYS_KECCAK, KECCAK_PTR_LIMIT + 1, 0), halt.clone()]),
+            1000,
+        ),
+        (
+            "keccak in range",
+            prog(&[sys(SYS_KECCAK, 0x4000, 0), halt.clone()]),
+            1000,
+        ),
+        (
+            "sha256 pointer",
+            prog(&[sys(SYS_SHA256, SHA256_PTR_LIMIT + 1, 0), halt.clone()]),
+            1000,
+        ),
+        (
+            "an unknown syscall",
+            prog(&[sys(99, 0, 0), halt.clone()]),
+            1000,
+        ),
+        (
+            "a misaligned word load",
+            prog(&[lw(0x4002), halt.clone()]),
+            1000,
+        ),
+        (
+            "a misaligned half store",
+            prog(&[sh(0x4001), halt.clone()]),
+            1000,
+        ),
+        (
+            "a pc past the program",
+            prog(&[vec![Instr::Jal { rd: 0, imm: 0x100 }]]),
+            1000,
+        ),
+        (
+            "the cycle budget",
+            prog(&[vec![Instr::Jal { rd: 0, imm: 0 }]]),
+            100,
+        ),
+    ];
+    for (name, p, limit) in cases {
+        let want = execute(&p, &[7], &[], limit as usize).map(|e| (e.outputs, e.cycles() as u64));
+        let got = count(&p, &[7], limit);
+        assert_eq!(got, want, "{name}");
+        eprintln!("{name}: {got:?}");
+    }
 }

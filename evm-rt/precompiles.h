@@ -1,5 +1,5 @@
 /* The nine Shanghai precompiles (addresses 1-9), in software: what a translated contract's CALL,
- * CALLCODE, DELEGATECALL or STATICCALL to one of them runs (`evm_call` in evm_rt.c).
+ * CALLCODE, DELEGATECALL or STATICCALL to one of them runs (`evm_call` in evm_call.c).
  *
  *   1 ecrecover     evm_secp256k1.c (secp256k1 recovery over evm_bn.c) + Keccak through `ffi.rs`
  *   2 sha256        here, one compression per block: on RV32 the machine's SHA-256 coprocessor
@@ -22,8 +22,9 @@
  *
  * **Failure.** `evm_precompile_run` returns PC_OK with the output, PC_FAIL when the input is
  * invalid under the precompile's own rules (the EVM's call then fails: status word 0 pushed, all
- * the gas passed consumed, no return data), or PC_TOO_BIG for a modexp whose base, exponent or
- * modulus is longer than PC_MODEXP_MAX_BYTES - the runtime's own cap, like interp.rs's
+ * the gas passed consumed, no return data), or PC_TOO_BIG for a modexp whose base or modulus is
+ * longer than PC_MODEXP_MAX_BYTES (the exponent is streamed, never stored, and has no cap) - the
+ * runtime's own cap, like interp.rs's
  * MAX_MEMORY_BYTES, which `evm_call` turns into Halt::OutOfBounds. An ecrecover that cannot
  * recover a key is PC_OK with an empty output, as in the EVM.
  *
@@ -51,7 +52,7 @@
 #define PC_BN256_PAIRING_PAIR 34000 /* EIP-1108 */
 #define PC_BLAKE2F_ROUND 1         /* EIP-152 */
 
-/* The runtime's cap on each of modexp's three lengths (1 KiB: 8192-bit operands, the largest
+/* The runtime's cap on modexp's base and modulus lengths (1 KiB: 8192-bit operands, the largest
  * go-ethereum's vectors use). Over it, an affordable call halts OutOfBounds instead of running. */
 #define PC_MODEXP_MAX_BYTES 1024
 

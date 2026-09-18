@@ -170,10 +170,11 @@ __attribute__((noreturn)) void evm_revert(uint32_t off, uint32_t len);
  * and RunPrecompiledContract; the controller's Task 5 rulings), as below. A contract that makes
  * no call runs exactly as before: the emitter uses none of this for it.
  *
- * `evm_call(op, a)`: CALL (0xf1), CALLCODE (0xf2), DELEGATECALL (0xf4) or STATICCALL (0xfa), with
- * `a = &evm_stack[evm_sp - n]` (n = 7 for CALL/CALLCODE, 6 for the other two), so `a[n-1]` is the
- * top: gas, address, [value,] argsOffset, argsLength, retOffset, retLength from the top down. The
- * success flag replaces a[0]; the caller then drops n - 1 words.
+ * `evm_call(op, a, gas_after)`: CALL (0xf1), CALLCODE (0xf2), DELEGATECALL (0xf4) or STATICCALL
+ * (0xfa), with `a = &evm_stack[evm_sp - n]` (n = 7 for CALL/CALLCODE, 6 for the other two), so
+ * `a[n-1]` is the top: gas, address, [value,] argsOffset, argsLength, retOffset, retLength from
+ * the top down, and `gas_after` the static gas of the ops after the call in its block (step 4).
+ * The success flag replaces a[0]; the caller then drops n - 1 words.
  *   1. The target is the low 160 bits of the address word. Anything but 1..9 halts Trap(op): a
  *      proof carries one contract (the interpreter's trap, kept).
  *   2. CALL/CALLCODE with a nonzero value halt Trap(op): there is no balance model.
@@ -186,10 +187,13 @@ __attribute__((noreturn)) void evm_revert(uint32_t off, uint32_t len);
  *      fails: 0, the gas passed consumed, the return data emptied, the ret region untouched.
  *      Otherwise 1, RequiredGas consumed (the rest of the gas passed stays), the return data is
  *      the output and its first min(retLength, output length) bytes are copied to retOffset.
- *      A modexp over PC_MODEXP_MAX_BYTES that it can afford halts OutOfBounds (the runtime's cap).
+ *      A modexp whose base or modulus is over PC_MODEXP_MAX_BYTES that it can afford halts
+ *      OutOfBounds (the runtime's cap).
  *   Consuming more than `evm_gas` halts OutOfGas here: the EVM would then have less left than the
  *   rest of the block's static gas and run out before the block's end — the block-head rule's
- *   same status 2 and gas_used = limit.
+ *   same status 2 and gas_used = limit. When the call can afford the precompile (RequiredGas
+ *   within the gas passed) it consumes at least RequiredGas whatever the precompile does, so a
+ *   RequiredGas above `evm_gas` halts OutOfGas before the precompile runs.
  * Its static gas (the block head's) is 0; everything above is charged here. */
 #define EVM_CALL_WARM_ACCESS 100
 #define EVM_RETURNDATA_MAX 65536

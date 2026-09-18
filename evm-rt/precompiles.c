@@ -368,12 +368,20 @@ static uint64_t modexp_gas(const uint8_t *in, uint32_t len) {
     }
     uint64_t iter;
     if (el <= 32) iter = msb;
-    else if (el - 32 > (UINT64_MAX - 255) / 8) iter = UINT64_MAX; /* the gas saturates anyway */
+    /* Where 8 (el - 32) + msb would not fit a u64, iter is clamped to UINT64_MAX. go-ethereum
+     * computes the exact big-integer value, so the two can differ - but only where both are at
+     * least floor((2^64 - 1) / 3) (words >= 1 here: words = 0 gives the 200 minimum in both),
+     * which no call can pay: the gas limit is one u32 word of the input (abi.rs), so the gas
+     * passed is below 2^32 and the call fails the same way, consuming the same gas passed. */
+    else if (el - 32 > (UINT64_MAX - 255) / 8) iter = UINT64_MAX;
     else iter = 8 * (el - 32) + msb;
     if (iter < 1) iter = 1;
     uint64_t maxl = bl > ml ? bl : ml;
     uint64_t words = maxl / 8 + ((maxl & 7) != 0);
-    if (words > 0xffffffffull) return UINT64_MAX; /* mc >= 2^64 */
+    /* words >= 2^32: mc = words^2 >= 2^64 does not fit, and the exact gas is at least
+     * floor(2^64 / 3) (iter >= 1). Saturating it to UINT64_MAX differs from go-ethereum's exact
+     * value, but, as above, only at a level no call can pay (the gas passed is below 2^32). */
+    if (words > 0xffffffffull) return UINT64_MAX;
     uint64_t g = mul_div3_sat(words * words, iter);
     return g < PC_MODEXP_MIN ? PC_MODEXP_MIN : g;
 }
@@ -382,11 +390,15 @@ static uint32_t modexp(const uint8_t *in, uint32_t len, uint8_t *out, uint32_t *
     uint64_t bl = len_word(in, len, 0), el = len_word(in, len, 32), ml = len_word(in, len, 64);
     *out_len = 0;
     if (bl == 0 && ml == 0) return PC_OK;
-    if (bl > PC_MODEXP_MAX_BYTES || el > PC_MODEXP_MAX_BYTES || ml > PC_MODEXP_MAX_BYTES)
-        return PC_TOO_BIG;
-    uint32_t nb = (uint32_t)bl, ne = (uint32_t)el, nm = (uint32_t)ml;
+    /* The base and the modulus are held in MX limbs; the exponent is not held at all (it is read
+     * bit by bit from the input below), so its length is not capped. */
+    if (bl > PC_MODEXP_MAX_BYTES || ml > PC_MODEXP_MAX_BYTES) return PC_TOO_BIG;
+    uint32_t nb = (uint32_t)bl, nm = (uint32_t)ml;
     uint32_t mlimbs = (nm + 3) / 4, blimbs = (nb + 3) / 4;
-    mx_load(mx_modv, MX, in, len, 96 + (uint64_t)nb + ne, nm);
+    /* The modulus starts after the exponent. An exponent reaching past the input puts it wholly in
+     * the zero padding: offset `len` reads the same, and cannot overflow. */
+    uint64_t moff = el >= len ? (uint64_t)len : 96 + (uint64_t)nb + el;
+    mx_load(mx_modv, MX, in, len, moff, nm);
     zero(out, nm);
     *out_len = nm;
     uint32_t n = mx_top(mx_modv, mlimbs ? mlimbs : 1);
@@ -407,7 +419,9 @@ static uint32_t modexp(const uint8_t *in, uint32_t len, uint8_t *out, uint32_t *
     mx_rem(mx_acc, mx_prod, n, &mx_M);
     uint64_t e0 = 96 + (uint64_t)nb;
     int started = 0;
-    for (uint32_t i = 0; i < ne; i++) {
+    /* el * 8 steps: RequiredGas is at least 8 (el - 32) / 3, so an affordable call (gas below 2^32)
+     * has el below 2^31 and this loop is bounded by the gas paid. */
+    for (uint64_t i = 0; i < el; i++) {
         uint8_t b = in_byte(in, len, e0 + i);
         for (int k = 7; k >= 0; k--) {
             if (started) mx_mulmod(mx_acc, mx_acc);

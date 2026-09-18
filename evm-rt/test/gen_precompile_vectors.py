@@ -18,7 +18,7 @@ Every vector carries its source. They are:
   * identity: the output is the input.
   * The rejections the geth files do not cover, built here from the precompiles' own rules (the
     Yellow Paper appendix E, EIP-196/197 and go-ethereum's contracts.go, which say what fails):
-    ecrecover's r = 0, s = n, r = n, v = 29, and a short input (v reads as 0) - each a success
+    ecrecover's r = 0, s = 0, s = n, r = n, v = 29, and a short input (v reads as 0) - each a success
     with empty output; alt_bn128 add/mul with a point off the curve or a coordinate >= p; the
     pairing with a length that is not a multiple of 192, a G1 point off the curve, a G2 point off
     the twist, and a G2 point on the twist but outside the r-torsion subgroup (derived with py_ecc
@@ -106,6 +106,7 @@ def main():
     add(src, "v = 27, the other parity", 1, msg + h32(27) + r + s,
         "000000000000000000000000" + OTHER_PARITY_ADDR, 3000)
     add(src, "64 bytes: v reads as 0", 1, msg + h32(0), "", 3000)
+    add(src, "s = 0", 1, msg + v + r + h32(0), "", 3000)
 
     # 2 sha256
     fips = [
@@ -178,6 +179,16 @@ def main():
     add(srcm, "33-byte exponent", 5, h32(1) + h32(33) + h32(1) + "02" + e33 + "0b",
         format(pow(2, int(e33, 16), 11), "02x"), modexp_gas(bytes.fromhex(h32(1) + h32(33) + h32(1) + "02" + e33 + "0b")))
 
+    # modulus length 0 with a base: the output is empty (mod-length bytes), whatever the base
+    add(srcm, "modulus length 0, base length 1", 5, h32(1) + h32(1) + h32(0) + "0305", "",
+        modexp_gas(bytes.fromhex(h32(1) + h32(1) + h32(0) + "0305")))
+    # A 1025-byte exponent: longer than the modulus cap, which the exponent is not held to (it is
+    # streamed from the input, never stored). 3^e mod 251, e's bytes a fixed pattern.
+    e1025 = bytes((7 * i + 1) & 0xff for i in range(1025)).hex()
+    inp = h32(1) + h32(1025) + h32(1) + "03" + e1025 + "fb"
+    add(srcm, "1025-byte exponent, 1-byte modulus", 5, inp, format(pow(3, int(e1025, 16), 251), "02x"),
+        modexp_gas(bytes.fromhex(inp)))
+
     # 6, 7, 8 alt_bn128
     geth(d, "bn256Add", 6)
     geth(d, "bn256ScalarMul", 7)
@@ -186,6 +197,8 @@ def main():
     add(srcb, "add: (1, 3) is not on the curve", 6, h32(1) + h32(3) + h32(1) + h32(2), "", 150, 0)
     add(srcb, "add: x = p", 6, h32(P) + h32(2) + h32(1) + h32(2), "", 150, 0)
     add(srcb, "add: y = p + 2 (= the generator's y)", 6, h32(1) + h32(P + 2) + h32(0) + h32(0), "", 150, 0)
+    add(srcb, "add: the first point valid (G1), the second (1, 3) off the curve", 6,
+        h32(1) + h32(2) + h32(1) + h32(3), "", 150, 0)
     add(srcb, "mul: (1, 3) is not on the curve", 7, h32(1) + h32(3) + h32(2), "", 6000, 0)
     add(srcb, "mul: y = p", 7, h32(0) + h32(P) + h32(2), "", 6000, 0)
     g1 = h32(1) + h32(2)

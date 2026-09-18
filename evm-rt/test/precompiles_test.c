@@ -126,7 +126,7 @@ static void modexp_edges(void) {
     memset(in2 + 97, 0, 32);
     in2[97] = 0xff; /* exponent head 0xff00..: msb 255 */
     CHECK(evm_precompile_gas(5, in2, sizeof in2) == UINT64_MAX);
-    /* The cap: a 1025-byte modulus is PC_TOO_BIG, 1024 runs. */
+    /* The cap: a 1025-byte modulus (or base) is PC_TOO_BIG, 1024 runs. */
     static uint8_t big[96 + 1 + 1 + 1025];
     memset(big, 0, sizeof big);
     put_word(big, 1);
@@ -142,9 +142,18 @@ static void modexp_edges(void) {
     put_word(big, 1025);
     put_word(big + 64, 1);
     CHECK(evm_precompile_run(5, big, 96, out, &n) == PC_TOO_BIG);
+    /* The exponent is not capped (it is streamed, never stored): 1025 bytes, all past this input
+     * and so zero, with the modulus past it too (zero): mod 0 is one zero byte. An exponent length
+     * of 2^32 + 1025 puts the modulus in the padding the same way, with no offset overflow. The
+     * computed case (3^e mod 251, e 1025 bytes) is in the vectors. */
     put_word(big, 1);
     put_word(big + 32, 1025);
-    CHECK(evm_precompile_run(5, big, 96, out, &n) == PC_TOO_BIG);
+    out[0] = 0xee;
+    CHECK(evm_precompile_run(5, big, 96, out, &n) == PC_OK && n == 1 && out[0] == 0);
+    big[32 + 27] = 1;
+    out[0] = 0xee;
+    CHECK(evm_precompile_run(5, big, 96, out, &n) == PC_OK && n == 1 && out[0] == 0);
+    big[32 + 27] = 0;
 }
 
 /* blake2f: the rounds count is the gas; with zero rounds, t = 0 and f = 0, F is h ^ h ^ IV = IV

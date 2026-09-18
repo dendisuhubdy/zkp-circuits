@@ -3,7 +3,8 @@
 //! Translates the contract's runtime bytecode into `<dir>/contract.c` and writes the shim crate
 //! around it (`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/main.rs`, `shim.ld`), ready for
 //! `rand-guest build <dir> --max-words 65535`. Prints the block and opcode counts and a warning
-//! per trapping opcode present (a call-family opcode: unless its target is a precompile). Without `--out` it only analyses and prints.
+//! per trapping opcode present (a call-family opcode: unless its target is a precompile). Without
+//! `--out` it only analyses and prints.
 
 use std::fs;
 use std::path::{Path, PathBuf};
