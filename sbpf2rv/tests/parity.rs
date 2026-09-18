@@ -67,18 +67,39 @@ fn clean(c: &mut Command) -> &mut Command {
     c
 }
 
+/// A clang that really targets the machine — `$CLANG`, else Homebrew's — probed by compiling an
+/// empty file for `riscv32-unknown-none-elf`, as build.rs will. Fails loudly otherwise: this test
+/// cannot run without one (Apple's clang has no RISC-V backend).
 fn require_clang() {
-    if let Some(c) = std::env::var_os("CLANG") {
-        assert!(
-            Path::new(&c).exists(),
-            "$CLANG is {c:?}, which does not exist"
-        );
-        return;
-    }
-    assert!(
-        Path::new("/opt/homebrew/opt/llvm/bin/clang").exists(),
-        "no RISC-V clang: `brew install llvm` (for /opt/homebrew/opt/llvm/bin/clang) or set $CLANG — this test cannot run without one"
+    let clang = std::env::var_os("CLANG").map_or_else(
+        || PathBuf::from("/opt/homebrew/opt/llvm/bin/clang"),
+        PathBuf::from,
     );
+    let empty = work().join("empty.c");
+    std::fs::write(&empty, "").unwrap();
+    let o = Command::new(&clang)
+        .args([
+            "--target=riscv32-unknown-none-elf",
+            "-march=rv32im",
+            "-mabi=ilp32",
+            "-c",
+            "-o",
+        ])
+        .arg(work().join("empty.o"))
+        .arg(&empty)
+        .output();
+    match o {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => panic!(
+            "{} cannot compile for riscv32-unknown-none-elf: {}\n`brew install llvm` or set $CLANG",
+            clang.display(),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Err(e) => panic!(
+            "no RISC-V clang at {} ({e}): `brew install llvm` or set $CLANG",
+            clang.display()
+        ),
+    }
 }
 
 /// The `rand-guest` binary, built once (release: its emulator runs the interpreter guest).
@@ -133,8 +154,25 @@ fn translate(elf: &Path, name: &str) -> Translated {
         .unwrap();
     let report = check(&o, "sbpf2rv");
     eprintln!("sbpf2rv {}:\n{report}", elf.display());
-    for f in ["program.c", "Cargo.toml", "build.rs", "src/main.rs"] {
+    for f in [
+        "program.c",
+        "Cargo.toml",
+        "Cargo.lock",
+        "build.rs",
+        "src/main.rs",
+        "shim.ld",
+    ] {
         assert!(dir.join(f).exists(), "{f} was not generated");
+    }
+    // What the image depends on is stated in the crate, not taken from the builder's environment:
+    // exact pins, and the harness profile.
+    let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+    for line in [
+        "cc = \"=1.4.6\"",
+        "[profile.release]\nopt-level = \"s\"",
+        "[profile.release.package.\"*\"]\nopt-level = 3",
+    ] {
+        assert!(toml.contains(line), "Cargo.toml lacks {line:?}:\n{toml}");
     }
 
     // The `halt-words` twin: the same generated crate with the test-only feature on by default
@@ -158,6 +196,7 @@ fn translate(elf: &Path, name: &str) -> Translated {
 
     let build = |d: &Path| -> (PathBuf, String) {
         let image = d.join("image.bin");
+        let lock = std::fs::read(d.join("Cargo.lock")).expect("sbpf2rv writes Cargo.lock");
         // The cap is measured separately (`info` below), so the build itself is not refused over it.
         let o = clean(
             Command::new(rand_guest())
@@ -169,10 +208,26 @@ fn translate(elf: &Path, name: &str) -> Translated {
         )
         .output()
         .unwrap();
-        (
-            image,
-            check(&o, &format!("rand-guest build {}", d.display())),
-        )
+        let out = check(&o, &format!("rand-guest build {}", d.display()));
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        // Reproducible: the generated lock is complete, so cargo resolves nothing and rewrites
+        // nothing, and the build names the clang it used.
+        for word in ["Locking", "Updating"] {
+            assert!(
+                !err.contains(word) && !out.contains(word),
+                "cargo resolved something ({word}):\n{err}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(d.join("Cargo.lock")).unwrap(),
+            lock,
+            "the build changed Cargo.lock"
+        );
+        assert!(
+            err.contains("sbpf2rv: clang "),
+            "build.rs names its clang:\n{err}"
+        );
+        (image, out)
     };
     let (image, b) = build(&dir);
     eprintln!("{b}");
@@ -305,6 +360,9 @@ fn parity(
     result
 }
 
+/// `hc` of the translated SPL Token image (Homebrew clang 23.1.1, rustc 1.98.1).
+const SPL_TOKEN_HC: &str = "f382dd28e4c363709afed9dc7cacd11508e61739617626f7a1a4d69e93d1920e";
+
 fn interpreter_guest() -> PathBuf {
     root().join("guests-compiled/bin/sbpf.bin")
 }
@@ -342,17 +400,22 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
         .unwrap();
     check(&o, "sbpf2rv (elsewhere)");
     let image = dir.join("image.bin");
+    // … and with C flags in the environment, under every spelling `cc` reads: build.rs removes them.
     let o = clean(
         Command::new(rand_guest())
             .arg("build")
             .arg(&dir)
             .arg("--out")
             .arg(&image)
-            .args(["--max-words", "65535"]),
+            .args(["--max-words", "65535"])
+            .env("CFLAGS", "-O0 -g")
+            .env("TARGET_CFLAGS", "-DSBPF_USIZE_MAX=1")
+            .env("CFLAGS_riscv32im_unknown_none_elf", "-O3")
+            .env("CFLAGS_riscv32im-unknown-none-elf", "-fno-inline"),
     )
     .output()
     .unwrap();
-    check(&o, "rand-guest build (elsewhere)");
+    check(&o, "rand-guest build (elsewhere, with CFLAGS)");
     let o = Command::new(rand_guest())
         .arg("info")
         .arg(&image)
@@ -363,6 +426,9 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
         t.hc,
         "the image depends on where it was generated"
     );
+    // The image is pinned: a change to the emitter, the runtime, the harness or the toolchain that
+    // moves it has to update this line on purpose.
+    assert_eq!(t.hc, SPL_TOKEN_HC, "the translated SPL Token image moved");
     let interp = interpreter_guest();
 
     // The transfer.
