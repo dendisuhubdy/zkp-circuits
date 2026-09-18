@@ -68,7 +68,9 @@ pub fn scrub_env(cmd: &mut Command) -> &mut Command {
 
 /// `$CARGO_HOME`, else `~/.cargo`: where cargo reads its user-wide `config.toml`.
 fn cargo_home() -> Option<PathBuf> {
-    std::env::var_os("CARGO_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+    std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
 }
 
 /// Refuses a build that cargo would read a `.cargo/config` or `.cargo/config.toml` into: one in
@@ -295,14 +297,22 @@ pub fn find_clang() -> Result<PathBuf> {
 
 /// `X.Y.Z` from `clang --version`'s first line (`[vendor] clang version X.Y.Z [(…)]`).
 pub fn clang_version(clang: &Path) -> Result<String> {
-    let o = scrub_env(&mut Command::new(clang)).arg("--version").output().with_context(|| format!("running {} --version", clang.display()))?;
+    let o = scrub_env(&mut Command::new(clang))
+        .arg("--version")
+        .output()
+        .with_context(|| format!("running {} --version", clang.display()))?;
     let text = String::from_utf8_lossy(&o.stdout);
     let first = text.lines().next().unwrap_or("");
     first
         .split_once("clang version ")
         .and_then(|(_, rest)| rest.split_whitespace().next())
         .map(str::to_string)
-        .with_context(|| format!("{} --version printed no `clang version`: {first:?}", clang.display()))
+        .with_context(|| {
+            format!(
+                "{} --version printed no `clang version`: {first:?}",
+                clang.display()
+            )
+        })
 }
 
 /// `rust-lld` from the pinned Rust sysroot's llvm-tools, so a C guest needs only clang installed:
@@ -456,7 +466,10 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
     let lld = rust_lld()?;
     // The ELF this build links, never one a previous build left.
     match std::fs::remove_file(&elf) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("removing the previous build's {}", elf.display())),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e)
+                .with_context(|| format!("removing the previous build's {}", elf.display()))
+        }
         _ => {}
     }
     let status = scrub_env(&mut Command::new(&lld))
@@ -490,7 +503,13 @@ fn elfs_in(dir: &Path) -> Result<Vec<PathBuf>> {
         .with_context(|| format!("reading {}", dir.display()))?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().is_none() && std::fs::read(p).map(|b| b.starts_with(b"\x7fELF")).unwrap_or(false))
+        .filter(|p| {
+            p.is_file()
+                && p.extension().is_none()
+                && std::fs::read(p)
+                    .map(|b| b.starts_with(b"\x7fELF"))
+                    .unwrap_or(false)
+        })
         .collect())
 }
 
@@ -501,7 +520,8 @@ fn remove_elfs(dir: &Path) -> Result<()> {
         return Ok(());
     }
     for p in elfs_in(dir)? {
-        std::fs::remove_file(&p).with_context(|| format!("removing the previous build's {}", p.display()))?;
+        std::fs::remove_file(&p)
+            .with_context(|| format!("removing the previous build's {}", p.display()))?;
     }
     Ok(())
 }

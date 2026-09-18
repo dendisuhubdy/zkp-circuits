@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").canonicalize().unwrap()
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .unwrap()
 }
 
 fn bin() -> PathBuf {
@@ -42,8 +45,16 @@ fn build(guest: &Path, out: &Path, env: &[(&str, &str)]) -> Output {
 /// The `hc` a successful `build` prints.
 fn hc(o: &Output) -> String {
     let out = String::from_utf8_lossy(&o.stdout);
-    assert!(o.status.success(), "{out}\n{}", String::from_utf8_lossy(&o.stderr));
-    out.split(", hc ").nth(1).and_then(|s| s.split(',').next()).unwrap_or_else(|| panic!("no hc in {out}")).to_string()
+    assert!(
+        o.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    out.split(", hc ")
+        .nth(1)
+        .and_then(|s| s.split(',').next())
+        .unwrap_or_else(|| panic!("no hc in {out}"))
+        .to_string()
 }
 
 #[test]
@@ -57,25 +68,38 @@ fn the_builders_environment_cannot_change_hc() {
     let overrides: [&[(&str, &str)]; 4] = [
         &[("CARGO_PROFILE_RELEASE_LTO", "false")],
         &[("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16")],
-        &[("CARGO_TARGET_RISCV32IM_UNKNOWN_NONE_ELF_RUSTFLAGS", "-Coverflow-checks=on")],
+        &[(
+            "CARGO_TARGET_RISCV32IM_UNKNOWN_NONE_ELF_RUSTFLAGS",
+            "-Coverflow-checks=on",
+        )],
         &[
             ("CARGO_PROFILE_RELEASE_LTO", "false"),
             ("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16"),
             ("CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS", "true"),
-            ("CARGO_TARGET_RISCV32IM_UNKNOWN_NONE_ELF_RUSTFLAGS", "-Coverflow-checks=on"),
+            (
+                "CARGO_TARGET_RISCV32IM_UNKNOWN_NONE_ELF_RUSTFLAGS",
+                "-Coverflow-checks=on",
+            ),
             ("RUSTFLAGS", "-Copt-level=0"),
             ("CARGO_ENCODED_RUSTFLAGS", "-Copt-level=0"),
             ("CARGO_INCREMENTAL", "1"),
         ],
     ];
     for env in overrides {
-        assert_eq!(hc(&build(guest.path(), &out, env)), clean, "{env:?} changed hc");
+        assert_eq!(
+            hc(&build(guest.path(), &out, env)),
+            clean,
+            "{env:?} changed hc"
+        );
     }
     // And the committed guest's own pin: the copy is the committed source.
     let pinned = std::fs::read(root().join("guests-compiled/bin/fib.bin")).unwrap();
     let p = rand_zkvm::isa::Program::from_flat_binary(0x1000, &pinned).unwrap();
     let want: String = p.digest().iter().map(|w| format!("{w:08x}")).collect();
-    assert_eq!(clean, want, "the copy of fib builds to fib's pinned program");
+    assert_eq!(
+        clean, want,
+        "the copy of fib builds to fib's pinned program"
+    );
 }
 
 #[test]
@@ -88,12 +112,27 @@ fn a_target_dir_elsewhere_still_packs_the_fresh_elf() {
     // ELF the first build left in `<guest>/target`, wherever `CARGO_TARGET_DIR` points cargo.
     let main = guest.path().join("src/main.rs");
     let text = std::fs::read_to_string(&main).unwrap();
-    std::fs::write(&main, text.replace("write_output(0, fib(n));", "write_output(0, fib(n) ^ 1);")).unwrap();
+    std::fs::write(
+        &main,
+        text.replace("write_output(0, fib(n));", "write_output(0, fib(n) ^ 1);"),
+    )
+    .unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
-    let moved = hc(&build(guest.path(), &out, &[("CARGO_TARGET_DIR", elsewhere.path().to_str().unwrap()), ("CARGO_BUILD_TARGET_DIR", elsewhere.path().to_str().unwrap())]));
+    let moved = hc(&build(
+        guest.path(),
+        &out,
+        &[
+            ("CARGO_TARGET_DIR", elsewhere.path().to_str().unwrap()),
+            ("CARGO_BUILD_TARGET_DIR", elsewhere.path().to_str().unwrap()),
+        ],
+    ));
     assert_ne!(moved, old, "the stale ELF was packed");
     std::fs::remove_dir_all(guest.path().join("target")).unwrap();
-    assert_eq!(hc(&build(guest.path(), &out, &[])), moved, "a clean build of the new source gives the same hc");
+    assert_eq!(
+        hc(&build(guest.path(), &out, &[])),
+        moved,
+        "a clean build of the new source gives the same hc"
+    );
 }
 
 /// A guest with a `Cargo.toml` and nothing else: enough for the refusal, which comes before any
@@ -101,7 +140,11 @@ fn a_target_dir_elsewhere_still_packs_the_fresh_elf() {
 fn bare_guest(parent: &Path) -> PathBuf {
     let g = parent.join("guest");
     std::fs::create_dir_all(g.join("src")).unwrap();
-    std::fs::write(g.join("Cargo.toml"), "[package]\nname = \"g\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n").unwrap();
+    std::fs::write(
+        g.join("Cargo.toml"),
+        "[package]\nname = \"g\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n",
+    )
+    .unwrap();
     std::fs::write(g.join("src/main.rs"), "fn main() {}\n").unwrap();
     g
 }
@@ -118,7 +161,10 @@ fn a_cargo_config_in_an_ancestor_is_refused() {
         let err = String::from_utf8_lossy(&o.stderr);
         assert!(!o.status.success(), "{name}: built anyway");
         let cfg = cfg.canonicalize().unwrap();
-        assert!(err.contains(&cfg.display().to_string()), "{name}: the refusal names the file: {err}");
+        assert!(
+            err.contains(&cfg.display().to_string()),
+            "{name}: the refusal names the file: {err}"
+        );
         assert!(!tmp.path().join("out.bin").exists());
     }
 }
@@ -128,11 +174,22 @@ fn a_cargo_config_in_cargo_home_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let guest = bare_guest(tmp.path());
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join("config.toml"), "[build]\nrustflags = [\"-Copt-level=0\"]\n").unwrap();
-    let o = build(&guest, &tmp.path().join("out.bin"), &[("CARGO_HOME", home.path().to_str().unwrap())]);
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[build]\nrustflags = [\"-Copt-level=0\"]\n",
+    )
+    .unwrap();
+    let o = build(
+        &guest,
+        &tmp.path().join("out.bin"),
+        &[("CARGO_HOME", home.path().to_str().unwrap())],
+    );
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(!o.status.success());
-    assert!(err.contains("config.toml") && err.contains("CARGO_HOME"), "{err}");
+    assert!(
+        err.contains("config.toml") && err.contains("CARGO_HOME"),
+        "{err}"
+    );
 }
 
 /// A stand-in clang with a riscv32 target but the wrong version: refused unless the builder says
@@ -153,7 +210,11 @@ fn a_clang_other_than_the_pinned_one_is_refused() {
     std::fs::write(guest.join("main.c"), "void main(void) {}\n").unwrap();
     let run = |unpinned: bool| {
         let mut c = Command::new(bin());
-        c.args(["build", "--lang", "c"]).arg(&guest).arg("--out").arg(tmp.path().join("out.bin")).env("CLANG", &fake);
+        c.args(["build", "--lang", "c"])
+            .arg(&guest)
+            .arg("--out")
+            .arg(tmp.path().join("out.bin"))
+            .env("CLANG", &fake);
         if unpinned {
             c.env("RAND_GUEST_CLANG_UNPINNED", "1");
         } else {
@@ -164,12 +225,21 @@ fn a_clang_other_than_the_pinned_one_is_refused() {
     let o = run(false);
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(!o.status.success());
-    assert!(err.contains("99.0.1") && err.contains(rand_guest::build::CLANG_VERSION), "{err}");
-    assert!(err.contains("RAND_GUEST_CLANG_UNPINNED"), "the refusal names the override: {err}");
+    assert!(
+        err.contains("99.0.1") && err.contains(rand_guest::build::CLANG_VERSION),
+        "{err}"
+    );
+    assert!(
+        err.contains("RAND_GUEST_CLANG_UNPINNED"),
+        "the refusal names the override: {err}"
+    );
     // With the override the clang is accepted, loudly (the stand-in then fails to compile, which is
     // past the point this checks).
     let o = run(true);
     let err = String::from_utf8_lossy(&o.stderr);
-    assert!(err.contains("WARNING") && err.contains("will not match"), "{err}");
+    assert!(
+        err.contains("WARNING") && err.contains("will not match"),
+        "{err}"
+    );
     assert!(!err.contains("refus"), "{err}");
 }
