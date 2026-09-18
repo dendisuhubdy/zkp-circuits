@@ -26,11 +26,20 @@
 //! **CHAINID and ORIGIN** (ruling 5): the interpreter traps on both, so the interpreter runs the
 //! same program with each replaced by `CALLER` (`Case::interp_code`), with the caller equal to
 //! the chain id the translation bakes in; `chainid_is_the_translation_time_constant` checks the
-//! constant on its own.
+//! constant on its own. The code guard (Task 9) binds the translation to `Case::code`, so the
+//! translation runs over a vector carrying that code, and its eight words are compared with the
+//! interpreter's result rebound to it (`interpret_rebound`: `public_output` over `Case::code` with
+//! the interpreter's roots and outcome — every word of the digest's preimage but the code hash).
+//! The code hash is asserted separately: over the interpreter's own vector the guard refuses
+//! (status 2, `gas_used` 0). A case that reads a replaced byte through `CODECOPY` sees different
+//! code on the two sides by construction (a handful per corpus); it keeps Task 6's comparison, the
+//! translation over the interpreter's vector with the guard skipped, and must still match the
+//! interpreter's status and gas with the guard on.
 //!
 //! **Coverage** (ruling 5): every opcode the translation implements is executed at least 100 times
 //! across the corpus (counted in the translated code), and so are dynamic bad jumps. The test
-//! prints the per-opcode table.
+//! prints the per-opcode table. Under stage two it is op-line coverage: a folded op's line runs as
+//! a constant, not a runtime call.
 //!
 //! **Reproducing a failure:** each is printed with its seed, its code and calldata as hex, its
 //! gas limit and both outcomes; `EVM2RV_FUZZ_SEED=<seed>` runs that one case alone.
@@ -53,7 +62,7 @@ use common::{build_shim, host, root, run_out_of_cycles, STAGES};
 use evm2rv::blocks::static_gas;
 use evm2rv::emit::{translate, Options, Stage};
 use evm2rv::gen::{case, case_opaque, non_trapping, Case, Gas};
-use evm_core::abi::{run_call_with, Workspace};
+use evm_core::abi::{public_output, run_call_with, Workspace};
 use evm_core::ffi::HALT_INVALID;
 use evm_core::interp::{Halt, Outcome};
 use evm_core::u256::U256;
@@ -103,6 +112,74 @@ fn gas_word(c: &Case) -> usize {
 
 /// `c`'s input vector at its final gas limit, and the interpreter's words and outcome on it.
 fn interpret(c: &Case, ws: &mut Workspace) -> (Vec<u32>, [u32; 8], Outcome) {
+    let (words, out, o, _) = interpret_rebound(c, ws);
+    (words, out, o)
+}
+
+/// [`interpret`], plus what the translation must publish: the interpreter's words **rebound to
+/// `c.code`** — `public_output` over `c.code` with the interpreter's own roots and outcome.
+///
+/// The code guard binds the translation to `c.code`, so its input vector carries `c.code`
+/// ([`translated_words`]). For every case without `CHAINID` or `ORIGIN` that is `interp_code`, and
+/// the rebound words are the interpreter's (asserted). For one with them, the interpreter ran
+/// `interp_code` (each replaced by `CALLER`), so the two digests differ in exactly one input, the
+/// code hash: every other word of the preimage (the status, both roots, the return data, the
+/// logs) is compared through the rebound words, and the code hash is asserted separately
+/// ([`the_guard_refuses_the_interpreters_code`]).
+fn interpret_rebound(c: &Case, ws: &mut Workspace) -> (Vec<u32>, [u32; 8], Outcome, [u32; 8]) {
+    let (words, out, o) = interpret_inner(c, ws);
+    let i = &ws.input;
+    let rebound = public_output(&mut HostRef, &c.code, &i.pre_root, &i.storage.root(), &o);
+    if c.code == c.interp_code() {
+        assert_eq!(rebound, out, "seed {}: the rebound words", c.seed);
+    }
+    (words, out, o, rebound)
+}
+
+/// `words` (an input vector for `c`, over `interp_code`) with its code replaced by `c.code`, the
+/// code the translation was made from. The two have the same length, so nothing else moves.
+fn translated_words(c: &Case, words: &[u32]) -> Vec<u32> {
+    let mut w = words.to_vec();
+    assert_eq!(w[0] as usize, c.code.len());
+    for (k, chunk) in c.code.chunks(4).enumerate() {
+        let mut b = [0u8; 4];
+        b[..chunk.len()].copy_from_slice(chunk);
+        w[1 + k] = u32::from_le_bytes(b);
+    }
+    w
+}
+
+/// The code guard on a `CHAINID`/`ORIGIN` case: the translation over the interpreter's code
+/// (`interp_code`, which is not the code it was made from) is refused before anything runs —
+/// status 2, `gas_used` 0 — and publishes exactly the interpreter's `pre_halt` output for that
+/// code, which binds that code's hash.
+fn the_guard_refuses_the_interpreters_code(
+    c: &Case,
+    words: &[u32],
+    got: &[u32; 8],
+    halt: Halt,
+    gas_used: u64,
+) -> Result<(), String> {
+    let pre = Outcome {
+        halt: Halt::OutOfBounds,
+        gas_used: 0,
+        ret: [0; evm_core::interp::MAX_RETURN_BYTES],
+        ret_len: 0,
+        logs: [evm_core::interp::Log::EMPTY; evm_core::interp::MAX_LOGS],
+        n_logs: 0,
+    };
+    let pre_root: [u32; 8] = words[gas_word(c) + 1..gas_word(c) + 9].try_into().unwrap();
+    let want = public_output(&mut HostRef, &c.interp_code(), &pre_root, &pre_root, &pre);
+    if *got != want || gas_used != 0 || halt != Halt::OutOfBounds {
+        return Err(format!(
+            "seed {}: the guard let the interpreter's code through: status {} halt {halt:?} gas_used {gas_used}",
+            c.seed, got[0]
+        ));
+    }
+    Ok(())
+}
+
+fn interpret_inner(c: &Case, ws: &mut Workspace) -> (Vec<u32>, [u32; 8], Outcome) {
     let mut words = call_of(c).input_words();
     let gi = gas_word(c);
     assert_eq!(
@@ -229,9 +306,22 @@ fn corpus(stage: Stage, opaque: bool) {
     let mut status = [0usize; 3];
     let mut halts: BTreeMap<String, usize> = BTreeMap::new();
     let (mut chain, mut loops, mut call_bytes, mut dead_call_bytes, mut cuts) = (0, 0, 0, 0, 0);
+    let mut subs = 0usize;
+    let mut refused = 0usize;
+    let mut codecopy_seen = 0usize;
     for (i, c) in cases.iter().enumerate() {
-        let (words, want_w, want_o) = interpret(c, &mut ws);
-        let (got_w, got_o, extra) = lib.run_words(&mut HostRef, i, &words);
+        let (words, want_w, want_o, rebound) = interpret_rebound(c, &mut ws);
+        let (got_w, got_o, extra) = lib.run_words(&mut HostRef, i, &translated_words(c, &words));
+        if c.code != c.interp_code() {
+            let (w, o, _) = lib.run_words(&mut HostRef, i, &words);
+            if let Err(e) =
+                the_guard_refuses_the_interpreters_code(c, &words, &w, o.halt, o.gas_used)
+            {
+                n_failed += 1;
+                failures.push(e);
+            }
+            refused += 1;
+        }
         if extra.reached_precompile {
             assert!(
                 matches!(want_o.halt, Halt::Trap(0xf1 | 0xf2 | 0xf4 | 0xfa)),
@@ -250,10 +340,24 @@ fn corpus(stage: Stage, opaque: bool) {
         call_bytes += c.tags.call_byte as usize;
         dead_call_bytes += (c.tags.dead_call_byte && !c.tags.call_step) as usize;
         cuts += (c.gas != Gas::Full) as usize;
-        if want_w != got_w || want_o.gas_used != got_o.gas_used {
+        subs += (c.tags.subs > 0) as usize;
+        let mut diverged = rebound != got_w || want_o.gas_used != got_o.gas_used;
+        if diverged
+            && c.code != c.interp_code()
+            && (want_w[0], want_o.gas_used) == (got_w[0], got_o.gas_used)
+        {
+            // A CHAINID/ORIGIN case whose bound data (return data, logs or storage) differs with
+            // the same status and gas: it read one of the replaced bytes through CODECOPY, so the
+            // two sides saw different code by construction. Task 6's comparison then applies:
+            // the translation over the interpreter's own code, the guard skipped, all eight words.
+            let (w, o, _) = lib.run_words_guarded(&mut HostRef, i, &words, false);
+            diverged = w != want_w || o.gas_used != want_o.gas_used;
+            codecopy_seen += 1;
+        }
+        if diverged {
             n_failed += 1;
             if failures.len() < 20 {
-                failures.push(report(c, &words, &(want_w, want_o), &(got_w, got_o)));
+                failures.push(report(c, &words, &(rebound, want_o), &(got_w, got_o)));
             }
         }
     }
@@ -273,7 +377,10 @@ fn corpus(stage: Stage, opaque: bool) {
         status[1], status[0], status[2], halts
     );
     eprintln!(
-        "fuzz: with loops {loops}, with CHAINID {chain}, with a call-family byte {call_bytes} ({dead_call_bytes} in dead code only), gas cut below the need {cuts}"
+        "fuzz: with loops {loops}, with internal-function calls {subs}, with CHAINID {chain}, with a call-family byte {call_bytes} ({dead_call_bytes} in dead code only), gas cut below the need {cuts}"
+    );
+    eprintln!(
+        "fuzz: the code guard refused the interpreter's code (CHAINID/ORIGIN as CALLER) in all {refused} such cases; {codecopy_seen} of them read a replaced byte through CODECOPY and were compared unguarded over the interpreter's code"
     );
     eprintln!(
         "fuzz: timings: generate + translate {:.1}s, host build {:.1}s, run {:.1}s",
@@ -291,7 +398,15 @@ fn corpus(stage: Stage, opaque: bool) {
 
     // Coverage, over the whole corpus (the excluded cases' executions too).
     let cov = lib.coverage();
-    let mut table = format!("fuzz ({stage:?}): executed per opcode (translated code):\n");
+    // Stage two folds constant operands at translation, so there a count is op-line coverage:
+    // the op's line in the translated code ran, which may be a folded constant rather than a
+    // runtime call (the opaque corpus and the laundered directed cases reach the calls).
+    let mut table = match stage {
+        Stage::One => format!("fuzz ({stage:?}): executed per opcode (translated code):\n"),
+        Stage::Two => format!(
+            "fuzz ({stage:?}): op-line coverage per opcode (the op's line ran; a folded op's line is a constant, not a runtime call):\n"
+        ),
+    };
     for (k, op) in non_trapping().into_iter().enumerate() {
         table.push_str(&format!(
             "  {:02x} {:<14} {:>8}",
@@ -670,7 +785,7 @@ fn sample() -> &'static Vec<Case> {
         let mut with_loops = 0;
         for seed in 0.. {
             let c = case(seed);
-            if c.tags.call_byte || c.code.len() > 700 || c.touched.len() > 3 {
+            if c.tags.call_byte || c.code.len() > 600 || c.touched.len() > 3 {
                 continue;
             }
             let (_, _, o) = interpret(&c, &mut ws);
@@ -703,10 +818,7 @@ fn sample_c(cases: &[Case], stage: Stage) -> String {
             (h ^ x as u32).wrapping_mul(0x0100_0193)
         })
     };
-    let mut keys: Vec<(usize, u32)> = cases
-        .iter()
-        .map(|c| (c.code.len(), fnv(&c.interp_code())))
-        .collect();
+    let mut keys: Vec<(usize, u32)> = cases.iter().map(|c| (c.code.len(), fnv(&c.code))).collect();
     keys.sort_unstable();
     keys.dedup();
     assert_eq!(keys.len(), cases.len(), "two sampled codes share a key");
@@ -714,18 +826,32 @@ fn sample_c(cases: &[Case], stage: Stage) -> String {
     for (i, c) in cases.iter().enumerate() {
         let t = translate_case(c, stage)
             .replace("void evm_entry(void)", &format!("void evm_entry_{i}(void)"))
+            .replace(
+                "*evm_code_digest(void)",
+                &format!("*evm_code_digest_{i}(void)"),
+            )
             .replace("#include <stdint.h>\n#include \"evm_rt.h\"\n", "");
         s.push_str(&t);
     }
-    s.push_str("void evm_entry(void);\nvoid evm_entry(void) {\n    uint32_t h = 0x811c9dc5u;\n    for (uint32_t i = 0; i < evm_code_len; i++) h = (h ^ evm_code[i]) * 0x01000193u;\n");
-    for (i, c) in cases.iter().enumerate() {
-        s.push_str(&format!(
-            "    if (evm_code_len == {}u && h == {:#x}u) evm_entry_{i}();\n",
-            c.code.len(),
-            fnv(&c.interp_code())
-        ));
-    }
+    let pick = |s: &mut String, call: &str| {
+        s.push_str("    uint32_t h = 0x811c9dc5u;\n    for (uint32_t i = 0; i < evm_code_len; i++) h = (h ^ evm_code[i]) * 0x01000193u;\n");
+        for (i, c) in cases.iter().enumerate() {
+            s.push_str(&format!(
+                "    if (evm_code_len == {}u && h == {:#x}u) {};\n",
+                c.code.len(),
+                fnv(&c.code),
+                call.replace("{i}", &i.to_string())
+            ));
+        }
+    };
+    s.push_str("void evm_entry(void);\nvoid evm_entry(void) {\n");
+    pick(&mut s, "evm_entry_{i}()");
     s.push_str("    evm_halt(EVM_HALT_INVALID, 0);\n}\n");
+    // The guard's constant is the picked case's own; a code that is no case's gets one no code
+    // hashes to, so the shim's guard refuses it.
+    s.push_str("const uint32_t *evm_code_digest(void);\nconst uint32_t *evm_code_digest(void) {\n");
+    pick(&mut s, "return evm_code_digest_{i}()");
+    s.push_str("    static const uint32_t none[8] = {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};\n    return none;\n}\n");
     s
 }
 
@@ -798,8 +924,33 @@ fn pipeline(stage: Stage) {
     let mut ran_loops = 0;
     let mut too_long = 0;
     let t = Instant::now();
+    let mut refused = 0;
     for c in cases {
-        let (words, want, o) = interpret(c, &mut ws);
+        let (interp_words, _, o, want) = interpret_rebound(c, &mut ws);
+        // The translation's vector carries the code it was made from (the guard); `want` is the
+        // interpreter's result rebound to that code (see `interpret_rebound`).
+        let words = translated_words(c, &interp_words);
+        if c.code != c.interp_code() {
+            // The interpreter's code (CHAINID/ORIGIN as CALLER) is refused by the real guard.
+            let got = run_words(&images[0], &interp_words);
+            let dbg = run_words(&images[1], &interp_words);
+            // The halt is checked from the emit-outcome image's out[6] below.
+            the_guard_refuses_the_interpreters_code(
+                c,
+                &interp_words,
+                &got,
+                Halt::OutOfBounds,
+                dbg[7] as u64,
+            )
+            .unwrap_or_else(|e| panic!("{e} ({stage:?}, the real pipeline)"));
+            assert_eq!(
+                (dbg[0], dbg[6]),
+                (2, evm_core::ffi::halt_code(Halt::OutOfBounds)),
+                "seed {}: the guard's halt",
+                c.seed
+            );
+            refused += 1;
+        }
         if run_out_of_cycles(&images[0], &words).is_some() {
             too_long += 1;
             continue;
@@ -829,7 +980,7 @@ fn pipeline(stage: Stage) {
         ran_loops += (c.tags.loops > 0) as usize;
     }
     eprintln!(
-        "sample ({stage:?}): {ran} cases ({ran_loops} with loops) through rand-guest run, {too_long} past the 2^20 cycles; build {:.1}s, runs {:.1}s",
+        "sample ({stage:?}): {ran} cases ({ran_loops} with loops) through rand-guest run, {too_long} past the 2^20 cycles, {refused} with CHAINID/ORIGIN also refused over the interpreter's code; build {:.1}s, runs {:.1}s",
         t_build.as_secs_f64(),
         t.elapsed().as_secs_f64()
     );

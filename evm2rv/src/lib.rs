@@ -7,6 +7,8 @@
 //! one: every block to C over `evm-rt`'s memory stack, with one `switch` for the dynamic jumps.
 //! [`lift`] is stage two: the same blocks with each block's words in C locals, spilled to the
 //! memory stack only where another block or the runtime needs them.
+//! [`guard`] is the code guard: a digest of the source bytecode baked into the C, which the shim
+//! checks the input vector's code against before anything runs.
 //! [`shim`] is the generated crate around that C: the interpreter guest's ABI harness
 //! (`evm_core::abi::run_call_with_executor`) with the translated code as the executor.
 
@@ -15,5 +17,6 @@ pub mod emit;
 /// Test-only: the fuzz corpus generator (`tests/fuzz.rs`). Not part of the translator.
 #[doc(hidden)]
 pub mod gen;
+pub mod guard;
 pub mod lift;
 pub mod shim;

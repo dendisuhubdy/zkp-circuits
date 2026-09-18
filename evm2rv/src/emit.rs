@@ -425,11 +425,18 @@ pub(crate) fn head_c(b: &Block, after_checks: &str) -> String {
 }
 
 /// Translate `code` to the C of one `evm_entry`, at `opts.stage`.
+///
+/// Either stage's C ends with the code guard ([`crate::guard::code_digest_c`]): the digest of
+/// `code`, which the shim checks the input vector's code against before anything runs.
 pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
-    match opts.stage {
-        Stage::One => translate_one(code, opts),
-        Stage::Two => crate::lift::translate(code, opts),
-    }
+    let mut e = match opts.stage {
+        Stage::One => translate_one(code, opts)?,
+        Stage::Two => crate::lift::translate(code, opts)?,
+    };
+    e.c.push_str(&crate::guard::code_digest_c(&crate::guard::code_digest(
+        code,
+    )));
+    Ok(e)
 }
 
 /// Stage one.

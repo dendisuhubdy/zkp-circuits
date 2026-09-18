@@ -16,11 +16,12 @@ evm-core = { path = "../guests-compiled/evm-core" }
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1"
 hex = "0.4"
+# The machine's own Poseidon2 sponge (`hash::sponge_hash`), for the code guard's digest
+# (`guard::code_digest`), as sbpf2rv's ELF guard uses it. Also the tests' oracle: research's ERC-20
+# fixtures (`rand_zkvm::evm`) and the interpreter run natively over them (`EvmCall::expected`).
+rand_zkvm = { path = "../research" }
 
 [dev-dependencies]
-# The parity test's oracle and vectors: research's ERC-20 fixtures (`rand_zkvm::evm`) and the
-# interpreter run natively over them (`EvmCall::expected`).
-rand_zkvm = { path = "../research" }
 # `ffi.rs`'s halt-code table, which the parity test's `emit-outcome` build reports its halt in.
 evm-core = { path = "../guests-compiled/evm-core", features = ["ffi"] }
 

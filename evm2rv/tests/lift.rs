@@ -224,6 +224,23 @@ fn cases() -> Vec<Case> {
         calls: false,
     });
 
+    // JUMPI whose *condition* is an entry slot the exit overwrites (Task 8 review, mutation R2):
+    // [c, 5] -> CALLDATASIZE, SWAP2, PUSH2 20, JUMPI. The condition `c` (calldata word 0, zero)
+    // must be read before the spill writes CALLDATASIZE (32, nonzero) over its slot; read after,
+    // the jump is taken and the contract returns 2 instead of 1.
+    v.push(Case {
+        name: "jumpi condition in a spilled slot",
+        code: [
+            &[0x60, 0x00, 0x35, 0x60, 0x05][..],
+            &[0x5b, 0x36, 0x91, 0x61, 0x00, 0x14, 0x57], // 5
+            &[0x60, 0x01, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3], // 12: return 1
+            &[0x5b, 0x60, 0x02, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3], // 20: return 2
+        ]
+        .concat(),
+        calldata: word(0),
+        calls: false,
+    });
+
     // The same for JUMP: [dest] -> CALLDATASIZE, SWAP1, JUMP.
     v.push(Case {
         name: "jump destination in a spilled slot",

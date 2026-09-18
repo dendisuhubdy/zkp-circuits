@@ -6,7 +6,9 @@
 //! `evm_core::ffi`'s own `extern "C"` functions, so the storage tree, its witnesses and every hash
 //! are the interpreter's, as in the shim.
 //!
-//! Each contract's `evm_entry` is renamed `evm_entry_<i>` and reached through a table; every
+//! Each contract's `evm_entry` is renamed `evm_entry_<i>` and reached through a table, and so is
+//! its code guard constant (`evm_code_digest_<i>`), which the Rust side checks the input vector's
+//! code against before the run, as the shim does; every
 //! opcode's line is prefixed with `fuzz_cov[op]++` (the emitted C labels each op with a comment
 //! naming it, which is what the counter keys on), and the dispatch's bad-jump exits count into
 //! `fuzz_dyn_bad`. The instrumentation adds counters and nothing else. The library is compiled with
@@ -64,6 +66,7 @@ type RunFn = unsafe extern "C" fn(
     out: *mut COut,
 ) -> u32;
 type HooksFn = unsafe extern "C" fn(*const c_void, *const c_void, *const c_void);
+type DigestFn = unsafe extern "C" fn(idx: u32) -> *const u32;
 
 const HARNESS_C: &str = r#"/* evm2rv tests: the host harness around the translated contracts (tests/common/host.rs). */
 #include <stdint.h>
@@ -90,6 +93,10 @@ void evm_keccak256(void *h, const uint8_t *p, uint32_t n, uint8_t *out) { h_kecc
 uint64_t fuzz_cov[256];
 uint64_t fuzz_dyn_bad;
 extern void (*const fuzz_entries[])(void);
+extern const uint32_t *(*const fuzz_digests[])(void);
+
+/* Contract `idx`'s code guard constant (its `evm_code_digest`). */
+const uint32_t *fuzz_digest(uint32_t idx) { return fuzz_digests[idx](); }
 
 typedef struct {
     uint32_t halt, arg;
@@ -160,7 +167,12 @@ pub fn instrument(c: &str, i: usize) -> String {
     let names: Vec<(String, u8)> = (0..=255u8).map(|o| (mnemonic(o), o)).collect();
     let mut out = String::with_capacity(c.len() + c.len() / 4);
     for line in c.lines() {
-        let mut line = line.replace("void evm_entry(void)", &format!("void evm_entry_{i}(void)"));
+        let mut line = line
+            .replace("void evm_entry(void)", &format!("void evm_entry_{i}(void)"))
+            .replace(
+                "*evm_code_digest(void)",
+                &format!("*evm_code_digest_{i}(void)"),
+            );
         let t = line.trim_start().to_string();
         if t.starts_with("/* 0x") {
             // `/* 0x0012 NAME [0x..] */ code`
@@ -236,6 +248,7 @@ fn sanitize() -> String {
 /// A loaded library of translated contracts.
 pub struct Lib {
     run: RunFn,
+    digest: DigestFn,
     pub cov: *const [u64; 256],
     pub dyn_bad: *const u64,
     pub path: PathBuf,
@@ -297,6 +310,14 @@ fn compile(dir: &Path, rt: &Path, flags: &[String], contracts: &[String], lib: &
     table.push_str("void (*const fuzz_entries[])(void) = {\n");
     for i in 0..contracts.len() {
         table.push_str(&format!("    evm_entry_{i},\n"));
+    }
+    table.push_str("};\n");
+    for i in 0..contracts.len() {
+        table.push_str(&format!("const uint32_t *evm_code_digest_{i}(void);\n"));
+    }
+    table.push_str("const uint32_t *(*const fuzz_digests[])(void) = {\n");
+    for i in 0..contracts.len() {
+        table.push_str(&format!("    evm_code_digest_{i},\n"));
     }
     table.push_str("};\n");
     std::fs::write(dir.join("table.c"), table).unwrap();
@@ -385,6 +406,7 @@ fn load(lib: &Path) -> Lib {
         );
         Lib {
             run: std::mem::transmute::<*mut c_void, RunFn>(sym(h, "fuzz_run")),
+            digest: std::mem::transmute::<*mut c_void, DigestFn>(sym(h, "fuzz_digest")),
             cov: sym(h, "fuzz_cov") as *const [u64; 256],
             dyn_bad: sym(h, "fuzz_dyn_bad") as *const u64,
             path: lib.to_path_buf(),
@@ -408,9 +430,26 @@ impl Lib {
         idx: usize,
         words: &[u32],
     ) -> ([u32; 8], Outcome, Extra) {
+        self.run_words_guarded(h, idx, words, true)
+    }
+
+    /// [`Lib::run_words`], with the code guard skipped when `guard` is false. Only the fuzz
+    /// corpus's `CHAINID`/`ORIGIN` cases that read a replaced byte through `CODECOPY` use that
+    /// (`tests/fuzz.rs`, `interpret_rebound`): their interpreter runs other code by construction.
+    pub fn run_words_guarded<H: evm_core::Host>(
+        &self,
+        h: &mut H,
+        idx: usize,
+        words: &[u32],
+        guard: bool,
+    ) -> ([u32; 8], Outcome, Extra) {
         let mut ws = Box::new(Workspace::ZERO);
         let mut extra = Extra::default();
         let run = self.run;
+        // SAFETY: the library's `evm_code_digest_<idx>` returns a pointer to 8 constant words.
+        let want: [u32; 8] = unsafe { std::slice::from_raw_parts((self.digest)(idx as u32), 8) }
+            .try_into()
+            .unwrap();
         let mut exec = |h: &mut H,
                         code: &[u8],
                         calldata: &[u8],
@@ -418,6 +457,18 @@ impl Lib {
                         tree: &mut StorageTree,
                         _b: &mut Buffers|
          -> Outcome {
+            // The shim's code guard (`is_the_translated_code`), before anything runs: another
+            // code is the interpreter's pre_halt, OutOfBounds with nothing spent.
+            if guard && evm2rv::guard::code_digest(code) != want {
+                return Outcome {
+                    halt: Halt::OutOfBounds,
+                    gas_used: 0,
+                    ret: [0; MAX_RETURN_BYTES],
+                    ret_len: 0,
+                    logs: [Log::EMPTY; MAX_LOGS],
+                    n_logs: 0,
+                };
+            }
             let mut hb = HostBox(h);
             let mut envw = [0u32; 24];
             envw[..8].copy_from_slice(&env.address.0);

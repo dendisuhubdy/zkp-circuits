@@ -37,11 +37,12 @@ use std::sync::OnceLock;
 
 use common::{build_shim, encoded_halt, root, run, run_tier, STAGES};
 use evm2rv::emit::Stage;
-use evm_core::interp::Halt;
+use evm_core::abi::public_output;
+use evm_core::interp::{Halt, Log, Outcome, MAX_LOGS, MAX_RETURN_BYTES};
 use evm_core::u256::U256;
 use rand_zkvm::evm::{
-    abi_call, erc20_transfer, mapping_slot, mapping_slot2, EvmCall, ALICE, BOB, SLOT_ALLOWANCES,
-    SLOT_BALANCES,
+    abi_call, erc20_transfer, mapping_slot, mapping_slot2, EvmCall, HostRef, ALICE, BOB,
+    SLOT_ALLOWANCES, SLOT_BALANCES,
 };
 
 fn erc20_hex() -> PathBuf {
@@ -83,15 +84,19 @@ fn images(stage: Stage) -> &'static Images {
 /// The stage-one ERC-20 translation's program digest. It binds the translator's output, evm-rt,
 /// evm-core, guest-sdk, the pinned cc and the clang that compiled the C (build.rs prints its
 /// version), so a change to any of them moves it — deliberately: re-derive it and say why.
-const ERC20_HC: &str = "3307bfc4aaf87e4021941d18a9e813441354bb6fa19b357c5b604839e516579d";
+///
+/// Re-derived in Task 9 for the code guard (the digest of the source bytecode in `contract.c`, and
+/// the check in `main.rs`); it was `3307bfc4…579d`. `--no-default-config` alone does not move it.
+const ERC20_HC: &str = "9cdb79e7f05d53f6503f0eb777bb0c2356d29cab516a0378864802e42fd048c8";
 
 /// The same for the stage-two translation (Task 8): a different program, so a different digest.
-const ERC20_HC_STAGE2: &str = "87aba574b1dff3591631fbfc2ebd9e993098e9929219126ddc94ecaf2c60ccad";
+/// Re-derived in Task 9 for the code guard; it was `87aba574…0ccad`.
+const ERC20_HC_STAGE2: &str = "a0feae92a7311c9562495717100eb7aea71270a38ed435d06dc31387e0ea8ff6";
 
 /// `hc` of the stage-one ERC-20 translation (`--stage 1`), pinned (fix round 1, item 7). Uses
 /// the parity build.
 #[test]
-fn the_default_erc20_translation_hc_is_pinned() {
+fn the_stage_one_erc20_translation_hc_is_pinned() {
     assert_eq!(images(Stage::One).plain_hc, ERC20_HC);
 }
 
@@ -229,4 +234,50 @@ fn out_of_gas_matches_the_interpreter() {
     let mut exact = transfer_250();
     exact.gas_limit = used;
     check(&format!("exact gas {used}"), &exact, 1);
+}
+
+/// The code guard (Task 9): the transfer with its code one byte different — the last byte, inside
+/// solc's metadata trailer, which no path executes. The interpreter runs it exactly as the real
+/// code (status 1). Both translations refuse it before any translated code runs: status 2,
+/// `gas_used` 0, `OutOfBounds` — the interpreter's `pre_halt` — and publish exactly the `pre_halt`
+/// output for that code. This is accepted divergence #3.
+#[test]
+fn a_code_one_byte_different_is_refused_by_the_guard() {
+    let mut call = transfer_250();
+    *call.code.last_mut().unwrap() ^= 1;
+    let words = call.input_words();
+    let (interp, o, _) = call.expected();
+    assert_eq!(
+        (interp[0], o.halt),
+        (1, Halt::Return),
+        "the interpreter runs the other code"
+    );
+    let (evm_bin, _) = run(&root().join("guests-compiled/bin/evm.bin"), &words);
+    assert_eq!(evm_bin, interp, "evm.bin runs the other code too");
+
+    let pre = Outcome {
+        halt: Halt::OutOfBounds,
+        gas_used: 0,
+        ret: [0; MAX_RETURN_BYTES],
+        ret_len: 0,
+        logs: [Log::EMPTY; MAX_LOGS],
+        n_logs: 0,
+    };
+    let root_before = call.tree.root();
+    let want = public_output(&mut HostRef, &call.code, &root_before, &root_before, &pre);
+    for stage in STAGES {
+        let Images { plain, outcome, .. } = images(stage);
+        let (got, cycles, tier) = run_tier(plain, &words);
+        assert_eq!(
+            got, want,
+            "{stage:?}: the pre_halt output for the other code"
+        );
+        let (dbg, _) = run(outcome, &words);
+        assert_eq!(
+            (dbg[0], dbg[6], dbg[7]),
+            (2, encoded_halt(&pre), 0),
+            "{stage:?}: status 2, OutOfBounds, gas_used 0"
+        );
+        eprintln!("guard ({stage:?}): refused in {cycles} cycles (tier {tier:?})");
+    }
 }

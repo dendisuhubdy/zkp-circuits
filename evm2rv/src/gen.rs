@@ -10,6 +10,9 @@
 //!   a call target, …) or a `DUPn` of a result already on the stack, so results feed later ops;
 //! * **loops** (a counter in memory or in a witnessed storage slot, 1–12 iterations, a
 //!   stack-neutral body, the back edge static or dynamic);
+//! * **internal-function calls** ([`Gen::call_sub`]): solc's pattern — a return label and
+//!   arguments pushed, a jump to a body that permutes them with `SWAPn` and returns through
+//!   `SWAPn JUMP`, at random depths, sometimes nested;
 //! * **forward branches** (`JUMPI` over a stack-neutral run), **dynamic forward jumps over dead
 //!   bytes** (random bytes, call-family and `JUMPDEST` bytes included — which switches a contract
 //!   into return-data buffer mode without ever executing a call), **guarded early exits**, and
@@ -26,9 +29,10 @@
 //! `CHAINID` and `ORIGIN` are generated like any other opcode. The interpreter traps on both, so
 //! [`Case::interp_code`] is the same program with each replaced by `CALLER` (same gas, same stack
 //! effect); when the code contains `CHAINID`, the caller is a u64 and the translation's
-//! `--chain-id` is that value, so the two programs compute the same words (`tests/fuzz.rs` runs
-//! the translation of [`Case::code`] over an input vector carrying `interp_code`, so `CODECOPY`
-//! and the code hash agree too).
+//! `--chain-id` is that value, so the two programs compute the same words. The code guard binds
+//! the translation to [`Case::code`], so `tests/fuzz.rs` runs it over an input vector carrying
+//! `code` and compares it with the interpreter's result rebound to that code (every word of the
+//! digest's preimage but the code hash).
 
 use evm_core::u256::U256;
 
@@ -118,6 +122,8 @@ pub struct Tags {
     pub call_step: bool,
     /// The epilogue is a dynamic jump to a non-jumpdest.
     pub dynamic_bad_jump: bool,
+    /// Internal-function calls ([`Gen::call_sub`]), nested ones included.
+    pub subs: u32,
 }
 
 impl Case {
@@ -635,6 +641,95 @@ impl Gen<'_> {
         self.depth -= 2;
     }
 
+    /// solc's internal-function call (Task 8 review, Important 2): push a return label, push 0-4
+    /// arguments, and jump to a body. The body permutes its frame with `SWAPn`, copies with `DUPn`,
+    /// computes over its arguments (sometimes calling another body, up to three deep), then
+    /// returns through `SWAPn JUMP`. The destination was pushed in an earlier block and sits deep in
+    /// the body's entry stack, and the body's exit spill overwrites its slot, so stage two's spill
+    /// must protect it. The call leaves the body's frame, the return label consumed, as results.
+    fn call_sub(&mut self, nest: u32) {
+        self.tags.subs += 1;
+        let base = self.depth;
+        let ret = self.label();
+        let body = self.label();
+        self.push_label(ret);
+        // The frame, from the bottom: `true` is a copy of the return label.
+        let mut frame = vec![true];
+        let args = self.r.range(0, 4) as usize;
+        for _ in 0..args {
+            let v = interesting(self.r);
+            self.push(&v);
+            self.launder();
+        }
+        frame.extend(std::iter::repeat_n(false, args));
+        self.push_label(body);
+        self.op(0x56);
+        self.depth -= 1;
+        self.bind(body);
+        for _ in 0..self.r.range(1, 6) {
+            let n = frame.len();
+            match self.r.below(5) {
+                0 if n >= 2 => {
+                    let k = self.r.range(1, (n - 1).min(16) as u64) as usize;
+                    self.op(0x8f + k as u8);
+                    frame.swap(n - 1, n - 1 - k);
+                }
+                1 if n < 12 => {
+                    let k = self.r.range(1, n.min(16) as u64) as usize;
+                    self.op(0x7f + k as u8);
+                    self.depth += 1;
+                    frame.push(frame[n - k]);
+                }
+                2 if n >= 2 && !frame[n - 1] && !frame[n - 2] => {
+                    let op = self
+                        .r
+                        .pick(&[0x01u8, 0x02, 0x03, 0x16, 0x17, 0x18, 0x1b, 0x1c]);
+                    self.op(op);
+                    self.depth -= 1;
+                    frame.pop();
+                    self.observe();
+                }
+                3 if nest < 2 && n < 10 => {
+                    let d = self.depth;
+                    self.call_sub(nest + 1);
+                    frame.extend(std::iter::repeat_n(false, self.depth - d));
+                }
+                _ => {
+                    if self.r.chance(500) {
+                        self.op(0x36); // CALLDATASIZE: a word known only at run time
+                        self.depth += 1;
+                    } else {
+                        let v = interesting(self.r);
+                        self.push(&v);
+                    }
+                    frame.push(false);
+                }
+            }
+        }
+        // Return: the topmost copy of the label to the top (`SWAPn`), then `JUMP`.
+        let n = frame.len();
+        let at = (0..n).rev().find(|&i| frame[i]).expect("the return label");
+        let k = n - 1 - at;
+        if k > 0 {
+            if k > 16 {
+                // Too deep for one SWAP: drop what is above it instead.
+                for _ in 0..k {
+                    self.op(0x50);
+                    frame.pop();
+                }
+                self.depth -= k;
+            } else {
+                self.op(0x8f + k as u8);
+                frame.swap(n - 1, at);
+            }
+        }
+        self.op(0x56);
+        frame.pop();
+        self.bind(ret);
+        self.depth = base + frame.len();
+        debug_assert_eq!(self.depth, base + frame.len());
+    }
+
     /// `JUMPI` forward over a neutral run.
     fn branch(&mut self) {
         if self.r.chance(120) {
@@ -1009,10 +1104,11 @@ fn case_with(seed: u64, opaque: bool) -> Case {
     }
     for _ in 0..n_seg {
         match g.r.below(100) {
-            0..=51 => {
+            0..=45 => {
                 let n = g.r.range(3, 24) as usize;
                 g.straight(n);
             }
+            46..=51 => g.call_sub(0),
             52..=69 => g.looped(),
             70..=81 => g.branch(),
             82..=88 => g.dead(),

@@ -615,8 +615,9 @@ fn jumps_dynamic_and_static() {
 fn the_end_of_the_code_and_code_over_the_cap() {
     for stage in STAGES {
         let c = translate(&[0x60, 0x01], &at(stage)).unwrap().c;
+        // `evm_entry` ends with the STOP; the code guard's constant follows it.
         assert!(
-            c.trim_end().ends_with("evm_halt(EVM_HALT_STOP, 0);\n}"),
+            c.contains("evm_halt(EVM_HALT_STOP, 0);\n}\n\n/* The code guard"),
             "{c}"
         );
 
@@ -699,10 +700,15 @@ fn one_opcode_contracts_compile_clean(stage: Stage) {
         )
         .unwrap()
         .c;
-        let c = c.replace(
-            "void evm_entry(void)",
-            &format!("void evm_entry_{op}(void)"),
-        );
+        let c = c
+            .replace(
+                "void evm_entry(void)",
+                &format!("void evm_entry_{op}(void)"),
+            )
+            .replace(
+                "*evm_code_digest(void)",
+                &format!("*evm_code_digest_{op}(void)"),
+            );
         if op == 0 {
             all.push_str(&c);
         } else {
@@ -813,7 +819,20 @@ fn the_shim_crate() {
         assert!(f.build_rs.contains(src), "{src}: {}", f.build_rs);
     }
     assert!(f.build_rs.contains(".include(root.join(\"rand-guest\"))"));
-    assert!(f.build_rs.contains("cargo:warning=evm2rv: clang {version}"));
+    assert!(f.build_rs.contains("cargo:warning=evm2rv: clang {first}"));
+    // rand-guest's clang pin, with its override, and no clang configuration file.
+    assert!(f
+        .build_rs
+        .contains("const CLANG_VERSION: &str = \"23.1.1\";"));
+    assert_eq!(evm2rv::shim::CLANG_VERSION, "23.1.1");
+    assert!(f.build_rs.contains("assert_pinned(&clang);"));
+    assert!(f.build_rs.contains("RAND_GUEST_CLANG_UNPINNED"));
+    assert!(f.build_rs.contains(".flag(\"--no-default-config\")"));
+    // The code guard runs before the translated code.
+    assert!(f.main_rs.contains("fn evm_code_digest() -> *const u32;"));
+    assert!(f
+        .main_rs
+        .contains("if pre != 0 || !is_the_translated_code(code) {"));
     // The globals C writes are `static mut` on the Rust side.
     for g in [
         "evm_ret:",
