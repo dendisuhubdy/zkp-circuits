@@ -338,10 +338,23 @@ fn case_text(c: &Case) -> String {
     s
 }
 
+/// Whether a host C compiler (`cc`) runs. The two tests that compile `sbpf-rt` for the host skip,
+/// saying why, without one — this crate's default suite must not need a C toolchain, as
+/// `rand-guest/tests/sbpf_rt.rs` skips without a RISC-V clang.
+fn host_cc() -> bool {
+    let found = Command::new("cc").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    if !found {
+        eprintln!("no host C compiler (`cc`); skipping the sbpf-rt host build");
+    }
+    found
+}
+
+/// Warnings are shown, not fatal: which ones fire depends on the host compiler and its version, and
+/// a new one must not fail this suite on someone else's machine.
 fn cc(out: &Path, extra: &[&str], srcs: &[&str]) {
     let d = rt_dir();
     let mut cmd = Command::new("cc");
-    cmd.args(["-O1", "-Wall", "-Wextra", "-Werror", "-o"]).arg(out).args(extra);
+    cmd.args(["-O1", "-Wall", "-Wextra", "-o"]).arg(out).args(extra);
     for s in srcs {
         cmd.arg(d.join(s));
     }
@@ -701,6 +714,9 @@ fn random(n: usize) -> Vec<Case> {
 
 #[test]
 fn every_region_access_and_syscall_matches_the_interpreter() {
+    if !host_cc() {
+        return;
+    }
     let mut cases = directed();
     let n_directed = cases.len();
     cases.extend(random(4000));
@@ -725,6 +741,9 @@ fn every_region_access_and_syscall_matches_the_interpreter() {
 
 #[test]
 fn the_c_suite_passes_in_both_usize_widths() {
+    if !host_cc() {
+        return;
+    }
     let tmp = tempfile_dir();
     let srcs = ["test/host_test.c", "test/host_glue.c", "sbpf_rt.c", "sbpf_bn.c", "sbpf_ed25519.c", "sbpf_secp256k1.c"];
     for (name, extra) in [("host64", vec![]), ("host32", vec!["-DSBPF_USIZE_MAX=0xffffffffu"])] {
