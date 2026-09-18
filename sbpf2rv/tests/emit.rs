@@ -529,3 +529,187 @@ fn a_deferred_check_is_never_next_to_another() {
     assert_eq!(head(3), "budget -= 1;");
     assert_eq!(head(4), "if ((budget -= 1) < 0) goto L_limit;");
 }
+
+/// Fix round 1 (critical): a callee that reads its argument only through a register store. The
+/// store opcodes do not follow the ALU/JMP source bit (stxb 0x73 and stxw 0x63 have bit 3 clear;
+/// st imm 0x6a and 0x7a have it set), so liveness must name them explicitly: every `stx` width uses
+/// its source, and no `st` immediate uses one.
+#[test]
+fn a_store_register_is_a_use_at_every_width_and_a_store_immediate_is_not() {
+    let passes = |store: Insn, load: u8| {
+        let t = text(&[
+            i(opc::MOV64_IMM, 3, 0, 0, 0x42), // 0
+            i(opc::CALL_IMM, 0, 0, 0, 1),     // 1: call 3
+            i(opc::EXIT, 0, 0, 0, 0),         // 2
+            store,                            // 3
+            i(load, 0, 10, -8, 0),            // 4
+            i(opc::EXIT, 0, 0, 0, 0),         // 5
+        ]);
+        let p = Program::from_text(&t).unwrap();
+        let c = emit_program(&p, &scan(&p)).c;
+        let at = c.find("SBPF_CALL(f_3(").unwrap_or_else(|| panic!("{c}"));
+        c[at + "SBPF_CALL(f_3".len()..]
+            .split(')')
+            .next()
+            .unwrap()
+            .to_string()
+            + ")"
+    };
+    for (st, ld) in [
+        (opc::ST_B_REG, opc::LD_B_REG),
+        (opc::ST_H_REG, opc::LD_H_REG),
+        (opc::ST_W_REG, opc::LD_W_REG),
+        (opc::ST_DW_REG, opc::LD_DW_REG),
+    ] {
+        assert_eq!(
+            passes(i(st, 10, 3, -8, 0), ld),
+            "(0, 0, 0, r3, 0, 0, 0, 0, 0, 0, r10 + SBPF_STACK_FRAME)",
+            "{st:#04x}"
+        );
+    }
+    for (st, ld) in [
+        (opc::ST_B_IMM, opc::LD_B_REG),
+        (opc::ST_H_IMM, opc::LD_H_REG),
+        (opc::ST_W_IMM, opc::LD_W_REG),
+        (opc::ST_DW_IMM, opc::LD_DW_REG),
+    ] {
+        // `src` is 3 in the encoding, but an immediate store reads only its base.
+        assert_eq!(
+            passes(i(st, 10, 3, -8, 9), ld),
+            "(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, r10 + SBPF_STACK_FRAME)",
+            "{st:#04x}"
+        );
+    }
+}
+
+/// The liveness audit (fix round 1): `use_def` against the interpreter itself, for every opcode
+/// `isa::classify` assigns except calls and `exit` (whose effect the block's `Term` carries). Each
+/// instruction is encoded with `dst = r1`, `src = r2` (so an immediate form that wrongly used its
+/// `src` field would show up), run once from a base register file and once per variant of each
+/// register; a register whose variation changes anything observable — the halt, the other
+/// registers, the stack — is read, and must be declared; a register the instruction changes is
+/// written, and must be declared. The declared sets must also not over-state reads.
+#[test]
+fn use_def_is_what_the_interpreter_reads_and_writes() {
+    use sbpf2rv::emit::use_def;
+    use sbpf_core::interp::{Halt, Vm};
+    use sbpf_core::memory::{Memory, HEAP_BYTES, REGION_STACK, STACK_BYTES};
+
+    type Seen = (Result<u64, Halt>, [u64; 11], Vec<u8>);
+    fn observe(prog: &[Insn], regs: [u64; 11]) -> Seen {
+        let t = text(prog);
+        let p = Program::from_text(&t).unwrap();
+        let mut stack = Box::new([0u8; STACK_BYTES]);
+        let mut heap = Box::new([0u8; HEAP_BYTES]);
+        let mut input = vec![0u8; 64];
+        let mem = Memory {
+            text: p.text,
+            text_va: p.text_va,
+            rodata: p.rodata,
+            rodata_base: p.rodata_va,
+            stack: &mut stack,
+            heap: &mut heap,
+            input: &mut input,
+        };
+        let mut h = rand_zkvm::sbpf::HostRef;
+        let (r, out) = {
+            let mut vm = Vm::new(&mut h, &p, mem);
+            vm.regs = regs;
+            (vm.run(), vm.regs)
+        };
+        (r, out, stack.to_vec())
+    }
+
+    let base = |shift: u64| -> [u64; 11] {
+        core::array::from_fn(|k| REGION_STACK + 0x1000 + 0x40 * k as u64 + shift)
+    };
+    let (a, b) = (base(0), base(0x100));
+    let mut audited = 0;
+    for byte in 0..=255u8 {
+        if isa::classify(byte).is_none()
+            || matches!(byte, opc::CALL_IMM | opc::CALL_REG | opc::EXIT)
+        {
+            continue;
+        }
+        let imm = if matches!(byte, opc::LE | opc::BE) {
+            16
+        } else {
+            3
+        };
+        let me = i(
+            byte,
+            1,
+            2,
+            if isa::classify(byte) == Some(isa::Class::Jmp) {
+                2
+            } else {
+                -8
+            },
+            imm,
+        );
+        // A jump lands on one of two exits that set r0 apart; anything else falls into `r0 = 0;
+        // exit`, so `exit`'s own read of r0 is not mistaken for the instruction's.
+        let tail = [i(opc::MOV64_IMM, 0, 0, 0, 0), i(opc::EXIT, 0, 0, 0, 0)];
+        let prog: Vec<Insn> = if byte == opc::LD_DW_IMM {
+            [vec![me, i(0, 0, 0, 0, 7)], tail.to_vec()].concat()
+        } else if isa::classify(byte) == Some(isa::Class::Jmp) {
+            vec![
+                me,
+                i(opc::MOV64_IMM, 0, 0, 0, 0),
+                i(opc::EXIT, 0, 0, 0, 0),
+                i(opc::MOV64_IMM, 0, 0, 0, 1),
+                i(opc::EXIT, 0, 0, 0, 0),
+            ]
+        } else {
+            [vec![me], tail.to_vec()].concat()
+        };
+        let (used, defined) = use_def(&me);
+
+        let mut writes: u16 = 0;
+        for regs in [a, b] {
+            let (_, out, _) = observe(&prog, regs);
+            for k in 0..11 {
+                if out[k] != regs[k] {
+                    writes |= 1 << k;
+                }
+            }
+        }
+        // The tails' own `mov r0` is not the instruction's write (it names r1 and r2 only).
+        writes &= !1;
+        assert_eq!(
+            writes & !defined,
+            0,
+            "{byte:#04x} writes {writes:#x}, declares {defined:#x}"
+        );
+
+        let mut reads: u16 = 0;
+        let seen_a = observe(&prog, a);
+        for x in 0..11 {
+            let mut variants: Vec<u64> = vec![a[x] + 8, 0, 3, 16, u64::MAX, 1 << 63];
+            variants.extend((0..11).filter(|&k| k != x).map(|k| a[k]));
+            for v in variants {
+                let mut regs = a;
+                regs[x] = v;
+                let seen = observe(&prog, regs);
+                let mut differs = seen.0 != seen_a.0 || seen.2 != seen_a.2;
+                for k in 0..11 {
+                    if (k != x || defined & (1 << k) != 0) && seen.1[k] != seen_a.1[k] {
+                        differs = true;
+                    }
+                }
+                if differs {
+                    reads |= 1 << x;
+                }
+            }
+        }
+        assert_eq!(
+            reads, used,
+            "{byte:#04x}: the interpreter reads {reads:#x}, use_def declares {used:#x}"
+        );
+        audited += 1;
+    }
+    assert_eq!(
+        audited, 88,
+        "every classified opcode but call, callx and exit"
+    );
+}

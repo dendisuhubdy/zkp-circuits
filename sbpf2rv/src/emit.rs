@@ -797,25 +797,38 @@ fn bit(r: u8) -> Regs {
     1 << r
 }
 
-/// What one straight-line instruction reads and writes (`interp.rs`'s semantics, register-wise).
-fn use_def(i: &Insn) -> (Regs, Regs) {
+/// What one instruction reads and writes, as register sets (bit `n` for `rn`) — `interp.rs`'s
+/// semantics opcode by opcode, never inferred from an encoding bit: the ALU/JMP source bit
+/// (`0x08`) does not carry over to the stores (`stxb` 0x73 and `stxw` 0x63 have it clear, `st`
+/// immediates 0x6a and 0x7a have it set). Calls, `callx` and `exit` read and write nothing *here*:
+/// the block's [`Term`] carries their effect (liveness takes a call's reads from the callee, and
+/// `callx`'s register from its immediate). An opcode `isa::classify` does not assign is never
+/// executed (the scanner traps before it), so it is empty too.
+pub fn use_def(i: &Insn) -> (u16, u16) {
+    use opc::*;
     let (d, s) = (bit(i.dst), bit(i.src));
-    let is_reg = i.opc & 0x08 != 0;
-    match isa::classify(i.opc) {
-        Some(Class::Ld) if i.opc == opc::LD_DW_IMM => (0, d),
-        Some(Class::Ld) => (s, d),
-        Some(Class::St) => (if is_reg { d | s } else { d }, 0),
-        Some(Class::Alu32) if i.opc == opc::LE || i.opc == opc::BE => (d, d),
-        Some(Class::Alu32 | Class::Alu64) if i.opc == opc::MOV32_IMM || i.opc == opc::MOV64_IMM => {
-            (0, d)
-        }
-        Some(Class::Alu32 | Class::Alu64) if i.opc == opc::MOV32_REG || i.opc == opc::MOV64_REG => {
-            (s, d)
-        }
-        Some(Class::Alu32 | Class::Alu64) if i.opc == opc::NEG32 || i.opc == opc::NEG64 => (d, d),
-        Some(Class::Alu32 | Class::Alu64) => (if is_reg { d | s } else { d }, d),
-        Some(Class::Jmp) if i.opc == opc::JA => (0, 0),
-        Some(Class::Jmp) => (if is_reg { d | s } else { d }, 0),
+    match i.opc {
+        LD_DW_IMM => (0, d),
+        LD_B_REG | LD_H_REG | LD_W_REG | LD_DW_REG => (s, d),
+        ST_B_IMM | ST_H_IMM | ST_W_IMM | ST_DW_IMM => (d, 0),
+        ST_B_REG | ST_H_REG | ST_W_REG | ST_DW_REG => (d | s, 0),
+        MOV32_IMM | MOV64_IMM => (0, d),
+        MOV32_REG | MOV64_REG => (s, d),
+        NEG32 | NEG64 | LE | BE => (d, d),
+        ADD32_IMM | SUB32_IMM | MUL32_IMM | DIV32_IMM | OR32_IMM | AND32_IMM | LSH32_IMM
+        | RSH32_IMM | MOD32_IMM | XOR32_IMM | ARSH32_IMM | ADD64_IMM | SUB64_IMM | MUL64_IMM
+        | DIV64_IMM | OR64_IMM | AND64_IMM | LSH64_IMM | RSH64_IMM | MOD64_IMM | XOR64_IMM
+        | ARSH64_IMM => (d, d),
+        ADD32_REG | SUB32_REG | MUL32_REG | DIV32_REG | OR32_REG | AND32_REG | LSH32_REG
+        | RSH32_REG | MOD32_REG | XOR32_REG | ARSH32_REG | ADD64_REG | SUB64_REG | MUL64_REG
+        | DIV64_REG | OR64_REG | AND64_REG | LSH64_REG | RSH64_REG | MOD64_REG | XOR64_REG
+        | ARSH64_REG => (d | s, d),
+        JA => (0, 0),
+        JEQ_IMM | JGT_IMM | JGE_IMM | JLT_IMM | JLE_IMM | JSET_IMM | JNE_IMM | JSGT_IMM
+        | JSGE_IMM | JSLT_IMM | JSLE_IMM => (d, 0),
+        JEQ_REG | JGT_REG | JGE_REG | JLT_REG | JLE_REG | JSET_REG | JNE_REG | JSGT_REG
+        | JSGE_REG | JSLT_REG | JSLE_REG => (d | s, 0),
+        CALL_IMM | CALL_REG | EXIT => (0, 0),
         _ => (0, 0),
     }
 }
