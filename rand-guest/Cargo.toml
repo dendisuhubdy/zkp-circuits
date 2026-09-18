@@ -17,9 +17,19 @@ clap = { version = "4.4", features = ["derive"] }
 anyhow = "1"
 sha2 = "0.10"
 hex = "0.4"
+# The chain's program id (`src/chain.rs`): fullnode's `program_id` is blake3, the same major.
+blake3 = "1.8"
 
 [dev-dependencies]
 tempfile = "3"
+# `U256` for building the ERC-20 transfer `tests/run.rs` pins `run`'s cycle count on.
+evm-core = { path = "../guests-compiled/evm-core" }
 
 # Its own workspace root, like every guest crate: never swept into research's cargo test.
 [workspace]
+
+# The prover and the emulator are research's code; optimise them even in a debug build, as
+# research's own manifest does, so `run` on the interpreters and the `#[ignore]`d proof test
+# (`tests/prove.rs`) take seconds rather than minutes.
+[profile.dev.package."*"]
+opt-level = 3

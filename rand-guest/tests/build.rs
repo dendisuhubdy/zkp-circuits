@@ -66,6 +66,7 @@ fn build_reproduces_every_committed_image_and_reports_hc() {
         assert_eq!(sum, format!("{}  {name}.bin\n", sha256_hex(&image)), "{name}.bin.sha256");
         let stdout = String::from_utf8_lossy(&o.stdout);
         assert!(stdout.contains("hc "), "{stdout}");
+        assert!(stdout.contains("program id "), "{stdout}");
         assert!(stdout.contains("words"), "{stdout}");
     }
     pack_and_check_the_elf_build_left(tmp.path());
@@ -300,4 +301,22 @@ void main(void) {
     for (i, w) in want.iter().enumerate() {
         assert!(s.contains(&format!("out[{i}] = {w}\n")), "out[{i}] should be {w}: {s}");
     }
+}
+
+/// `info` prints the chain's program id — fullnode's `randprotocol_core::program::program_id`, a
+/// blake3 content address, not `hc` — for the loader's `(base_pc, words)`. The value is the one
+/// fullnode's own function computes for the committed `evm.bin` (cross-checked once by calling
+/// `randprotocol_core::program::program_id` on `Program::from_flat_image(evm.bin)` from a scratch
+/// crate depending on both); fullnode has no fixed test vector for it to compare against.
+#[test]
+fn info_prints_the_program_id_fullnode_computes() {
+    const EVM_PROGRAM_ID: &str = "9969434294cec7a4aa6c6cfc305dfbe2e9e96b5375c9436ccb3ac0c72c44762b";
+    let o = Command::new(bin()).arg("info").arg(root().join("guests-compiled/bin/evm.bin")).output().unwrap();
+    let s = String::from_utf8_lossy(&o.stdout);
+    assert!(s.contains(&format!("program id {EVM_PROGRAM_ID}\n")), "{s}");
+    let p = Program::from_flat_image(&pinned_bytes("evm")).unwrap();
+    assert_eq!(hex::encode(rand_guest::chain::program_id(p.base_pc, &p.words)), EVM_PROGRAM_ID);
+    // A flat pin's id is over its `0x1000` base and its words, like any other program's.
+    let fib = Program::from_flat_binary(0x1000, &pinned_bytes("fib")).unwrap();
+    assert_eq!(hex::encode(rand_guest::chain::program_id(fib.base_pc, &fib.words)), "9d5a6507fb7f8dd6c77e4b542f3bcb3d9b68d2e79b87eb9ec5f1740fac776e26");
 }

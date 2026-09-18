@@ -30,10 +30,10 @@ source ──▶ rustc / clang (riscv32im-unknown-none-elf, guest.ld, fixed flag
 
 | command | in | out |
 |---|---|---|
-| `rand-guest build <dir> [--lang rust\|c] [--out image.bin]` | a Rust crate directory (a `no_std` bin depending on `guest-sdk`), or a directory of `.c`/`.h` files | the ELF under `<dir>/target/`, then `check` and `pack`; prints words, `hc`, program id, and whether it fits the chain cap |
+| `rand-guest build <dir> [--lang rust\|c] [--out image.bin]` | a Rust crate directory (a `no_std` bin depending on `guest-sdk`), or a directory of `.c`/`.h` files | the ELF under `<dir>/target/`, then `check` and `pack`; prints words, `hc`, the chain's program id (§5 — not `hc`), and whether it fits the chain cap |
 | `rand-guest check <elf\|image.bin>` | an ELF or a packed image | the ISA report (§4); exit 1 on any rejection |
 | `rand-guest pack <elf> [--out image.bin]` | an ELF | the image (§5) and its `sha256` |
-| `rand-guest run <image.bin> [--input w...] [--public w...] [--tier t]` | an image and its inputs | the eight output words, cycles, the smallest tier that fits, the trap if any (pc, word, cause) |
+| `rand-guest run <image.bin> [--input w...] [--public w...] [--tier t]` | an image and its inputs | the eight output words, cycles, the smallest tier that fits, whether it fits tier `t` (both budgets), the trap if any (the emulator's error; it carries no pc) |
 | `rand-guest info <image.bin>` | an image | words (text, data, prologue), `hc`, program id, data-segment bytes, cap check |
 
 `build` is `compile` + `check` + `pack`; the others exist so a transpiler can hand `check` an
@@ -83,11 +83,28 @@ The part that does not exist today. Over the ELF's `.text` (or an image's text s
 3. **Layout.** `.text` starts at the script's `ORIGIN`; every loaded PROGBITS section fits the
    container's data span; `.bss` and the stack fit `RAM`'s `LENGTH`; there is no relocation left
    unresolved; the entry is `_start`.
+   *Amended at the final review (2026-09-18): deferred.* The checker checks only that the text
+   base is word-aligned. The rest is covered in practice by the two tools on either side of it:
+   the linker places every output section inside `RAM` or fails the link (`> RAM`: an overflowed
+   region is a link error), resolves every relocation or fails, and takes its entry from
+   `guest.ld`'s `ENTRY(_start)`; the packer builds the data span from the sections themselves, so a section
+   cannot fall outside it; and the loader refuses a misaligned or wrapping base, a data segment
+   overlapping the text and a prologue with no room below it (`LoadError::{Base, Range, Overlap,
+   PrologueRoom}`). What none of them covers: the 64 KiB stack reservation is a location-counter
+   bump in `guest.ld`, not a section, so nothing checks `__stack_top` against `LENGTH` (1 MiB; no
+   guest comes close), and a stack that outgrows its 64 KiB into `.bss` at run time is not a
+   static property at all. `rand-guest/README.md`'s "What `check` does not check" says
+   so.
 4. **Limits.** Text words plus prologue words against the loader's `u16::MAX` words, and against
    the chain's deploy cap (§8), reported as fits / does not fit with the numbers.
 5. **Alignment.** Every `lw`/`sw`/`lh`/`sh` whose address is a constant the checker can fold is
    checked for alignment; the rest are the compiler's promise under
    `-unaligned-scalar-mem`, and the report says how many it could not fold.
+   *Amended at the final review (2026-09-18): deferred.* Compiled code rarely addresses memory
+   through a constant the checker could fold (it goes through `sp` or a pointer held in a
+   register), so the fold would check next to nothing, and
+   `-unaligned-scalar-mem` is what actually keeps the compiler from emitting a misaligned access;
+   one computed at run time is a trap `run` reports. The report prints no unfolded count.
 
 The report is one line per finding with the address, the word, the mnemonic and the rule; the
 exit code is the verdict. A guest that passes `check` cannot fail in-circuit for an encoding,
@@ -99,16 +116,22 @@ an out-of-range `READ_INPUT`, running past the tier), which `run` reports with t
 Exactly `mkimage.py`'s container, now in Rust, so the loader (`Program::from_flat_image`) is
 unchanged: six little-endian header words `["RAND", 1, text_base, n_text, data_base, n_data]`
 then `text`, then every allocated PROGBITS section from `.rodata` up as one span with gaps
-zero-filled; `.bss` never appears. `hc` and the program id are computed with the research
-crate's `Program::digest` and printed; the `sha256` of the image is written beside it, as the
-Makefiles do, because that is what pins a guest in a test.
+zero-filled; `.bss` never appears. `hc` is computed with the research crate's `Program::digest`
+and printed. The **program id** is a different thing, not derived from `Program::digest`: it is the
+chain's content address, fullnode's `randprotocol_core::program::program_id` —
+`blake3("rand-program" ‖ base_pc LE ‖ words LE)` over the loader's `(base_pc, words)` — reproduced
+byte for byte in `rand-guest/src/chain.rs` and printed beside `hc`. (*Amended at the final review,
+2026-09-18: the first draft said both came from `Program::digest`.*) The `sha256` of the image is
+written beside it, as the Makefiles did, because that is what pins a guest in a test.
 
 ## 6. Running
 
 `run` loads the image with the same loader the prover uses, executes it on the research
 emulator with the given private inputs and public segment, and prints the eight outputs, the
-cycle count, the smallest tier whose cycle budget holds it, and, on a trap, the pc, the word and
-the cause. This is the measurement the transpiler exit criteria are stated in (cycles against
+cycle count, the smallest tier that holds it — by `Tier::for_workload`, the prover's own rule, which
+checks the Poseidon2 permutation budget as well as the cycle budget — and, with `--tier t`,
+whether tier `t` holds it, with both budgets. On a trap it prints the emulator's error, which
+carries the cause but no pc. This is the measurement the transpiler exit criteria are stated in (cycles against
 the interpreter's), and the developer's proof-free dry run.
 
 ## 7. Testing
@@ -119,8 +142,8 @@ the interpreter's), and the developer's proof-free dry run.
 - **A fifth guest in C** (`guests-compiled/c-fib` or similar) builds, checks, runs to the same
   outputs as the Rust `fib`, and proves under the research prover's test profile.
 - **Checker negatives**, one per rule: an ELF with a `fence`, a CSR read, an `ebreak`, a
-  compressed instruction, an unknown syscall number, a `.data` past the span, a text past the
-  cap. Each must be rejected with its rule named.
+  compressed instruction, an unknown syscall number, a text past the cap. Each must be rejected
+  with its rule named.
 - **`run` reproduces** the committed cycle counts for the four guests (the ERC-20 transfer's
   121 638 executed cycles among them).
 - **Reproducibility:** the same source built from two different checkout paths gives the same

@@ -2,8 +2,9 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use rand_guest::{build, check, pack};
+use rand_guest::{build, chain, check, pack};
 use rand_zkvm::isa::{LoadError, Program, IMAGE_MAGIC};
+use rand_zkvm::machine::{Tier, TIERS};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -54,6 +55,9 @@ enum Cmd {
         inputs: Vec<u32>,
         #[arg(long = "public", num_args = 0..)]
         public: Vec<u32>,
+        /// Also say whether the run fits this tier (one of the machine's tiers: 10, 12, …, 20).
+        #[arg(long)]
+        tier: Option<usize>,
     },
     /// Words, hc, the cap.
     Info {
@@ -183,7 +187,13 @@ fn main() -> Result<()> {
             let c = report_image(&image, max_words).with_context(|| format!("checking {}", b.image.display()))?;
             println!("{c}");
             match &c.program {
-                Some(p) => println!("wrote {} and its .sha256 ({} words, hc {})", b.image.display(), p.words.len(), hex8(&p.digest())),
+                Some(p) => println!(
+                    "wrote {} and its .sha256 ({} words, hc {}, program id {})",
+                    b.image.display(),
+                    p.words.len(),
+                    hex8(&p.digest()),
+                    hex::encode(chain::program_id(p.base_pc, &p.words))
+                ),
                 None => println!("wrote {} (the loader refuses it: no hc)", b.image.display()),
             }
             if !c.report.is_ok() {
@@ -210,10 +220,15 @@ fn main() -> Result<()> {
             pack::write_image(&out, &image)?;
             println!("wrote {} ({} bytes) and {}.sha256", out.display(), image.len(), out.display());
         }
-        Cmd::Run { image, inputs, public } => {
+        Cmd::Run { image, inputs, public, tier } => {
+            if let Some(t) = tier {
+                if !TIERS.contains(&t) {
+                    bail!("--tier {t} is not one of the machine's tiers {TIERS:?}");
+                }
+            }
             let bytes = std::fs::read(&image).with_context(|| format!("reading {}", image.display()))?;
             let (program, _form) = load(&bytes).map_err(|e| anyhow::anyhow!("{e:?}")).with_context(|| format!("loading {}", image.display()))?;
-            let max = rand_zkvm::machine::Tier(*rand_zkvm::machine::TIERS.last().unwrap()).max_cycles();
+            let max = Tier(*TIERS.last().unwrap()).max_cycles();
             match rand_zkvm::emulator::execute(&program, &inputs, &public, max) {
                 Ok(exec) => {
                     for (i, w) in exec.outputs.iter().enumerate() { println!("out[{i}] = {w}"); }
@@ -230,15 +245,26 @@ fn main() -> Result<()> {
                     let total_cycles = cycles + digest_rows;
                     let absorb_rows = exec.events.iter().filter(|e| matches!(e.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. }))).count();
                     let permutations = digest_rows + absorb_rows;
-                    match rand_zkvm::machine::Tier::for_workload(total_cycles, permutations) {
+                    match Tier::for_workload(total_cycles, permutations) {
                         Some(t) => println!("tier {}", t.0),
-                        None => println!("no tier fits {total_cycles} cycles"),
+                        None => println!("no tier fits: cycles {total_cycles}, Poseidon2 permutations {permutations}"),
                     }
-                    if !exec.halted { println!("note: the program did not halt (ran out of the largest tier's budget)"); }
+                    if let Some(t) = tier {
+                        // The same rule `Tier::for_workload` applies to every tier it tries, stated
+                        // for this one tier with both budgets printed.
+                        let t = Tier(t);
+                        let (cycle_budget, perm_budget) = (t.max_cycles(), t.poseidon2_height() / rand_zkvm::tables::poseidon2::BLOCK);
+                        let fits = total_cycles <= t.max_cycles() && permutations * rand_zkvm::tables::poseidon2::BLOCK <= t.poseidon2_height();
+                        println!(
+                            "tier {}: {} (cycles {total_cycles} of {cycle_budget}, Poseidon2 permutations {permutations} of {perm_budget})",
+                            t.0,
+                            if fits { "fits" } else { "does not fit" }
+                        );
+                    }
                 }
                 Err(e) => {
-                    // The emulator's error carries the faulting pc where it has one; print what it has.
-                    println!("trap at pc: {e:?}");
+                    // The emulator's error carries no pc to print; the error itself says what trapped.
+                    println!("trap: {e:?}");
                     std::process::exit(2);
                 }
             }
@@ -270,6 +296,7 @@ fn main() -> Result<()> {
                 }
             }
             println!("hc {}", hex8(&program.digest()));
+            println!("program id {}", hex::encode(chain::program_id(program.base_pc, &program.words)));
             println!("{} words against a cap of {max_words}: {}", program.words.len(), if program.words.len() <= max_words { "fits" } else { "does not fit" });
         }
     }

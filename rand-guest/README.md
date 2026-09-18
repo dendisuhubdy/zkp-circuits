@@ -41,18 +41,25 @@ Also writes `guest.bin.sha256`, the pin format `guests-compiled/bin/*.bin.sha256
 
 ### `run` — run an image on the emulator with the given inputs
 
-    cargo +1.98.1 run -- run ../guests-compiled/bin/fib.bin --input 20
+    cargo +1.98.1 run -- run ../guests-compiled/bin/fib.bin --input 20 --tier 10
 
 Prints each output word, the cycle count, and the smallest tier the run fits (mirroring
 `Machine::prove_salted`'s tier pick, not cycles alone — the Poseidon2 table is a second,
-independent constraint); a trap prints the faulting pc and exits 2.
+independent constraint); with `--tier t`, also whether the run fits tier `t`, with both budgets
+(`tier 10: fits (cycles 146 of 1023, Poseidon2 permutations 10 of 128)` for `fib(20)`). A run that fits no tier
+says so with both counts. A trap prints `trap: <the emulator's error>` (it carries no pc) and
+exits 2.
 
 ### `info` — words, hc, the cap
 
     cargo +1.98.1 run -- info ../guests-compiled/bin/evm.bin
 
 Reports the on-disk form, the text/data/prologue word counts (image containers) or just the word
-count (flat binaries), the program digest `hc`, and whether the program fits `--max-words`.
+count (flat binaries), the program digest `hc`, the chain's program id, and whether the program
+fits `--max-words`. The two identities are different hashes of the same `(base_pc, words)`: `hc`
+is the circuit's Poseidon2 digest a proof is verified against; the program id is fullnode's
+`program_id`, `blake3("rand-program" ‖ base_pc ‖ words)`, the key a deployed program is stored and
+called under. `build` prints both too.
 
 ## Flags
 
@@ -70,6 +77,7 @@ count (flat binaries), the program digest `hc`, and whether the program fits `--
 | `run` | `<image>` (positional) | — | a packed image or a legacy flat binary |
 | `run` | `--input <u32>...` | none | private input words, bound to `H_IN` (`READ_INPUT`) |
 | `run` | `--public <u32>...` | none | public input words, bound to `H_PUB` (`READ_PUBLIC`) |
+| `run` | `--tier <t>` | none | also report whether the run fits tier `t` (10, 12, …, 20) |
 | `info` | `<image>` (positional) | — | a packed image or a legacy flat binary |
 | `info` | `--max-words <n>` | `4096` | the cap the report is measured against |
 
@@ -98,6 +106,30 @@ cannot fail in-circuit for an encoding, syscall-number, or layout reason. It ref
   data prologue it synthesises, never estimated from the data word count, since an `li` is one
   word or two depending on the constant and the base register resets periodically (`Cap`)
 - a text base that is not word-aligned (`Layout`)
+
+## What `check` does not check
+
+The spec's §4.3 and §4.5 are deferred (`docs/superpowers/specs/2026-09-18-rand-guest-toolchain-design.md`
+says why); in practice the linker, the packer and the loader cover them:
+
+- **Layout beyond the text base.** Only the text base's alignment is checked. Sections inside
+  `RAM`, unresolved relocations and the entry point are the linker's (an overflowed region or an
+  unresolved symbol fails the link; `guest.ld` says `ENTRY(_start)`); the data span is built from
+  the sections themselves; a misaligned or wrapping base, data overlapping the text and a prologue
+  with no room below the text are refused by the loader. Nothing checks the 64 KiB stack
+  reservation against `RAM`'s `LENGTH`, or a stack that outgrows it into `.bss` at run time.
+- **Alignment of constant addresses.** No load or store address is folded; the compiler's
+  `-unaligned-scalar-mem` is the guarantee, and a misaligned address computed at run time is a
+  trap `run` reports.
+- **`a7` past a branch target.** The syscall rule tracks the last `li a7, n` in straight-line code
+  and forgets it at every branch or jump *instruction* — but not at a branch *target*, which the
+  checker does not compute. Code reached by a jump into the middle of a block, after an `li a7`
+  that the jumping path never executed, is judged with that `li`'s value. The compilers set `a7`
+  immediately before each `ecall`, so this does not arise in practice, but a hand-written or
+  translated text could hide an unimplemented syscall number from the check this way (the machine
+  still traps on it at run time).
+- **What a syscall does with its arguments** — pointers, lengths, input indices. Those are run-time
+  values; `run` reports the trap.
 
 ## The cap: `--max-words` and its default
 
