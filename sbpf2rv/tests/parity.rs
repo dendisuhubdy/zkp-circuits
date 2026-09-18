@@ -12,8 +12,10 @@
 //! digest, where the code is the `Halt` variant's declaration index (0 = returned, payload `r0`) —
 //! the same numbering as `sbpf-rt`'s `SBPF_HALT_*`, mapped back through the shim's `halt_from`.
 //!
-//! Vectors: the SPL Token `Transfer` (status 1), the same with too large an amount (status 0), a
-//! `Transfer` with too few accounts (the program's own `NotEnoughAccountKeys`, status 0), a region
+//! Vectors: the SPL Token `Transfer` (status 1), the same with too large an amount (status 0),
+//! `MintTo` and `Burn` (status 1) with their failing cases — a mint signed by someone other than the
+//! mint authority (`OwnerMismatch`) and a burn of more than the balance (`InsufficientFunds`),
+//! status 0 — a `Transfer` with too few accounts (the program's own `NotEnoughAccountKeys`, status 0), a region
 //! claiming more than `MAX_ACCOUNTS` accounts (refused by the harness before anything runs, status
 //! 2), and a hand-built program that writes an account and then loads through a null pointer
 //! (`Halt::AccessViolation(0)`, status 2 over the pre-state).
@@ -270,6 +272,13 @@ fn hc_of(info: &str) -> String {
 
 /// `rand-guest run`: the eight words and the cycle count.
 fn run(image: &Path, call: &SbpfCall) -> ([u32; 8], usize) {
+    let (out, cycles, _) = run_tiered(image, call);
+    (out, cycles)
+}
+
+/// `rand-guest run`: the eight words, the cycle count, and the tier it reports (`Tier::for_workload`
+/// over the cycles plus the digest rows; `None` if none fits).
+fn run_tiered(image: &Path, call: &SbpfCall) -> ([u32; 8], usize, Option<usize>) {
     let mut c = Command::new(rand_guest());
     c.arg("run").arg(image).arg("--public");
     for w in call.public_words() {
@@ -299,7 +308,14 @@ fn run(image: &Path, call: &SbpfCall) -> ([u32; 8], usize) {
         .trim()
         .parse()
         .unwrap();
-    (out, cycles)
+    let tier = s
+        .lines()
+        .find_map(|l| l.strip_prefix("tier ")?.trim().parse().ok());
+    assert!(
+        tier.is_some() || s.contains("no tier fits"),
+        "rand-guest run names a tier:\n{s}"
+    );
+    (out, cycles, tier)
 }
 
 /// `Result<u64, Halt>` as the `halt-words` image writes it after `status`.
@@ -328,6 +344,17 @@ fn halt_words(r: &Result<u64, Halt>) -> [u32; 3] {
     [code, payload as u32, (payload >> 32) as u32]
 }
 
+/// One vector's measurements: `rand-guest run` on both images, and what the interpreter executed.
+struct Row {
+    what: String,
+    result: Result<u64, Halt>,
+    status: u32,
+    /// sBPF instructions the interpreter executes (natively, `sbpf_core`'s meter).
+    insns: u64,
+    translated: (usize, Option<usize>),
+    interpreted: Option<(usize, Option<usize>)>,
+}
+
 /// The whole comparison for one vector.
 fn parity(
     t: &Translated,
@@ -336,9 +363,20 @@ fn parity(
     call: &SbpfCall,
     want_status: u32,
 ) -> Result<u64, Halt> {
+    parity_measured(t, interp_image, what, call, want_status).result
+}
+
+/// [`parity`], and the cycles and tier each image took.
+fn parity_measured(
+    t: &Translated,
+    interp_image: Option<&Path>,
+    what: &str,
+    call: &SbpfCall,
+    want_status: u32,
+) -> Row {
     let (want, result, _) = call.expected();
     assert_eq!(want[0], want_status, "{what}: the interpreter's own status");
-    let (got, cycles) = run(&t.image, call);
+    let (got, cycles, tier) = run_tiered(&t.image, call);
     assert_eq!(
         got, want,
         "{what}: translated vs sbpf_core::abi::run_call on the host"
@@ -350,18 +388,177 @@ fn parity(
         [want_status, hw[0], hw[1], hw[2], 0, 0, 0, 0],
         "{what}: translated halt vs the interpreter's {result:?}"
     );
-    match interp_image {
+    let interpreted = match interp_image {
         Some(interp) => {
-            let (via_interp, interp_cycles) = run(interp, call);
+            let (via_interp, interp_cycles, interp_tier) = run_tiered(interp, call);
             assert_eq!(
                 via_interp, want,
                 "{what}: sbpf.bin on the emulator vs the host"
             );
             eprintln!("{what}: {result:?}, status {want_status}; cycles translated {cycles}, interpreter guest {interp_cycles}");
+            Some((interp_cycles, interp_tier))
         }
-        None => eprintln!("{what}: {result:?}, status {want_status}; cycles translated {cycles}"),
+        None => {
+            eprintln!("{what}: {result:?}, status {want_status}; cycles translated {cycles}");
+            None
+        }
+    };
+    // A refused ELF or region never reaches the program: nothing executes.
+    let insns = match result {
+        Err(Halt::BadElf) => 0,
+        _ => instructions(call),
+    };
+    Row {
+        what: what.to_string(),
+        result,
+        status: want_status,
+        insns,
+        translated: (cycles, tier),
+        interpreted,
     }
-    result
+}
+
+/// The measured rows as the README's table.
+fn table(rows: &[Row], words: usize, interp_words: usize) -> String {
+    let tier = |t: Option<usize>| t.map_or("none".to_string(), |t| t.to_string());
+    let mut s = format!(
+        "| vector | result | status | sBPF insns | translated cycles | tier | sbpf.bin cycles | tier \
+         | saved |\n|---|---|---|---|---|---|---|---|---|\n(image words: translated {words}, \
+         sbpf.bin {interp_words})\n"
+    );
+    for r in rows {
+        let (ic, it) = r.interpreted.unwrap_or((0, None));
+        s.push_str(&format!(
+            "| {} | `{:?}` | {} | {} | {} | {} | {} | {} | {} |\n",
+            r.what,
+            r.result,
+            r.status,
+            r.insns,
+            r.translated.0,
+            tier(r.translated.1),
+            ic,
+            tier(it),
+            ic as i64 - r.translated.0 as i64
+        ));
+    }
+    s
+}
+
+/// `rand-guest info`'s program word count for an image.
+fn image_words(image: &Path) -> usize {
+    let o = Command::new(rand_guest())
+        .arg("info")
+        .arg(image)
+        .args(["--max-words", "65535"])
+        .output()
+        .unwrap();
+    check(&o, "rand-guest info")
+        .lines()
+        .find_map(|l| {
+            l.split_once(" words against a cap of ")
+                .map(|(n, _)| n.trim().parse::<usize>().unwrap())
+        })
+        .expect("info prints the word count")
+}
+
+// ---- the SPL Token `MintTo` and `Burn` vectors -----------------------------------------------------
+
+/// `spl_token::instruction::TokenInstruction::MintTo`'s discriminant.
+const MINT_TO_TAG: u8 = 7;
+/// `spl_token::instruction::TokenInstruction::Burn`'s discriminant.
+const BURN_TAG: u8 = 8;
+
+/// `research`'s fixture key: a 32-byte key from one byte, its last byte perturbed (the same
+/// function as `rand_zkvm::sbpf`'s private `key`, so these accounts are the transfer fixture's).
+fn key(tag: u8) -> [u8; 32] {
+    let mut k = [tag; 32];
+    k[31] = tag ^ 0x5a;
+    k
+}
+
+/// An account in the transfer fixture's shape: lamports and rent epoch as it has them.
+fn account(key: [u8; 32], owner: [u8; 32], data: Vec<u8>, signer: bool, writable: bool) -> Account {
+    Account {
+        key,
+        owner,
+        lamports: match data.len() {
+            0 => 1_000_000_000,
+            sbpf::MINT_LEN => 1_461_600,
+            _ => 2_039_280,
+        },
+        data,
+        is_signer: signer,
+        is_writable: writable,
+        executable: false,
+        rent_epoch: u64::MAX,
+    }
+}
+
+/// The transfer fixture's mint, token account and owner, and `amount` as a tagged instruction.
+fn spl_parts(tag: u8, amount: u64) -> ([u8; 32], [u8; 32], Vec<u8>) {
+    let mut data = vec![tag];
+    data.extend_from_slice(&amount.to_le_bytes());
+    (key(1), key(2), data)
+}
+
+/// An SPL Token `MintTo` of `amount` to the transfer fixture's source account (holding
+/// `SPL_TRANSFER_SOURCE_BALANCE`), in the order `process_mint_to` reads them: `[mint (writable),
+/// destination (writable), authority (signer)]`. The mint's authority is the fixture's owner;
+/// `signer` is who signs as the authority — the owner, or (the failing case) someone else, which
+/// `validate_owner` refuses with `TokenError::OwnerMismatch`.
+fn spl_mint_to(amount: u64, signer: [u8; 32]) -> SbpfCall {
+    let (mint, owner, data) = spl_parts(MINT_TO_TAG, amount);
+    let supply = sbpf::SPL_TRANSFER_SOURCE_BALANCE + sbpf::SPL_TRANSFER_DEST_BALANCE;
+    let accounts = [
+        account(
+            mint,
+            sbpf::SPL_TOKEN_ID,
+            sbpf::mint_data(Some(owner), supply, 6),
+            false,
+            true,
+        ),
+        account(
+            key(3),
+            sbpf::SPL_TOKEN_ID,
+            sbpf::token_account_data(mint, owner, sbpf::SPL_TRANSFER_SOURCE_BALANCE),
+            false,
+            true,
+        ),
+        account(signer, [0u8; 32], Vec::new(), true, false),
+    ];
+    SbpfCall {
+        elf: sbpf::SPL_TOKEN_ELF.to_vec(),
+        input: sbpf::serialize_aligned(&accounts, &data, &sbpf::SPL_TOKEN_ID),
+    }
+}
+
+/// An SPL Token `Burn` of `amount` from the transfer fixture's source account, in the order
+/// `process_burn` reads them: `[source (writable), mint (writable), owner (signer)]`. More than
+/// the source holds is the failing case: `TokenError::InsufficientFunds`.
+fn spl_burn(amount: u64) -> SbpfCall {
+    let (mint, owner, data) = spl_parts(BURN_TAG, amount);
+    let supply = sbpf::SPL_TRANSFER_SOURCE_BALANCE + sbpf::SPL_TRANSFER_DEST_BALANCE;
+    let accounts = [
+        account(
+            key(3),
+            sbpf::SPL_TOKEN_ID,
+            sbpf::token_account_data(mint, owner, sbpf::SPL_TRANSFER_SOURCE_BALANCE),
+            false,
+            true,
+        ),
+        account(
+            mint,
+            sbpf::SPL_TOKEN_ID,
+            sbpf::mint_data(Some(owner), supply, 6),
+            false,
+            true,
+        ),
+        account(owner, [0u8; 32], Vec::new(), true, false),
+    ];
+    SbpfCall {
+        elf: sbpf::SPL_TOKEN_ELF.to_vec(),
+        input: sbpf::serialize_aligned(&accounts, &data, &sbpf::SPL_TOKEN_ID),
+    }
 }
 
 /// `hc` of the translated SPL Token image (Homebrew clang 23.1.1, rustc 1.98.1).
@@ -435,21 +632,41 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
     assert_eq!(t.hc, SPL_TOKEN_HC, "the translated SPL Token image moved");
     let interp = interpreter_guest();
 
+    let mut rows = Vec::new();
+    let mut measure = |what: &str, call: &SbpfCall, status: u32| -> Result<u64, Halt> {
+        let row = parity_measured(&t, Some(&interp), what, call, status);
+        let r = row.result;
+        rows.push(row);
+        r
+    };
+
     // The transfer.
-    assert_eq!(
-        parity(&t, Some(&interp), "transfer 250", &spl_transfer(250), 1),
-        Ok(0)
-    );
+    assert_eq!(measure("transfer 250", &spl_transfer(250), 1), Ok(0));
 
     // Too much: `InsufficientFunds`, a non-zero r0, status 0 over the pre-state.
-    let r = parity(
-        &t,
-        Some(&interp),
-        "transfer too much",
-        &spl_transfer(u64::MAX / 2),
-        0,
-    );
+    let r = measure("transfer too much", &spl_transfer(u64::MAX / 2), 0);
     assert!(matches!(r, Ok(c) if c != 0), "{r:?}");
+
+    // `MintTo` and `Burn`, each with its failing case. `TokenError` is `repr(u32)` and a
+    // `ProgramError::Custom(n)` returns `n` in r0: `InsufficientFunds` = 1, `OwnerMismatch` = 4.
+    assert_eq!(measure("MintTo 250", &spl_mint_to(250, key(2)), 1), Ok(0));
+    assert_eq!(
+        measure(
+            "MintTo 250 signed by someone else",
+            &spl_mint_to(250, key(5)),
+            0
+        ),
+        Ok(4)
+    );
+    assert_eq!(measure("Burn 250", &spl_burn(250), 1), Ok(0));
+    assert_eq!(
+        measure(
+            "Burn 1 000 001 (balance 1 000 000)",
+            &spl_burn(sbpf::SPL_TRANSFER_SOURCE_BALANCE + 1),
+            0
+        ),
+        Ok(1)
+    );
 
     // A bad account count, two ways. Too few for `Transfer` — the program's own error:
     let full = spl_transfer(250);
@@ -459,20 +676,18 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
         elf: full.elf.clone(),
         input: sbpf::serialize_aligned(&accounts[..2], &data, &id),
     };
-    let r = parity(&t, Some(&interp), "transfer with two accounts", &short, 0);
+    let r = measure("transfer with two accounts", &short, 0);
     assert!(matches!(r, Ok(c) if c != 0), "{r:?}");
     // And more than `MAX_ACCOUNTS` claimed: the harness refuses the region before anything runs.
     let mut over = full.clone();
     over.input[0..8].copy_from_slice(&(abi::MAX_ACCOUNTS as u64 + 1).to_le_bytes());
     assert_eq!(
-        parity(
-            &t,
-            Some(&interp),
-            "an account count above MAX_ACCOUNTS",
-            &over,
-            2
-        ),
+        measure("an account count above MAX_ACCOUNTS", &over, 2),
         Err(Halt::BadElf)
+    );
+    eprintln!(
+        "cycles, from rand-guest run on each image:\n{}",
+        table(&rows, t.words, image_words(&interp))
     );
 }
 
@@ -1247,11 +1462,7 @@ fn symbols(dir: &Path, name: &str) -> Vec<(u32, u32, String)> {
     let elf = dir
         .join("target/riscv32im-unknown-none-elf/release")
         .join(name);
-    let clang = std::env::var_os("CLANG").map_or_else(
-        || PathBuf::from("/opt/homebrew/opt/llvm/bin/clang"),
-        PathBuf::from,
-    );
-    let o = Command::new(clang.with_file_name("llvm-nm"))
+    let o = Command::new(llvm_tool("llvm-nm"))
         .args(["-n", "--defined-only"])
         .arg(&elf)
         .output()
@@ -1350,4 +1561,391 @@ fn fuzz_elf(text: &[u8]) -> Vec<u8> {
         i += if text[i] == opc::LD_DW_IMM { 16 } else { 8 };
     }
     builder::build_elf(&text, &[], &syms, &rels, 0)
+}
+
+// ---- one real proof ----------------------------------------------------------------------------------
+
+/// The translated SPL Token `Transfer` proved and verified — once, under the research prover's test
+/// profile (`FriProfile::Test`: 16 queries, 4 PoW bits), as `research/tests/backend.rs` proves its
+/// guests: `Machine::prove` over the image with the call's two input segments, then `verify`
+/// against the image's `hc` and `verify_public` against the ELF words (which is what binds the
+/// program a chain means: `verify` alone would accept a proof of any image's run).
+///
+/// The run is 692 854 cycles, `Tier(20)`: a 2^20-row batch, the size research's own
+/// `compiled_sbpf_spl_token_transfer_proves_and_verifies` (the interpreter's twin of this test) is
+/// ignored for on a 48 GB machine. Run it explicitly, in release, where the memory is:
+///
+/// ```text
+/// cd sbpf2rv && cargo +1.98.1 test --release --test parity \
+///     the_translated_spl_token_transfer_proves_and_verifies -- --ignored --nocapture
+/// ```
+///
+/// `README.md` records what running it here measured.
+#[test]
+#[ignore = "Tier(20) proof: run once on this 48 GB laptop on 2026-09-18 and stopped at 225 s at a \
+            30.8 GB peak footprint, still proving (README.md, \"One real proof\"); needs a >= 64 GB \
+            machine, like research's interpreter twin of this test"]
+fn the_translated_spl_token_transfer_proves_and_verifies() {
+    use rand_zkvm::machine::{FriProfile, Machine};
+    let elf = root().join("guests-compiled/sbpf/programs/spl_token.so");
+    let t = translate(&elf, "spl-token");
+    assert_eq!(t.hc, SPL_TOKEN_HC, "the translated SPL Token image moved");
+    let program =
+        rand_zkvm::isa::Program::from_flat_image(&std::fs::read(&t.image).unwrap()).unwrap();
+    let call = spl_transfer(250);
+    let (want, result, _) = call.expected();
+    assert_eq!(result, Ok(0));
+    let (inputs, public) = (call.input_words(), call.public_words());
+    let m = Machine::new(FriProfile::Test);
+    eprintln!(
+        "proving: {} program words, {} private words, {} public words",
+        program.words.len(),
+        inputs.len(),
+        public.len()
+    );
+    let t0 = std::time::Instant::now();
+    let (proof, exec) = m.prove(&program, &inputs, &public, None).unwrap();
+    let prove = t0.elapsed();
+    assert_eq!(exec.outputs, want, "the proved run's words vs run_call");
+    let t1 = std::time::Instant::now();
+    m.verify(&program.digest(), &proof).unwrap();
+    m.verify_public(&program.digest(), &public, &proof).unwrap();
+    let verify = t1.elapsed();
+    eprintln!(
+        "translated SPL Token transfer: {} cycles, tier {}, proof {} bytes, prove {prove:?}, \
+         verify + verify_public {verify:?}",
+        exec.cycles(),
+        proof.tier.0,
+        proof.size()
+    );
+}
+
+// ---- where the cycles go ----------------------------------------------------------------------------
+
+/// Where each image's cycles go, for the three successful SPL Token vectors: the harness's stages
+/// against the program's own execution. A measurement, not an assertion (`#[ignore]`d; it builds
+/// two more images and runs six executions on the emulator):
+///
+/// ```text
+/// cd sbpf2rv && cargo +1.98.1 test --test parity where_the_cycles_go -- --ignored --nocapture
+/// ```
+///
+/// Both images are built without debug info, and the harness is inlined into `main`, so symbols
+/// alone cannot split it. So each image gets a *line-table twin*: the same crate rebuilt with
+/// `profile.release.debug = "line-tables-only"` into a separate target directory, which must pack
+/// to the very same image bytes (debug info changes no code), and whose line tables then name,
+/// through `llvm-symbolizer --inlining`, the inlined function every pc belongs to. A shadow call
+/// stack replayed from the pc sequence attributes shared helpers (`memset`, `memcpy`, the SHA-256
+/// block function, `check_zeros`) to whoever called them. The first stage in [`STAGES`] that any
+/// frame on the stack matches is the cycle's stage.
+#[test]
+#[ignore = "measurement: builds two line-table twins and profiles six runs; see the doc comment"]
+fn where_the_cycles_go() {
+    let elf = root().join("guests-compiled/sbpf/programs/spl_token.so");
+    let t = translate(&elf, "spl-token");
+    let prof = work().join("profile");
+    std::fs::create_dir_all(&prof).unwrap();
+    let shim = work().join("spl-token");
+    let twins = [
+        (
+            "translated",
+            t.image.clone(),
+            line_table_twin(
+                &shim,
+                &shim.join("shim.ld"),
+                &prof.join("translated"),
+                "spl-token",
+                &t.image,
+            ),
+        ),
+        (
+            "sbpf.bin",
+            interpreter_guest(),
+            line_table_twin(
+                &root().join("guests-compiled/sbpf"),
+                &root().join("guests-compiled/sbpf/sbpf.ld"),
+                &prof.join("interpreter"),
+                "sbpf-guest",
+                &interpreter_guest(),
+            ),
+        ),
+    ];
+    for (what, call) in [
+        ("transfer 250", spl_transfer(250)),
+        ("MintTo 250", spl_mint_to(250, key(2))),
+        ("Burn 250", spl_burn(250)),
+    ] {
+        let insns = instructions(&call);
+        for (image_name, image, twin) in &twins {
+            let split = cycle_split(image, twin, &call);
+            let total: usize = split.iter().map(|(_, n)| n).sum();
+            eprintln!("{what} on {image_name}: {total} cycles, {insns} sBPF instructions");
+            for (stage, n) in &split {
+                eprintln!(
+                    "  {n:8}  {:5.1}%  {stage}",
+                    100.0 * *n as f64 / total as f64
+                );
+            }
+        }
+    }
+}
+
+/// One stage of a run, and the frames that identify it.
+struct Stage {
+    name: &'static str,
+    /// A (demangled, inlined) Rust function name containing one of these.
+    words: &'static [&'static str],
+    /// A C function (no `::` in its name: the translated code and `sbpf-rt`, which carry no line
+    /// tables) starting with one of these.
+    c_prefixes: &'static [&'static str],
+    /// A frame in one of these source files.
+    files: &'static [&'static str],
+}
+
+/// The harness's stages and the program's execution. The first stage any frame on the shadow
+/// stack matches is the cycle's, so a `check_region` inside `decode_input` is `check_region`'s.
+const STAGES: &[Stage] = &[
+    Stage {
+        name: "check_region: the zero scan pinning the region",
+        words: &["check_region", "check_zeros"],
+        c_prefixes: &[],
+        files: &[],
+    },
+    Stage {
+        name: "canonical input_hash",
+        words: &["canonical_input_hash"],
+        c_prefixes: &[],
+        files: &[],
+    },
+    Stage {
+        name: "output_hash",
+        words: &["output_hash"],
+        c_prefixes: &[],
+        files: &[],
+    },
+    Stage {
+        name: "public output words, program id",
+        words: &["public_output", "program_id", "write_output"],
+        c_prefixes: &[],
+        files: &[],
+    },
+    Stage {
+        name: "elf::load: parse, relocate, hash syscall names",
+        words: &["murmur3"],
+        c_prefixes: &[],
+        files: &["elf.rs"],
+    },
+    Stage {
+        name: "program: sBPF execution (interpreter, or translated code + sbpf-rt)",
+        words: &[],
+        c_prefixes: &["f_", "sbpf_", "OUTLINED_FUNCTION", "slice"],
+        files: &["interp.rs", "memory.rs", "syscalls.rs"],
+    },
+    Stage {
+        name: "decode_input: read both tapes",
+        words: &["decode_input"],
+        c_prefixes: &[],
+        files: &[],
+    },
+    Stage {
+        name: "zero the sBPF stack and heap",
+        words: &["fill<"],
+        c_prefixes: &[],
+        files: &[],
+    },
+];
+
+impl Stage {
+    fn claims(&self, function: &str, file: &str) -> bool {
+        self.words.iter().any(|w| function.contains(w))
+            || (!function.contains("::") && self.c_prefixes.iter().any(|p| function.starts_with(p)))
+            || self.files.contains(&file)
+    }
+}
+
+/// Rebuilds `dir` (a Rust guest crate) exactly as `rand-guest build` does but with line tables,
+/// into `target_dir`, and returns the ELF — after requiring that it packs to `image`'s bytes.
+fn line_table_twin(dir: &Path, ld: &Path, target_dir: &Path, bin: &str, image: &Path) -> PathBuf {
+    let root = root().canonicalize().unwrap();
+    // `rand-guest`'s `build::flags`, verbatim.
+    let flags = [
+        "-C".to_string(),
+        format!("link-arg=-T{}", ld.canonicalize().unwrap().display()),
+        "-C".into(),
+        "target-feature=-unaligned-scalar-mem".into(),
+        format!("--remap-path-prefix={}=/rand-circuits", root.display()),
+    ];
+    let quoted: Vec<String> = flags.iter().map(|f| format!("{f:?}")).collect();
+    let o = clean(
+        Command::new("cargo")
+            .args(["+1.98.1", "build", "--release", "--locked"])
+            .args(["--target", "riscv32im-unknown-none-elf", "--config"])
+            .arg(format!(
+                "target.riscv32im-unknown-none-elf.rustflags=[{}]",
+                quoted.join(",")
+            ))
+            .args([
+                "--config",
+                "profile.release.debug=\"line-tables-only\"",
+                "--target-dir",
+            ])
+            .arg(target_dir)
+            .current_dir(dir),
+    )
+    .output()
+    .unwrap();
+    assert!(
+        o.status.success(),
+        "line-table build of {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let elf = target_dir
+        .join("riscv32im-unknown-none-elf/release")
+        .join(bin);
+    let packed = target_dir.join("twin.bin");
+    check(
+        &Command::new(rand_guest())
+            .arg("pack")
+            .arg(&elf)
+            .arg("--out")
+            .arg(&packed)
+            .output()
+            .unwrap(),
+        "rand-guest pack (line-table twin)",
+    );
+    assert_eq!(
+        std::fs::read(&packed).unwrap(),
+        std::fs::read(image).unwrap(),
+        "{}'s line-table twin is not the same image: its lines would describe other code",
+        dir.display()
+    );
+    elf
+}
+
+/// One run of `image` over `call` on the emulator, its cycles attributed to [`STAGES`] through
+/// `elf`'s line tables (anything no stage claims is "other").
+fn cycle_split(image: &Path, elf: &Path, call: &SbpfCall) -> Vec<(String, usize)> {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    let program = rand_zkvm::isa::Program::from_flat_image(&std::fs::read(image).unwrap()).unwrap();
+    let exec =
+        rand_zkvm::emulator::execute(&program, &call.input_words(), &call.public_words(), 1 << 21)
+            .unwrap();
+    // Function entry points: a jump to one that does not fall through from the previous pc is a
+    // call (the caller's pc is pushed); a jump to 4 past a pushed call site returns to it.
+    let starts: BTreeSet<u32> = nm_starts(elf);
+    let mut stack: Vec<u32> = Vec::new();
+    let mut by: HashMap<(Vec<u32>, u32), usize> = HashMap::new();
+    let mut prev: Option<u32> = None;
+    for e in &exec.events {
+        let pc = e.pc;
+        if let Some(p) = prev {
+            if pc != p.wrapping_add(4) {
+                if let Some(k) = stack.iter().rposition(|&c| c.wrapping_add(4) == pc) {
+                    stack.truncate(k);
+                } else if starts.contains(&pc) {
+                    stack.push(p);
+                }
+            }
+        }
+        *by.entry((stack.clone(), pc)).or_default() += 1;
+        prev = Some(pc);
+    }
+    let mut pcs: BTreeSet<u32> = BTreeSet::new();
+    for (st, pc) in by.keys() {
+        pcs.insert(*pc);
+        pcs.extend(st.iter().copied());
+    }
+    let frames = inline_frames(elf, &pcs);
+    let mut split: BTreeMap<String, usize> = BTreeMap::new();
+    for ((st, pc), n) in &by {
+        let chain: Vec<&(String, String)> = st
+            .iter()
+            .chain(std::iter::once(pc))
+            .flat_map(|a| frames.get(a).into_iter().flatten())
+            .collect();
+        let stage = STAGES
+            .iter()
+            .find(|s| chain.iter().any(|(f, file)| s.claims(f, file)))
+            .map_or("other: entry, glue", |s| s.name);
+        *split.entry(stage.to_string()).or_default() += n;
+    }
+    let mut v: Vec<(String, usize)> = split.into_iter().collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.1));
+    v
+}
+
+/// Every function symbol's address in `elf` (`llvm-nm`, text symbols only).
+fn nm_starts(elf: &Path) -> std::collections::BTreeSet<u32> {
+    let o = Command::new(llvm_tool("llvm-nm"))
+        .args(["-n", "--defined-only"])
+        .arg(elf)
+        .output()
+        .unwrap();
+    check(&o, "llvm-nm")
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let a = u32::from_str_radix(f.next()?, 16).ok()?;
+            matches!(f.next()?, "t" | "T").then_some(a)
+        })
+        .collect()
+}
+
+/// `(function, source file)` for every inlined frame at each pc, outermost first
+/// (`llvm-symbolizer --inlining`: a block of `function` / `file:line:column` line pairs per
+/// address, innermost first, blocks separated by a blank line).
+fn inline_frames(
+    elf: &Path,
+    pcs: &std::collections::BTreeSet<u32>,
+) -> std::collections::HashMap<u32, Vec<(String, String)>> {
+    use std::io::Write as _;
+    let mut child = Command::new(llvm_tool("llvm-symbolizer"))
+        .args(["--inlining", "--demangle", "--obj"])
+        .arg(elf)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input: String = pcs.iter().map(|a| format!("{a:#x}\n")).collect();
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let out = child.wait_with_output().unwrap();
+    writer.join().unwrap().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let blocks: Vec<&str> = text
+        .split("\n\n")
+        .filter(|b| !b.trim().is_empty())
+        .collect();
+    assert_eq!(
+        blocks.len(),
+        pcs.len(),
+        "llvm-symbolizer answered every address"
+    );
+    pcs.iter()
+        .zip(blocks)
+        .map(|(&a, b)| {
+            let lines: Vec<&str> = b.lines().collect();
+            let mut frames: Vec<(String, String)> = lines
+                .chunks(2)
+                .map(|p| {
+                    let file = p.get(1).map_or("", |l| l.split(':').next().unwrap_or(""));
+                    let file = file.rsplit('/').next().unwrap_or("").to_string();
+                    (p[0].to_string(), file)
+                })
+                .collect();
+            frames.reverse();
+            (a, frames)
+        })
+        .collect()
+}
+
+/// An LLVM tool beside the clang the builds use (`$CLANG`, else Homebrew's).
+fn llvm_tool(name: &str) -> PathBuf {
+    std::env::var_os("CLANG")
+        .map_or_else(
+            || PathBuf::from("/opt/homebrew/opt/llvm/bin/clang"),
+            PathBuf::from,
+        )
+        .with_file_name(name)
 }
