@@ -70,10 +70,15 @@ fn main() -> Result<()> {
         println!("no trapping opcodes present");
     } else {
         println!("warnings ({} occurrence(s)):", warns.len());
-        for (pc, op) in &warns {
-            println!(
-                "  pc {pc:#06x}: opcode {op:#04x} — the cross-contract family, traps at translation or (the call family) at runtime on a non-precompile target"
-            );
+        for w in &warns {
+            match w {
+                evm2rv::blocks::Warning::Trap { pc, opcode } => println!(
+                    "  pc {pc:#06x}: opcode {opcode:#04x} — the cross-contract family, traps at translation or (the call family) at runtime on a non-precompile target"
+                ),
+                evm2rv::blocks::Warning::CodeTooLarge { len } => println!(
+                    "  code is {len} bytes, over MAX_CODE_BYTES — the interpreter runs nothing; analysis is a single OutOfBounds block"
+                ),
+            }
         }
     }
 

@@ -3,8 +3,15 @@
 //! for every opcode byte, a hand-built static-gas sum, stack bounds on a hand-built sequence, and
 //! `warnings` over the cross-contract family (both the statically-trapping sixteen and the
 //! runtime-resolved call family).
+//!
+//! Fix 1's tests: `Op::gas_after`'s invariants against the interpreter's static-gas table, on the
+//! ERC-20 and on directed programs, plus a hand-computed case with a `GAS` opcode mid-block.
+//!
+//! Fix 2's tests: code longer than `MAX_CODE_BYTES` becomes exactly one `CodeTooLarge` warning, a
+//! single `Term::OutOfBounds` block, and an empty jumpdest set; code exactly at the cap analyses
+//! normally.
 
-use evm2rv::blocks::{blocks, jumpdests, static_gas, warnings, Term};
+use evm2rv::blocks::{blocks, jumpdests, static_gas, warnings, Term, Warning};
 use evm_core::interp::MAX_CODE_BYTES;
 
 /// The ERC-20 runtime bytecode the interpreter's own tests use (`evm-core`'s parity vector).
@@ -165,7 +172,19 @@ fn warnings_reports_statically_trapping_opcodes_with_pc() {
     // PUSH1 0, BALANCE, PUSH1 0, TIMESTAMP
     let code = [0x60, 0x00, 0x31, 0x60, 0x00, 0x42];
     let w = warnings(&code);
-    assert_eq!(w, vec![(2, 0x31), (5, 0x42)]);
+    assert_eq!(
+        w,
+        vec![
+            Warning::Trap {
+                pc: 2,
+                opcode: 0x31
+            },
+            Warning::Trap {
+                pc: 5,
+                opcode: 0x42
+            },
+        ]
+    );
 }
 
 #[test]
@@ -177,7 +196,13 @@ fn warnings_reports_call_family_even_though_it_is_not_a_terminator() {
     code.push(0xfa); // STATICCALL, at pc 12
     code.push(0x00); // STOP
     let w = warnings(&code);
-    assert_eq!(w, vec![(12, 0xfa)]);
+    assert_eq!(
+        w,
+        vec![Warning::Trap {
+            pc: 12,
+            opcode: 0xfa
+        }]
+    );
 }
 
 #[test]
@@ -219,5 +244,159 @@ fn erc20_blocks_and_warnings_are_stable() {
 
     // The ERC-20 subset (transfer/approve/transferFrom/balanceOf/totalSupply) does not touch the
     // cross-contract family.
+    assert!(warnings(&code).is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix 1: per-op cumulative static gas (`Op::gas_after`).
+// ---------------------------------------------------------------------------------------------
+
+/// For every block in `code`: `ops[0].gas_after + static(ops[0]) == block.static_gas`, each
+/// consecutive pair satisfies `ops[i].gas_after == ops[i+1].gas_after + static(ops[i+1])`, and the
+/// last op's `gas_after == 0`. Blocks with no ops (the empty-code case) are vacuously fine.
+fn assert_gas_after_invariants(code: &[u8]) {
+    for b in blocks(code) {
+        if b.ops.is_empty() {
+            continue;
+        }
+        let first = &b.ops[0];
+        assert_eq!(
+            first.gas_after + static_gas(first.opcode),
+            b.static_gas,
+            "block [{:#x},{:#x}): ops[0].gas_after + static(ops[0]) != block.static_gas",
+            b.start,
+            b.end
+        );
+        for w in b.ops.windows(2) {
+            assert_eq!(
+                w[0].gas_after,
+                w[1].gas_after + static_gas(w[1].opcode),
+                "block [{:#x},{:#x}): ops[i].gas_after != ops[i+1].gas_after + static(ops[i+1])",
+                b.start,
+                b.end
+            );
+        }
+        assert_eq!(
+            b.ops.last().unwrap().gas_after,
+            0,
+            "block [{:#x},{:#x}): last op's gas_after must be 0",
+            b.start,
+            b.end
+        );
+    }
+}
+
+#[test]
+fn gas_after_invariants_hold_on_erc20() {
+    assert_gas_after_invariants(&erc20_code());
+}
+
+#[test]
+fn gas_after_invariants_hold_on_directed_programs() {
+    // The directed test programs used elsewhere in this file, covering every terminator shape
+    // (fallthrough, JUMP, JUMPI, TrapOp, the call family, and the Fix 1 GAS case itself), plus a
+    // multi-block program so the per-block reset (each block's own suffix sum starts at 0) is
+    // exercised too.
+    let programs: Vec<Vec<u8>> = vec![
+        vec![0x5b, 0x00, 0x5b, 0x00],       // JUMPDEST STOP JUMPDEST STOP
+        vec![0x60, 0x03, 0x56, 0x5b, 0x00], // PUSH1 3 JUMP JUMPDEST STOP
+        vec![0x60, 0x06, 0x60, 0x01, 0x57, 0x01, 0x5b, 0x00], // PUSH1 6 PUSH1 1 JUMPI ADD JUMPDEST STOP
+        vec![0x60, 0x00, 0x31], // PUSH1 0 BALANCE (trap, falls off end)
+        {
+            let mut code = vec![];
+            for _ in 0..7 {
+                code.extend_from_slice(&[0x60, 0x00]);
+            }
+            code.push(0xf1); // CALL
+            code.push(0x00); // STOP
+            code
+        },
+        vec![0x60, 0x01, 0x5a, 0x60, 0x02, 0x01, 0x50, 0x00], // PUSH1 1 GAS PUSH1 2 ADD POP STOP
+    ];
+    for code in programs {
+        assert_gas_after_invariants(&code);
+    }
+}
+
+#[test]
+#[allow(clippy::identity_op)] // written out in full, STOP's 0 included on purpose, as elsewhere
+fn gas_after_hand_computed_with_gas_mid_block() {
+    // PUSH1 1, GAS, PUSH1 2, ADD, POP, STOP — the brief's own example. Static gas per op:
+    // PUSH1(3), GAS(2), PUSH1(3), ADD(3), POP(2), STOP(0); block.static_gas = 13.
+    let code = [0x60, 0x01, 0x5a, 0x60, 0x02, 0x01, 0x50, 0x00];
+    let bs = blocks(&code);
+    assert_eq!(bs.len(), 1);
+    assert_eq!(bs[0].static_gas, 3 + 2 + 3 + 3 + 2 + 0);
+    let ops = &bs[0].ops;
+    assert_eq!(ops.len(), 6);
+    // Each op's gas_after: the sum of static_gas over every op strictly after it.
+    let expected = [
+        (0x60u8, 10u64), // PUSH1 1: GAS(2)+PUSH1(3)+ADD(3)+POP(2)+STOP(0) after it
+        (0x5a, 8),       // GAS: PUSH1(3)+ADD(3)+POP(2)+STOP(0) after it
+        (0x60, 5),       // PUSH1 2: ADD(3)+POP(2)+STOP(0) after it
+        (0x01, 2),       // ADD: POP(2)+STOP(0) after it
+        (0x50, 0),       // POP: only STOP(0) after it
+        (0x00, 0),       // STOP: nothing after it
+    ];
+    for (op, (opcode, gas_after)) in ops.iter().zip(expected.iter()) {
+        assert_eq!(op.opcode, *opcode);
+        assert_eq!(
+            op.gas_after, *gas_after,
+            "opcode {:#04x} at pc {}",
+            op.opcode, op.pc
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fix 2: code longer than MAX_CODE_BYTES.
+// ---------------------------------------------------------------------------------------------
+
+/// `MAX_CODE_BYTES + 1` bytes of alternating `JUMPDEST`/`STOP`: over the cap, so
+/// `Interpreter::new` would refuse it outright and run nothing.
+#[test]
+fn over_cap_code_is_one_out_of_bounds_block_no_jumpdests_and_one_code_too_large_warning() {
+    let len = MAX_CODE_BYTES + 1;
+    let code: Vec<u8> = (0..len)
+        .map(|i| if i % 2 == 0 { 0x5b } else { 0x00 })
+        .collect();
+
+    assert_eq!(jumpdests(&code), Vec::<usize>::new());
+
+    let bs = blocks(&code);
+    assert_eq!(bs.len(), 1);
+    assert_eq!(bs[0].start, 0);
+    assert_eq!(bs[0].end, 0);
+    assert!(bs[0].ops.is_empty());
+    assert_eq!(bs[0].static_gas, 0);
+    assert_eq!(bs[0].min_depth, 0);
+    assert_eq!(bs[0].max_growth, 0);
+    assert_eq!(bs[0].term, Term::OutOfBounds);
+
+    assert_eq!(warnings(&code), vec![Warning::CodeTooLarge { len }]);
+}
+
+/// Exactly `MAX_CODE_BYTES` bytes — at the cap, not over it — analyses normally: no
+/// `Term::OutOfBounds`, jumpdests found, no `CodeTooLarge` warning.
+#[test]
+fn exactly_max_code_bytes_analyses_normally() {
+    let len = MAX_CODE_BYTES;
+    let code: Vec<u8> = (0..len)
+        .map(|i| if i % 2 == 0 { 0x5b } else { 0x00 })
+        .collect();
+
+    let jd = jumpdests(&code);
+    assert_eq!(jd.len(), len / 2);
+    assert_eq!(jd[0], 0);
+    assert_eq!(jd[jd.len() - 1], len - 2);
+
+    let bs = blocks(&code);
+    assert!(bs.len() > 1);
+    for b in &bs {
+        assert_ne!(b.term, Term::OutOfBounds);
+    }
+    assert_eq!(bs.first().unwrap().start, 0);
+    assert_eq!(bs.last().unwrap().end, len);
+
     assert!(warnings(&code).is_empty());
 }

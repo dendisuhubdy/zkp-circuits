@@ -25,7 +25,18 @@
 //! table charges both zero, which this crate's table mirrors exactly, byte for byte).
 //!
 //! [`warnings`] reports every occurrence (in code order, immediates correctly skipped) of any
-//! opcode in [`WARN_SET`] — [`TRAP_TERM`]'s sixteen plus [`CALL_FAMILY`]'s four.
+//! opcode in [`WARN_SET`] — [`TRAP_TERM`]'s sixteen plus [`CALL_FAMILY`]'s four — as a
+//! [`Warning::Trap`].
+//!
+//! **Code longer than [`MAX_CODE_BYTES`]** (EIP-170's cap) is a separate case from every opcode
+//! above: `Interpreter::new` refuses it outright (`pre_halt = Halt::OutOfBounds`) before a single
+//! opcode runs, so none of it is ever reachable. [`jumpdests`] returns the empty set, [`blocks`]
+//! returns exactly one empty block terminated by [`Term::OutOfBounds`], and [`warnings`] returns
+//! exactly one [`Warning::CodeTooLarge`] and nothing else for such an input.
+//!
+//! Each [`Op`] also carries [`Op::gas_after`]: the sum of [`static_gas`] over every op strictly
+//! after it in its block, which `GAS` (Task 4's emitter) adds to the live gas counter to correct
+//! for static gas being charged once, up front, at the block head rather than per opcode.
 
 use evm_core::interp::MAX_CODE_BYTES;
 
@@ -36,6 +47,16 @@ pub struct Op {
     pub pc: usize,
     pub opcode: u8,
     pub push: Option<[u8; 32]>,
+    /// The sum of [`static_gas`] over every op strictly after this one in the same block —
+    /// what is still "owed" from the block's up-front charge, from this op's point of view.
+    /// Static gas is never charged per opcode; it is charged once, at the block head, as
+    /// `block.static_gas` (Task 4's emitted C decrements the whole block's charge from `evm_gas`
+    /// before any of the block's ops run). So by the time a mid-block `GAS` executes, `gas_after`
+    /// worth of gas has been deducted up front for ops that have not run yet. `GAS` (Task 4) must
+    /// therefore push `evm_gas + gas_after`, not the raw counter, so the value it returns is the
+    /// gas actually remaining *at this point in the original per-opcode accounting* rather than
+    /// gas already debited for instructions still to come.
+    pub gas_after: u64,
 }
 
 /// How a block ends. The terminating opcode, when one physically occupies a byte (everything but
@@ -64,6 +85,13 @@ pub enum Term {
     /// has no other classification for (undefined bytes, the Cancun opcodes, …) — those trap
     /// exactly the same way, just without a name in [`WARN_SET`].
     TrapOp(u8),
+    /// `code` is longer than [`MAX_CODE_BYTES`] (EIP-170's cap). The interpreter's
+    /// `Interpreter::new` sets `pre_halt = Halt::OutOfBounds` for such code, and `run` executes
+    /// nothing — none of the code is reachable. [`blocks`] mirrors that with exactly one block,
+    /// at pc 0, containing no ops, terminated by this variant; Task 4's emitter turns it straight
+    /// into `evm_halt` with the `OutOfBounds` halt code from `evm-rt`'s / `evm-core`'s `ffi.rs`
+    /// halt table (`HALT_OUT_OF_BOUNDS`), the same code `Interpreter::run` itself would report.
+    OutOfBounds,
 }
 
 /// One basic block: `[start, end)` of the code, its decoded ops, the sum of the interpreter's
@@ -81,6 +109,20 @@ pub struct Block {
     /// max_growth` must not exceed 1024, or some path through it overflows.
     pub max_growth: usize,
     pub term: Term,
+}
+
+/// A translation-time warning [`warnings`] reports; something worth flagging to the caller
+/// without refusing to translate the contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Warning {
+    /// A [`WARN_SET`] opcode — one of [`TRAP_TERM`]'s sixteen or [`CALL_FAMILY`]'s four — present
+    /// at `pc`.
+    Trap { pc: usize, opcode: u8 },
+    /// `code` is `len` bytes, longer than [`MAX_CODE_BYTES`] (EIP-170's cap). This is the *only*
+    /// warning [`warnings`] reports for such an input: the interpreter's `Interpreter::new` sets
+    /// `pre_halt = Halt::OutOfBounds` and runs nothing, so none of the code is ever reachable and
+    /// a per-opcode [`Trap`](Warning::Trap) warning for bytes inside it would be misleading.
+    CodeTooLarge { len: usize },
 }
 
 /// The nine block-context opcodes: no public-segment binding exists yet (plan's Global
@@ -152,10 +194,15 @@ pub const fn static_gas(op: u8) -> u64 {
 
 /// The interpreter's rule (`evm_core::interp::scan_jumpdests`, reused rather than reimplemented —
 /// the one thing this crate must never drift from): every `JUMPDEST` byte that is not inside a
-/// `PUSHn`'s immediate, as a sorted list of positions. Code past [`MAX_CODE_BYTES`] is capped, as
-/// the interpreter caps it in `Interpreter::new`.
+/// `PUSHn`'s immediate, as a sorted list of positions. Code longer than [`MAX_CODE_BYTES`] is
+/// **not** capped and rescanned: `Interpreter::new` refuses such code outright (`pre_halt =
+/// Halt::OutOfBounds`, nothing executes), so none of it is ever reachable and this returns the
+/// empty set — never a jumpdest list computed over a truncated prefix, which would misreport
+/// positions that can never actually be jumped to.
 pub fn jumpdests(code: &[u8]) -> Vec<usize> {
-    let code = &code[..code.len().min(MAX_CODE_BYTES)];
+    if code.len() > MAX_CODE_BYTES {
+        return Vec::new();
+    }
     let mut bits = [0u32; MAX_CODE_BYTES / 32];
     evm_core::interp::scan_jumpdests(code, &mut bits);
     (0..code.len())
@@ -164,7 +211,9 @@ pub fn jumpdests(code: &[u8]) -> Vec<usize> {
 }
 
 /// One decoded instruction at `pc`, and the pc of the next one. `PUSH1..PUSH32`'s immediate reads
-/// past the end of `code` as zero, exactly as the interpreter reads it.
+/// past the end of `code` as zero, exactly as the interpreter reads it. `gas_after` is left `0`
+/// here — it depends on the op's position within its whole block, which `decode` does not know —
+/// and is filled in by [`blocks`] once a block's full `ops` vector exists.
 fn decode(code: &[u8], pc: usize) -> (Op, usize) {
     let opcode = code[pc];
     if (0x60..=0x7f).contains(&opcode) {
@@ -178,6 +227,7 @@ fn decode(code: &[u8], pc: usize) -> (Op, usize) {
                 pc,
                 opcode,
                 push: Some(b),
+                gas_after: 0,
             },
             pc + 1 + n,
         )
@@ -187,6 +237,7 @@ fn decode(code: &[u8], pc: usize) -> (Op, usize) {
                 pc,
                 opcode,
                 push: None,
+                gas_after: 0,
             },
             pc + 1,
         )
@@ -318,10 +369,25 @@ fn stack_bounds(ops: &[Op]) -> (usize, usize) {
 /// Split `code` into basic blocks at every `JUMPDEST` and after every terminator (`JUMP`,
 /// `JUMPI`, `STOP`, `RETURN`, `REVERT`, `INVALID`, or one of [`TRAP_TERM`]'s sixteen opcodes, or
 /// any other opcode byte this crate does not implement). Falling off the end of the code is
-/// `STOP`, as in the interpreter. Code past [`MAX_CODE_BYTES`] is capped, as the interpreter caps
-/// it.
+/// `STOP`, as in the interpreter.
+///
+/// Code longer than [`MAX_CODE_BYTES`] is **not** capped and analysed as a truncated prefix:
+/// `Interpreter::new` refuses it outright (`pre_halt = Halt::OutOfBounds`), so none of it ever
+/// runs. This returns exactly one block — `[0, 0)`, no ops, `static_gas` 0, `min_depth` 0,
+/// `max_growth` 0 — terminated by [`Term::OutOfBounds`], the closest analogue to "nothing
+/// executes" a block list has.
 pub fn blocks(code: &[u8]) -> Vec<Block> {
-    let code = &code[..code.len().min(MAX_CODE_BYTES)];
+    if code.len() > MAX_CODE_BYTES {
+        return vec![Block {
+            start: 0,
+            end: 0,
+            ops: Vec::new(),
+            static_gas: 0,
+            min_depth: 0,
+            max_growth: 0,
+            term: Term::OutOfBounds,
+        }];
+    }
 
     if code.is_empty() {
         // An empty contract still needs somewhere for the emitter to enter and immediately
@@ -406,6 +472,18 @@ pub fn blocks(code: &[u8]) -> Vec<Block> {
         let end = pc.min(code.len());
         let static_gas_sum: u64 = ops.iter().map(|o| static_gas(o.opcode)).sum();
         let (min_depth, max_growth) = stack_bounds(&ops);
+        // `gas_after`: walking the block backwards, each op's `gas_after` is the running suffix
+        // sum *before* that op's own cost is folded in — i.e. the sum of `static_gas` over every
+        // op strictly after it. The last op sees `gas_after == 0` (nothing after it); each op
+        // before it accumulates the next op's `gas_after` plus that next op's own static gas,
+        // which is exactly the invariant `tests/blocks.rs` checks.
+        {
+            let mut suffix = 0u64;
+            for op in ops.iter_mut().rev() {
+                op.gas_after = suffix;
+                suffix += static_gas(op.opcode);
+            }
+        }
         out.push(Block {
             start,
             end,
@@ -419,17 +497,26 @@ pub fn blocks(code: &[u8]) -> Vec<Block> {
     out
 }
 
-/// Every occurrence (pc, opcode) of a [`WARN_SET`] opcode in `code`, in code order, with `PUSHn`
-/// immediates correctly skipped so a push's data bytes are never misread as an opcode. Code past
-/// [`MAX_CODE_BYTES`] is capped, as the interpreter caps it.
-pub fn warnings(code: &[u8]) -> Vec<(usize, u8)> {
-    let code = &code[..code.len().min(MAX_CODE_BYTES)];
+/// Every [`Warning`] `code` raises, in code order, with `PUSHn` immediates correctly skipped so a
+/// push's data bytes are never misread as an opcode.
+///
+/// Code longer than [`MAX_CODE_BYTES`] is **not** capped and scanned for per-opcode warnings:
+/// `Interpreter::new` refuses it outright and nothing in it ever runs, so this reports exactly one
+/// [`Warning::CodeTooLarge`] and nothing else — never a [`Warning::Trap`] for bytes that can never
+/// be reached.
+pub fn warnings(code: &[u8]) -> Vec<Warning> {
+    if code.len() > MAX_CODE_BYTES {
+        return vec![Warning::CodeTooLarge { len: code.len() }];
+    }
     let mut out = Vec::new();
     let mut pc = 0usize;
     while pc < code.len() {
         let (op, next_pc) = decode(code, pc);
         if WARN_SET.contains(&op.opcode) {
-            out.push((op.pc, op.opcode));
+            out.push(Warning::Trap {
+                pc: op.pc,
+                opcode: op.opcode,
+            });
         }
         pc = next_pc;
     }
