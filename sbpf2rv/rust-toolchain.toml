@@ -1,0 +1,5 @@
+# The toolchain `sbpf2rv` itself builds and runs with, so a plain `cargo run` / `cargo test` in this
+# directory uses it — the same one `rand-guest` pins and compiles every shim crate with
+# (`rand-guest/src/build.rs`'s `TOOLCHAIN`).
+[toolchain]
+channel = "1.98.1"
