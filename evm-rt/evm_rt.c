@@ -15,6 +15,10 @@ uint32_t evm_code_len;
 const uint8_t *evm_calldata;
 uint32_t evm_calldata_len;
 
+u256 evm_address;
+u256 evm_caller;
+u256 evm_callvalue;
+
 void *evm_tree;
 void *evm_host;
 

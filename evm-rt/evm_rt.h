@@ -85,6 +85,13 @@ extern uint32_t evm_code_len;
 extern const uint8_t *evm_calldata;
 extern uint32_t evm_calldata_len;
 
+/* The call's environment: `Env`'s three words, which the embedder (a translated contract's shim)
+ * writes after `evm_rt_init` from the decoded call. ADDRESS, CALLER and CALLVALUE push them;
+ * ORIGIN pushes `evm_caller` (one call, no relayer: the spec's §3). */
+extern u256 evm_address;
+extern u256 evm_caller;
+extern u256 evm_callvalue;
+
 /* The opaque pointers `ffi.rs` takes: the `*mut StorageTree` and the `*mut HostBox`. */
 extern void *evm_tree;
 extern void *evm_host;
