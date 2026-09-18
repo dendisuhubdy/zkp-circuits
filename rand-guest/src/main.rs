@@ -26,7 +26,7 @@ enum Cmd {
         dir: PathBuf,
         #[arg(long, value_enum, default_value_t = Lang::Rust)]
         lang: Lang,
-        /// The linker script, relative to the guest directory as the Makefiles write it
+        /// The linker script, relative to the guest directory as the former Makefiles wrote it
         /// (default: the one `.ld` in the guest, else `guest-sdk/guest.ld`).
         #[arg(long)]
         ld: Option<PathBuf>,

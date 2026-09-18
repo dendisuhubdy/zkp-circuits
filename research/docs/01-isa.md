@@ -322,9 +322,8 @@ so every guest was written directly against `asm.rs`'s mnemonic helpers
 (`src/asm.rs::ops`) rather than compiled from C or Rust `no_std`. That
 toolchain now exists: `guest-sdk` (syscall wrappers and the guest entry
 point, `#![no_std]`) and `guests-compiled/` (per-guest crates targeting
-`riscv32im-unknown-none-elf`, built with `-C link-arg=-Tguest.ld` and
-converted to a flat image with `llvm-objcopy -O binary`, committed as
-`.bin` files with their build command in a `Makefile` — see
+`riscv32im-unknown-none-elf`, built by the `rand-guest` toolchain crate and
+committed as `.bin` files — see `guests-compiled/README.md` and
 `docs/04-guests.md`'s "Compiled guests" section) load through
 `Program::from_flat_binary`, above. The hand-assembled path against
 `asm.rs` remains fully supported and is not being retired — it stays the

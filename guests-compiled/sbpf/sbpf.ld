@@ -2,8 +2,8 @@
    (15 360 instructions) of program space below the text for the data prologue the loader
    synthesises (`Program::from_flat_image`, research/docs/01-isa.md). This guest's `.rodata` is
    the `Halt::Trap(&'static str)` literals, the panic `Location`s and the opcode dispatch's jump
-   tables; the Makefile prints its size at every build and `make` fails with
-   `LoadError::PrologueRoom` long before the room here runs out.
+   tables; `rand-guest build` (`guests-compiled/README.md`) reports its word count at every build
+   and fails with `LoadError::PrologueRoom` long before the room here runs out.
 
    The 1 MiB RAM has to hold `abi::Workspace` in `.bss` — a 256 KiB ELF buffer, the 48 KiB
    instruction region, the 32 KiB sBPF stack and the 32 KiB heap, 368 KiB in all — plus this

@@ -53,9 +53,9 @@ pub fn flags(root: &Path, ld: &Path) -> Vec<String> {
     ]
 }
 
-/// The `--config` argument carrying [`flags`]: a TOML array of strings, the shape the Makefiles'
-/// `RUSTFLAGS_LIST` has. Rust's `{:?}` is TOML's basic-string syntax for these flags (they hold
-/// no backslashes or control characters).
+/// The `--config` argument carrying [`flags`]: a TOML array of strings, the shape the former
+/// per-guest Makefiles' `RUSTFLAGS_LIST` had. Rust's `{:?}` is TOML's basic-string syntax for
+/// these flags (they hold no backslashes or control characters).
 pub fn cargo_config(root: &Path, ld: &Path) -> String {
     let quoted: Vec<String> = flags(root, ld).into_iter().map(|f| format!("{f:?}")).collect();
     format!("target.{TARGET}.rustflags=[{}]", quoted.join(","))
@@ -97,8 +97,8 @@ pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutp
         Some(l) => l.to_path_buf(),
         None => find_ld(dir, &root)?,
     };
-    // A relative `--ld` is the guest crate's own, as the Makefiles write it; make it absolute so
-    // the `--config` does not depend on where cargo is invoked from.
+    // A relative `--ld` is the guest crate's own, as the former Makefiles wrote it; make it
+    // absolute so the `--config` does not depend on where cargo is invoked from.
     let ld_abs = if ld.is_absolute() { ld } else { dir.join(ld) };
     let config = cargo_config(&root, &ld_abs);
     let status = Command::new("cargo")

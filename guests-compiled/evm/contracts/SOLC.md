@@ -2,9 +2,9 @@
 
 `solc` is on none of the build machines and no test needs it: `ERC20.sol` was compiled **once**,
 by hand, with the pinned static release binary below, and only the runtime bytecode is committed.
-`make contracts` in `guests-compiled/evm` re-runs the same command when a `solc` *is* on `PATH`
-(or `SOLC=/path/to/solc make contracts`) and diffs the result against the committed hex, so a
-reviewer can reproduce it without the repo carrying a 32 MB compiler.
+`contracts/build.sh` re-runs the same command when a `solc` *is* on `PATH`
+(or `SOLC=/path/to/solc bash contracts/build.sh`) and diffs the result against the committed hex,
+so a reviewer can reproduce it without the repo carrying a 32 MB compiler.
 
 ## The compiler
 

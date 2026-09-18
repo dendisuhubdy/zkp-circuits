@@ -37,9 +37,11 @@ fn pinned_bytes(name: &str) -> Vec<u8> {
 #[test]
 fn the_packer_reproduces_every_committed_image() {
     // Two gates, because the four pins are two different formats. `evm` and `sbpf` have a data
-    // segment, so their Makefiles run the ELF through `mkimage.py` (`pack`'s Rust port); those two
-    // are gated byte for byte against the committed `.bin.sha256`. `fib` and `keccak256` have no
-    // data segment at all, so their Makefiles just `objcopy -O binary` the ELF — a headerless flat
+    // segment, so they are built through the image container this crate's `pack` module writes
+    // (formerly their Makefiles' `mkimage.py`, `guests-compiled/README.md`); those two are gated
+    // byte for byte against the committed `.bin.sha256`. `fib` and `keccak256` have no data
+    // segment at all, and were pinned before this toolchain existed by `objcopy -O binary` on the
+    // ELF — a headerless flat
     // binary loaded by `Program::from_flat_binary(0x1000, …)` (`research/src/guests.rs`, pinned
     // again by `research/tests/isa.rs`) — and that pin is a shared fixture this task does not
     // touch. `pack()` still emits the one container format the spec gives it, even with no data
