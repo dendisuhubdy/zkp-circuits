@@ -89,7 +89,30 @@ pub fn checkout_root(dir: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Refuse to build over an existing `out` that is not an image container (first word not
+/// `IMAGE_MAGIC`). The two committed legacy flat pins, `guests-compiled/bin/fib.bin` and
+/// `keccak256.bin`, are exactly such files: `build` only writes the container form, so a rebuild
+/// "over" either would replace a pin that two repos load with `from_flat_binary(0x1000, …)` by a
+/// file they cannot load, and every test that includes it would break. Checked first, before any
+/// compiler runs.
+pub fn refuse_legacy_out(out: &Path) -> Result<()> {
+    let existing = match std::fs::read(out) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading the existing {}", out.display())),
+    };
+    let magic = existing.get(..4).map(|w| u32::from_le_bytes(w.try_into().unwrap()));
+    if magic != Some(rand_zkvm::isa::IMAGE_MAGIC) {
+        bail!(
+            "{} exists and is not an image container — a legacy flat pin (like guests-compiled/bin/fib.bin and keccak256.bin, which are never rebuilt over); build writes only the container form, so pass a different --out",
+            out.display()
+        );
+    }
+    Ok(())
+}
+
 pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput> {
+    refuse_legacy_out(out)?;
     // Absolute from here on: cargo runs in the guest directory, so a guest path relative to *our*
     // cwd would resolve against the wrong directory in `-T` and in the remap prefix.
     let dir = &dir.canonicalize().with_context(|| format!("no such guest directory: {}", dir.display()))?;
@@ -188,6 +211,7 @@ fn clang_flags(root: &Path) -> Vec<String> {
 /// a C guest is its own source and nothing else — the shape the sBPF and EVM translators will
 /// emit into.
 pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput> {
+    refuse_legacy_out(out)?;
     // Absolute from here on, for `build_rust`'s reason: the paths below go into the object files
     // and the linker command line, and must not depend on the caller's cwd.
     let dir = &dir.canonicalize().with_context(|| format!("no such guest directory: {}", dir.display()))?;
@@ -268,7 +292,7 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
 fn finish(elf: PathBuf, out: &Path) -> Result<BuildOutput> {
     let image = pack::pack(&std::fs::read(&elf).with_context(|| format!("reading the linked ELF {}", elf.display()))?)
         .with_context(|| format!("packing {}", elf.display()))?;
-    std::fs::write(out, &image).with_context(|| format!("writing {}", out.display()))?;
+    pack::write_image(out, &image)?;
     Ok(BuildOutput { elf, image: out.to_path_buf() })
 }
 

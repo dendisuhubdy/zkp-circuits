@@ -14,10 +14,17 @@ Run from this directory (`cd rand-guest`) with the pinned toolchain: `cargo +1.9
 
 ### `build` — compile a guest directory to a packed image, checking it on the way
 
-    cargo +1.98.1 run -- build ../guests-compiled/fib --out ../guests-compiled/bin/fib.bin
+    cargo +1.98.1 run -- build ../guests-compiled/evm --out ../guests-compiled/bin/evm.bin --max-words 65535
 
-Rust is the default language; `--lang c` drives clang instead (see "The C path" below). Exits
-non-zero — after still writing the image — if `check` rejects the result.
+Rust is the default language; `--lang c` drives clang instead (see "The C path" below). Writes
+the image and its `<out>.sha256` pin (the same form `pack` writes), then prints the checker's
+report. Exits non-zero — after still writing the image — if `check` rejects the result.
+
+`fib.bin` and `keccak256.bin` are **never rebuilt over**: they are legacy flat pins (see "The two
+image forms"), `build` only writes the container form, and replacing either would break every
+test that loads it with `from_flat_binary`. They are checked instead, by `rand-guest/tests/build.rs`
+(program equality against a fresh build into a temporary directory) and by `info`. `build`
+refuses outright to write over an existing `--out` that is not an image container, naming it.
 
 ### `check` — the ISA report over an ELF or an image
 

@@ -3,7 +3,8 @@
 //! the lowest to the highest address, gaps zero-filled. `.bss` never appears.
 
 use crate::elf::{read_sections, span};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use std::path::Path;
 use rand_zkvm::isa::{IMAGE_HEADER_WORDS, IMAGE_MAGIC, IMAGE_VERSION};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,4 +58,17 @@ pub fn split(image: &[u8]) -> Result<(ImageInfo, Vec<u32>, Vec<u32>)> {
     if body.len() != info.n_text + info.n_data { bail!("image body has {} words, header says {} + {}", body.len(), info.n_text, info.n_data); }
     let (t, d) = body.split_at(info.n_text);
     Ok((info, t.to_vec(), d.to_vec()))
+}
+
+/// Write `image` to `out` and its pin beside it, `<out>.sha256`, in the form
+/// `guests-compiled/bin/*.bin.sha256` uses (`shasum -a 256`'s: `<hex>  <file name>\n`). `pack` and
+/// `build` both write through here, so a rebuilt guest's pin is never left stale beside it.
+pub fn write_image(out: &Path, image: &[u8]) -> Result<()> {
+    use sha2::Digest;
+    let name = out.file_name().with_context(|| format!("{} names no file to write the image to", out.display()))?;
+    std::fs::write(out, image).with_context(|| format!("writing {}", out.display()))?;
+    let pin = format!("{}.sha256", out.display());
+    std::fs::write(&pin, format!("{}  {}\n", hex::encode(sha2::Sha256::digest(image)), name.to_string_lossy()))
+        .with_context(|| format!("writing {pin}"))?;
+    Ok(())
 }

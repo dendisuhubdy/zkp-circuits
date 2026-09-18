@@ -183,7 +183,7 @@ fn main() -> Result<()> {
             let c = report_image(&image, max_words).with_context(|| format!("checking {}", b.image.display()))?;
             println!("{c}");
             match &c.program {
-                Some(p) => println!("wrote {} ({} words, hc {})", b.image.display(), p.words.len(), hex8(&p.digest())),
+                Some(p) => println!("wrote {} and its .sha256 ({} words, hc {})", b.image.display(), p.words.len(), hex8(&p.digest())),
                 None => println!("wrote {} (the loader refuses it: no hc)", b.image.display()),
             }
             if !c.report.is_ok() {
@@ -204,15 +204,11 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Pack { elf, out } => {
-            let image = pack::pack(&std::fs::read(&elf)?)?;
+            let bytes = std::fs::read(&elf).with_context(|| format!("reading {}", elf.display()))?;
+            let image = pack::pack(&bytes).with_context(|| format!("packing {}", elf.display()))?;
             let out = out.unwrap_or_else(|| elf.with_extension("bin"));
-            std::fs::write(&out, &image)?;
-            use sha2::Digest;
-            std::fs::write(
-                format!("{}.sha256", out.display()),
-                format!("{}  {}\n", hex::encode(sha2::Sha256::digest(&image)), out.file_name().unwrap().to_string_lossy()),
-            )?;
-            println!("wrote {} ({} bytes)", out.display(), image.len());
+            pack::write_image(&out, &image)?;
+            println!("wrote {} ({} bytes) and {}.sha256", out.display(), image.len(), out.display());
         }
         Cmd::Run { image, inputs, public } => {
             let bytes = std::fs::read(&image).with_context(|| format!("reading {}", image.display()))?;

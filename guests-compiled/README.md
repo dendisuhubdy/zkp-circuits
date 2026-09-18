@@ -1,13 +1,19 @@
 # Compiled guests
 
-Built with the toolchain, never by hand:
+Built with the toolchain, never by hand — for example, after an `evm-core` change:
 
-    cd rand-guest && cargo run -- build ../guests-compiled/<guest> --out ../guests-compiled/bin/<guest>.bin --max-words 65535
+    cd rand-guest && cargo run -- build ../guests-compiled/evm --out ../guests-compiled/bin/evm.bin --max-words 65535
 
-`--max-words 65535` is needed for `evm` and `sbpf`: both interpreter guests are far over the
-chain's default 4096-word cap (`rand-guest/README.md`'s "The cap"), which is a genesis parameter
-on the v0.4 chain, not yet raised for either of them; `fib`, `keccak256`, and `c-fib` fit under
-the default and do not need the flag, but passing it always is harmless.
+That writes `bin/evm.bin` and `bin/evm.bin.sha256` together. `--max-words 65535` is needed for
+`evm` and `sbpf`: both interpreter guests are far over the chain's default 4096-word cap
+(`rand-guest/README.md`'s "The cap"), which is a genesis parameter on the v0.4 chain, not yet
+raised for either of them.
+
+**`fib.bin` and `keccak256.bin` are never rebuilt over.** They are legacy flat pins (below) and
+`build` only writes the image container, so a rebuild into `bin/` would replace a file two repos
+load with `from_flat_binary` by one they cannot; `rand-guest build` refuses to write over them.
+They are checked instead: by `rand-guest/tests/build.rs`, which builds both into a temporary
+directory and compares the programs, and by `rand-guest info`.
 
 `rand-guest build` compiles with the pinned toolchain and the fixed flags, checks the ELF
 against the machine, packs the image and prints its `hc`. `bin/<guest>.bin.sha256` pins each

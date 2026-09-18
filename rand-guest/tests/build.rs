@@ -61,6 +61,9 @@ fn build_reproduces_every_committed_image_and_reports_hc() {
         } else {
             assert_eq!(sha256_hex(&image), pinned(name), "{name}.bin");
         }
+        // `build` writes the pin beside the image, in the committed pins' own form.
+        let sum = std::fs::read_to_string(tmp.path().join(format!("{name}.bin.sha256"))).unwrap();
+        assert_eq!(sum, format!("{}  {name}.bin\n", sha256_hex(&image)), "{name}.bin.sha256");
         let stdout = String::from_utf8_lossy(&o.stdout);
         assert!(stdout.contains("hc "), "{stdout}");
         assert!(stdout.contains("words"), "{stdout}");
@@ -203,4 +206,22 @@ fn build_names_a_decode_class_rule_instead_of_a_load_error() {
     assert!(!o.status.success(), "{stdout}");
     assert!(stdout.contains("Fence: "), "{stdout}\n{}", String::from_utf8_lossy(&o.stderr));
     assert!(stdout.contains("REJECTED"), "{stdout}");
+}
+
+/// `build` never writes over a legacy flat pin: `guests-compiled/bin/fib.bin` and `keccak256.bin`
+/// are headerless, `build` only writes the container form, and replacing either would break every
+/// test (here and in fullnode) that loads it with `from_flat_binary`. The refusal names the file,
+/// happens before any compiler runs, and leaves the file as it was.
+#[test]
+fn build_refuses_to_overwrite_a_legacy_flat_pin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("fib.bin");
+    std::fs::write(&out, pinned_bytes("fib")).unwrap();
+    let o = Command::new(bin()).arg("build").arg(root().join("guests-compiled/fib")).arg("--out").arg(&out).output().unwrap();
+    assert!(!o.status.success());
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(stderr.contains(&out.display().to_string()), "{stderr}");
+    assert!(stderr.contains("legacy flat pin"), "{stderr}");
+    assert_eq!(std::fs::read(&out).unwrap(), pinned_bytes("fib"), "the pin must be left as it was");
+    assert!(!tmp.path().join("fib.bin.sha256").exists());
 }
