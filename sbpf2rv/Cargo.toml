@@ -1,0 +1,21 @@
+[package]
+name = "sbpf2rv"
+version = "0.1.0"
+edition = "2021"
+description = "Translates an sBPF ELF into C that runs natively in the Rand zkVM (scanner + emitter)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "sbpf2rv"
+path = "src/main.rs"
+
+[dependencies]
+sbpf-core = { path = "../guests-compiled/sbpf-core" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+# Its own workspace root, like every crate here (guests-compiled/sbpf-core, rand-guest, …): never
+# swept into research's or circuits' own cargo test/build.
+[workspace]
