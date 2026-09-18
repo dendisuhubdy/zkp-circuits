@@ -38,6 +38,11 @@ fn core_src(f: &str) -> String {
 fn header() -> String {
     std::fs::read_to_string(rt_dir().join("sbpf_rt.h")).unwrap()
 }
+/// The software signature checks' header (`sbpf_crypto.h`): their two syscall hashes, which the
+/// interpreter does not implement.
+fn crypto_header() -> String {
+    std::fs::read_to_string(rt_dir().join("sbpf_crypto.h")).unwrap()
+}
 
 /// `#define <prefix><NAME> <value> …` lines, in order: (NAME, value text, rest of the line).
 fn defines(h: &str, prefix: &str) -> Vec<(String, String, String)> {
@@ -178,8 +183,8 @@ fn c_name(name: &str) -> String {
 fn the_syscall_table_is_supported_and_each_has_a_function() {
     let h = header();
     let hdr = defines(&h, "SBPF_SYSCALL_");
-    // The first twelve are `SUPPORTED`, in its order; each comment names the syscall.
-    assert!(hdr.len() >= SUPPORTED.len());
+    // Exactly `SUPPORTED`, in its order; each comment names the syscall.
+    assert_eq!(hdr.len(), SUPPORTED.len());
     for (i, &(hash, name)) in SUPPORTED.iter().enumerate() {
         let (_, v, tail) = &hdr[i];
         assert_eq!(parse_num(v), u64::from(hash), "{name}");
@@ -187,9 +192,11 @@ fn the_syscall_table_is_supported_and_each_has_a_function() {
         let decl = format!("uint64_t sbpf_sys_{}(uint64_t r1,", c_name(name));
         assert!(h.contains(&decl), "sbpf_rt.h declares no {decl}");
     }
-    // The rest are the software signature checks: murmur3 of their names, and *not* supported by
-    // the interpreter (so `sbpf_syscall` must trap on them, as `dispatch` does).
-    for (_, v, tail) in &hdr[SUPPORTED.len()..] {
+    // `sbpf_crypto.h`'s are the software signature checks: murmur3 of their names, and *not*
+    // supported by the interpreter (so `sbpf_syscall` must trap on them, as `dispatch` does).
+    let crypto = defines(&crypto_header(), "SBPF_SYSCALL_");
+    assert_eq!(crypto.len(), 2);
+    for (_, v, tail) in &crypto {
         let name = tail.trim_start_matches("/*").split_whitespace().next().unwrap();
         assert_eq!(parse_num(v), u64::from(murmur3_32(name.as_bytes(), 0)), "{name}");
         assert!(!SUPPORTED.iter().any(|(_, n)| *n == name), "{name}");

@@ -6,7 +6,7 @@
  * scalars are reduced mod L the same way. No tables; the curve constants below are the only data.
  * `test/crypto_vectors.h` has the known answers (RFC 8032 §7.1 among them). */
 #include "sbpf_bn.h"
-#include "sbpf_rt.h"
+#include "sbpf_crypto.h"
 
 /* ---- SHA-512 (FIPS 180-4) --------------------------------------------------------------------- */
 

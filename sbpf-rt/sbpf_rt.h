@@ -11,8 +11,8 @@
  *
  * Files: `sbpf_rt.c` (regions, traps, the twelve syscalls, SHA-256's padding) is all a translated
  * program needs. `sbpf_bn.c` + `sbpf_ed25519.c` and `sbpf_bn.c` + `sbpf_secp256k1.c` are the
- * software signature checks, each in its own file so its cycle cost is measurable on its own; see
- * the note on them at the end of this header before wiring either into a translation.
+ * software signature checks, each in its own file so its cycle cost is measurable on its own,
+ * declared in `sbpf_crypto.h`; see the note there before wiring either into a translation.
  */
 #ifndef SBPF_RT_H
 #define SBPF_RT_H
@@ -95,7 +95,14 @@ typedef struct {
 extern sbpf_regions sbpf_r;
 
 /* Instructions remaining. `sbpf_rt_reset` sets it to `SBPF_MAX_INSTRUCTIONS`; the emitted code
- * subtracts each basic block's length at the block's head and traps InstructionLimit below zero. */
+ * subtracts each basic block's length at the block's head (sbpf2rv keeps a function-local copy,
+ * handed over through this variable around every call and return) and traps InstructionLimit when
+ * it goes negative — at that block's head, or, for a block whose check sbpf2rv defers to its
+ * successors, at the head of the next block (sbpf2rv/src/emit.rs, `choose_checked`). Either way the
+ * halt kind may differ from the interpreter's, which counts one instruction at a time, only in the
+ * block that crosses the limit: a fault part-way through it may be reported as InstructionLimit, or
+ * (deferred) the other way round. The status (2) and the eight public words are equal, since an
+ * exceptional halt publishes the pre-state whatever its kind. */
 extern int64_t sbpf_budget;
 /* `Vm::heap_used`: the bump allocator's cursor, bytes handed out by `sol_alloc_free_`. */
 extern uint32_t sbpf_heap_used;
@@ -129,9 +136,22 @@ __attribute__((noreturn)) void sbpf_trap(uint32_t halt_code, uint64_t arg);
  * offset must still lie at or inside its region's end. No alignment rule. */
 const uint8_t *sbpf_tr_ro(uint64_t addr, uint64_t len);
 uint8_t *sbpf_tr_rw(uint64_t addr, uint64_t len);
-/* A 1-, 2-, 4- or 8-byte little-endian load, zero-extended; a store of `v`'s low `size` bytes. */
+/* A 1-, 2-, 4- or 8-byte little-endian load, zero-extended; a store of `v`'s low `size` bytes. A
+ * `size` above 8 is taken as 8 (no caller passes one; the clamp keeps the byte loop inside a u64). */
 uint64_t sbpf_load(uint64_t addr, uint32_t size);
 void sbpf_store(uint64_t addr, uint32_t size, uint64_t v);
+/* The emitted `ldx`/`st`/`stx`: one entry per width taking the base register and the instruction's
+ * offset, so the address is `interp.rs`'s `(base as i64).wrapping_add(off as i64) as u64`, computed
+ * once here rather than at every one of the translated program's thousands of access sites. The
+ * fault payload is that wrapped address, as the interpreter's is. */
+uint64_t sbpf_ld1(uint64_t base, int32_t off);
+uint64_t sbpf_ld2(uint64_t base, int32_t off);
+uint64_t sbpf_ld4(uint64_t base, int32_t off);
+uint64_t sbpf_ld8(uint64_t base, int32_t off);
+void sbpf_st1(uint64_t base, int32_t off, uint64_t v);
+void sbpf_st2(uint64_t base, int32_t off, uint64_t v);
+void sbpf_st4(uint64_t base, int32_t off, uint64_t v);
+void sbpf_st8(uint64_t base, int32_t off, uint64_t v);
 
 /* ---- the syscalls ---------------------------------------------------------------------------
  * `syscalls::dispatch`, one function per arm: arguments in r1..r5, the result is r0. Each checks
@@ -150,50 +170,13 @@ uint64_t sbpf_sys_memcmp(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uin
 uint64_t sbpf_sys_alloc_free(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
 uint64_t sbpf_sys_sha256(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
 /* The whole of `dispatch`: the twelve above by hash, anything else UnknownSyscall(hash) — CPI
- * (`sol_invoke_signed_*`) and the two crypto syscalls below included, since the interpreter
- * implements none of them. */
+ * (`sol_invoke_signed_*`) and the two crypto syscalls of `sbpf_crypto.h` included, since the
+ * interpreter implements none of them. */
 uint64_t sbpf_syscall(uint32_t hash, uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
 
 /* One SHA-256 compression of the 24-word `SYS_SHA256` argument (`Host::sha256_compress`): words
  * 0..16 the block as big-endian-valued words, 16..24 the chaining state, updated in place. On RV32
  * `sbpf_rt.c` defines it over `rand_sha256_compress`; a host build links a portable one. */
 void sbpf_sha256_compress(uint32_t w[24]);
-
-/* ---- software signature checks, beyond the interpreter --------------------------------------
- * NOT part of `syscalls::SUPPORTED`: the interpreter halts `UnknownSyscall` on both hashes, so a
- * translation that must match it word for word routes them to `sbpf_syscall`'s trap, not here. They
- * exist to be measured (spec §5: the coprocessor backlog) and for a later, deliberate widening of
- * the syscall set. Pure C, reference-style (Montgomery arithmetic on 8 x 32-bit limbs with 64-bit
- * products, `sbpf_bn.c`), no tables, not constant time — a proof has no timing channel. */
-#define SBPF_SYSCALL_SOL_SECP256K1_RECOVER 0x17e40350u /* sol_secp256k1_recover (Solana's) */
-#define SBPF_SYSCALL_SOL_ED25519_VERIFY 0x1a72106bu    /* sol_ed25519_verify (not a Solana name:
-                                                          Solana verifies Ed25519 in a native
-                                                          program, not a syscall) */
-
-/* `sol_secp256k1_recover`'s result codes (Solana's `Secp256k1RecoverError`, returned in r0). */
-#define SBPF_SECP256K1_OK 0
-#define SBPF_SECP256K1_INVALID_HASH 1 /* never: any 32 bytes are a message */
-#define SBPF_SECP256K1_INVALID_RECOVERY_ID 2
-#define SBPF_SECP256K1_INVALID_SIGNATURE 3
-
-/* Solana's `sol_secp256k1_recover` over libsecp256k1 `parse_standard_slice`: `hash` is the 32-byte
- * big-endian message (reduced mod n), `recid` must be 0..3 (a u64 that is not a u8, or is >= 4, is
- * INVALID_RECOVERY_ID), `sig` is r || s big-endian with 0 < r, s < n (high s accepted), and x = r +
- * (recid >> 1) n must be < p and on the curve. On success writes the 64-byte uncompressed key x || y
- * (no 0x04 prefix) and returns 0; otherwise `out` is untouched. */
-uint32_t sbpf_secp256k1_recover(const uint8_t hash[32], uint64_t recid, const uint8_t sig[64],
-                                uint8_t out[64]);
-/* RFC 8032 §5.1.7 as its §6 reference code checks it: A and R must decode (canonical y < p, x
- * recoverable, x = 0 only with sign bit 0), S < L, and [S]B = R + [k]A with k = SHA-512(R || A || M)
- * mod L (cofactorless). Returns 0 if the signature verifies, 1 if not. */
-uint32_t sbpf_ed25519_verify(const uint8_t pk[32], const uint8_t *msg, uint32_t len,
-                             const uint8_t sig[64]);
-/* The syscall-shaped wrappers: pointers are region addresses, translated first (AccessViolation on
- * a miss, as Solana's `translate_slice` faults). secp256k1: r1 hash (32, read), r2 recid, r3 sig
- * (64, read), r4 result (64, written), translated in Agave's order hash, sig, result; r0 the code.
- * ed25519: r1 public key (32), r2 message, r3 its length (above u32::MAX: AccessViolation(r3)),
- * r4 signature (64), translated in that order; r0 0 valid, 1 not. */
-uint64_t sbpf_sys_secp256k1_recover(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
-uint64_t sbpf_sys_ed25519_verify(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
 
 #endif

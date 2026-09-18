@@ -24,7 +24,7 @@
  *   3  neither: the baseline
  */
 #include "guest.h"
-#include "../../sbpf_rt.h"
+#include "../../sbpf_crypto.h"
 #include "../../sbpf_rt.c"
 #include "../../sbpf_bn.c"
 #include "../../sbpf_ed25519.c"

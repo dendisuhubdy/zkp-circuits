@@ -76,6 +76,7 @@ const uint8_t *sbpf_tr_ro(uint64_t addr, uint64_t len) { return slice(addr, len,
 uint8_t *sbpf_tr_rw(uint64_t addr, uint64_t len) { return (uint8_t *)slice(addr, len, 1); }
 
 uint64_t sbpf_load(uint64_t addr, uint32_t size) {
+    if (size > 8) size = 8;
     const uint8_t *p = slice(addr, size, 0);
     uint64_t v = 0;
     for (uint32_t i = 0; i < size; i++) v |= (uint64_t)p[i] << (8 * i);
@@ -83,9 +84,22 @@ uint64_t sbpf_load(uint64_t addr, uint32_t size) {
 }
 
 void sbpf_store(uint64_t addr, uint32_t size, uint64_t v) {
+    if (size > 8) size = 8;
     uint8_t *p = (uint8_t *)slice(addr, size, 1);
     for (uint32_t i = 0; i < size; i++) p[i] = (uint8_t)(v >> (8 * i));
 }
+
+/* `(regs[r] as i64).wrapping_add(off as i64) as u64`. */
+static uint64_t at(uint64_t base, int32_t off) { return base + (uint64_t)(int64_t)off; }
+
+uint64_t sbpf_ld1(uint64_t base, int32_t off) { return sbpf_load(at(base, off), 1); }
+uint64_t sbpf_ld2(uint64_t base, int32_t off) { return sbpf_load(at(base, off), 2); }
+uint64_t sbpf_ld4(uint64_t base, int32_t off) { return sbpf_load(at(base, off), 4); }
+uint64_t sbpf_ld8(uint64_t base, int32_t off) { return sbpf_load(at(base, off), 8); }
+void sbpf_st1(uint64_t base, int32_t off, uint64_t v) { sbpf_store(at(base, off), 1, v); }
+void sbpf_st2(uint64_t base, int32_t off, uint64_t v) { sbpf_store(at(base, off), 2, v); }
+void sbpf_st4(uint64_t base, int32_t off, uint64_t v) { sbpf_store(at(base, off), 4, v); }
+void sbpf_st8(uint64_t base, int32_t off, uint64_t v) { sbpf_store(at(base, off), 8, v); }
 
 /* `Memory::nonoverlapping`. */
 static int nonoverlapping(uint64_t a, uint64_t b, uint64_t n) {

@@ -6,7 +6,7 @@
  * curve constants below are the only data. `test/crypto_vectors.h` has the known answers
  * (go-ethereum's ecrecover vector, OpenSSL-signed vectors, every rejection). */
 #include "sbpf_bn.h"
-#include "sbpf_rt.h"
+#include "sbpf_crypto.h"
 
 /* Little-endian limbs: p = 2^256 - 2^32 - 977, n the group order, G the generator (SEC 2). */
 static const bn SP = {{0xfffffc2f, 0xfffffffe, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,

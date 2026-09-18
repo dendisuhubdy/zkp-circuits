@@ -15,7 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../sbpf_rt.h"
+#include "../sbpf_crypto.h"
 #include "crypto_vectors.h"
 
 #ifndef SBPF_USIZE_MAX
@@ -190,6 +190,50 @@ static uint64_t deep(uint64_t n, uint64_t b, uint64_t c, uint64_t d, uint64_t e)
 }
 static uint64_t ret_sum(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
     return a + b + c + d + e;
+}
+
+/* sbpf2rv's per-width access entries: base register plus the instruction's signed offset, wrapped
+ * in 64 bits (`interp.rs`'s `(base as i64).wrapping_add(off as i64)`), faulting with that wrapped
+ * address; and `sbpf_load`/`sbpf_store`'s clamp of a size above 8. */
+static uint64_t f_ld(uint64_t base, uint64_t off, uint64_t width, uint64_t d, uint64_t e) {
+    (void)d, (void)e;
+    switch (width) {
+    case 1: return sbpf_ld1(base, (int32_t)off);
+    case 2: return sbpf_ld2(base, (int32_t)off);
+    case 4: return sbpf_ld4(base, (int32_t)off);
+    default: return sbpf_ld8(base, (int32_t)off);
+    }
+}
+static uint64_t f_st(uint64_t base, uint64_t off, uint64_t width, uint64_t v, uint64_t e) {
+    (void)e;
+    switch (width) {
+    case 1: sbpf_st1(base, (int32_t)off, v); break;
+    case 2: sbpf_st2(base, (int32_t)off, v); break;
+    case 4: sbpf_st4(base, (int32_t)off, v); break;
+    default: sbpf_st8(base, (int32_t)off, v); break;
+    }
+    return 0;
+}
+static void test_width_entries(void) {
+    layout_v1();
+    CHECK(OK(call(f_st, STK(4096), (uint64_t)-8, 8, 0x1122334455667788ull, 0), 0), "st8 at r10 - 8");
+    CHECK(le(stack + 4088, 8) == 0x1122334455667788ull, "the bytes");
+    CHECK(OK(call(f_ld, STK(4096), (uint64_t)-8, 8, 0, 0), 0x1122334455667788ull), "ld8 at r10 - 8");
+    CHECK(OK(call(f_ld, STK(4096), (uint64_t)-7, 1, 0, 0), 0x77), "ld1");
+    CHECK(OK(call(f_ld, STK(4096), (uint64_t)-8, 2, 0, 0), 0x7788), "ld2");
+    CHECK(OK(call(f_ld, STK(4096), (uint64_t)-8, 4, 0, 0), 0x55667788), "ld4");
+    CHECK(OK(call(f_st, IN(0), 127, 1, 0xabcd, 0), 0) && input[127] == 0xcd, "st1 at the last input byte");
+    CHECK(OK(call(f_st, IN(10), 0, 2, 0xbeef, 0), 0) && le(input + 10, 2) == 0xbeef, "st2");
+    CHECK(OK(call(f_st, IN(20), 0, 4, 0xfeedf00d, 0), 0) && le(input + 20, 4) == 0xfeedf00d, "st4");
+    /* The offset wraps the whole 64-bit address: 0 - 1 is u64::MAX, which is the fault payload. */
+    CHECK(AV(call(f_ld, 0, (uint64_t)-1, 1, 0, 0), UINT64_MAX), "wrap below zero");
+    CHECK(AV(call(f_ld, STK(0), (uint64_t)-32768, 8, 0, 0), STK(0) - 32768), "below the stack");
+    CHECK(AV(call(f_st, IN(126), 0, 4, 0, 0), IN(126)), "st4 straddling the input's end");
+    CHECK(AV(call(f_st, PROG(0x120), 0, 8, 0, 0), PROG(0x120)), "the program region is read-only");
+    /* A size above 8 is 8. */
+    CHECK(OK(LOAD(STK(4088), 9), 0x1122334455667788ull), "load size clamp");
+    CHECK(OK(STORE(STK(0), 200, 0x0102030405060708ull), 0) && le(stack, 8) == 0x0102030405060708ull && stack[8] == 0,
+          "store size clamp");
 }
 
 static void test_traps(void) {
@@ -485,6 +529,7 @@ static void test_secp256k1(void) {
 int main(void) {
     test_regions();
     test_traps();
+    test_width_entries();
     test_memcpy_memmove();
     test_memset();
     test_memcmp();
