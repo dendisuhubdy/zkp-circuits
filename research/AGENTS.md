@@ -92,6 +92,30 @@ own tier-20 proof. `sbpf2rv/README.md` has the full walkthrough
 (commands and their real output) and every measured number; the design spec is
 `docs/superpowers/specs/2026-09-18-sbpf-to-rv32-translator-design.md`.
 
+**`evm2rv`, piece 3 of the two translator specs above, is done through Task 9
+(2026-09-18)**: an ahead-of-time EVM → RV32 translator. It turns Solidity runtime bytecode into C
+over `evm-rt/` in a shim crate `rand-guest build` compiles, reusing `evm-core::abi`'s harness, so
+the input vector and the eight output words are the interpreter's. Stage two (register lifting,
+the default) runs the ERC-20 transfer in 66 235 cycles against the interpreter's 121 638, both
+tier 18, at 11 686 program words; the three ERC-20 calls and five more vectors (a revert, out of gas three ways, the exact limit) match the
+interpreter word for word, and 10 000-case fuzz corpora (plain and opaque, both stages) show no
+divergence. The observable contract is the status, the eight words and `gas_used`, never the halt
+kind. Three accepted divergences: block-head gas can change the halt kind; the translation runs
+`CHAINID` (a baked `--chain-id`), `ORIGIN` (= `CALLER`) and calls to precompiles 1–9, which the
+interpreter traps; and the code guard. The guard: the logic is baked into the image but `CODECOPY`
+reads the input code, so `contract.c` carries a `POSEIDON2` digest of the source bytecode and the
+shim refuses any other code (status 2, `gas_used` 0, `OutOfBounds`), so `hc` binds the code; it
+costs 1 008 cycles. The nine block-context opcodes trap until a public binding is designed (a user
+decision). All nine precompiles are software; ecrecover, bn256 mul, the pairing and large modexp
+and blake2f exceed 2^20 cycles and are the coprocessor backlog. The harness is about 60% of a
+transfer. Trust: rebuild with Rust 1.98.1, clang 23.1.1 (the generated `build.rs` refuses any other
+unless `RAND_GUEST_CLANG_UNPINNED=1`) and `cc` 1.4.6 and compare `hc`; the chain does not record
+the bytecode's hash. Not yet proven on a 48 GB laptop (the stage-one attempt died at 24.7 GB);
+deferred to a machine with at least 64 GB. The image is over chain 12's 4 096-word cap, so
+deploying it needs a genesis with a larger `max_program_words`. `evm2rv/README.md` has the
+walkthrough with real output; the spec is
+`docs/superpowers/specs/2026-09-18-evm-to-rv32-translator-design.md`.
+
 **Constraint set 6 in one paragraph**, because it is what most recently moved
 under everyone's feet: `SYS_READ_PUBLIC = 6` reads a second, independently
 indexed input vector bound to `H_PUB = pv::PUB0..PUB7`, which — unlike `H_IN` —

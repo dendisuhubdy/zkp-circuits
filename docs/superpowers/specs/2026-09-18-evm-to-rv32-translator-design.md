@@ -62,7 +62,7 @@ so the per-opcode checks disappear in straight-line code.
 | `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH` | the trap the interpreter raises (`Halt::Trap(opcode)`, status 2), until a public-segment binding for them is designed (a follow-up for the user). A private input word is bound only to the salted `H_IN`, which a verifier cannot open, so it cannot carry a chain fact a prover could not forge |
 | `LOG0..4` | runtime calls that append to the logs the harness hashes |
 | `STOP`, `RETURN`, `REVERT`, `INVALID` | set the outcome and leave |
-| precompile calls: `CALL`/`STATICCALL` to addresses 1–9 | the runtime's software implementations (§5) with the precompile's gas |
+| precompile calls: all four call opcodes, `CALL`, `CALLCODE`, `DELEGATECALL` and `STATICCALL`, to addresses 1–9 | the runtime's software implementations (§5) with the precompile's gas (Shanghai: 100 warm access, all but one 64th, the return-data buffer). A nonzero value on `CALL`/`CALLCODE` traps: there is no balance model. `modexp`'s base and modulus are capped at 1 024 bytes each; past the cap an affordable call halts `OutOfBounds` |
 | the cross-contract family: `CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL` to any other address, `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, `CREATE`, `CREATE2`, `SELFDESTRUCT` | the trap the interpreter raises (status 2). A single proof carries one contract's witnessed storage; a multi-contract witness model is a chain design, not a translator. This is the one thing "broad Shanghai coverage" does not mean, and `evm2rv` prints a warning at translation naming each such opcode present in the code |
 
 **Gas.** The Shanghai static schedule the interpreter implements is summed per basic block at
@@ -77,11 +77,35 @@ part way through fails at its head instead, with the same status and the same re
 
 ## 4. Stage two: register lifting
 
-Same runtime, same tests, a cycle target rather than new semantics. A per-block stack-depth
-analysis assigns each stack slot whose depth is static within the block to a C local (`u256`
-value), so straight-line arithmetic never touches the array; slots live across a dynamic jump
-are spilled to the array at the block end and reloaded at the target. Stage two lands after
-stage one's exit gate and reports the ERC-20 cycle count again.
+Same runtime, same tests, same gas, fewer cycles. As built (Task 8, `evm2rv/src/lift.rs`), and
+the CLI's default:
+
+- **Each block is simulated symbolically** from its entry depth. A position holds the word the
+  memory stack already has there (read in place through `sp_ = &evm_stack[evm_sp]`, set once at
+  the head), a `u256` local, a constant, or one of the three environment words.
+- **Entry words are read in place. There is no reload at block entry.** A slot is copied only when
+  something is about to overwrite it.
+- **Constant folding.** A pure op over constants is computed at translation with the interpreter's
+  own `U256`, so it matches by construction. `EXP` is never folded, because its gas depends on its
+  operand.
+- **Static const operands.** A constant offset or length becomes a literal, saturated exactly as
+  `u256_sat_u32` would; a constant word a runtime call reads is a function-scope `static const`.
+- **Constant jumps become `goto`.** A constant destination is resolved at translation, even when
+  the push is not adjacent to the jump, to a direct `goto` or a static bad jump.
+- `DUP`/`SWAP` only rename. At most 96 locals per block; past that the block spills, so no frame
+  exceeds 4 KiB.
+
+The invariants (Task 8 review):
+
+- the memory stack is written only by a spill (a parallel move, cycles rotated through one
+  temporary, and any word above the spill height that reads an overwritten slot copied first);
+- `evm_sp` changes only at a block's exits;
+- no local is live across a block boundary;
+- the call family and `LOG` receive a spilled stack;
+- every `u256`/runtime routine allows its result to alias any operand (`evm-rt/u256.h`).
+
+The block heads, `GAS`'s `gas_after` and every runtime call are stage one's. On the ERC-20
+transfer stage two runs 66 235 cycles against stage one's 80 211 and the interpreter's 121 638.
 
 ## 5. The runtime
 
@@ -106,6 +130,12 @@ on the published bytecode, with the same `--chain-id`, exactly as for sBPF) and 
 `EVM_OUT` against the same bytecode — so the translated program and the code it claims to run
 cannot come apart.
 
+**The code guard** (Task 9). The translated logic is baked into the image, but `CODECOPY` and
+`CODESIZE` read the input vector's code. So `contract.c` carries a `POSEIDON2` digest of the source
+bytecode, and the shim checks the input code against it before anything runs. Any other code gets
+the interpreter's `pre_halt`: status 2, `gas_used` 0, `OutOfBounds`. `hc` therefore binds the
+code as well as the logic. The chain does not record the bytecode or its hash.
+
 ## 7. Testing
 
 - **Interpreter parity.** Every EVM vector `evm-core` tests (the ERC-20 transfer, and `approve`
@@ -122,7 +152,8 @@ cannot come apart.
 - **Cycles.** The ERC-20 transfer's cycle count against 121 638, reported after stage one and
   after stage two.
 - **A real proof.** The translated ERC-20 transfer proves under the test profile and verifies,
-  once, as each stage's exit gate.
+  once, as each stage's exit gate. **Deferred** to a machine with at least 64 GB: on a 48 GB
+  laptop the stage-one attempt was killed at a 24.7 GB peak (Task 7).
 
 ## 8. Out of scope
 

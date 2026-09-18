@@ -1,213 +1,383 @@
 # evm2rv
 
-Translates EVM bytecode (solc's runtime bytecode) into C over `evm-rt/`, for `rand-guest` to build
-into a zkVM image. See Tasks 1-9's briefs and reports under
-`.superpowers/sdd/2026-09-18-evm2rv-translator/` for the design and every ruling.
+`evm2rv` translates EVM runtime bytecode (what `solc --bin-runtime` prints) into C over
+`evm-rt/`. `rand-guest build` then compiles that C into a zkVM image. The image takes the same
+input vector as the EVM interpreter guest (`guests-compiled/bin/evm.bin`) and publishes the same
+eight output words. It just runs the contract natively instead of interpreting it opcode by
+opcode.
 
-This page is the measurement of both translation stages: the translated ERC-20's cycles against
-the interpreter's (`guests-compiled/bin/evm.bin`), split into harness/ABI work and contract
-execution, and one real proof (stage one, Task 7).
+The design spec is `docs/superpowers/specs/2026-09-18-evm-to-rv32-translator-design.md`. Every
+ruling is in the task briefs and reports under `.superpowers/sdd/2026-09-18-evm2rv-translator/`.
 
-- **Stage one** (Task 4, `src/emit.rs`): every opcode over `evm-rt`'s memory stack.
-  `evm2rv --stage 1`.
-- **Stage two** (Task 8, `src/lift.rs`): the same blocks, block heads, runtime calls and gas, with
-  each block's words in C locals, constants folded (with the interpreter's own `U256`) and
-  resolved at translation, and the memory stack written only where another block or the runtime
-  reads it. It passes every test stage one passes and is the CLI's **default** (Task 8, ruling 1).
-  The two are different programs, each with its own pinned `hc`.
+There are two translation stages. Both give the same results and the same gas.
 
-**Toolchain.** `cargo +1.98.1`. The RV32 shim is built with Homebrew clang, found by `build.rs` the
-way `rand-guest` finds it (`$CLANG`, then Homebrew's LLVM, then `clang` on `PATH`, each probed for
-`riscv32` in `--print-targets`): on the machine these numbers were measured on, that resolved to
+| stage | source | what it does | flag |
+|---|---|---|---|
+| one | `src/emit.rs` | every opcode over `evm-rt`'s memory stack | `--stage 1` |
+| two | `src/lift.rs` | each block's words in C locals, constants folded at translation | `--stage 2` (the default) |
+
+Each stage is a different program, so each has its own `hc`.
+
+## Walkthrough: the ERC-20, end to end
+
+Every command below was run from the root of a `circuits` checkout, and the output shown is its
+real output. Long output is cut where marked `...`.
+
+### 0. The toolchain
+
+The pins are Rust 1.98.1, clang 23.1.1 and the `cc` crate 1.4.6. `hc` depends on all three.
 
 ```
-$ /opt/homebrew/opt/llvm/bin/clang --version
+$ /opt/homebrew/opt/llvm/bin/clang --version | head -1
 Homebrew clang version 23.1.1
-Target: arm64-apple-darwin25.6.0
 ```
 
-## Cycles, tier and words
+On macOS, `brew install llvm` gives this clang. Build the two tools once:
 
-Measured with `rand-guest run` (`rand-guest info` for words and `hc`) on the vectors `tests/parity.rs`
-and `tests/precompiles.rs` already pin; both print, for every stage, the cycles and the tier
-`rand-guest run` picks. Every translated image is the **default build** (what a chain would
-deploy, `emit-outcome` off). `evm.bin` is unmodified (`guests-compiled/bin/evm.bin`, sha256
-`5500886f…440d`).
+```
+$ (cd evm2rv && cargo +1.98.1 build --release)
+$ (cd rand-guest && cargo +1.98.1 build --release)
+```
+
+### 1. The bytecode
+
+`evm2rv` takes **runtime** bytecode: the code that lives at the contract's address after
+deployment. It does not take creation code. Creation code runs the constructor once and returns
+the runtime code. A proof here is of one call to a deployed contract, so the constructor never
+runs. The state it would have written is part of the pre-state instead, as storage witnesses.
+
+To get runtime bytecode from Solidity:
+
+```
+solc --optimize --optimize-runs 200 --evm-version shanghai --bin-runtime MyToken.sol
+```
+
+The last line of output is the hex. Save it as `mytoken.hex`. Use `--evm-version shanghai`:
+newer targets emit `MCOPY` and other Cancun opcodes, which trap here.
+
+`solc` is not installed on the machine these numbers come from. The committed ERC-20
+(`guests-compiled/evm/contracts/erc20.runtime.hex`, 1 296 bytes) was compiled once with solc
+**0.8.37** (`0.8.37+commit.f401782d`), with exactly the flags above.
+`guests-compiled/evm/contracts/SOLC.md` names the binary and its sha256.
+`guests-compiled/evm/contracts/build.sh` recompiles it and diffs the result when a solc is on
+`PATH`.
+
+### 2. Translate
+
+```
+$ evm2rv/target/release/evm2rv guests-compiled/evm/contracts/erc20.runtime.hex --out evm2rv/target/erc20 --chain-id 12
+1296 code bytes: 74 blocks, 798 opcodes, 51 jumpdests (stage 2)
+CHAINID is the constant 12
+no trapping opcodes present
+wrote evm2rv/target/erc20 (crate erc20-runtime): contract.c, Cargo.toml, Cargo.lock, build.rs, src/main.rs, shim.ld
+```
+
+- A `.hex` file is read as hex text. Any other extension is read as raw bytes.
+- `--out` must be inside a circuits checkout, because `rand-guest build` needs one.
+- `--chain-id N` is the value `CHAINID` returns, baked into the C. It is required when the code
+  contains `CHAINID`. This ERC-20 does not, so the flag changes nothing here: `hc` is the same with
+  or without it.
+- Any trapping opcode is listed as a warning, with its pc.
+
+`contract.c` is the translated contract. It ends with the code guard (see "Trust" below):
+
+```
+$ tail -7 evm2rv/target/erc20/contract.c
+   from. Before any of the code above runs, the shim hashes the input vector's code the same way and
+   refuses any other (OutOfBounds, status 2, gas_used 0). */
+const uint32_t *evm_code_digest(void);
+const uint32_t *evm_code_digest(void) {
+    static const uint32_t d[8] = {0xf679280fu, 0x86c10e83u, 0x7e8f1f39u, 0xa2377de3u, 0x8a2e282fu, 0xc54cad42u, 0xddfaf009u, 0x7d28a8afu};
+    return d;
+}
+```
+
+### 3. Build the image
+
+```
+$ rand-guest/target/release/rand-guest build evm2rv/target/erc20 --max-words 65535
+...
+warning: erc20-runtime@0.1.0: evm2rv: clang Homebrew clang version 23.1.1 (/opt/homebrew/opt/llvm/bin/clang)
+    Finished `release` profile [optimized] target(s) in 3.50s
+11686 words against a cap of 65535 (fits); 0 ecall(s) with a non-static a7
+OK
+wrote evm2rv/target/erc20/image.bin and its .sha256 (11686 words, hc a0feae92a7311c9562495717100eb7aea71270a38ed435d06dc31387e0ea8ff6, program id f074c4eb834cf01886a8241b6a2e0caf6e1cee5327fee6cb1a1a37436607280d)
+```
+
+`--max-words 65535` is needed: the default cap is 4 096 words. The build refuses any clang other
+than 23.1.1. `RAND_GUEST_CLANG_UNPINNED=1` builds anyway, with a warning that `hc` will not match
+published images.
+
+### 4. Run a transfer
+
+The input vector is the interpreter's: the code, the calldata, the caller and other environment
+words, the gas limit, the pre-state root, and one storage witness per slot the call touches. This
+example prints the parity test's `transfer` (ALICE sends BOB 250 of her 1 000) as 921 words. It
+also has `approve` and `transferFrom`.
+
+```
+$ (cd evm2rv && cargo +1.98.1 run -q --release --example erc20_vector -- transfer > target/transfer.words)
+921 input words
+$ rand-guest/target/release/rand-guest run evm2rv/target/erc20/image.bin --input $(cat evm2rv/target/transfer.words)
+out[0] = 1
+out[1] = 513227413
+out[2] = 3087537901
+out[3] = 995619457
+out[4] = 4004100029
+out[5] = 234390638
+out[6] = 3262201797
+out[7] = 3842361427
+cycles 66235
+tier 18
+```
+
+`out[0]` is the status: 1 success, 0 revert, 2 exceptional halt. `out[1..8]` is the `EVM_OUT`
+digest over the code hash, both state roots, the return data and the logs.
+
+### 5. The same eight words as the interpreter
+
+The interpreter guest, on the same input:
+
+```
+$ rand-guest/target/release/rand-guest run guests-compiled/bin/evm.bin --input $(cat evm2rv/target/transfer.words)
+out[0] = 1
+out[1] = 513227413
+out[2] = 3087537901
+out[3] = 995619457
+out[4] = 4004100029
+out[5] = 234390638
+out[6] = 3262201797
+out[7] = 3842361427
+cycles 121638
+tier 18
+```
+
+The interpreter run natively on the host (the tests' oracle):
+
+```
+$ (cd evm2rv && cargo +1.98.1 run -q --release --example erc20_vector -- transfer --expected)
+out[0] = 1
+out[1] = 513227413
+...
+out[7] = 3842361427
+interpreter (native): status 1, Return, gas_used 29956
+```
+
+The check, as one command:
+
+```
+$ diff <(rand-guest/target/release/rand-guest run evm2rv/target/erc20/image.bin --input $(cat evm2rv/target/transfer.words) | grep '^out') \
+       <(rand-guest/target/release/rand-guest run guests-compiled/bin/evm.bin --input $(cat evm2rv/target/transfer.words) | grep '^out') \
+  && echo "the eight words are identical"
+the eight words are identical
+```
+
+| | translated (stage two) | interpreter (`evm.bin`) |
+|---|---:|---:|
+| eight output words | identical | identical |
+| cycles | 66 235 | 121 638 |
+| tier | 18 | 18 |
+| program words | 11 686 | 18 009 |
+
+`tests/parity.rs` runs this and seven more vectors under both stages, and also checks `gas_used`
+and the halt through a second build that reports them.
+
+### 6. Deploy (not run here)
+
+```
+$ rand-guest/target/release/rand-guest info evm2rv/target/erc20/image.bin
+form: image container
+text 11147 words at 0x10000; data 408 words (205 non-zero) at 0x1ae2c; prologue 539 words; program 11686 words from base_pc 0xf794
+hc a0feae92a7311c9562495717100eb7aea71270a38ed435d06dc31387e0ea8ff6
+program id f074c4eb834cf01886a8241b6a2e0caf6e1cee5327fee6cb1a1a37436607280d
+11686 words against a cap of 4096: does not fit
+```
+
+The fullnode wallet deploys an image with:
+
+```
+rand program deploy evm2rv/target/erc20/image.bin
+```
+
+It prints the program id, the word count and `hc`, then checks the chain's program cap before it
+proves anything. The image is 11 686 words. Chain 12 runs the default cap of 4 096 words, so this
+deploy is refused there. It needs a chain whose genesis sets `max_program_words` high enough, for
+example `rand-node genesis ... --max-program-words 65535` (fullnode `docs/cli.md`). The cap is part
+of the genesis hash, so it cannot be raised on an existing chain.
+
+## Trust
+
+A verifier checks a translated contract in two steps:
+
+1. **`hc == translate(bytecode)`.** Re-run `evm2rv` on the published bytecode with the same
+   `--stage` and `--chain-id`, rebuild with the pinned toolchain (Rust 1.98.1, clang 23.1.1,
+   `cc` 1.4.6), and compare `hc`. The generated crate pins `cc` exactly and carries its own
+   `Cargo.lock`. The build refuses any other clang unless told otherwise.
+2. **The code guard.** The translated logic is baked into the image, so `hc` binds it. But
+   `CODECOPY` and `CODESIZE` read the input vector's code. Without a check, one `hc` could run with
+   code bytes the caller chose. So `contract.c` carries a digest of the source bytecode
+   (`guard::code_digest`: the `POSEIDON2` sponge over the code's length and its bytes), and the
+   shim hashes the input vector's code the same way before any translated code runs. Any other
+   code is refused the way the interpreter's `pre_halt` stops a call before it starts: status 2,
+   `gas_used` 0, halt `OutOfBounds`. So `hc` binds the code too.
+
+The `EVM_OUT` digest also binds `keccak256` of the input vector's code, as the interpreter's
+does. The chain does not record the source bytecode or its hash; a verifier who wants to check
+`hc` needs the bytecode from the contract's author.
+
+What the guard costs, on the transfer (measured):
+
+| | before the guard | with the guard | cost |
+|---|---:|---:|---:|
+| stage one cycles | 79 203 | 80 211 | +1 008 |
+| stage two cycles | 65 227 | 66 235 | +1 008 |
+| program words, either stage | 15 637 / 11 519 | 15 804 / 11 686 | +167 |
+
+Why `POSEIDON2` and not Keccak: the harness hashes the code with Keccak for `EVM_OUT`, but only
+after the contract has run. Reusing that hash would mean changing `evm-core`, which would move
+the pinned `evm.bin`. So the guard hashes once more, with the cheaper coprocessor hash:
+
+| guard hash (stage two transfer) | added cycles |
+|---|---:|
+| Keccak-256 of the code | +8 798 |
+| `POSEIDON2`, plain copy loop | +2 720 |
+| `POSEIDON2`, eight-word copy (shipped) | +1 008 |
+
+A code one byte different from the source is refused in 30 344 cycles (stage one) or 30 418
+(stage two), tier 16. `tests/guard.rs` also runs 16 381- and 24 575-byte codes, which need a
+second `POSEIDON2` call.
+
+## The observable contract
+
+What must match the interpreter is the status, the eight output words and `gas_used`. The halt
+kind is not public, and it may differ. Three divergences are accepted:
+
+1. **The halt kind.** Static gas is charged once at the head of each block. A block that would
+   halt midway for another reason can halt `OutOfGas` at its head instead, or the reverse. Both are
+   status 2 with `gas_used` equal to the limit, so nothing observable changes.
+2. **The translation runs a little more than the interpreter.** The interpreter traps on
+   `CHAINID`, `ORIGIN` and every call. The translation implements `CHAINID` and `ORIGIN`, and runs
+   calls to the precompiles (addresses 1 to 9). A call on too shallow a stack underflows at the
+   block head where the interpreter traps; both are status 2.
+3. **The code guard.** Given code other than its source, the interpreter would run it. The
+   translation refuses it (status 2, `gas_used` 0).
+
+## Environment opcodes
+
+| opcode | translation |
+|---|---|
+| `ADDRESS`, `CALLER`, `CALLVALUE`, `CALLDATASIZE`, `CODESIZE` | from the input vector, as the interpreter reads them |
+| `CHAINID` | the `--chain-id` constant, baked in, so `hc` binds it; 2 gas |
+| `ORIGIN` | `CALLER` (one call, no relayer); 2 gas |
+| `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH` | trap (status 2), as in the interpreter |
+
+The nine block-context opcodes trap until there is a design for binding them. A private input
+word is bound only to the salted `H_IN`, which a verifier cannot open, so it could not carry a
+block fact a prover could not forge. Binding them needs a chain decision on which block a proof is
+checked against. Until then, contracts that read the time or the block number (a permit deadline,
+for example) trap.
+
+## Calls and precompiles
+
+- All four call opcodes (`CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`) run a precompile when
+  the target is 1 to 9, with Shanghai gas. Any other target traps, as in the interpreter.
+- A nonzero value on `CALL` or `CALLCODE` traps: there is no balance model.
+- `modexp`'s base and modulus are capped at 1 024 bytes each. Past the cap, an affordable call
+  halts `OutOfBounds`. The exponent is not capped.
+- `RETURNDATASIZE` and `RETURNDATACOPY` read a real return-data buffer in a contract that calls.
+
+All nine are software. Measured with one known answer each (`evm-rt/test/rv32-precompiles`):
+
+| precompile | vector | cycles | fits 2^20? |
+|---|---|---:|---|
+| 1 ecrecover | ValidKey | 14 510 525 | no |
+| 2 sha256 | "abc" / 200 bytes | 2 791 / 5 289 | yes |
+| 3 ripemd160 | "abc" | 12 195 | yes |
+| 4 identity | 100 bytes | 4 498 | yes |
+| 5 modexp | nagydani-1-square / -1-pow0x10001 | 122 332 / 874 548 | yes |
+| 5 modexp | eip_example1 (256-bit) | 11 170 118 | no |
+| 5 modexp | nagydani-5-pow0x10001 (1 024-byte) | 55 076 950 | no |
+| 6 bn256 add | chfast1 | 978 262 | yes, just |
+| 7 bn256 mul | chfast1 | 3 060 669 | no |
+| 8 bn256 pairing | 1 pair / 2 pairs | 1 853 656 212 / 2 019 000 469 | no |
+| 9 blake2f | 12 rounds | 14 493 | yes (up to about 1 800 rounds) |
+
+The ones over 2^20 cycles are correct but cannot be proven today. They are the coprocessor
+backlog: ecrecover, bn256 mul, the pairing, modexp past small operands, and blake2f past about
+1 800 rounds.
+
+## Cycles against the interpreter
+
+Measured with `rand-guest run` on the vectors `tests/parity.rs` and `tests/precompiles.rs` pin,
+with the code guard in. Tier in parentheses.
+
+| vector | interpreter | stage one | stage two |
+|---|---:|---:|---:|
+| `transfer(BOB, 250)` | 121 638 (18) | 80 211 (18) | **66 235** (18) |
+| `approve(BOB, 5)` | 85 645 (18) | 56 261 (16) | **48 119** (16) |
+| `transferFrom(ALICE, BOB, 100)` | 161 434 (18) | 110 074 (18) | **88 824** (18) |
+| transfer of 5 000 of 1 000 (reverts) | 88 092 (18) | 54 256 (16) | 46 830 (16) |
+| transfer, out of gas at 100 | 49 504 (16) | 32 831 (16) | 32 382 (16) |
+| transfer, out of gas at 20 000 | 103 736 (18) | 67 815 (18) | 57 427 (16) |
+| transfer, out of gas at 29 955 | 120 235 (18) | 78 553 (18) | 65 038 (18) |
+| sha256 + ecrecover, underfunded | traps | 22 626 (16) | 21 562 (16) |
 
 | program | words | hc |
 |---|---:|---|
-| interpreted (`evm.bin`) | 18 009 | `7e1aea2b…854c08` |
-| ERC-20, stage one | 15 637 | `3307bfc4aaf87e4021941d18a9e813441354bb6fa19b357c5b604839e516579d` (pinned) |
-| ERC-20, stage two | 11 519 | `87aba574b1dff3591631fbfc2ebd9e993098e9929219126ddc94ecaf2c60ccad` (pinned) |
-| sha256 + ecrecover contract, stage one | 15 691 | `338c1588…822285` |
-| sha256 + ecrecover contract, stage two | 15 463 | `96bae05f…3c2914` |
+| interpreter (`evm.bin`) | 18 009 | `7e1aea2b…854c08` |
+| ERC-20, stage one | 15 804 | `9cdb79e7f05d53f6503f0eb777bb0c2356d29cab516a0378864802e42fd048c8` |
+| ERC-20, stage two | 11 686 | `a0feae92a7311c9562495717100eb7aea71270a38ed435d06dc31387e0ea8ff6` |
+| sha256 + ecrecover contract, stage one | 15 858 | `c8f00a09…f946fd` |
+| sha256 + ecrecover contract, stage two | 15 630 | `011120cf…058c33` |
 
-Cycles, with the tier in parentheses:
+Stage two runs the three ERC-20 calls in 54.5% (`transfer`), 56.2% (`approve`) and 55.0%
+(`transferFrom`) of the interpreter's cycles. Stage one takes 65.7 to 68.2%.
 
-| vector | interpreted (`evm.bin`) | stage one | stage two | stage two / stage one |
+**The transfer stays at tier 18.** Its 66 235 cycles are just over tier 16's 65 535. The tier also
+counts the digest rows: one per four program words, and one per four input words.
+
+### Where the cycles go
+
+The harness is the code both images share: decoding the input, verifying each storage witness,
+the ABI's own `keccak256` calls, and the output digest. The split below was measured on the
+transfer with a one-off tool (Tasks 7 and 8; not committed): `llvm-nm` symbol ranges over each
+cycle's pc, with each `memcpy`/`memset`/`memcmp` call charged to its caller. It was measured
+before the code guard.
+
+| transfer, before the guard | total | contract | harness | unclassified |
 |---|---:|---:|---:|---:|
-| `transfer(BOB, 250)`, balance 1 000 | 121 638 (18) | 79 203 (18) | **65 227** (18) | 82.4% |
-| `approve(BOB, 5)` | 85 645 (18) | 55 255 (16) | **47 113** (16) | 85.3% |
-| `transferFrom(ALICE, BOB, 100)` | 161 434 (18) | 109 064 (18) | **87 814** (18) | 80.5% |
-| transfer of 5 000 of 1 000 (reverts) | 88 092 (18) | 53 248 (16) | 45 822 (16) | 86.1% |
-| transfer, out of gas at 100 | 49 504 (16) | 31 823 (16) | 31 374 (16) | 98.6% |
-| transfer, out of gas at 20 000 | 103 736 (18) | 66 807 (18) | 56 419 (16) | 84.5% |
-| transfer, out of gas at 29 955 | 120 235 (18) | 77 545 (18) | 64 030 (18) | 82.6% |
-| sha256("abc") + ecrecover (underfunded, 2 999 of 3 000) | — | 22 367 (16) | 21 303 (16) | 95.2% |
+| stage one | 79 203 | 39 839 | 38 920 | 444 |
+| stage two | 65 227 | 25 789 | 38 920 | 518 |
 
-The precompile vector (`tests/precompiles.rs`'s Task 5 end-to-end contract, STATICCALL to sha256
-then to ecrecover with one gas short) has no interpreted row: `evm-core`'s interpreter traps on
-every `CALL`-family opcode (Task 5's ruling 1), so it is not an oracle for a contract that calls
-out, and the comparison in this README is translated-only.
+Stage two cuts the contract's own execution by 35%. The guard adds 1 008 cycles to the harness,
+so the harness is now about 39 928 of stage two's 66 235 cycles: **about 60% of a transfer**. No
+translation work can go below that floor.
 
-Stage one's cycles are consistently **64.5-67.6% of the interpreter's** across every ERC-20 vector —
-a 32-35% cut (`transfer` 65.1%, `approve` 64.5%, `transferFrom` 67.6%): block-level static gas
-charging and direct dispatch (`goto`s, not a decode-execute loop) remove some of the interpreter's
-per-opcode overhead, but — see the harness/ABI split below — most of what is left in the translated
-program is not opcode dispatch either.
+## Proving
 
-Stage two takes the ERC-20 vectors to **53.6-55.0% of the interpreter's** (`transfer` 53.6%,
-`approve` 55.0%, `transferFrom` 54.4%): another 15-20% off stage one on the successful calls, and a
-quarter fewer program words. The precompile contract gains least (4.8%): nearly all of its
-cycles are the harness and `evm_call`, not its handful of opcodes.
+**Not yet proven on a 48 GB laptop.** A proof of the stage-one transfer (Task 7, before the
+guard) was run once, with `Machine::new(FriProfile::Test).prove`, and the OS killed it:
 
-**The tier.** Stage two's `transfer` (65 227 cycles) runs under tier 16's 65 535-cycle budget but
-stays at tier 18: the tier `rand-guest run` reports (and `Machine::prove` would take) is
-`Tier::for_workload` over the cycles **plus** the digest rows — one per four program words
-(2 880 for 11 519 words) and one per four input words, plus one. Tier 16 would need at least
-2 572 fewer cycles or rows, more once the input's rows are counted. The out-of-gas-at-20 000 vector does drop a tier (18 to
-16).
+| run | wall time | peak memory | result |
+|---|---:|---:|---|
+| stage-one transfer, tier 18 | 1 015.76 s | 24 706 367 488 bytes (24.7 GB) | SIGKILL, no proof |
 
-### Harness/ABI work vs. contract execution
+No stage-two proof and no `evm.bin` proof were attempted. Both are deferred to a machine with at
+least 64 GB. `tests/proof.rs` holds the two `#[ignore]`d tests, each with its exact command. The
+prover is unchanged; this is a memory gap, not a correctness gap.
 
-The brief asks the translated program's cycles to be split into harness/ABI work — decoding the
-input vector, verifying a storage witness the first time a slot is touched, the ABI's own
-`keccak256` calls (the runtime bytecode's `codehash`, and `return_hash`/`logs_hash` at the end),
-and building the output digest — versus contract execution: `evm_entry` itself (the translated
-opcodes) plus the shared `evm-rt`/`u256.c` primitives every opcode structurally needs (gas
-charging, memory, stack arithmetic, calldata, logs, the `KECCAK256`/`SLOAD`/`SSTORE` opcodes'
-own dispatch code).
+## Tests
 
-No `rand-guest`/emulator mode emits a pc histogram or a symbolised sample directly, so this is a
-small one-off tool built for Task 7 (not committed — every number below is reproducible from the
-shim's own RV32 ELF, kept under `target/` by `rand-guest build`): `llvm-nm --print-size` on the
-shim's ELF gives every function's `[start, start+size)`, each classified by name (`evm_entry`,
-`evm_rt_*`, `evm_charge`, `evm_mexpand`, `evm_m{load,store}`, `evm_calldataload`, `evm_keccak`,
-`evm_log`, `evm_storage_{load,store}`, `evm_{sload,sstore,keccak256}`, `u256_*`, `shl_by`/`shr_by`,
-`mem{cmp,set,cpy}`, `_start` count as contract execution; everything else — the ABI's own
-`keccak256` monomorphisation, `public_output`, `run_call_with_executor`, `InputCursor::bytes`,
-`StorageTree::{find,verify}`, `main`, the syscall trampolines and unreached panic handlers — counts
-as harness). `rand_zkvm::emulator::execute` (the same emulator `rand-guest run` uses) is then run
-directly — no 2^20 cap needed, since every one of these vectors fits it — and each `CycleEvent`'s
-`pc` is looked up in that table.
+`cargo +1.98.1 test --release` in this directory: 70 tests, plus the 2 ignored proofs.
 
-| vector | total | contract execution | harness/ABI | unclassified* |
-|---|---:|---:|---:|---:|
-| transfer | 79 203 | 33 688 (42.5%) | 45 071 (56.9%) | 444 (0.6%) |
-| transfer, **stage two** (Task 8) | 65 227 | 27 450 (42.1%) | 37 259 (57.1%) | 518 (0.8%) |
-| approve | 55 255 | 20 588 (37.3%) | 34 223 (61.9%) | 444 (0.8%) |
-| transferFrom | 109 064 | 50 286 (46.1%) | 58 334 (53.5%) | 444 (0.4%) |
-| sha256 + ecrecover (underfunded) | 22 367 | 9 300 (41.6%) | 11 819 (52.8%) | 1 248 (5.6%) |
-
-\* pc that landed outside every symbol's `[start, start+size)` — chiefly `_start`'s own prologue
-(reported by `llvm-nm` at size 0, so only its first instruction is covered) and small gaps between
-functions. It is not attributed to either bucket; at 0.4-0.8% for the ERC-20 vectors and 5.6% for
-the precompile contract (which links more `evm-rt` object files, so more such gaps) it does not
-change the conclusion below.
-
-Even with contract execution generously defined (every opcode-support primitive, not just
-`evm_entry`'s own control flow), **harness/ABI work is 53-62% of the translated program's
-cycles** — storage-witness verification (paid once per slot on first touch: the ERC-20 vectors
-each touch one or two) and the ABI's own three `keccak256` calls dominate it. The 79 203-cycle
-`transfer` is still only 65.1% of the interpreter's 121 638, so the harness overhead is not what
-makes the translation faster than the interpreter — it is paid by both, and the interpreter pays
-its own equivalent decode/witness/hash costs inline rather than in separately-counted functions —
-but it is the visible floor under which no amount of opcode-level translation work can shrink a
-call.
-
-**Stage two's split (Task 8), and a correction to the rule above.** The table's stage-two row is
-this rule applied again, with the tool rebuilt for Task 8 (not committed either; the rebuilt
-tool puts stage one's `transfer` at 33 502 / 45 257 / 444, within 186 cycles of the row above).
-By that rule, stage two's `transfer` spends 8 000 fewer cycles in the *harness* — which cannot be
-right, since the harness is the same code in both images. The name rule counts
-`compiler_builtins::memcpy` (a mangled Rust symbol, not the C `memcpy` it lists) as harness, and
-most of its calls in stage one are the contract's own: every 32-byte `DUP`/`SWAP` of the memory
-stack is a struct assignment that clang lowers to `memcpy`. Charging each `memcpy`, `memset` and
-`memcmp` call to the function that made it (the pc of the call site; all three are leaves) gives
-the split that separates the two:
-
-| transfer | total | contract execution | harness/ABI | unclassified* |
-|---|---:|---:|---:|---:|
-| stage one, calls charged to their caller | 79 203 | 39 839 (50.3%) | 38 920 (49.1%) | 444 (0.6%) |
-| stage two, calls charged to their caller | 65 227 | 25 789 (39.5%) | 38 920 (59.7%) | 518 (0.8%) |
-
-The harness is exactly 38 920 cycles in both (as it must be), and **stage two cuts the
-contract's own execution by 35% (39 839 to 25 789)**: of stage one's `memcpy` cycles, 12 728 were
-the contract's and 4 472 remain (spills, and the runtime's own copies). The harness is now 60% of
-a `transfer`. Stage two's unclassified cycles grow by 74: its constants live in the image's data,
-which the loader's prologue writes before `_start`.
-
-## One real proof
-
-(Stage one, Task 7. Task 8 ran no proof, as its notes direct; a stage-two proof is the same
-machine over a smaller program with fewer cycles, at the same tier for `transfer`.)
-
-An `#[ignore]`d test (`tests/proof.rs`) proves and verifies the translated ERC-20 `transfer` (and,
-as a second `#[ignore]`d test, `evm.bin` on the same vector) with
-`Machine::new(FriProfile::Test).prove(&program, &inputs, &[], None)`, then `verify`
-(`research/tests/backend.rs:44-61` is the API these two tests follow). Each test's own doc comment
-carries the exact command; both are meant to be run once, by hand, under `/usr/bin/time -l`, never
-as part of an ordinary `cargo test`.
-
-**The translated `transfer` was run once, as specified.** It did not finish:
-
-```
-$ cd evm2rv && /usr/bin/time -l cargo +1.98.1 test --release --test proof \
-    the_translated_erc20_transfer_proves_and_verifies -- --ignored --exact --nocapture
-...
-test the_translated_erc20_transfer_proves_and_verifies has been running for over 60 seconds
-error: test failed, to rerun pass `--test proof`
-Caused by:
-  process didn't exit successfully: `.../proof-006b5d858b317c53 the_translated_erc20_transfer_proves_and_verifies --ignored --exact --nocapture` (signal: 9, SIGKILL: kill)
-     1015.76 real       857.71 user        33.00 sys
-         24706367488  maximum resident set size
-```
-
-1 015.76 s (about 16.9 minutes) of wall time in, at a peak resident set of 24 706 367 488 bytes
-(23.0 GiB / 24.7 GB) — over the notes' "about 24 GB" budget — the process was killed by SIGKILL
-(the OS, not a limit this test enforces itself; a concurrent `ps`-based watch never saw the process
-above 22.8 GiB at its own 15-second sampling interval, so the true peak was reached and gone
-between samples). No proof was produced, and the run was not repeated: the notes ask for one run,
-recorded, and to stop at this budget.
-
-**`evm.bin` on the same vector was not attempted.** The notes make it conditional on the translated
-proof fitting the same limits ("if that fits the same limits, so the README can compare proof times
-directly") — it did not. `evm.bin` is also the larger and more expensive program on every measure
-above (18 009 words against 15 637, 121 638 cycles against 79 203 on this exact vector), so it would
-not plausibly fit a budget the smaller, cheaper program already exceeded; running it to confirm
-that would cost another ~17 minutes for a predictable answer.
-
-**Reading.** `Machine::prove`'s CPU path (`build_traces_salted` then `prove_traces`, no GPU
-backend) builds a full trace matrix — one row per cycle, one column per chip, for every chip the
-tier needs — before it commits to anything; nothing here streams. At `FriProfile::Test` (16
-queries, 4 PoW bits — deliberately weak, for a fast `cargo test`) the query and PoW cost is small,
-so this is a trace-construction and low-degree-extension cost, not a FRI cost. A stage-one program
-this size proving CPU-only past a 24-25 GB peak on this 48 GB laptop (shared with other proving
-work during this measurement) is squarely the concern Task 5's report and Task 7's own concerns
-list flag as the coprocessor/aggregation backlog, not a defect in the translation itself — see
-`Machine::prove_with(Backend::Cuda, …)` (`research/tests/backend.rs`) for the GPU path this stage
-did not exercise.
-
-## Concerns
-
-- The harness/ABI-vs-contract-execution split is a symbol-based classification built for this
-  measurement, not a `rand-guest`/emulator feature; it is reproducible (the method is described
-  above) but not automated, and a future task that wants it on demand should give `rand-guest run`
-  or the emulator a pc-histogram mode instead of re-deriving symbol ranges by hand. (Task 8 had
-  to rebuild it, and found the name rule mis-files the contract's `memcpy` calls; the
-  caller-charged split above is the one to trust.)
-- Stage two's cycles were measured, not proved: no stage-two proof was run (Task 8's notes).
-- Neither proof ran to completion. The cycle/tier/words table above is the full, real comparison
-  the brief asks for; the proof-time column it also asks for could not be filled in for either
-  program within the stated budget. A GPU-backed or aggregation-based proving path (already
-  planned, per the concerns above) is the likely fix, not a change to the translation.
+| file | what |
+|---|---|
+| `blocks.rs` | the jumpdest rule, block splitting, static gas, stack bounds |
+| `emit.rs` | the emitted C and the shim's files, for both stages |
+| `lift.rs` | stage two's lifting: text tests, directed hazards, the 4 KiB frame cap |
+| `opcodes.rs` | 34 directed opcode edges, both stages, and again under stage two with every push laundered |
+| `parity.rs` | the ERC-20's 8 vectors, both stages, against `evm.bin` and the native interpreter; the hc pins; the guard refusing a one-byte change |
+| `precompiles.rs` | a sha256 + ecrecover contract, end to end |
+| `fuzz.rs` | 10 000 random programs, plain and opaque, both stages, against the interpreter; a sample through the real pipeline |
+| `guard.rs` | the code guard's digest, and long codes through the real pipeline |
+| `toolchain.rs` | the clang pin and its override |

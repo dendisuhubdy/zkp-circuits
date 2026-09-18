@@ -19,6 +19,19 @@ expensive ones need dedicated coprocessor tables rather than a naive
 byte-by-byte simulation, or Solidity guests would be orders of magnitude
 slower than the RISC-V native path:
 
+**The translator, `evm2rv`, is done (2026-09-18, `circuits/evm2rv`).** It compiles the bytecode to
+C over `evm-rt/` ahead of time, in a shim crate `rand-guest build` turns into an image. The shim
+reuses the interpreter's ABI harness, so the input vector and the eight public output words do not
+change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 66 235 cycles
+against the interpreter's 121 638, at 11 686 program words against 18 009. The harness it shares
+with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 60%
+of those cycles, so further gains must come from the harness or the coprocessors below. One `hc`
+per contract: the image carries a digest of its source bytecode and refuses any other code
+(status 2), because `CODECOPY` reads the input code. All nine precompiles run in software;
+ecrecover (14.5 M cycles), bn256 mul (3.1 M), the pairing (about 1.9 G) and large modexp and
+blake2f are over 2^20 and wait on the coprocessors in this table. `evm2rv/README.md` has the
+walkthrough with real command output and every number.
+
 | EVM opcode(s) | Coprocessor needed | Notes |
 |---|---|---|
 | `KECCAK256` | Keccak-f\[1600\] table | **done (M4.2)** — the vendored Plonky3 0.7 set had `p3-keccak` (the permutation) but no `p3-keccak-air`, so the chip was hand-written: `tables::keccak`, 2 612 main columns, one row per round in 32-row blocks, `docs/02-tables-and-buses.md`'s `keccak` section. The sponge (rate, padding, squeeze) stays in guest code |
