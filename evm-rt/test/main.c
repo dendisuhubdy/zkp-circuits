@@ -37,6 +37,8 @@ void t_print(const char *label, const u256 *a) {
 int main(void) {
     u256_tests();
     mem_tests();
+    precompile_tests();
+    call_tests();
     printf("evm-rt: %d passed, %d failed\n", passed, failed);
     return failed != 0;
 }

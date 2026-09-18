@@ -20,4 +20,6 @@ void t_print(const char *label, const u256 *a);
 
 int u256_tests(void);
 int mem_tests(void);
+int precompile_tests(void);
+int call_tests(void);
 #endif

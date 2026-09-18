@@ -12,7 +12,14 @@ static void *stub_host_seen;
 static const uint8_t *stub_ptr;
 static uint32_t stub_len, stub_calls;
 
+extern int t_real_keccak; /* host_keccak.c: set while precompiles_test.c and call_test.c run */
+void t_keccak256(const uint8_t *p, uint32_t n, uint8_t out[32]);
+
 void evm_keccak256(void *host, const uint8_t *ptr, uint32_t len, uint8_t *out) {
+    if (t_real_keccak) {
+        t_keccak256(ptr, len, out);
+        return;
+    }
     stub_host_seen = host;
     stub_ptr = ptr;
     stub_len = len;

@@ -143,8 +143,9 @@ void evm_calldataload(uint32_t off, u256 *r);         /* zero-padded */
 /* CALLDATACOPY / CODECOPY: G_COPY_WORD per word, the expansion, then zero-padded bytes. */
 void evm_copy_calldata(uint32_t dst, uint32_t src, uint32_t len);
 void evm_copy_code(uint32_t dst, uint32_t src, uint32_t len);
-/* RETURNDATACOPY: no call is ever made, so the buffer is empty — a zero length is a no-op and
- * any other traps (Halt::Trap(0x3e)); nothing is charged here and memory is not touched. */
+/* RETURNDATACOPY in a contract with no call-family opcode, which can never have made a call: the
+ * interpreter's rule — the buffer is empty, a zero length is a no-op and any other traps
+ * (Halt::Trap(0x3e)); nothing is charged here and memory is not touched. */
 void evm_copy_returndata(uint32_t dst, uint32_t src, uint32_t len);
 /* KECCAK256: G_KECCAK256 + G_KECCAK256_WORD per word, the expansion, then `ffi.rs`'s hash. */
 void evm_keccak(uint32_t off, uint32_t len, u256 *r);
@@ -161,6 +162,47 @@ void evm_storage_store(const u256 *slot, const u256 *value);
 /* RETURN / REVERT: the data (bounds, MAX_RETURN_BYTES, expansion) into evm_ret, then the halt. */
 __attribute__((noreturn)) void evm_return(uint32_t off, uint32_t len);
 __attribute__((noreturn)) void evm_revert(uint32_t off, uint32_t len);
+
+/* ---- calls: the precompiles (precompiles.h) and the return-data buffer (evm_call.c) ----
+ *
+ * The interpreter traps on the whole call family, so there is no oracle there: a translated
+ * contract is a strict superset of it, and the rules are Shanghai's (go-ethereum's opCall family
+ * and RunPrecompiledContract; the controller's Task 5 rulings), as below. A contract that makes
+ * no call runs exactly as before: the emitter uses none of this for it.
+ *
+ * `evm_call(op, a)`: CALL (0xf1), CALLCODE (0xf2), DELEGATECALL (0xf4) or STATICCALL (0xfa), with
+ * `a = &evm_stack[evm_sp - n]` (n = 7 for CALL/CALLCODE, 6 for the other two), so `a[n-1]` is the
+ * top: gas, address, [value,] argsOffset, argsLength, retOffset, retLength from the top down. The
+ * success flag replaces a[0]; the caller then drops n - 1 words.
+ *   1. The target is the low 160 bits of the address word. Anything but 1..9 halts Trap(op): a
+ *      proof carries one contract (the interpreter's trap, kept).
+ *   2. CALL/CALLCODE with a nonzero value halt Trap(op): there is no balance model.
+ *   3. 100 gas (EIP-2929's warm access: a precompile is always warm), then the args region's and
+ *      the ret region's expansion (offsets and lengths saturated, `Interpreter::mem`'s rules).
+ *   4. The gas passed is min(requested, all but one 64th of what is left) (EIP-150). What is
+ *      left is `evm_gas + gas_after`: the block head has already taken the static gas of the ops
+ *      after the call in its block (`GAS` adds the same `gas_after` back), and the EVM has not.
+ *   5. If the precompile's RequiredGas exceeds it, or the precompile rejects its input, the call
+ *      fails: 0, the gas passed consumed, the return data emptied, the ret region untouched.
+ *      Otherwise 1, RequiredGas consumed (the rest of the gas passed stays), the return data is
+ *      the output and its first min(retLength, output length) bytes are copied to retOffset.
+ *      A modexp over PC_MODEXP_MAX_BYTES that it can afford halts OutOfBounds (the runtime's cap).
+ *   Consuming more than `evm_gas` halts OutOfGas here: the EVM would then have less left than the
+ *   rest of the block's static gas and run out before the block's end — the block-head rule's
+ *   same status 2 and gas_used = limit.
+ * Its static gas (the block head's) is 0; everything above is charged here. */
+#define EVM_CALL_WARM_ACCESS 100
+#define EVM_RETURNDATA_MAX 65536
+extern uint8_t evm_rdata[EVM_RETURNDATA_MAX];
+extern uint32_t evm_rdata_len; /* RETURNDATASIZE, in a contract with a call-family opcode */
+extern uint32_t evm_rdata_live; /* a call has been made this run */
+/* The top of `evm_entry` in a contract with a call-family opcode: no call made, no return data. */
+void evm_calls_begin(void);
+void evm_call(uint32_t op, u256 *a, uint64_t gas_after);
+/* RETURNDATACOPY in a contract with a call-family opcode. Before its first call, the
+ * interpreter's rule (`evm_copy_returndata`); after it, EIP-211: src + len past the buffer halts
+ * OutOfBounds (a zero length included), else G_COPY_WORD per word, the expansion and the bytes. */
+void evm_copy_returndata_buf(uint32_t dst, uint32_t src, uint32_t len);
 
 /* ---- the Rust side (`evm-core/src/ffi.rs`, feature `ffi`) ---- */
 uint32_t evm_sload(void *tree, void *host, const uint32_t *slot, uint32_t *out);
