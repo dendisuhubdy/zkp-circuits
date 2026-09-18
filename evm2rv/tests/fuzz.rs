@@ -52,7 +52,7 @@ use std::time::Instant;
 use common::{build_shim, host, root, run_out_of_cycles, STAGES};
 use evm2rv::blocks::static_gas;
 use evm2rv::emit::{translate, Options, Stage};
-use evm2rv::gen::{case, non_trapping, Case, Gas};
+use evm2rv::gen::{case, case_opaque, non_trapping, Case, Gas};
 use evm_core::abi::{run_call_with, Workspace};
 use evm_core::ffi::HALT_INVALID;
 use evm_core::interp::{Halt, Outcome};
@@ -176,24 +176,43 @@ fn report(
 
 #[test]
 fn the_translation_matches_the_interpreter_on_the_fuzz_corpus() {
-    corpus(Stage::One);
+    corpus(Stage::One, false);
 }
 
 #[test]
 fn the_stage_two_translation_matches_the_interpreter_on_the_fuzz_corpus() {
-    corpus(Stage::Two);
+    corpus(Stage::Two, false);
 }
 
-fn corpus(stage: Stage) {
+/// The opaque corpus (`gen::case_opaque`, the same seeds): operands and jump destinations that
+/// stage two cannot fold, so its locals, its spills' protection and its dynamic jumps are
+/// exercised as much as its constants.
+#[test]
+fn the_stage_two_translation_matches_the_interpreter_on_the_opaque_corpus() {
+    corpus(Stage::Two, true);
+}
+
+#[test]
+fn the_translation_matches_the_interpreter_on_the_opaque_corpus() {
+    corpus(Stage::One, true);
+}
+
+fn corpus(stage: Stage, opaque: bool) {
     let t0 = Instant::now();
     let seeds = seeds();
-    let cases: Vec<Case> = seeds.iter().map(|&s| case(s)).collect();
+    let make = if opaque { case_opaque } else { case };
+    let cases: Vec<Case> = seeds.iter().map(|&s| make(s)).collect();
     let cs: Vec<String> = cases.iter().map(|c| translate_case(c, stage)).collect();
     let t_gen = t0.elapsed();
     let t1 = Instant::now();
     let tag = match stage {
         Stage::One => "",
         Stage::Two => "-stage2",
+    };
+    let tag = if opaque {
+        format!("-opaque{tag}")
+    } else {
+        tag.to_string()
     };
     let name = match seeds.as_slice() {
         [one] => format!("fuzz-seed-{one}{tag}"),
@@ -242,7 +261,8 @@ fn corpus(stage: Stage) {
 
     let compared = cases.len() - excluded;
     eprintln!(
-        "fuzz ({stage:?}): {} cases, {} compared, {} excluded (a call reached a precompile), {} diverged",
+        "fuzz ({stage:?}{}): {} cases, {} compared, {} excluded (a call reached a precompile), {} diverged",
+        if opaque { ", opaque" } else { "" },
         cases.len(),
         compared,
         excluded,

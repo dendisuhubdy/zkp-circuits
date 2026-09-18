@@ -437,9 +437,15 @@ fn the_frame_stays_within_its_budget() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(10_000);
-    let mut all: Vec<(usize, u64, String)> = (0..n)
-        .map(|s| {
-            let c = evm2rv::gen::case(s);
+    // Both corpus styles: the opaque one keeps more words in locals.
+    let mut all: Vec<(usize, u64, String)> = (0..2 * n)
+        .map(|k| {
+            let s = k % n;
+            let c = if k < n {
+                evm2rv::gen::case(s)
+            } else {
+                evm2rv::gen::case_opaque(s)
+            };
             let e = translate(
                 &c.code,
                 &Options {
@@ -448,7 +454,7 @@ fn the_frame_stays_within_its_budget() {
                 },
             )
             .unwrap();
-            (e.locals, s, e.c)
+            (e.locals, k, e.c)
         })
         .collect();
     assert!(
@@ -457,14 +463,16 @@ fn the_frame_stays_within_its_budget() {
     );
     all.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let mut worst = 0;
-    for (locals, seed, c) in all.iter().take(8) {
-        let f = frame(&format!("seed-{seed}"), c);
-        eprintln!("frame: corpus seed {seed}: {locals} locals, evm_entry {f} bytes");
-        assert!(f <= BUDGET, "seed {seed}: frame {f}");
+    for (locals, k, c) in all.iter().take(8) {
+        let (seed, style) = (k % n, if *k < n { "" } else { " (opaque)" });
+        let file = format!("seed-{seed}{}", if *k < n { "" } else { "-opaque" });
+        let f = frame(&file, c);
+        eprintln!("frame: corpus seed {seed}{style}: {locals} locals, evm_entry {f} bytes");
+        assert!(f <= BUDGET, "seed {seed}{style}: frame {f}");
         worst = worst.max(f);
     }
     eprintln!(
-        "frame: corpus of {n}: at most {} locals; the largest frame measured {worst} bytes",
+        "frame: corpus of {n} (both styles): at most {} locals; the largest frame measured {worst} bytes",
         all[0].0
     );
 }

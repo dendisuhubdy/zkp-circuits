@@ -291,6 +291,9 @@ struct Gen<'a> {
     /// interpreter's eight logs.
     in_loop: bool,
     logs: u32,
+    /// [`case_opaque`]'s style: some operands and jump destinations are passed through a zero
+    /// known only at run time, so stage two cannot fold or resolve them at translation.
+    opaque: bool,
 }
 
 /// Where the running accumulator of observed results lives in memory (see [`Gen::observe`]).
@@ -336,6 +339,17 @@ impl Gen<'_> {
         self.fixups.push((self.code.len(), l));
         self.code.extend_from_slice(&[0, 0]);
         self.depth += 1;
+        self.launder();
+    }
+    /// In the opaque style, sometimes turn the top word into a run-time value without changing
+    /// it: `CALLDATASIZE DUP1 XOR XOR` (x ^ (cs ^ cs)). Stage two then holds it in a local (or
+    /// jumps to it through the dispatch) instead of folding it. Draws no randomness otherwise.
+    fn launder(&mut self) {
+        if self.opaque && self.r.chance(400) {
+            for b in [0x36, 0x80, 0x18, 0x18] {
+                self.op(b);
+            }
+        }
     }
     fn pop_to(&mut self, d: usize) {
         while self.depth > d {
@@ -500,6 +514,7 @@ impl Gen<'_> {
                 } else {
                     let v = self.value(role);
                     self.push(&v);
+                    self.launder();
                 }
             }
         }
@@ -918,6 +933,18 @@ impl Gen<'_> {
 
 /// The case for `seed`.
 pub fn case(seed: u64) -> Case {
+    case_with(seed, false)
+}
+
+/// The case for `seed` in the opaque style (Task 8): the same generator, but some operands and
+/// jump destinations reach their op as run-time values (`CALLDATASIZE DUP1 XOR XOR` after the
+/// push), so a stage-two translation holds them in locals, consumes them without a `DUP`, and
+/// jumps through the dispatch — the lifting's own paths, which constant operands fold away.
+pub fn case_opaque(seed: u64) -> Case {
+    case_with(seed, true)
+}
+
+fn case_with(seed: u64, opaque: bool) -> Case {
     let mut r = Rng::new(seed);
     let calldata_len = match r.below(10) {
         0 => 0,
@@ -973,6 +1000,7 @@ pub fn case(seed: u64) -> Case {
         faulty,
         in_loop: false,
         logs: 0,
+        opaque,
     };
     let sweep = !faulty && g.r.chance(300);
     let n_seg = if sweep { 0 } else { g.r.range(2, 9) };
