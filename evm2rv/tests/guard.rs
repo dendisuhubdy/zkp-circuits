@@ -138,11 +138,11 @@ fn long_codes_pass_the_guard_and_one_changed_byte_is_refused() {
 
 /// A code one byte longer than what it was translated from: the source plus a trailing `0x00`
 /// (unreached — the fixed prefix already `RETURN`s), through the real pipeline. `code_words`
-/// packs bytes four to a word, so a code whose length is not a multiple of four already carries
-/// implicit zero padding in its last word; appending a real `0x00` there can leave every packed
-/// word bit-identical (`the_message_carries_the_length` above: `code_words(&[0x60])` and
-/// `code_words(&[0x60, 0x00])` share their one data word). Only the message's leading length word
-/// tells the two codes apart, so this pins that the guard is keyed on it.
+/// packs bytes four to a word. Here the source is 64 bytes, a multiple of four, so the extra `0x00`
+/// adds a whole new (zero) data word as well as changing the leading length word. The case where
+/// ONLY the length word differs (a source whose length is not a multiple of four, whose last word
+/// already carries implicit zero padding) is pinned host-side by `the_message_carries_the_length`
+/// above; this test pins that the guest refuses a longer code end to end, through the real pipeline.
 #[test]
 fn a_trailing_zero_byte_is_refused_by_the_guard() {
     let code = long_code(64);
