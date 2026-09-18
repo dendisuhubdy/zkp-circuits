@@ -1,6 +1,6 @@
 //! `sbpf2rv <program.so> --out <dir> [--name <crate>]`: loads an sBPF ELF, scans and translates it,
 //! and writes the shim crate `rand-guest build <dir>` turns into an image — `program.c`,
-//! `Cargo.toml`, `build.rs`, `src/main.rs` and `shim.ld` (see `sbpf2rv::shim`). Without `--out` it
+//! `Cargo.toml`, `Cargo.lock`, `build.rs`, `src/main.rs` and `shim.ld` (see `sbpf2rv::shim`). Without `--out` it
 //! only reports the scan. The scan itself cannot fail (see `scan::scan`'s docs); only loading the
 //! ELF can, with the interpreter's own refusal.
 
@@ -28,8 +28,10 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mut elf = std::fs::read(&cli.program)
+    let source = std::fs::read(&cli.program)
         .with_context(|| format!("reading {}", cli.program.display()))?;
+    // `load` relocates in place; the ELF guard's digest is of the bytes as published.
+    let mut elf = source.clone();
     let program = sbpf_core::elf::load(&mut elf).map_err(|halt| {
         anyhow!(
             "{} is not a loadable sBPF v1 ELF: {halt:?}",
@@ -72,7 +74,7 @@ fn main() -> Result<()> {
             }
             None => shim::crate_name(&stem),
         };
-        shim::write_crate(out, &name, &emitted.c)?;
+        shim::write_crate(out, &name, &emitted.c, &source)?;
         println!(
             "wrote {} ({} bytes of C) and the {name} shim crate: rand-guest build {}",
             out.join("program.c").display(),

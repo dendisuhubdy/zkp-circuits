@@ -561,8 +561,25 @@ fn spl_burn(amount: u64) -> SbpfCall {
     }
 }
 
-/// `hc` of the translated SPL Token image (Homebrew clang 23.1.1, rustc 1.98.1).
-const SPL_TOKEN_HC: &str = "f382dd28e4c363709afed9dc7cacd11508e61739617626f7a1a4d69e93d1920e";
+/// `hc` of the translated SPL Token image (Homebrew clang 23.1.1, rustc 1.98.1), and its program
+/// words (the loader's count, against the 65 535-word cap).
+const SPL_TOKEN_HC: &str = "e78a8e7faca155368869db460e6c46f421009d0c429305deb07d06c84b19a63e";
+const SPL_TOKEN_WORDS: usize = 64_945;
+
+/// The SPL Token translation, built once per test binary: several tests use it, and two builds of
+/// the same crate directory at once would race.
+fn spl_token() -> &'static Translated {
+    static T: OnceLock<Translated> = OnceLock::new();
+    T.get_or_init(|| {
+        let elf = root().join("guests-compiled/sbpf/programs/spl_token.so");
+        assert_eq!(
+            std::fs::read(&elf).unwrap(),
+            sbpf::SPL_TOKEN_ELF,
+            "the interpreter's tests use this file"
+        );
+        translate(&elf, "spl-token")
+    })
+}
 
 fn interpreter_guest() -> PathBuf {
     root().join("guests-compiled/bin/sbpf.bin")
@@ -571,12 +588,7 @@ fn interpreter_guest() -> PathBuf {
 #[test]
 fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word() {
     let elf = root().join("guests-compiled/sbpf/programs/spl_token.so");
-    assert_eq!(
-        std::fs::read(&elf).unwrap(),
-        sbpf::SPL_TOKEN_ELF,
-        "the interpreter's tests use this file"
-    );
-    let t = translate(&elf, "spl-token");
+    let t = spl_token();
     eprintln!(
         "translated SPL Token: {} program words (cap 65 535), hc {}",
         t.words, t.hc
@@ -630,11 +642,15 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
     // The image is pinned: a change to the emitter, the runtime, the harness or the toolchain that
     // moves it has to update this line on purpose.
     assert_eq!(t.hc, SPL_TOKEN_HC, "the translated SPL Token image moved");
+    assert_eq!(
+        t.words, SPL_TOKEN_WORDS,
+        "the translated SPL Token image changed size"
+    );
     let interp = interpreter_guest();
 
     let mut rows = Vec::new();
     let mut measure = |what: &str, call: &SbpfCall, status: u32| -> Result<u64, Halt> {
-        let row = parity_measured(&t, Some(&interp), what, call, status);
+        let row = parity_measured(t, Some(&interp), what, call, status);
         let r = row.result;
         rows.push(row);
         r
@@ -691,6 +707,87 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
     );
 }
 
+/// `name`'s file range in an ELF64 file: `(sh_offset, sh_size)`, found through the section header
+/// string table.
+fn section(elf: &[u8], name: &str) -> (usize, usize) {
+    let u16_at = |o: usize| u16::from_le_bytes(elf[o..o + 2].try_into().unwrap()) as usize;
+    let u32_at = |o: usize| u32::from_le_bytes(elf[o..o + 4].try_into().unwrap()) as usize;
+    let u64_at = |o: usize| u64::from_le_bytes(elf[o..o + 8].try_into().unwrap()) as usize;
+    let (shoff, shentsize, shnum, shstrndx) =
+        (u64_at(0x28), u16_at(0x3a), u16_at(0x3c), u16_at(0x3e));
+    let hdr = |i: usize| shoff + i * shentsize;
+    let strtab = u64_at(hdr(shstrndx) + 0x18);
+    (0..shnum)
+        .find_map(|i| {
+            let at = strtab + u32_at(hdr(i));
+            let end = at + elf[at..].iter().position(|&b| b == 0).unwrap();
+            (&elf[at..end] == name.as_bytes())
+                .then(|| (u64_at(hdr(i) + 0x18), u64_at(hdr(i) + 0x20)))
+        })
+        .unwrap_or_else(|| panic!("no {name} section"))
+}
+
+/// Accepted divergence #3, the ELF guard: the image carries a digest of the ELF it was translated
+/// from and refuses any other with `BadElf` (status 2 over the pre-state), where the interpreter
+/// runs whatever ELF it is given. Here the other ELF is SPL Token with one `.rodata` byte changed —
+/// a byte the transfer never reads, so the interpreter runs it to the very same eight words — and
+/// the translation refuses it.
+#[test]
+fn an_elf_one_rodata_byte_away_is_refused_where_the_interpreter_runs_it() {
+    let t = spl_token();
+    let good = spl_transfer(250);
+    let mut elf = good.elf.clone();
+    let (off, len) = section(&elf, ".rodata");
+    assert!(len > 2, ".rodata is {len} bytes");
+    elf[off + len - 2] ^= 0x01; // inside the last string, before its NUL
+    let other = SbpfCall {
+        elf,
+        input: good.input.clone(),
+    };
+
+    // The interpreter runs it, to the same outcome as the untouched ELF.
+    let (good_want, good_result, _) = good.expected();
+    let (want, result, _) = other.expected();
+    assert_eq!(good_result, Ok(0));
+    assert_eq!(
+        (want, result),
+        (good_want, good_result),
+        "the changed byte is never read"
+    );
+    assert_eq!(
+        run(&interpreter_guest(), &other).0,
+        want,
+        "sbpf.bin runs it too"
+    );
+
+    // The translation refuses it: status 2, the halt `BadElf`, and the digest over the pre-state —
+    // the same words any status-2 run over this instruction publishes. The formula is checked on
+    // the untouched run first.
+    let digest = |status: u32, post: &[u8]| {
+        abi::public_output(
+            &mut sbpf::HostRef,
+            status,
+            &sbpf::canonical_input_hash_of(&good.input),
+            &sbpf::output_hash_of(post),
+        )
+    };
+    assert_eq!(
+        digest(1, &good.input_post_state()),
+        good_want,
+        "public_output over the post-state"
+    );
+    let (out, _) = run(&t.image, &other);
+    assert_eq!(out, digest(2, &good.input), "status 2 over the pre-state");
+    let (halt, _) = run(&t.halt_image, &other);
+    assert_eq!(
+        &halt[..4],
+        &[2, 7, 0, 0],
+        "status 2, Halt::BadElf (code 7), no payload"
+    );
+    // And the ELF it was translated from runs.
+    assert_eq!(run(&t.image, &good).0, good_want);
+}
+
 /// A program that writes account 0's lamports and then loads through `r0` (zero): the write
 /// happened, the halt is `AccessViolation(0)`, and the published post-state is the pre-state.
 #[test]
@@ -721,6 +818,80 @@ fn an_access_violation_halts_exactly_as_the_interpreter_does() {
         ),
         Err(Halt::AccessViolation(0))
     );
+}
+
+/// The generated `build.rs` holds the same clang pin as `rand-guest` (`CLANG_VERSION`, 23.1.1) and
+/// passes `--no-default-config`: a clang of another version is refused, naming the override, and
+/// `RAND_GUEST_CLANG_UNPINNED=1` lets it through with a warning that `hc` will not match.
+#[test]
+fn the_shim_refuses_a_clang_other_than_the_pinned_one() {
+    let rand_guest_src = std::fs::read_to_string(root().join("rand-guest/src/build.rs")).unwrap();
+    assert!(
+        rand_guest_src.contains(&format!(
+            "pub const CLANG_VERSION: &str = \"{}\";",
+            sbpf2rv::shim::CLANG_VERSION
+        )),
+        "sbpf2rv's clang pin is rand-guest's"
+    );
+    let elf = builder::build_elf(&asm(&[insn(opc::EXIT, 0, 0, 0, 0)]), &[], &[], &[], 0);
+    let path = work().join("clang-pin.so");
+    std::fs::write(&path, &elf).unwrap();
+    let dir = work().join("clang-pin");
+    let o = Command::new(env!("CARGO_BIN_EXE_sbpf2rv"))
+        .arg(&path)
+        .arg("--out")
+        .arg(&dir)
+        .args(["--name", "clang-pin"])
+        .output()
+        .unwrap();
+    check(&o, "sbpf2rv");
+    let build_rs = std::fs::read_to_string(dir.join("build.rs")).unwrap();
+    assert!(
+        build_rs.contains(".flag(\"--no-default-config\")"),
+        "{build_rs}"
+    );
+
+    // A stand-in with a riscv32 target and the wrong version (the probe is all it answers).
+    let fake = work().join("clang-pin-fake/clang");
+    std::fs::create_dir_all(fake.parent().unwrap()).unwrap();
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\ncase \"$1\" in\n  --print-targets) echo '    riscv32     - 32-bit RISC-V' ;;\n  --version) echo 'clang version 99.0.1' ;;\n  *) exit 1 ;;\nesac\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let build = |unpinned: bool| {
+        let mut c = Command::new(rand_guest());
+        clean(&mut c)
+            .arg("build")
+            .arg(&dir)
+            .arg("--out")
+            .arg(dir.join("image.bin"))
+            .env("CLANG", &fake);
+        if unpinned {
+            c.env("RAND_GUEST_CLANG_UNPINNED", "1");
+        } else {
+            c.env_remove("RAND_GUEST_CLANG_UNPINNED");
+        }
+        c.output().unwrap()
+    };
+    let o = build(false);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "built with clang 99.0.1");
+    assert!(
+        err.contains("is clang 99.0.1, but rand-guest is pinned to clang 23.1.1")
+            && err.contains("RAND_GUEST_CLANG_UNPINNED=1"),
+        "{err}"
+    );
+    // Let through, loudly (the stand-in then cannot compile anything, which is past this check).
+    let o = build(true);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("WARNING") && err.contains("hc will not match published images"),
+        "{err}"
+    );
+    assert!(!err.contains("but rand-guest is pinned"), "{err}");
 }
 
 // ---- the call and budget vectors (fix round 1) ------------------------------------------------
@@ -1587,8 +1758,7 @@ fn fuzz_elf(text: &[u8]) -> Vec<u8> {
             machine, like research's interpreter twin of this test"]
 fn the_translated_spl_token_transfer_proves_and_verifies() {
     use rand_zkvm::machine::{FriProfile, Machine};
-    let elf = root().join("guests-compiled/sbpf/programs/spl_token.so");
-    let t = translate(&elf, "spl-token");
+    let t = spl_token();
     assert_eq!(t.hc, SPL_TOKEN_HC, "the translated SPL Token image moved");
     let program =
         rand_zkvm::isa::Program::from_flat_image(&std::fs::read(&t.image).unwrap()).unwrap();
@@ -1641,8 +1811,7 @@ fn the_translated_spl_token_transfer_proves_and_verifies() {
 #[test]
 #[ignore = "measurement: builds two line-table twins and profiles six runs; see the doc comment"]
 fn where_the_cycles_go() {
-    let elf = root().join("guests-compiled/sbpf/programs/spl_token.so");
-    let t = translate(&elf, "spl-token");
+    let t = spl_token();
     let prof = work().join("profile");
     std::fs::create_dir_all(&prof).unwrap();
     let shim = work().join("spl-token");
@@ -1705,6 +1874,12 @@ struct Stage {
 /// The harness's stages and the program's execution. The first stage any frame on the shadow
 /// stack matches is the cycle's, so a `check_region` inside `decode_input` is `check_region`'s.
 const STAGES: &[Stage] = &[
+    Stage {
+        name: "the ELF guard: hash the staged tape (the staging itself is in decode_input)",
+        words: &["elf_is_the_translated_one"],
+        c_prefixes: &[],
+        files: &[],
+    },
     Stage {
         name: "check_region: the zero scan pinning the region",
         words: &["check_region", "check_zeros"],

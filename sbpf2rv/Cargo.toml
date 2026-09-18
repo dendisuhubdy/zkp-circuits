@@ -15,10 +15,9 @@ path = "src/main.rs"
 sbpf-core = { path = "../guests-compiled/sbpf-core" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-
-[dev-dependencies]
-# The parity test's oracle: `SbpfCall` (the SPL Token vectors and their two input segments) and
-# `HostRef`, the same fixtures the interpreter's own tests use.
+# The machine's own Poseidon2 sponge (`hash::sponge_hash`), for the ELF guard's digest
+# (`shim::elf_digest`). Also the parity test's oracle: `SbpfCall` (the SPL Token vectors and their
+# two input segments) and `HostRef`, the same fixtures the interpreter's own tests use.
 rand_zkvm = { path = "../research" }
 
 # Its own workspace root, like every crate here (guests-compiled/sbpf-core, rand-guest, …): never
