@@ -296,16 +296,34 @@ pub fn scan(program: &Program<'_>) -> Scan {
     let mut functions: Vec<Function> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
     while let Some(entry) = worklist.pop_front() {
-        let f = scan_function(entry, &by_pc, n_slots, &mut known_functions, &mut worklist, &mut warnings);
+        let f = scan_function(
+            entry,
+            &by_pc,
+            n_slots,
+            &mut known_functions,
+            &mut worklist,
+            &mut warnings,
+        );
         functions.push(f);
     }
     // `program.entry_pc`'s function first, whatever order the worklist discovered the rest in —
     // `Scan::entry` and `functions[0].entry` agree (see `Scan::functions`'s doc comment).
-    functions.sort_by_key(|f| if f.entry == program.entry_pc { (0, f.entry) } else { (1, f.entry) });
+    functions.sort_by_key(|f| {
+        if f.entry == program.entry_pc {
+            (0, f.entry)
+        } else {
+            (1, f.entry)
+        }
+    });
 
     let callx_targets: Vec<usize> = known_functions.into_iter().collect();
 
-    Scan { functions, entry: program.entry_pc, callx_targets, warnings }
+    Scan {
+        functions,
+        entry: program.entry_pc,
+        callx_targets,
+        warnings,
+    }
 }
 
 /// Every pc `interp.rs`'s `callx` (`CALL_REG`) could statically land on beyond what a `call imm`
@@ -361,7 +379,12 @@ fn lddw_and_rodata_function_roots(
 
 /// `value` (a virtual address), converted to a slot exactly as `interp.rs`'s `callx` does
 /// (`addr.wrapping_sub(text_va) / 8`), kept only if it lands 8-aligned on a real instruction start.
-fn text_slot(value: u64, text_va: u64, n_slots: usize, by_pc: &BTreeMap<usize, Insn>) -> Option<usize> {
+fn text_slot(
+    value: u64,
+    text_va: u64,
+    n_slots: usize,
+    by_pc: &BTreeMap<usize, Insn>,
+) -> Option<usize> {
     let diff = value.wrapping_sub(text_va);
     if !diff.is_multiple_of(8) {
         return None;
@@ -487,9 +510,20 @@ fn scan_function(
         // validates `e_entry` against the text). Not a real ELF the interpreter could load either,
         // but there is no source instruction to blame the way `resolve_edge` usually has one, so
         // this is handled directly rather than forced through it.
-        warnings.push(Warning::JumpOutOfText { pc: entry, target: entry as i64 });
-        let trap = Block { start: entry, end: entry, insns: Vec::new(), term: Term::Trap(TrapKind::BadJump) };
-        return Function { entry, blocks: vec![trap] };
+        warnings.push(Warning::JumpOutOfText {
+            pc: entry,
+            target: entry as i64,
+        });
+        let trap = Block {
+            start: entry,
+            end: entry,
+            insns: Vec::new(),
+            term: Term::Trap(TrapKind::BadJump),
+        };
+        return Function {
+            entry,
+            blocks: vec![trap],
+        };
     }
 
     // ---- (a) reachability + split points + terminator classification --------------------------
@@ -538,7 +572,14 @@ fn scan_function(
 
             match class {
                 Class::Jmp if insn.opc == opc::JA => {
-                    let target = resolve_edge(pc, jump_to(pc, insn.off), n_slots, by_pc, &mut term_at, warnings);
+                    let target = resolve_edge(
+                        pc,
+                        jump_to(pc, insn.off),
+                        n_slots,
+                        by_pc,
+                        &mut term_at,
+                        warnings,
+                    );
                     term_at.insert(pc, Term::Jump(target));
                     if target != n_slots {
                         jump_targets.insert(target);
@@ -551,8 +592,16 @@ fn scan_function(
                     // independently: a bad `taken` target does not make the `not`-taken side bad
                     // too (and vice versa) — only whichever side actually runs would ever reach the
                     // interpreter's own check, so this scanner keeps the same independence.
-                    let taken = resolve_edge(pc, jump_to(pc, insn.off), n_slots, by_pc, &mut term_at, warnings);
-                    let not = resolve_edge(pc, next_pc as i64, n_slots, by_pc, &mut term_at, warnings);
+                    let taken = resolve_edge(
+                        pc,
+                        jump_to(pc, insn.off),
+                        n_slots,
+                        by_pc,
+                        &mut term_at,
+                        warnings,
+                    );
+                    let not =
+                        resolve_edge(pc, next_pc as i64, n_slots, by_pc, &mut term_at, warnings);
                     term_at.insert(pc, Term::CondJump { taken, not });
                     if taken != n_slots {
                         jump_targets.insert(taken);
@@ -573,9 +622,18 @@ fn scan_function(
                         match classify_syscall(hash) {
                             SyscallKind::Supported => {}
                             SyscallKind::Cpi(name) => warnings.push(Warning::Cpi { pc, name }),
-                            SyscallKind::Unknown => warnings.push(Warning::UnknownSyscall { pc, hash }),
+                            SyscallKind::Unknown => {
+                                warnings.push(Warning::UnknownSyscall { pc, hash })
+                            }
                         }
-                        let next = resolve_edge(pc, next_pc as i64, n_slots, by_pc, &mut term_at, warnings);
+                        let next = resolve_edge(
+                            pc,
+                            next_pc as i64,
+                            n_slots,
+                            by_pc,
+                            &mut term_at,
+                            warnings,
+                        );
                         term_at.insert(pc, Term::Syscall { hash, next });
                         if next == n_slots {
                             break;
@@ -608,7 +666,14 @@ fn scan_function(
                             if known_functions.insert(target) {
                                 call_worklist.push_back(target);
                             }
-                            let next = resolve_edge(pc, next_pc as i64, n_slots, by_pc, &mut term_at, warnings);
+                            let next = resolve_edge(
+                                pc,
+                                next_pc as i64,
+                                n_slots,
+                                by_pc,
+                                &mut term_at,
+                                warnings,
+                            );
                             term_at.insert(pc, Term::Call { target, next });
                             if next == n_slots {
                                 break;
@@ -617,7 +682,10 @@ fn scan_function(
                             continue;
                         }
                         None => {
-                            warnings.push(Warning::JumpOutOfText { pc, target: raw_target });
+                            warnings.push(Warning::JumpOutOfText {
+                                pc,
+                                target: raw_target,
+                            });
                             term_at.insert(pc, Term::Trap(TrapKind::BadJump));
                             break;
                         }
@@ -640,7 +708,8 @@ fn scan_function(
                     // approximation is every known function entry (`Scan::callx_targets`, filled
                     // in by `scan` once every function is found — including ones found only
                     // through `lddw`/read-only-data constants, not just `call imm` sites).
-                    let next = resolve_edge(pc, next_pc as i64, n_slots, by_pc, &mut term_at, warnings);
+                    let next =
+                        resolve_edge(pc, next_pc as i64, n_slots, by_pc, &mut term_at, warnings);
                     term_at.insert(pc, Term::CallX { next });
                     if next == n_slots {
                         break;
@@ -665,7 +734,10 @@ fn scan_function(
                             continue;
                         }
                         None => {
-                            warnings.push(Warning::JumpOutOfText { pc, target: next_pc as i64 });
+                            warnings.push(Warning::JumpOutOfText {
+                                pc,
+                                target: next_pc as i64,
+                            });
                             term_at.insert(pc, Term::Trap(TrapKind::BadJump));
                             break;
                         }
@@ -687,7 +759,12 @@ fn scan_function(
             // The shared synthetic trap pc (or, defensively, any other pc `resolve_edge` redirected
             // here instead of a real instruction start): no real code, `term_at[start]` is already
             // its `Term::Trap`.
-            blocks.push(Block { start, end: start, insns: Vec::new(), term: term_at[&start] });
+            blocks.push(Block {
+                start,
+                end: start,
+                insns: Vec::new(),
+                term: term_at[&start],
+            });
             continue;
         }
         let mut insns = Vec::new();
@@ -705,7 +782,12 @@ fn scan_function(
                         worklist.push_back(succ);
                     }
                 }
-                blocks.push(Block { start, end: pc, insns, term });
+                blocks.push(Block {
+                    start,
+                    end: pc,
+                    insns,
+                    term,
+                });
                 break;
             }
             insns.push(insn);
@@ -714,7 +796,12 @@ fn scan_function(
                 if block_starts.insert(next_pc) {
                     worklist.push_back(next_pc);
                 }
-                blocks.push(Block { start, end: pc, insns, term: Term::Fallthrough(next_pc) });
+                blocks.push(Block {
+                    start,
+                    end: pc,
+                    insns,
+                    term: Term::Fallthrough(next_pc),
+                });
                 break;
             }
             pc = next_pc;

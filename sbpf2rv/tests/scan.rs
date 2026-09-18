@@ -6,13 +6,19 @@
 //! is refused — it becomes a `Warning` plus a `Term` that traps at runtime if actually reached,
 //! exactly as `interp.rs` would. See `scan::scan`'s module docs.
 
+use sbpf2rv::scan::{scan, Term, TrapKind, Warning};
 use sbpf_core::elf::Program;
 use sbpf_core::isa::{opc, Insn};
 use sbpf_core::syscalls;
-use sbpf2rv::scan::{scan, Term, TrapKind, Warning};
 
 fn insn(opc: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
-    Insn { opc, dst, src, off, imm }
+    Insn {
+        opc,
+        dst,
+        src,
+        off,
+        imm,
+    }
 }
 
 /// An internal `call imm`'s `imm`: unlike `ja`/a conditional jump, the relative offset from a
@@ -62,7 +68,11 @@ fn a_call_to_a_second_function_makes_two_functions_and_splits_the_caller() {
     // pc0: call target=2 (src=0: internal, imm = target - (pc+1) = 2 - 1 = 1)
     // pc1: exit                          (the call's return point — its own block)
     // pc2: exit                          (the called function)
-    let t = text(&[insn(opc::CALL_IMM, 0, 0, 0, call_offset(0, 2)), exit(), exit()]);
+    let t = text(&[
+        insn(opc::CALL_IMM, 0, 0, 0, call_offset(0, 2)),
+        exit(),
+        exit(),
+    ]);
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
@@ -136,8 +146,14 @@ fn a_conditional_jump_splits_into_taken_and_not_taken_blocks() {
     assert_eq!(f.blocks.len(), 3);
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     assert_eq!(b0.term, Term::CondJump { taken: 2, not: 1 });
-    assert!(f.blocks.iter().any(|b| b.start == 1 && b.term == Term::Exit));
-    assert!(f.blocks.iter().any(|b| b.start == 2 && b.term == Term::Exit));
+    assert!(f
+        .blocks
+        .iter()
+        .any(|b| b.start == 1 && b.term == Term::Exit));
+    assert!(f
+        .blocks
+        .iter()
+        .any(|b| b.start == 2 && b.term == Term::Exit));
     assert!(scanned.warnings.is_empty());
 }
 
@@ -152,7 +168,10 @@ fn a_ja_past_the_text_is_a_warning_and_traps() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::JumpOutOfText { pc: 0, target: 11 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::JumpOutOfText { pc: 0, target: 11 }]
+    );
     let f = &scanned.functions[0];
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     // `Term::Jump` still names the target — it is the shared synthetic trap pc (`n_slots == 1`
@@ -174,15 +193,26 @@ fn a_call_past_the_text_is_a_warning_and_traps_at_the_call_site() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::JumpOutOfText { pc: 0, target: 11 }]);
-    assert_eq!(scanned.functions.len(), 1, "the bad target names no function");
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::JumpOutOfText { pc: 0, target: 11 }]
+    );
+    assert_eq!(
+        scanned.functions.len(),
+        1,
+        "the bad target names no function"
+    );
     let f = &scanned.functions[0];
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     // Important 3 (review round 1): unlike a `BadInsn` trap, the `call imm` itself is still in
     // `insns` — `interp.rs` pushes the frame (the depth check) *before* fetching the bad target
     // (`push_frame` then `slot_at`), so the emitter must still place the depth check ahead of the
     // trap, exactly as it would for a call to a real target.
-    assert_eq!(b0.insns, vec![insn(opc::CALL_IMM, 0, 0, 0, 10)], "the depth check still runs");
+    assert_eq!(
+        b0.insns,
+        vec![insn(opc::CALL_IMM, 0, 0, 0, 10)],
+        "the depth check still runs"
+    );
     assert_eq!(b0.term, Term::Trap(TrapKind::BadJump));
 }
 
@@ -198,12 +228,29 @@ fn mov_r11_is_a_warning_and_traps_without_the_instruction_in_insns() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::RegisterOutOfRange { pc: 0, opc: opc::MOV64_IMM }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::RegisterOutOfRange {
+            pc: 0,
+            opc: opc::MOV64_IMM
+        }]
+    );
     let f = &scanned.functions[0];
-    assert_eq!(f.blocks.len(), 1, "the bad instruction is the whole function: nothing after it");
+    assert_eq!(
+        f.blocks.len(),
+        1,
+        "the bad instruction is the whole function: nothing after it"
+    );
     let b0 = &f.blocks[0];
-    assert!(b0.insns.is_empty(), "the bad instruction never ran: {:?}", b0.insns);
-    assert_eq!(b0.end, 0, "`end` still names the trapping pc even though it is not in `insns`");
+    assert!(
+        b0.insns.is_empty(),
+        "the bad instruction never ran: {:?}",
+        b0.insns
+    );
+    assert_eq!(
+        b0.end, 0,
+        "`end` still names the trapping pc even though it is not in `insns`"
+    );
     assert_eq!(b0.term, Term::Trap(TrapKind::BadInsn(opc::MOV64_IMM)));
 }
 
@@ -213,17 +260,30 @@ fn src_r11_is_also_a_warning_and_traps_without_the_instruction_in_insns() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::RegisterOutOfRange { pc: 0, opc: opc::ADD64_REG }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::RegisterOutOfRange {
+            pc: 0,
+            opc: opc::ADD64_REG
+        }]
+    );
     let f = &scanned.functions[0];
     assert!(f.blocks[0].insns.is_empty());
-    assert_eq!(f.blocks[0].term, Term::Trap(TrapKind::BadInsn(opc::ADD64_REG)));
+    assert_eq!(
+        f.blocks[0].term,
+        Term::Trap(TrapKind::BadInsn(opc::ADD64_REG))
+    );
 }
 
 #[test]
 fn a_register_out_of_range_mid_block_excludes_only_the_bad_instruction() {
     // pc0: mov r0, 1        (ran: kept)
     // pc1: mov r11, 2       (never ran: excluded, but `end` still names it)
-    let t = text(&[insn(opc::MOV64_IMM, 0, 0, 0, 1), insn(opc::MOV64_IMM, 11, 0, 0, 2), exit()]);
+    let t = text(&[
+        insn(opc::MOV64_IMM, 0, 0, 0, 1),
+        insn(opc::MOV64_IMM, 11, 0, 0, 2),
+        exit(),
+    ]);
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
@@ -243,7 +303,10 @@ fn an_unassigned_opcode_byte_is_a_warning_and_traps_without_the_instruction_in_i
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::UnknownOpcode { pc: 0, opc: 0x00 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::UnknownOpcode { pc: 0, opc: 0x00 }]
+    );
     let f = &scanned.functions[0];
     assert!(f.blocks[0].insns.is_empty());
     assert_eq!(f.blocks[0].term, Term::Trap(TrapKind::BadInsn(0x00)));
@@ -257,7 +320,10 @@ fn falling_off_the_end_of_the_text_is_a_warning_and_traps() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::JumpOutOfText { pc: 0, target: 1 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::JumpOutOfText { pc: 0, target: 1 }]
+    );
     let f = &scanned.functions[0];
     assert_eq!(f.blocks.len(), 1);
     // Unlike a `BadInsn` trap: the `mov` itself ran to completion (its own halt does not fire —
@@ -268,7 +334,8 @@ fn falling_off_the_end_of_the_text_is_a_warning_and_traps() {
 }
 
 #[test]
-fn callx_with_a_register_number_above_r10_is_a_warning_and_traps_without_the_instruction_in_insns() {
+fn callx_with_a_register_number_above_r10_is_a_warning_and_traps_without_the_instruction_in_insns()
+{
     // `callx`'s immediate is a register *number* (not a pc), checked the same way — the one place
     // besides `dst`/`src` that `interp.rs` validates a register reference, and (like the generic
     // register check) before any frame push, so this `callx` never ran either.
@@ -276,10 +343,19 @@ fn callx_with_a_register_number_above_r10_is_a_warning_and_traps_without_the_ins
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::RegisterOutOfRange { pc: 0, opc: opc::CALL_REG }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::RegisterOutOfRange {
+            pc: 0,
+            opc: opc::CALL_REG
+        }]
+    );
     let f = &scanned.functions[0];
     assert!(f.blocks[0].insns.is_empty());
-    assert_eq!(f.blocks[0].term, Term::Trap(TrapKind::BadInsn(opc::CALL_REG)));
+    assert_eq!(
+        f.blocks[0].term,
+        Term::Trap(TrapKind::BadInsn(opc::CALL_REG))
+    );
 }
 
 #[test]
@@ -290,10 +366,19 @@ fn a_call_imm_with_src_2_to_10_is_bad_insn_0x85() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::BadCallImmSrc { pc: 0, src: 5 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::BadCallImmSrc { pc: 0, src: 5 }]
+    );
     let f = &scanned.functions[0];
-    assert!(f.blocks[0].insns.is_empty(), "never ran: no frame push, no dispatch");
-    assert_eq!(f.blocks[0].term, Term::Trap(TrapKind::BadInsn(opc::CALL_IMM)));
+    assert!(
+        f.blocks[0].insns.is_empty(),
+        "never ran: no frame push, no dispatch"
+    );
+    assert_eq!(
+        f.blocks[0].term,
+        Term::Trap(TrapKind::BadInsn(opc::CALL_IMM))
+    );
 }
 
 #[test]
@@ -304,13 +389,20 @@ fn a_conditional_jump_with_only_one_bad_target_keeps_the_other_side_real() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::JumpOutOfText { pc: 0, target: 11 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::JumpOutOfText { pc: 0, target: 11 }]
+    );
     let f = &scanned.functions[0];
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     // `taken` is the shared synthetic trap pc (n_slots == 2 here); `not` is the real pc1.
     assert_eq!(b0.term, Term::CondJump { taken: 2, not: 1 });
     let not_taken = f.blocks.iter().find(|b| b.start == 1).unwrap();
-    assert_eq!(not_taken.term, Term::Exit, "the real, in-text side must still be ordinary code");
+    assert_eq!(
+        not_taken.term,
+        Term::Exit,
+        "the real, in-text side must still be ordinary code"
+    );
     let trap = f.blocks.iter().find(|b| b.start == 2).unwrap();
     assert_eq!(trap.term, Term::Trap(TrapKind::BadJump));
 }
@@ -323,7 +415,10 @@ fn an_entry_that_is_not_fetchable_traps_immediately() {
     let program = Program::from_text(&[]).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::JumpOutOfText { pc: 0, target: 0 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::JumpOutOfText { pc: 0, target: 0 }]
+    );
     assert_eq!(scanned.functions.len(), 1);
     let f = &scanned.functions[0];
     assert_eq!(f.blocks.len(), 1);
@@ -339,7 +434,13 @@ fn a_call_to_sol_invoke_signed_c_is_a_warning_not_a_refusal() {
     let t = text(&[insn(opc::CALL_IMM, 0, 1, 0, hash as i32), exit()]);
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
-    assert_eq!(scanned.warnings, vec![Warning::Cpi { pc: 0, name: "sol_invoke_signed_c" }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::Cpi {
+            pc: 0,
+            name: "sol_invoke_signed_c"
+        }]
+    );
     let f = &scanned.functions[0];
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     assert_eq!(b0.term, Term::Syscall { hash, next: 1 });
@@ -351,7 +452,13 @@ fn a_call_to_sol_invoke_signed_rust_is_a_warning_not_a_refusal() {
     let t = text(&[insn(opc::CALL_IMM, 0, 1, 0, hash as i32), exit()]);
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
-    assert_eq!(scanned.warnings, vec![Warning::Cpi { pc: 0, name: "sol_invoke_signed_rust" }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::Cpi {
+            pc: 0,
+            name: "sol_invoke_signed_rust"
+        }]
+    );
 }
 
 /// A CPI call reachable only from inside a called function's body (not the entry function
@@ -371,7 +478,13 @@ fn a_cpi_call_inside_a_called_function_is_a_warning_not_a_refusal() {
     ]);
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
-    assert_eq!(scanned.warnings, vec![Warning::Cpi { pc: 2, name: "sol_invoke_signed_c" }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::Cpi {
+            pc: 2,
+            name: "sol_invoke_signed_c"
+        }]
+    );
     let callee = scanned.functions.iter().find(|f| f.entry == 2).unwrap();
     let b2 = callee.blocks.iter().find(|b| b.start == 2).unwrap();
     assert_eq!(b2.term, Term::Syscall { hash, next: 3 });
@@ -396,7 +509,10 @@ fn an_unrecognised_syscall_hash_is_a_warning_not_a_refusal() {
     let t = text(&[insn(opc::CALL_IMM, 0, 1, 0, hash as i32), exit()]);
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
-    assert_eq!(scanned.warnings, vec![Warning::UnknownSyscall { pc: 0, hash }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::UnknownSyscall { pc: 0, hash }]
+    );
     let f = &scanned.functions[0];
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     assert_eq!(b0.term, Term::Syscall { hash, next: 1 });
@@ -435,15 +551,20 @@ fn callx_is_a_terminator_and_does_not_add_call_targets() {
 /// which loads and runs this exact file today.
 #[test]
 fn the_real_spl_token_elf_scans_clean_and_warns_only_the_two_unsupported_syscalls() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../guests-compiled/sbpf/programs/spl_token.so");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../guests-compiled/sbpf/programs/spl_token.so"
+    );
     let mut bytes = std::fs::read(path).expect("the committed SPL Token ELF");
     let program = sbpf_core::elf::load(&mut bytes).expect("SPL Token must load");
 
     let scanned = scan(&program);
 
     let unsupported = ["sol_set_return_data", "sol_get_sysvar"];
-    let unsupported_hashes: Vec<u32> =
-        unsupported.iter().map(|n| syscalls::murmur3_32(n.as_bytes(), 0)).collect();
+    let unsupported_hashes: Vec<u32> = unsupported
+        .iter()
+        .map(|n| syscalls::murmur3_32(n.as_bytes(), 0))
+        .collect();
     for (name, hash) in unsupported.iter().zip(&unsupported_hashes) {
         assert!(
             scanned
@@ -491,7 +612,11 @@ fn a_function_reachable_only_through_callx_is_discovered_via_its_lddw_constant()
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert!(scanned.callx_targets.contains(&hidden), "{:?}", scanned.callx_targets);
+    assert!(
+        scanned.callx_targets.contains(&hidden),
+        "{:?}",
+        scanned.callx_targets
+    );
     let f = scanned.functions.iter().find(|f| f.entry == hidden);
     assert!(f.is_some(), "pc {hidden} must be its own function");
     assert_eq!(f.unwrap().blocks[0].term, Term::Exit);
@@ -503,7 +628,12 @@ fn a_function_reachable_only_through_callx_is_discovered_via_a_rodata_word() {
     // an `lddw` immediate: pc2's address as an 8-byte little-endian word right after the text.
     let hidden = 2usize;
     let addr = sbpf_core::memory::REGION_PROGRAM + (hidden as u64) * 8;
-    let t = text(&[insn(opc::CALL_REG, 0, 0, 0, 1), exit(), insn(opc::MOV64_IMM, 0, 0, 0, 9), exit()]);
+    let t = text(&[
+        insn(opc::CALL_REG, 0, 0, 0, 1),
+        exit(),
+        insn(opc::MOV64_IMM, 0, 0, 0, 9),
+        exit(),
+    ]);
     let mut rodata_buf = t.clone();
     rodata_buf.extend_from_slice(&addr.to_le_bytes());
     let program = Program {
@@ -516,8 +646,16 @@ fn a_function_reachable_only_through_callx_is_discovered_via_a_rodata_word() {
     };
     let scanned = scan(&program);
 
-    assert!(scanned.callx_targets.contains(&hidden), "{:?}", scanned.callx_targets);
-    let f = scanned.functions.iter().find(|f| f.entry == hidden).expect("must be its own function");
+    assert!(
+        scanned.callx_targets.contains(&hidden),
+        "{:?}",
+        scanned.callx_targets
+    );
+    let f = scanned
+        .functions
+        .iter()
+        .find(|f| f.entry == hidden)
+        .expect("must be its own function");
     assert_eq!(
         f.blocks.iter().find(|b| b.start == hidden).unwrap().insns,
         vec![insn(opc::MOV64_IMM, 0, 0, 0, 9), exit()]
@@ -529,21 +667,39 @@ fn a_function_reachable_only_through_callx_is_discovered_via_a_rodata_word() {
 /// no `call imm` anywhere — invisible before this fix.
 #[test]
 fn the_real_spl_token_elf_finds_the_callx_only_function_at_12244() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../guests-compiled/sbpf/programs/spl_token.so");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../guests-compiled/sbpf/programs/spl_token.so"
+    );
     let mut bytes = std::fs::read(path).expect("the committed SPL Token ELF");
     let program = sbpf_core::elf::load(&mut bytes).expect("SPL Token must load");
     let scanned = scan(&program);
 
-    assert!(scanned.callx_targets.contains(&12244), "{:?}", scanned.callx_targets);
-    let f12244 = scanned.functions.iter().find(|f| f.entry == 12244).expect("pc 12244 must be its own function");
+    assert!(
+        scanned.callx_targets.contains(&12244),
+        "{:?}",
+        scanned.callx_targets
+    );
+    let f12244 = scanned
+        .functions
+        .iter()
+        .find(|f| f.entry == 12244)
+        .expect("pc 12244 must be its own function");
     assert_eq!(f12244.blocks.iter().map(|b| b.end).max().unwrap(), 12258);
     // pc 12244's own body is short (12244..12258: a couple of internal calls, then exit) — the
     // reviewer's "slots 12244..12340 are in no function" is the *transitive* set: 12244 calls
     // 12259, which is itself only reachable through 12244 (no `call imm` elsewhere in the file
     // names it either) and reaches all the way to pc 12340.
-    let f12259 = scanned.functions.iter().find(|f| f.entry == 12259).expect("pc 12259 must be its own function");
+    let f12259 = scanned
+        .functions
+        .iter()
+        .find(|f| f.entry == 12259)
+        .expect("pc 12259 must be its own function");
     let max_end = f12259.blocks.iter().map(|b| b.end).max().unwrap();
-    assert!(max_end >= 12339, "function at 12259 only reaches pc {max_end}, expected >= 12339");
+    assert!(
+        max_end >= 12339,
+        "function at 12259 only reaches pc {max_end}, expected >= 12339"
+    );
 }
 
 // ---- Important 3: lddw's second slot ----------------------------------------------------------
@@ -552,12 +708,20 @@ fn the_real_spl_token_elf_finds_the_callx_only_function_at_12244() {
 fn a_jump_onto_an_lddws_second_slot_is_never_a_block_start_by_itself() {
     // pc0-1: lddw r1, <irrelevant>
     // pc2: exit                          -- ordinary fallthrough from pc0 never visits pc1
-    let t = text(&[insn(opc::LD_DW_IMM, 1, 0, 0, 0x1111_1111u32 as i32), insn(0, 0, 0, 0, 0), exit()]);
+    let t = text(&[
+        insn(opc::LD_DW_IMM, 1, 0, 0, 0x1111_1111u32 as i32),
+        insn(0, 0, 0, 0, 0),
+        exit(),
+    ]);
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
     let f = &scanned.functions[0];
-    assert!(!f.blocks.iter().any(|b| b.start == 1), "pc1 must not be a block start: {:?}", f.blocks);
+    assert!(
+        !f.blocks.iter().any(|b| b.start == 1),
+        "pc1 must not be a block start: {:?}",
+        f.blocks
+    );
 }
 
 #[test]
@@ -576,7 +740,11 @@ fn a_jump_onto_an_lddws_second_slot_with_a_valid_reinterpretation_is_ordinary_co
 
     assert!(scanned.warnings.is_empty(), "{:?}", scanned.warnings);
     let f = &scanned.functions[0];
-    let b1 = f.blocks.iter().find(|b| b.start == 1).expect("pc1 must be a block, once targeted");
+    let b1 = f
+        .blocks
+        .iter()
+        .find(|b| b.start == 1)
+        .expect("pc1 must be a block, once targeted");
     assert_eq!(b1.insns, vec![hi]);
     // pc1 falls through into pc2 (the `ja`), which is *also* independently reached from pc0's own
     // fallthrough — a convergence forcing a split, not a "swallow pc2 into pc1's block" bug.
@@ -597,7 +765,10 @@ fn a_jump_onto_an_lddws_second_slot_with_an_invalid_reinterpretation_traps() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::UnknownOpcode { pc: 1, opc: 0x00 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::UnknownOpcode { pc: 1, opc: 0x00 }]
+    );
     let f = &scanned.functions[0];
     let b1 = f.blocks.iter().find(|b| b.start == 1).unwrap();
     assert!(b1.insns.is_empty());
@@ -611,16 +782,29 @@ fn a_jump_inside_a_conditionals_not_taken_arm_is_still_discovered() {
     // pc0: jeq r0, 0, +1   (taken -> pc2; not -> pc1)
     // pc1: ja +0            (inside the not-taken arm; also targets pc2)
     // pc2: exit
-    let t = text(&[insn(opc::JEQ_IMM, 0, 0, 1, 0), insn(opc::JA, 0, 0, 0, 0), exit()]);
+    let t = text(&[
+        insn(opc::JEQ_IMM, 0, 0, 1, 0),
+        insn(opc::JA, 0, 0, 0, 0),
+        exit(),
+    ]);
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
     assert!(scanned.warnings.is_empty());
     let f = &scanned.functions[0];
     assert_eq!(f.blocks.len(), 3);
-    assert_eq!(f.blocks.iter().find(|b| b.start == 0).unwrap().term, Term::CondJump { taken: 2, not: 1 });
-    assert_eq!(f.blocks.iter().find(|b| b.start == 1).unwrap().term, Term::Jump(2));
-    assert_eq!(f.blocks.iter().find(|b| b.start == 2).unwrap().term, Term::Exit);
+    assert_eq!(
+        f.blocks.iter().find(|b| b.start == 0).unwrap().term,
+        Term::CondJump { taken: 2, not: 1 }
+    );
+    assert_eq!(
+        f.blocks.iter().find(|b| b.start == 1).unwrap().term,
+        Term::Jump(2)
+    );
+    assert_eq!(
+        f.blocks.iter().find(|b| b.start == 2).unwrap().term,
+        Term::Exit
+    );
 }
 
 #[test]
@@ -631,12 +815,22 @@ fn an_internal_call_as_the_last_instruction_traps_on_next_but_still_calls() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::JumpOutOfText { pc: 0, target: 1 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::JumpOutOfText { pc: 0, target: 1 }]
+    );
     let f = &scanned.functions[0];
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
-    assert_eq!(b0.insns, vec![insn(opc::CALL_IMM, 0, 0, 0, -1)], "the call itself still runs");
+    assert_eq!(
+        b0.insns,
+        vec![insn(opc::CALL_IMM, 0, 0, 0, -1)],
+        "the call itself still runs"
+    );
     assert_eq!(b0.term, Term::Call { target: 0, next: 1 });
-    assert_eq!(f.blocks.iter().find(|b| b.start == 1).unwrap().term, Term::Trap(TrapKind::BadJump));
+    assert_eq!(
+        f.blocks.iter().find(|b| b.start == 1).unwrap().term,
+        Term::Trap(TrapKind::BadJump)
+    );
 }
 
 #[test]
@@ -646,12 +840,18 @@ fn a_syscall_as_the_last_instruction_traps_on_next_but_still_calls() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::JumpOutOfText { pc: 0, target: 1 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::JumpOutOfText { pc: 0, target: 1 }]
+    );
     let f = &scanned.functions[0];
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     assert_eq!(b0.insns, vec![insn(opc::CALL_IMM, 0, 1, 0, hash as i32)]);
     assert_eq!(b0.term, Term::Syscall { hash, next: 1 });
-    assert_eq!(f.blocks.iter().find(|b| b.start == 1).unwrap().term, Term::Trap(TrapKind::BadJump));
+    assert_eq!(
+        f.blocks.iter().find(|b| b.start == 1).unwrap().term,
+        Term::Trap(TrapKind::BadJump)
+    );
 }
 
 #[test]
@@ -660,12 +860,18 @@ fn a_callx_as_the_last_instruction_traps_on_next_but_still_dispatches() {
     let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program);
 
-    assert_eq!(scanned.warnings, vec![Warning::JumpOutOfText { pc: 0, target: 1 }]);
+    assert_eq!(
+        scanned.warnings,
+        vec![Warning::JumpOutOfText { pc: 0, target: 1 }]
+    );
     let f = &scanned.functions[0];
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     assert_eq!(b0.insns, vec![insn(opc::CALL_REG, 0, 0, 0, 3)]);
     assert_eq!(b0.term, Term::CallX { next: 1 });
-    assert_eq!(f.blocks.iter().find(|b| b.start == 1).unwrap().term, Term::Trap(TrapKind::BadJump));
+    assert_eq!(
+        f.blocks.iter().find(|b| b.start == 1).unwrap().term,
+        Term::Trap(TrapKind::BadJump)
+    );
 }
 
 #[test]
@@ -694,8 +900,16 @@ fn two_function_entries_falling_into_one_shared_body_scan_independently() {
 
     assert!(scanned.callx_targets.contains(&1));
     assert!(scanned.callx_targets.contains(&2));
-    let fa = scanned.functions.iter().find(|f| f.entry == 1).expect("function A");
-    let fb = scanned.functions.iter().find(|f| f.entry == 2).expect("function B");
+    let fa = scanned
+        .functions
+        .iter()
+        .find(|f| f.entry == 1)
+        .expect("function A");
+    let fb = scanned
+        .functions
+        .iter()
+        .find(|f| f.entry == 2)
+        .expect("function B");
     assert!(fa.blocks.iter().any(|b| b.start == 1));
     assert!(fb.blocks.iter().any(|b| b.start == 2));
     // Both independently reach the shared tail without panicking or corrupting either scan.
