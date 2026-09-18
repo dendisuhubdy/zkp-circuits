@@ -1,0 +1,21 @@
+[package]
+name = "evm2rv"
+version = "0.1.0"
+edition = "2021"
+description = "Translates EVM bytecode (solc's runtime bytecode) into C over evm-rt/, for rand-guest to build into a zkVM image"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "evm2rv"
+path = "src/main.rs"
+
+[dependencies]
+evm-core = { path = "../guests-compiled/evm-core" }
+clap = { version = "4.4", features = ["derive"] }
+anyhow = "1"
+hex = "0.4"
+
+# Its own workspace root, like every guest crate: never swept into research's cargo test.
+[workspace]
