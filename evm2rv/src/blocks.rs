@@ -290,7 +290,7 @@ fn classify(opcode: u8) -> Classify {
 /// present, and the net change to the depth once the op has run. Every opcode this crate traps on
 /// unconditionally (see [`Classify::Trap`]) is `(0, 0)`, matching the interpreter's catch-all,
 /// which halts before touching the stack at all.
-fn stack_effect(op: u8) -> (usize, i32) {
+pub fn stack_effect(op: u8) -> (usize, i32) {
     match op {
         0x00 => (0, 0),                               // STOP
         0x01..=0x07 => (2, -1),                       // ADD..SMOD
@@ -348,7 +348,7 @@ fn stack_effect(op: u8) -> (usize, i32) {
 /// point. `depth` tracks the running stack height relative to an assumed-zero entry; `min_depth`
 /// is the largest shortfall any op's `need` would hit at that point, and `max_growth` is the
 /// highest `depth` climbs.
-fn stack_bounds(ops: &[Op]) -> (usize, usize) {
+pub fn stack_bounds(ops: &[Op]) -> (usize, usize) {
     let mut depth: i64 = 0;
     let mut min_depth: i64 = 0;
     let mut max_growth: i64 = 0;

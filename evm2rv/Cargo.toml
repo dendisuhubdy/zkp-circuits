@@ -17,5 +17,17 @@ clap = { version = "4.4", features = ["derive"] }
 anyhow = "1"
 hex = "0.4"
 
+[dev-dependencies]
+# The parity test's oracle and vectors: research's ERC-20 fixtures (`rand_zkvm::evm`) and the
+# interpreter run natively over them (`EvmCall::expected`).
+rand_zkvm = { path = "../research" }
+# `ffi.rs`'s halt-code table, which the parity test's `emit-outcome` build reports its halt in.
+evm-core = { path = "../guests-compiled/evm-core", features = ["ffi"] }
+
 # Its own workspace root, like every guest crate: never swept into research's cargo test.
 [workspace]
+
+# The oracle's Keccak and Poseidon2 are research's reference code; optimise the dependencies even
+# in a test build, as research's own manifest does.
+[profile.dev.package."*"]
+opt-level = 3
