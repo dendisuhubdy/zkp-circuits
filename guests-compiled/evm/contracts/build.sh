@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Replaces the deleted `guests-compiled/evm/Makefile`'s `contracts` target (recovered at
-# a43b801:guests-compiled/evm/Makefile). Recompiles ERC20.sol and diffs the result against the
+# Replaces the deleted `guests-compiled/evm/Makefile`'s `contracts` target (recovered from
+# 4df7cea:guests-compiled/evm/Makefile, a commit on main). Recompiles ERC20.sol and diffs the result against the
 # committed runtime bytecode. Needs the exact solc `contracts/SOLC.md` pins — a different 0.8.x
 # optimises differently and the hex will differ, so the version is asserted rather than trusted.
 # With no solc on PATH this says so and succeeds, so it is safe to run anywhere; no test needs it.
