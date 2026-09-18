@@ -94,13 +94,31 @@ guest's `.cargo/config.toml`, so a guest that also carried them would link with 
 `src/build.rs`'s `flags` and `clang_flags` are the only place each set is written down, with the
 reason for every flag.
 
-- **Rust** — `cargo +1.98.1 build --release --target riscv32im-unknown-none-elf --config
-  'target.riscv32im-unknown-none-elf.rustflags=[…]'` with:
+The pinned toolchain is Rust 1.98.1 and clang 23.1.1 (Homebrew LLVM), and `hc` is a function of
+the guest's source and that toolchain alone:
+
+- **The environment is scrubbed.** cargo and clang never see `RUSTFLAGS`,
+  `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`, the guest target's `CARGO_TARGET_*_RUSTFLAGS`
+  and `_LINKER`, any `CARGO_PROFILE_*`, `CARGO_INCREMENTAL`, a `RUSTC`/wrapper override,
+  `RUSTC_BOOTSTRAP`, any `CARGO_UNSTABLE_*`, `CARGO_TARGET_DIR`/`CARGO_BUILD_TARGET_DIR`/
+  `CARGO_BUILD_TARGET`, or clang's `CCC_OVERRIDE_OPTIONS`, `CPATH`, `C_INCLUDE_PATH` and
+  `COMPILER_PATH` (`build::SCRUBBED_VARS`). The output goes to `<guest>/target` (`--target-dir`),
+  and the previous build's ELF is deleted first, so a stale one can never be packed.
+- **Cargo config files are refused.** A `.cargo/config` or `.cargo/config.toml` in the guest's
+  directory, any ancestor, or `$CARGO_HOME` would be merged into the build and cannot be scrubbed,
+  so `build` refuses and names each file.
+- **clang is pinned.** `find_clang` refuses any clang whose `--version` is not 23.1.1
+  (`build::CLANG_VERSION`). `RAND_GUEST_CLANG_UNPINNED=1` builds with another one anyway, with a
+  warning that `hc` will not match published images. `--no-default-config` keeps clang's own
+  configuration files (Homebrew ships one per host triple) out of every compile.
+
+- **Rust** — `cargo +1.98.1 build --release --target riscv32im-unknown-none-elf --target-dir
+  <guest>/target --config 'target.riscv32im-unknown-none-elf.rustflags=[…]'` with:
   `-C link-arg=-T<ld>` (the guest's linker script),
   `-C target-feature=-unaligned-scalar-mem` (a misaligned access is a constraint violation here),
   `--remap-path-prefix=<checkout>=/rand-circuits` (panic locations in `.rodata` do not depend on
   where the checkout lives, so images reproduce byte for byte).
-- **C** — `clang --target=riscv32-unknown-none-elf -march=rv32im -mabi=ilp32 -mno-relax -nostdlib
+- **C** — `clang --no-default-config --target=riscv32-unknown-none-elf -march=rv32im -mabi=ilp32 -mno-relax -nostdlib
   -ffreestanding -fno-builtin -ffunction-sections -fdata-sections -Os
   -ffile-prefix-map=<checkout>=/rand-circuits -c`, per `.c` file plus `start.S` and `rt.c`, then
   `rust-lld -flavor gnu --gc-sections -T <ld>` from the pinned toolchain's sysroot.
@@ -185,8 +203,9 @@ the flat loader — hence reading the magic word directly instead.
 depend on the directory's) plus this crate's own `start.S` and `rt.c`, with `rust-lld` linking
 against the same `guest.ld` the Rust guests use. Prerequisites:
 
-- a clang that targets `riscv32`: either Homebrew's LLVM (`brew install llvm` — Apple's system
-  clang has no RISC-V backend) at its default path, or any other clang set via `$CLANG`
+- clang 23.1.1 with a `riscv32` target: either Homebrew's LLVM (`brew install llvm` — Apple's
+  system clang has no RISC-V backend) at its default path, or the same version set via `$CLANG`
+  (another version is refused unless `RAND_GUEST_CLANG_UNPINNED=1`; see "The compiler flags")
 - `rustup +1.98.1 component add llvm-tools`, for `rust-lld` — the same linker the Rust guests use,
   found in the pinned toolchain's own sysroot, so a C guest needs no separate linker installed
 

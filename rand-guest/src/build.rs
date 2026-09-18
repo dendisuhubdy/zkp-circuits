@@ -9,6 +9,103 @@ use std::process::Command;
 
 pub const TARGET: &str = "riscv32im-unknown-none-elf";
 pub const TOOLCHAIN: &str = "1.98.1";
+/// The one clang whose output `hc` is published for (Homebrew LLVM's, `brew install llvm`): another
+/// clang version schedules and allocates the same C differently, so a C guest — and every
+/// `sbpf2rv` shim, whose `program.c` it compiles — would get a different image. [`find_clang`]
+/// refuses any other version unless the builder sets [`CLANG_UNPINNED_VAR`]` = 1`.
+pub const CLANG_VERSION: &str = "23.1.1";
+/// The override for [`CLANG_VERSION`]: set to `1`, any clang with a riscv32 target is used, with a
+/// warning that the image will not match the published one.
+pub const CLANG_UNPINNED_VAR: &str = "RAND_GUEST_CLANG_UNPINNED";
+
+/// What the builder's environment may not bring into a build. Each of these changes the image cargo
+/// or clang produces — a profile, the rustflags, the compiler itself, where the output goes, what
+/// clang includes — so none of them reaches a child process: `hc` is a function of the guest's
+/// source and the pinned toolchain alone, which is what a verifier rebuilding the guest relies on.
+/// Every `CARGO_PROFILE_*` and `CARGO_UNSTABLE_*` variable goes too ([`SCRUBBED_PREFIXES`]).
+///
+/// `.cargo/config.toml` files cannot be scrubbed this way; [`refuse_cargo_configs`] refuses them.
+pub const SCRUBBED_VARS: &[&str] = &[
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_BUILD_RUSTFLAGS",
+    "CARGO_TARGET_RISCV32IM_UNKNOWN_NONE_ELF_RUSTFLAGS",
+    "CARGO_TARGET_RISCV32IM_UNKNOWN_NONE_ELF_LINKER",
+    "CARGO_INCREMENTAL",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+    "RUSTC_BOOTSTRAP",
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_TARGET_DIR",
+    "CARGO_BUILD_TARGET",
+    "CCC_OVERRIDE_OPTIONS",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "COMPILER_PATH",
+];
+
+/// The prefixes [`SCRUBBED_VARS`] cannot list one by one.
+pub const SCRUBBED_PREFIXES: &[&str] = &["CARGO_PROFILE_", "CARGO_UNSTABLE_"];
+
+/// Removes [`SCRUBBED_VARS`] and every variable under [`SCRUBBED_PREFIXES`] from `cmd`'s environment.
+pub fn scrub_env(cmd: &mut Command) -> &mut Command {
+    for v in SCRUBBED_VARS {
+        cmd.env_remove(v);
+    }
+    for (k, _) in std::env::vars_os() {
+        if let Some(k) = k.to_str() {
+            if SCRUBBED_PREFIXES.iter().any(|p| k.starts_with(p)) {
+                cmd.env_remove(k);
+            }
+        }
+    }
+    cmd
+}
+
+/// `$CARGO_HOME`, else `~/.cargo`: where cargo reads its user-wide `config.toml`.
+fn cargo_home() -> Option<PathBuf> {
+    std::env::var_os("CARGO_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+}
+
+/// Refuses a build that cargo would read a `.cargo/config` or `.cargo/config.toml` into: one in
+/// the guest directory or any of its ancestors, or in `$CARGO_HOME`. Cargo merges such a file into
+/// the build (a `[profile]`, `[build] rustflags`, a `[target]` linker), and unlike an environment
+/// variable it cannot be removed from the child, so the only reproducible answer is to refuse,
+/// naming every file found.
+pub fn refuse_cargo_configs(dir: &Path) -> Result<()> {
+    let mut found = Vec::new();
+    let mut p = Some(dir);
+    while let Some(d) = p {
+        for name in ["config", "config.toml"] {
+            let f = d.join(".cargo").join(name);
+            if f.exists() {
+                found.push(f);
+            }
+        }
+        p = d.parent();
+    }
+    if let Some(home) = cargo_home() {
+        for name in ["config", "config.toml"] {
+            let f = home.join(name);
+            if f.exists() && !found.contains(&f) {
+                found.push(f);
+            }
+        }
+    }
+    if !found.is_empty() {
+        let list: Vec<String> = found.iter().map(|f| f.display().to_string()).collect();
+        bail!(
+            "refusing to build {}: cargo would merge these config files into the build, so hc would depend on this machine rather than the guest's source (the guest's ancestors and $CARGO_HOME must hold none): {}",
+            dir.display(),
+            list.join(", ")
+        );
+    }
+    Ok(())
+}
 
 /// Where a build left its two files. What the image *is* — words, `hc`, the checker's verdict —
 /// is the caller's to ask, through the same path `check` takes, so a build that produced an image
@@ -117,6 +214,7 @@ pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutp
     // Absolute from here on: cargo runs in the guest directory, so a guest path relative to *our*
     // cwd would resolve against the wrong directory in `-T` and in the remap prefix.
     let dir = &dir.canonicalize().with_context(|| format!("no such guest directory: {}", dir.display()))?;
+    refuse_cargo_configs(dir)?;
     let root = checkout_root(dir)?;
     let ld = match ld {
         Some(l) => l.to_path_buf(),
@@ -126,9 +224,16 @@ pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutp
     // absolute so the `--config` does not depend on where cargo is invoked from.
     let ld_abs = if ld.is_absolute() { ld } else { dir.join(ld) };
     let config = cargo_config(&root, &ld_abs);
-    let status = Command::new("cargo")
+    // The output goes where this function looks for it, whatever the environment says, and no ELF
+    // a previous build left there can be packed in place of this one's.
+    let target_dir = dir.join("target");
+    let release = target_dir.join(TARGET).join("release");
+    remove_elfs(&release)?;
+    let status = scrub_env(&mut Command::new("cargo"))
         .arg(format!("+{TOOLCHAIN}"))
-        .args(["build", "--release", "--target", TARGET, "--config"])
+        .args(["build", "--release", "--target", TARGET, "--target-dir"])
+        .arg(&target_dir)
+        .arg("--config")
         .arg(&config)
         .current_dir(dir)
         .status()
@@ -136,7 +241,7 @@ pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutp
     if !status.success() {
         bail!("cargo build failed for {}", dir.display());
     }
-    let elf = find_elf(&dir.join("target").join(TARGET).join("release"))?;
+    let elf = find_elf(&release)?;
     finish(elf, out)
 }
 
@@ -147,25 +252,57 @@ pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutp
 ///
 /// `$CLANG` is an instruction, not a hint: if it is set and fails the probe this is an error
 /// naming it, never a silent fall back to some other clang.
+///
+/// The clang found must then be [`CLANG_VERSION`] (`clang --version`'s `clang version X.Y.Z`), or
+/// the build is refused: `hc` is published for that clang's output. [`CLANG_UNPINNED_VAR`]` = 1`
+/// accepts any version, with a warning on stderr that `hc` will not match published images.
 pub fn find_clang() -> Result<PathBuf> {
     let targets_riscv32 = |c: &Path| {
-        Command::new(c)
+        scrub_env(&mut Command::new(c))
             .arg("--print-targets")
             .output()
             .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("riscv32"))
             .unwrap_or(false)
     };
-    if let Some(c) = std::env::var_os("CLANG") {
+    let clang = if let Some(c) = std::env::var_os("CLANG") {
         let c = PathBuf::from(c);
         if !targets_riscv32(&c) {
             bail!("$CLANG is {}, which does not run or has no riscv32 target (`{} --print-targets`)", c.display(), c.display());
         }
-        return Ok(c);
+        c
+    } else {
+        [PathBuf::from("/opt/homebrew/opt/llvm/bin/clang"), PathBuf::from("clang")]
+            .into_iter()
+            .find(|c| targets_riscv32(c))
+            .context("no clang with a riscv32 target: brew install llvm, or set CLANG")?
+    };
+    let version = clang_version(&clang)?;
+    if version != CLANG_VERSION {
+        if std::env::var_os(CLANG_UNPINNED_VAR).is_some_and(|v| v == "1") {
+            eprintln!(
+                "WARNING: {} is clang {version}, not the pinned {CLANG_VERSION}; building anyway because {CLANG_UNPINNED_VAR}=1. hc will not match published images.",
+                clang.display()
+            );
+        } else {
+            bail!(
+                "{} is clang {version}, but rand-guest is pinned to clang {CLANG_VERSION} (hc is published for its output): install it (brew install llvm) or point CLANG at it; {CLANG_UNPINNED_VAR}=1 builds with this one anyway, and hc will not match published images",
+                clang.display()
+            );
+        }
     }
-    [PathBuf::from("/opt/homebrew/opt/llvm/bin/clang"), PathBuf::from("clang")]
-        .into_iter()
-        .find(|c| targets_riscv32(c))
-        .context("no clang with a riscv32 target: brew install llvm, or set CLANG")
+    Ok(clang)
+}
+
+/// `X.Y.Z` from `clang --version`'s first line (`[vendor] clang version X.Y.Z [(…)]`).
+pub fn clang_version(clang: &Path) -> Result<String> {
+    let o = scrub_env(&mut Command::new(clang)).arg("--version").output().with_context(|| format!("running {} --version", clang.display()))?;
+    let text = String::from_utf8_lossy(&o.stdout);
+    let first = text.lines().next().unwrap_or("");
+    first
+        .split_once("clang version ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .map(str::to_string)
+        .with_context(|| format!("{} --version printed no `clang version`: {first:?}", clang.display()))
 }
 
 /// `rust-lld` from the pinned Rust sysroot's llvm-tools, so a C guest needs only clang installed:
@@ -217,8 +354,10 @@ fn rust_lld() -> Result<PathBuf> {
 ///                      only DWARF, but the image container carries `.rodata` into the guest's RAM
 ///                      (`__FILE__`, assert text), and only the file map — the union of the debug
 ///                      and macro maps — reaches those strings too.
-fn clang_flags(root: &Path) -> Vec<String> {
+///  * `--no-default-config`  no clang configuration file (Homebrew's LLVM ships one per host).
+pub fn clang_flags(root: &Path) -> Vec<String> {
     vec![
+        "--no-default-config".into(),
         "--target=riscv32-unknown-none-elf".into(),
         "-march=rv32im".into(),
         "-mabi=ilp32".into(),
@@ -298,7 +437,7 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
         } else {
             target_dir.join(src.file_name().unwrap()).with_extension("o")
         };
-        let status = Command::new(&clang)
+        let status = scrub_env(&mut Command::new(&clang))
             .args(clang_flags(&root))
             .arg("-c")
             .arg("-I")
@@ -315,7 +454,12 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
     }
     let elf = target_dir.join("guest.elf");
     let lld = rust_lld()?;
-    let status = Command::new(&lld)
+    // The ELF this build links, never one a previous build left.
+    match std::fs::remove_file(&elf) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("removing the previous build's {}", elf.display())),
+        _ => {}
+    }
+    let status = scrub_env(&mut Command::new(&lld))
         .args(["-flavor", "gnu", "--gc-sections"])
         .arg("-T")
         .arg(&ld_abs)
@@ -339,14 +483,32 @@ fn finish(elf: PathBuf, out: &Path) -> Result<BuildOutput> {
     Ok(BuildOutput { elf, image: out.to_path_buf() })
 }
 
-/// The one executable ELF in the release dir (cargo names it after the bin target).
-fn find_elf(release: &Path) -> Result<PathBuf> {
-    let mut elfs: Vec<_> = std::fs::read_dir(release)
-        .with_context(|| format!("reading {}", release.display()))?
+/// The executables in a cargo release dir: extension-less files starting with the ELF magic (cargo
+/// names the guest's after its bin target).
+fn elfs_in(dir: &Path) -> Result<Vec<PathBuf>> {
+    Ok(std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && p.extension().is_none() && std::fs::read(p).map(|b| b.starts_with(b"\x7fELF")).unwrap_or(false))
-        .collect();
+        .collect())
+}
+
+/// Deletes every executable in a cargo release dir (if it exists) before a build, so the ELF found
+/// afterwards can only be the one this build wrote.
+fn remove_elfs(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for p in elfs_in(dir)? {
+        std::fs::remove_file(&p).with_context(|| format!("removing the previous build's {}", p.display()))?;
+    }
+    Ok(())
+}
+
+/// The one executable ELF in the release dir (cargo names it after the bin target).
+fn find_elf(release: &Path) -> Result<PathBuf> {
+    let mut elfs = elfs_in(release)?;
     match elfs.len() {
         1 => Ok(elfs.remove(0)),
         0 => bail!("no ELF in {}", release.display()),
