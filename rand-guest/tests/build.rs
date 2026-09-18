@@ -86,6 +86,23 @@ fn info_and_check_agree_with_build_on_the_evm_image() {
     assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stdout));
 }
 
+#[test]
+fn info_and_check_accept_the_headerless_flat_binary_pins() {
+    // `fib.bin`/`keccak256.bin` predate this tool and carry no `IMAGE_MAGIC` header
+    // (`build_reproduces_every_committed_image_and_reports_hc`'s comment above); `info` and
+    // `check` must fall back to `Program::from_flat_binary` for them, same as `run` does, rather
+    // than failing on the container reader's `Magic` error.
+    let image = root().join("guests-compiled/bin/fib.bin");
+    let info = Command::new(bin()).arg("info").arg(&image).output().unwrap();
+    assert!(info.status.success(), "{}", String::from_utf8_lossy(&info.stderr));
+    let s = String::from_utf8_lossy(&info.stdout);
+    assert!(s.contains("flat binary"), "{s}");
+    assert!(s.contains("26 words"), "{s}");
+    let check = Command::new(bin()).arg("check").arg(&image).output().unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stdout));
+    assert!(String::from_utf8_lossy(&check.stdout).contains("OK"), "{}", String::from_utf8_lossy(&check.stdout));
+}
+
 /// `pack` and `check` on the ELF `build` left behind, in the same test so the ELF is known to be
 /// there (cargo runs the test functions in parallel, so this cannot be a test of its own).
 fn pack_and_check_the_elf_build_left(tmp: &std::path::Path) {

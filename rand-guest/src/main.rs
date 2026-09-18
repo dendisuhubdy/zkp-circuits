@@ -67,17 +67,59 @@ fn hex8(w: &[u32; 8]) -> String {
     w.iter().map(|x| format!("{x:08x}")).collect()
 }
 
+/// The two on-disk forms an image handed to this tool can take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Loaded {
+    /// The M4.3 container `build`/`pack` themselves emit (`IMAGE_MAGIC` first word):
+    /// `Program::from_flat_image`.
+    Image,
+    /// A bare flat binary, no header: what a guest with no data segment was committed as before
+    /// this tool existed (`guests-compiled/bin/fib.bin`, `keccak256.bin` —
+    /// `research/src/guests.rs`'s `compiled::fib`/`compiled::keccak256`). Always loaded at
+    /// `guest-sdk/guest.ld`'s fixed `ORIGIN`, `0x1000`, since a flat binary carries no base of
+    /// its own.
+    Flat,
+}
+
+impl std::fmt::Display for Loaded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Loaded::Image => write!(f, "image container"),
+            Loaded::Flat => write!(f, "flat binary (legacy, base 0x1000)"),
+        }
+    }
+}
+
 /// The loader's own view of an image: what it will be on chain, which is what the cap is measured
 /// against. The prologue is not a function of the data word count — `li` is one word or two and
 /// the base register is reset periodically — so it is counted, never estimated.
-fn load(image: &[u8]) -> Result<Program> {
-    Program::from_flat_image(image).map_err(|e| anyhow::anyhow!("{e:?}"))
+///
+/// Tries the image container first, since that is what a fresh `build`/`pack` produces; a
+/// `Magic` mismatch alone (not any other container error) falls back to the flat form, so every
+/// subcommand that takes an image accepts both without asking the caller which one it has.
+fn load(image: &[u8]) -> Result<(Program, Loaded)> {
+    match Program::from_flat_image(image) {
+        Ok(p) => Ok((p, Loaded::Image)),
+        Err(rand_zkvm::isa::LoadError::Magic(_)) => {
+            let p = Program::from_flat_binary(0x1000, image).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            Ok((p, Loaded::Flat))
+        }
+        Err(e) => Err(anyhow::anyhow!("{e:?}")),
+    }
 }
 
 fn report_image(image: &[u8], max_words: usize) -> Result<check::Report> {
-    let (info, text, _data) = pack::split(image)?;
-    let program = load(image)?;
-    Ok(check::check_text(info.text_base, &text, program.words.len(), max_words))
+    let (program, form) = load(image)?;
+    match form {
+        Loaded::Image => {
+            let (info, text, _data) = pack::split(image)?;
+            Ok(check::check_text(info.text_base, &text, program.words.len(), max_words))
+        }
+        // No container header, so no separate prologue: the whole program is the text, starting
+        // at the loader's own base_pc (`check_text`'s doc: "for a bare text with no data it is
+        // simply text.len()").
+        Loaded::Flat => Ok(check::check_text(program.base_pc, &program.words, program.words.len(), max_words)),
+    }
 }
 
 fn main() -> Result<()> {
@@ -121,12 +163,7 @@ fn main() -> Result<()> {
         }
         Cmd::Run { image, inputs, public } => {
             let bytes = std::fs::read(&image)?;
-            // `load` (the image-container reader `build`/`check`/`info` share) is tried first, since
-            // that is what `rand-guest build`/`pack` themselves produce; a guest with no data segment
-            // — `fib.bin`, `keccak256.bin` — predates this tool and was committed as a bare flat
-            // binary instead (`research/src/guests.rs`'s `compiled::fib`/`compiled::keccak256`), so a
-            // container-magic miss falls back to that loader at `guest-sdk/guest.ld`'s fixed `ORIGIN`.
-            let program = load(&bytes).or_else(|_| rand_zkvm::isa::Program::from_flat_binary(0x1000, &bytes).map_err(|e| anyhow::anyhow!("{e:?}")))?;
+            let (program, _form) = load(&bytes)?;
             let max = rand_zkvm::machine::Tier(*rand_zkvm::machine::TIERS.last().unwrap()).max_cycles();
             match rand_zkvm::emulator::execute(&program, &inputs, &public, max) {
                 Ok(exec) => {
@@ -148,20 +185,30 @@ fn main() -> Result<()> {
         }
         Cmd::Info { image, max_words } => {
             let bytes = std::fs::read(&image)?;
-            let (info, text, data) = pack::split(&bytes)?;
-            let program = load(&bytes)?;
-            let nonzero = data.iter().filter(|w| **w != 0).count();
-            println!(
-                "text {} words at {:#x}; data {} words ({} non-zero) at {:#x}; prologue {} words; program {} words from base_pc {:#x}",
-                text.len(),
-                info.text_base,
-                data.len(),
-                nonzero,
-                info.data_base,
-                program.words.len() - text.len(),
-                program.words.len(),
-                program.base_pc
-            );
+            let (program, form) = load(&bytes)?;
+            println!("form: {form}");
+            match form {
+                Loaded::Image => {
+                    let (info, text, data) = pack::split(&bytes)?;
+                    let nonzero = data.iter().filter(|w| **w != 0).count();
+                    println!(
+                        "text {} words at {:#x}; data {} words ({} non-zero) at {:#x}; prologue {} words; program {} words from base_pc {:#x}",
+                        text.len(),
+                        info.text_base,
+                        data.len(),
+                        nonzero,
+                        info.data_base,
+                        program.words.len() - text.len(),
+                        program.words.len(),
+                        program.base_pc
+                    );
+                }
+                // No container header, so `pack::split` (which reads the header) does not apply:
+                // the whole program is the text, no separate prologue or data segment.
+                Loaded::Flat => {
+                    println!("{} words from base_pc {:#x}", program.words.len(), program.base_pc);
+                }
+            }
             println!("hc {}", hex8(&program.digest()));
             println!("{} words against a cap of {max_words}: {}", program.words.len(), if program.words.len() <= max_words { "fits" } else { "does not fit" });
         }
