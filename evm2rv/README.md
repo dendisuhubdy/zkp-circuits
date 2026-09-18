@@ -333,8 +333,11 @@ with the code guard in. Tier in parentheses.
 Stage two runs the three ERC-20 calls in 54.5% (`transfer`), 56.2% (`approve`) and 55.0%
 (`transferFrom`) of the interpreter's cycles. Stage one takes 65.7 to 68.2%.
 
-**The transfer stays at tier 18.** Its 66 235 cycles are just over tier 16's 65 535. The tier also
-counts the digest rows: one per four program words, and one per four input words.
+**The transfer stays at tier 18.** The tier bound is total rows (cycles plus digest rows: one per
+four program words, one per four input words, and the public-input digest) at or under 65 535,
+plus a separate Poseidon2 budget (`rand-guest/src/main.rs:244-248`). The transfer's 66 235 cycles
+plus 3 155 digest rows are 69 390 total, 3 855 over tier 16's 65 535; its 3 908 Poseidon2
+permutations are well under tier 16's 8 192, so cycles, not Poseidon2, keep it at tier 18.
 
 ### Where the cycles go
 
