@@ -350,6 +350,12 @@ fn corpus(stage: Stage, opaque: bool) {
             // the same status and gas: it read one of the replaced bytes through CODECOPY, so the
             // two sides saw different code by construction. Task 6's comparison then applies:
             // the translation over the interpreter's own code, the guard skipped, all eight words.
+            assert!(
+                c.code.contains(&0x39),
+                "seed {}: the CODECOPY fallback fired on a case whose code has no CODECOPY \
+                 (0x39) byte, so the divergence has some other cause",
+                c.seed,
+            );
             let (w, o, _) = lib.run_words_guarded(&mut HostRef, i, &words, false);
             diverged = w != want_w || o.gas_used != want_o.gas_used;
             codecopy_seen += 1;
@@ -381,6 +387,13 @@ fn corpus(stage: Stage, opaque: bool) {
     );
     eprintln!(
         "fuzz: the code guard refused the interpreter's code (CHAINID/ORIGIN as CALLER) in all {refused} such cases; {codecopy_seen} of them read a replaced byte through CODECOPY and were compared unguarded over the interpreter's code"
+    );
+    assert!(
+        codecopy_seen <= 32,
+        "fuzz ({stage:?}{}): {codecopy_seen} cases needed the CODECOPY fallback, over the bound \
+         of 32 per corpus — the generator may be producing CHAINID/ORIGIN cases that read a \
+         replaced byte through CODECOPY far more often than expected",
+        if opaque { ", opaque" } else { "" },
     );
     eprintln!(
         "fuzz: timings: generate + translate {:.1}s, host build {:.1}s, run {:.1}s",
