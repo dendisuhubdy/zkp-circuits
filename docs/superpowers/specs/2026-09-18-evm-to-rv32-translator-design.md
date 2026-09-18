@@ -1,7 +1,9 @@
 # `evm2rv` — the Solidity bytecode to RV32 translator (v0.4, piece 3 of 3)
 
-Status: **approved by the user 2026-09-18; spec written, plan after piece 1's plan.** Runs as a
-parallel track with piece 2 once `rand-guest` (piece 1) exists.
+Status: **approved by the user 2026-09-18; built on `feat/evm2rv` (Tasks 1-9): stage one, stage
+two, the code guard and the ERC-20 walkthrough all land and match the interpreter byte for byte.
+Final whole-branch review 2026-09-18: no Critical; Important and Minor findings folded into a
+fix wave.**
 
 Related: `docs/superpowers/specs/2026-09-18-rand-guest-toolchain-design.md` (the pipeline),
 `guests-compiled/evm-core/` (the interpreter this must agree with byte for byte on the public
@@ -37,8 +39,11 @@ input vector's code, as the interpreter does (§6).
 ## 3. Stage one: the memory-stack translation
 
 **Blocks.** The code is split into basic blocks at every `JUMPDEST` and after every `JUMP`,
-`JUMPI`, `STOP`, `RETURN`, `REVERT`, `INVALID` and `SELFDESTRUCT`. Each block is a C label;
-falling off the end of the code is `STOP`, as in the interpreter.
+`JUMPI`, `STOP`, `RETURN`, `REVERT`, `INVALID` and the sixteen opcodes that trap the interpreter
+unconditionally (`TRAP_TERM`: `GASPRICE`, `BLOCKHASH`, `COINBASE`, `TIMESTAMP`, `NUMBER`,
+`PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`,
+`EXTCODEHASH`, `CREATE`, `CREATE2`, `SELFDESTRUCT`). Each block is a C label; falling off the
+end of the code is `STOP`, as in the interpreter.
 
 **The stack.** A 1024-entry array of `u256` (eight `uint32_t` limbs) in the shim's `.bss` with
 a depth counter. Every opcode checks its pops and pushes against the depth (underflow and
@@ -55,7 +60,7 @@ so the per-opcode checks disappear in straight-line code.
 | `MLOAD`, `MSTORE`, `MSTORE8`, `MSIZE`, `CALLDATALOAD`, `CALLDATACOPY`, `CODECOPY`, `RETURNDATACOPY`, `KECCAK256` | runtime calls over the interpreter's memory model, with memory expansion charged as it charges it; `KECCAK256` on the coprocessor via the SDK |
 | `SLOAD`, `SSTORE` | runtime calls into the interpreter's Merkle-witness `StorageTree` (Rust, exposed to C by `extern "C"` shims), with the interpreter's gas: `SLOAD` a flat 2100, `SSTORE` 20 000 when a zero slot becomes non-zero and 2 900 otherwise, read from the pre-value — no warm/cold access list and no refunds, as `interp.rs` has none |
 | `JUMP`, `JUMPI` | `switch (dest_low_word) { case <pc>: goto L_<pc>; … default: trap(BadJump) }` over the jumpdest set, after checking the high limbs are zero; `JUMPI` tests the condition first |
-| `PC`, `JUMPDEST`, `GAS` | a constant; nothing (its gas is charged); the runtime's gas counter |
+| `PC`, `JUMPDEST`, `GAS` | a constant; nothing (its gas is charged); `evm_gas + gas_after` — the live counter corrected for the rest of the block's up-front charge |
 | environment: `ADDRESS`, `CALLER`, `CALLVALUE`, `CALLDATASIZE`, `CODESIZE`, `RETURNDATASIZE` | the decoded call's `Env`, calldata and code, exactly as the interpreter reads them; the input vector is the interpreter's, with no extra words |
 | `CHAINID` | a translation-time constant: `evm2rv --chain-id N` bakes `N` into the C, so the image hash `hc` binds it |
 | `ORIGIN` | `CALLER` — the same binding `CALLER` already has (one call, no relayer) |
@@ -73,7 +78,8 @@ topics, `EXP` per byte, precompile costs) are charged inside the runtime calls, 
 interpreter's exact formulas. Out of gas traps where the interpreter traps: since the static
 charge is taken at the block head rather than per opcode, a block that would have run out of gas
 part way through fails at its head instead, with the same status and the same reported
-`gas_used` (the whole block's static cost), which the differential tests pin as the contract.
+`gas_used` — the gas limit, as every exceptional halt reports it, not the block's static cost —
+which the differential tests pin as the contract.
 
 ## 4. Stage two: register lifting
 
@@ -112,8 +118,8 @@ transfer stage two runs 66 235 cycles against stage one's 80 211 and the interpr
 `evm-rt`: the eight-limb `u256` library in C (add, sub, mul, div, mod, sdiv, smod, addmod,
 mulmod, exp, signextend, comparisons, shifts, byte, bit and byte length), the memory model with
 expansion accounting, the gas counter, the logs buffer, the trap path, and `extern "C"` shims
-over the interpreter's Rust `StorageTree`, `keccak256` (SDK coprocessor), `sha256` (SDK
-coprocessor) and the harness's input reader. Precompiles in software: `ecrecover`
+over the interpreter's Rust `StorageTree`, `keccak256` (SDK coprocessor) and `sha256` (SDK
+coprocessor). Precompiles in software: `ecrecover`
 (secp256k1 recovery over the reference field arithmetic), `sha256`, `ripemd160`, `identity`,
 `modexp`, the bn128 `add`/`mul`/`pairing`, `blake2f`. Each is correct and slow; each is
 measured in cycles and listed as the coprocessor backlog — a machine milestone, not this tool's.
