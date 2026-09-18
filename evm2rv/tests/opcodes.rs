@@ -7,11 +7,11 @@
 //! the cases below are the opcodes Task 4's review named as covered by string tests only
 //! (SIGNEXTEND, SAR, BYTE, SDIV, SMOD, EXP, MSTORE8, CODECOPY, GAS, PC, dynamic bad jumps), at
 //! their edges, each now executed and pinned. Most store a result at 0 and `RETURN(0, 32)`
-//! (`TAIL`), so the returned word is compared too.
+//! (`TAIL`), so the returned word is compared too. Every case runs under both stages (Task 8).
 
 mod common;
 
-use common::host;
+use common::{host, STAGES};
 use evm2rv::emit::{translate, Options};
 use evm_core::abi::{run_call_with, Workspace};
 use rand_zkvm::evm::{EvmCall, HostRef, SparseTree};
@@ -320,9 +320,22 @@ fn directed_opcodes_match_the_interpreter_and_their_pins() {
             c
         })
         .collect();
-    let cs: Vec<String> = codes
+    // Each case at stage one, then at stage two.
+    let cs: Vec<String> = STAGES
         .iter()
-        .map(|c| translate(c, &Options::default()).unwrap().c)
+        .flat_map(|&stage| {
+            codes.iter().map(move |c| {
+                translate(
+                    c,
+                    &Options {
+                        chain_id: None,
+                        stage,
+                    },
+                )
+                .unwrap()
+                .c
+            })
+        })
         .collect();
     let lib = host::build("opcodes", &cs);
     let mut ws = Box::new(Workspace::ZERO);
@@ -345,14 +358,16 @@ fn directed_opcodes_match_the_interpreter_and_their_pins() {
             |k| words[k as usize],
             words.len() as u32,
         );
-        let (got, t, _) = lib.run_words(&mut HostRef, i, &words);
         let hexret = hex::encode(&o.ret[..o.ret_len]);
         table.push_str(&format!(
             "{name}: status {} gas {} ret {hexret}\n",
             want[0], o.gas_used
         ));
-        assert_eq!(got, want, "{name}: the eight words");
-        assert_eq!(t.gas_used, o.gas_used, "{name}: gas_used");
+        for (k, stage) in STAGES.iter().enumerate() {
+            let (got, t, _) = lib.run_words(&mut HostRef, k * CASES.len() + i, &words);
+            assert_eq!(got, want, "{name} ({stage:?}): the eight words");
+            assert_eq!(t.gas_used, o.gas_used, "{name} ({stage:?}): gas_used");
+        }
         assert_eq!(want[0], status, "{name}: status");
         assert_eq!(o.gas_used, gas, "{name}: gas_used pin");
         if !ret.is_empty() {

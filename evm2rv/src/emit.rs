@@ -49,11 +49,24 @@ use std::fmt::Write as _;
 
 use crate::blocks::{blocks, jumpdests, Block, Op, Term, CALL_FAMILY};
 
+/// Which translation: stage one (this module, the memory stack) or stage two (register lifting,
+/// [`crate::lift`]). Both run the same runtime calls with the same gas and produce the same
+/// observable results; stage two keeps a block's intermediate words in C locals, and is the
+/// default (Task 8, ruling 1: it passes every test stage one does, in fewer cycles).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stage {
+    One,
+    #[default]
+    Two,
+}
+
 /// What the emitter needs besides the code.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     /// The value `CHAINID` pushes. Required when the code contains `CHAINID`.
     pub chain_id: Option<u64>,
+    /// The translation stage.
+    pub stage: Stage,
 }
 
 /// Why a contract cannot be translated.
@@ -84,6 +97,9 @@ pub struct Emitted {
     pub blocks: usize,
     /// Opcodes emitted.
     pub opcodes: usize,
+    /// Stage two: the `u256` locals `evm_entry` declares (the most any block holds at once, and
+    /// never more than [`crate::lift::MAX_LOCALS`]). 0 for stage one.
+    pub locals: usize,
 }
 
 /// `&evm_stack[evm_sp-n]`, the n-th word from the top (1 is the top).
@@ -354,7 +370,7 @@ pub fn mnemonic(op: u8) -> String {
 }
 
 /// The comment beside an op: its pc and name, and a push's immediate.
-fn comment(op: &Op) -> String {
+pub(crate) fn comment(op: &Op) -> String {
     match &op.push {
         Some(v) => {
             let n = (op.opcode - 0x5f) as usize;
@@ -380,8 +396,9 @@ fn static_target(v: &[u8; 32]) -> Option<usize> {
 
 /// The block head: the stack check and the static charge (`blocks.rs`'s numbers, the call
 /// family at its real arity). The checks are braced: the next line starts with an op's comment,
-/// which an unbraced `if` would make -Wmisleading-indentation's case.
-fn head_c(b: &Block) -> String {
+/// which an unbraced `if` would make -Wmisleading-indentation's case. `after_checks` (stage two's
+/// base pointer, or nothing) goes between the checks and the charge.
+pub(crate) fn head_c(b: &Block, after_checks: &str) -> String {
     let mut h = format!(
         "/* [{:#06x}, {:#06x}) min_depth {}, max_growth {}, static gas {} */\n",
         b.start, b.end, b.min_depth, b.max_growth, b.static_gas,
@@ -400,14 +417,23 @@ fn head_c(b: &Block) -> String {
             b.max_growth
         );
     }
+    h.push_str(after_checks);
     if b.static_gas > 0 {
         let _ = writeln!(h, "    evm_charge({});", b.static_gas);
     }
     h
 }
 
-/// Translate `code` to the C of one `evm_entry`.
+/// Translate `code` to the C of one `evm_entry`, at `opts.stage`.
 pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
+    match opts.stage {
+        Stage::One => translate_one(code, opts),
+        Stage::Two => crate::lift::translate(code, opts),
+    }
+}
+
+/// Stage one.
+fn translate_one(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
     let bs = blocks(code);
     let jd = jumpdests(code);
     let is_jd = |t: usize| jd.binary_search(&t).is_ok();
@@ -433,7 +459,7 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
             pieces.push((b.start, body));
             continue;
         }
-        body.push_str(&head_c(b));
+        body.push_str(&head_c(b, ""));
         for (i, op) in b.ops.iter().enumerate() {
             opcodes += 1;
             // `PUSHn t; JUMP` / `PUSHn t; JUMPI`: the destination is a constant, resolved here.
@@ -535,5 +561,6 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
         c: out,
         blocks: bs.len(),
         opcodes,
+        locals: 0,
     })
 }

@@ -25,7 +25,8 @@ mod count;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use common::{build_shim, encoded_halt, root, run, run_out_of_cycles};
+use common::{build_shim, encoded_halt, root, run, run_out_of_cycles, STAGES};
+use evm2rv::emit::Stage;
 use evm_core::abi::{run_call_with_executor, Workspace};
 use evm_core::interp::{Halt, Log, Outcome, MAX_LOGS, MAX_RETURN_BYTES};
 use evm_core::u256::U256;
@@ -139,15 +140,27 @@ struct Images {
     outcome: PathBuf,
 }
 
-fn images() -> &'static Images {
-    static IMAGES: OnceLock<Images> = OnceLock::new();
-    IMAGES.get_or_init(|| {
+/// The two images of the contract at `stage` (Task 8: every vector runs under both stages).
+fn images(stage: Stage) -> &'static Images {
+    static ONE: OnceLock<Images> = OnceLock::new();
+    static TWO: OnceLock<Images> = OnceLock::new();
+    let (cell, dir) = match stage {
+        Stage::One => (&ONE, "calls"),
+        Stage::Two => (&TWO, "calls-stage2"),
+    };
+    cell.get_or_init(|| {
         let base = root().join("evm2rv/target/precompiles");
         std::fs::create_dir_all(&base).unwrap();
-        let hex_path = base.join("calls.hex");
+        let hex_path = base.join(format!("{dir}.hex"));
         std::fs::write(&hex_path, hex::encode(contract())).unwrap();
-        let (plain, _) = build_shim(&hex_path, &base.join("calls"), "calls-evm2rv", false);
-        let (outcome, _) = build_shim(&hex_path, &base.join("calls-outcome"), "calls-evm2rv", true);
+        let (plain, _) = build_shim(&hex_path, &base.join(dir), "calls-evm2rv", false, stage);
+        let (outcome, _) = build_shim(
+            &hex_path,
+            &base.join(format!("{dir}-outcome")),
+            "calls-evm2rv",
+            true,
+            stage,
+        );
         Images { plain, outcome }
     })
 }
@@ -178,7 +191,22 @@ fn words(image: &Path, call: &EvmCall, fits: bool) -> [u32; 8] {
 }
 
 fn check(name: &str, call: &EvmCall, fits: bool, halt: Halt, ret: &[u8], gas_used: u64) {
-    let Images { plain, outcome } = images();
+    for stage in STAGES {
+        check_at(stage, name, call, fits, halt, ret, gas_used);
+    }
+}
+
+fn check_at(
+    stage: Stage,
+    name: &str,
+    call: &EvmCall,
+    fits: bool,
+    halt: Halt,
+    ret: &[u8],
+    gas_used: u64,
+) {
+    let Images { plain, outcome } = images(stage);
+    let name = format!("{name} ({stage:?})");
     let want = expected(call, halt, ret, gas_used);
     assert_eq!(
         words(plain, call, fits),

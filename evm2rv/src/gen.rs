@@ -816,7 +816,18 @@ impl Gen<'_> {
                     _ => U256::MAX,
                 };
                 self.push(&t);
-                self.push_u(0);
+                // `t + 0`: half the time a constant zero, which stage two folds into a static bad
+                // jump; the other half a zero known only at run time (`CALLDATASIZE DUP1 XOR`), so
+                // stage two's jump stays dynamic and its dispatch's bad-jump exits are exercised
+                // too (Task 8). The choice reads no randomness, so no other case changes.
+                if self.code.len().is_multiple_of(2) {
+                    self.push_u(0);
+                } else {
+                    self.op(0x36);
+                    self.op(0x80);
+                    self.op(0x18);
+                    self.depth += 1;
+                }
                 self.op(0x01);
                 self.op(0x56);
             }

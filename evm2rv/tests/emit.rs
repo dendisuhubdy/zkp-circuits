@@ -1,4 +1,6 @@
-//! Task 4's emitter tests: each opcode's C against the spec's table (the operand order the
+//! Task 4's emitter tests (Task 8: the structural ones run under both stages — the block head, the
+//! jumps' shape, the call family's arity, the return-data buffer, `CHAINID`, compiling clean for
+//! rv32im — while the per-opcode strings are stage one's, `op_c`): each opcode's C against the spec's table (the operand order the
 //! interpreter pops in, offsets and lengths saturated, the runtime's names), the block head, the
 //! jump switch and the statically resolved jumps, `GAS`/`PC`, the traps (the sixteen and undefined
 //! bytes), the call family (a runtime dispatch to the precompiles, Task 5) and the return-data
@@ -10,7 +12,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use evm2rv::blocks::{Op, TRAP_TERM};
-use evm2rv::emit::{op_c, translate, EmitError, Options};
+use evm2rv::emit::{op_c, translate, EmitError, Options, Stage};
 use evm2rv::shim::{crate_name, files, C_FLAGS};
 use evm_core::interp::MAX_CODE_BYTES;
 
@@ -28,6 +30,21 @@ fn erc20_code() -> Vec<u8> {
     hex::decode(text.trim()).unwrap()
 }
 
+const STAGES: [Stage; 2] = [Stage::One, Stage::Two];
+
+/// No `CHAINID` constant, at `stage`.
+fn at(stage: Stage) -> Options {
+    Options {
+        chain_id: None,
+        stage,
+    }
+}
+
+/// Stage one, whose C the string tests pin.
+fn one() -> Options {
+    at(Stage::One)
+}
+
 fn op(opcode: u8) -> Op {
     Op {
         pc: 0x2a,
@@ -39,12 +56,12 @@ fn op(opcode: u8) -> Op {
 
 /// The C for `opcode` in a contract with no call-family opcode.
 fn c_of(opcode: u8) -> String {
-    op_c(&op(opcode), 0, &Options::default(), false).unwrap()
+    op_c(&op(opcode), 0, &one(), false).unwrap()
 }
 
 /// ... and in one with a call-family opcode (the return-data buffer is live).
 fn c_of_calls(opcode: u8) -> String {
-    op_c(&op(opcode), 0, &Options::default(), true).unwrap()
+    op_c(&op(opcode), 0, &one(), true).unwrap()
 }
 
 const S1: &str = "&evm_stack[evm_sp-1]";
@@ -221,7 +238,7 @@ fn stack_ops_pushes_and_constants() {
             push: Some(v),
             gas_after: 0,
         };
-        op_c(&o, 0, &Options::default(), false).unwrap()
+        op_c(&o, 0, &one(), false).unwrap()
     };
     assert_eq!(
         push(1, &[0x80]),
@@ -249,15 +266,17 @@ fn gas_adds_back_the_rest_of_the_block() {
         gas_after: 0,
     };
     assert_eq!(
-        op_c(&o, 17, &Options::default(), false).unwrap(),
+        op_c(&o, 17, &one(), false).unwrap(),
         "u256_from_u64(&evm_stack[evm_sp++], evm_gas + 17ull);"
     );
     // GAS, PUSH1 1, ADD, POP, STOP: after GAS come 3 + 3 + 2 + 0 = 8.
-    let c = translate(&[0x5a, 0x60, 0x01, 0x01, 0x50, 0x00], &Options::default())
-        .unwrap()
-        .c;
-    assert!(c.contains("evm_gas + 8ull"), "{c}");
-    assert!(c.contains("evm_charge(10);"), "{c}"); // 2 + 3 + 3 + 2
+    for stage in STAGES {
+        let c = translate(&[0x5a, 0x60, 0x01, 0x01, 0x50, 0x00], &at(stage))
+            .unwrap()
+            .c;
+        assert!(c.contains("evm_gas + 8ull"), "{c}");
+        assert!(c.contains("evm_charge(10);"), "{c}"); // 2 + 3 + 3 + 2
+    }
 }
 
 #[test]
@@ -267,43 +286,64 @@ fn environment_opcodes() {
     assert_eq!(c_of(0x32), c_of(0x33), "ORIGIN reads CALLER");
     assert_eq!(c_of(0x34), "evm_stack[evm_sp++] = evm_callvalue;");
     // CHAINID is the translation's constant, and there is no default.
-    let chain = |id| op_c(&op(0x46), 0, &Options { chain_id: id }, false);
+    let chain = |id| {
+        op_c(
+            &op(0x46),
+            0,
+            &Options {
+                chain_id: id,
+                stage: Stage::One,
+            },
+            false,
+        )
+    };
     assert_eq!(
         chain(Some(0x2a)).unwrap(),
         "u256_from_u64(&evm_stack[evm_sp++], 0x2aull);"
     );
     assert_eq!(chain(None), Err(EmitError::ChainIdRequired { pc: 0x2a }));
-    // PUSH1 1, CHAINID, STOP
+    // PUSH1 1, CHAINID, STOP — at either stage.
     let code = [0x60, 0x01, 0x46, 0x00];
-    assert_eq!(
-        translate(&code, &Options::default()).unwrap_err(),
-        EmitError::ChainIdRequired { pc: 2 }
-    );
-    let c = translate(&code, &Options { chain_id: Some(7) }).unwrap().c;
-    assert!(c.contains("CHAINID 7"), "the header names the constant");
-    assert!(c.contains("u256_from_u64(&evm_stack[evm_sp++], 0x7ull);"));
-    // A 0x46 byte inside push data is not CHAINID.
-    assert!(translate(&[0x60, 0x46, 0x00], &Options::default()).is_ok());
+    for stage in STAGES {
+        assert_eq!(
+            translate(&code, &at(stage)).unwrap_err(),
+            EmitError::ChainIdRequired { pc: 2 }
+        );
+        let c = translate(
+            &code,
+            &Options {
+                chain_id: Some(7),
+                stage,
+            },
+        )
+        .unwrap()
+        .c;
+        assert!(c.contains("CHAINID 7"), "the header names the constant");
+        if stage == Stage::One {
+            assert!(c.contains("u256_from_u64(&evm_stack[evm_sp++], 0x7ull);"));
+        }
+        // A 0x46 byte inside push data is not CHAINID.
+        assert!(translate(&[0x60, 0x46, 0x00], &at(stage)).is_ok());
+    }
 }
 
 /// ORIGIN and CHAINID cost G_BASE = 2 each in the translation (fix round 1 of Task 4, item 6): the
 /// head's charge includes them, and GAS's add-back counts them.
 #[test]
 fn origin_and_chainid_are_charged_g_base() {
-    // ORIGIN, CHAINID, POP, POP, STOP: 2 + 2 + 2 + 2 + 0.
-    let c = translate(
-        &[0x32, 0x46, 0x50, 0x50, 0x00],
-        &Options { chain_id: Some(1) },
-    )
-    .unwrap()
-    .c;
-    assert!(c.contains("evm_charge(8);"), "{c}");
-    // GAS, ORIGIN, CHAINID, STOP: after GAS come 2 + 2.
-    let c = translate(&[0x5a, 0x32, 0x46, 0x00], &Options { chain_id: Some(1) })
-        .unwrap()
-        .c;
-    assert!(c.contains("evm_gas + 4ull"), "{c}");
-    assert!(c.contains("evm_charge(6);"), "{c}");
+    for stage in STAGES {
+        let opts = Options {
+            chain_id: Some(1),
+            stage,
+        };
+        // ORIGIN, CHAINID, POP, POP, STOP: 2 + 2 + 2 + 2 + 0.
+        let c = translate(&[0x32, 0x46, 0x50, 0x50, 0x00], &opts).unwrap().c;
+        assert!(c.contains("evm_charge(8);"), "{c}");
+        // GAS, ORIGIN, CHAINID, STOP: after GAS come 2 + 2.
+        let c = translate(&[0x5a, 0x32, 0x46, 0x00], &opts).unwrap().c;
+        assert!(c.contains("evm_gas + 4ull"), "{c}");
+        assert!(c.contains("evm_charge(6);"), "{c}");
+    }
     let b = &evm2rv::blocks::blocks(&[0x32, 0x46, 0x00])[0];
     assert_eq!(b.static_gas, 4);
     assert_eq!(b.ops[0].gas_after, 2);
@@ -338,7 +378,15 @@ fn the_call_family_dispatches_at_runtime_and_the_block_continues() {
         // PUSH1 0 (n times), CALL, PUSH1 1, ADD, POP, STOP: after the call, 3 + 3 + 2 + 0 = 8.
         let mut code = [0x60u8, 0x00].repeat(n);
         code.extend_from_slice(&[call, 0x60, 0x01, 0x01, 0x50, 0x00]);
-        let c = translate(&code, &Options::default()).unwrap().c;
+        // Stage two spills the n operands first and hands the runtime the same contiguous words.
+        let c = translate(&code, &at(Stage::Two)).unwrap().c;
+        let line = c.lines().find(|l| l.contains("evm_call(")).expect(&c);
+        assert!(
+            line.contains(&format!("u256_from_u32(&sp_[{}], 0x0u);", n - 1))
+                && line.contains(&format!("evm_call({call:#04x}, &sp_[0], 8ull);")),
+            "{c}"
+        );
+        let c = translate(&code, &one()).unwrap().c;
         assert!(
             c.contains(&format!(
                 "evm_call({call:#04x}, &evm_stack[evm_sp-{n}], 8ull); evm_sp -= {};",
@@ -375,9 +423,7 @@ fn the_call_family_dispatches_at_runtime_and_the_block_continues() {
 #[test]
 fn a_call_on_a_shallow_stack_underflows_at_the_block_head() {
     // PUSH1 1, CALL, STOP: the call needs 7, one is pushed: entry needs 6.
-    let c = translate(&[0x60, 0x01, 0xf1, 0x00], &Options::default())
-        .unwrap()
-        .c;
+    let c = translate(&[0x60, 0x01, 0xf1, 0x00], &one()).unwrap().c;
     assert!(
         c.contains("if (evm_sp < 6u) { evm_halt(EVM_HALT_STACK_UNDERFLOW, 0); }"),
         "{c}"
@@ -386,6 +432,14 @@ fn a_call_on_a_shallow_stack_underflows_at_the_block_head() {
         c.contains("evm_call(0xf1, &evm_stack[evm_sp-7], 0ull);"),
         "{c}"
     );
+    let c = translate(&[0x60, 0x01, 0xf1, 0x00], &at(Stage::Two))
+        .unwrap()
+        .c;
+    assert!(
+        c.contains("if (evm_sp < 6u) { evm_halt(EVM_HALT_STACK_UNDERFLOW, 0); }"),
+        "{c}"
+    );
+    assert!(c.contains("evm_call(0xf1, &sp_[-6], 0ull);"), "{c}");
 }
 
 /// RETURNDATASIZE/RETURNDATACOPY: in a contract with no call-family opcode, which can never have
@@ -408,56 +462,54 @@ fn the_return_data_buffer_only_in_a_contract_that_calls() {
             sat(S3)
         )
     );
-    // RETURNDATASIZE, POP, STOP: no call, no buffer.
-    let c = translate(&[0x3d, 0x50, 0x00], &Options::default())
-        .unwrap()
-        .c;
-    assert!(
-        !c.contains("evm_rdata") && !c.contains("evm_calls_begin"),
-        "{c}"
-    );
-    // ... and with a STATICCALL anywhere in the code, the buffer.
-    let c = translate(&[0x3d, 0x50, 0x00, 0xfa], &Options::default())
-        .unwrap()
-        .c;
-    assert!(
-        c.contains("evm_rdata_len") && c.contains("evm_calls_begin();"),
-        "{c}"
-    );
-    // The ERC-20 makes no call: its C has none of it.
-    let c = translate(&erc20_code(), &Options::default()).unwrap().c;
-    assert!(
-        !c.contains("evm_call(") && !c.contains("evm_calls_begin") && !c.contains("evm_rdata"),
-        "{c}"
-    );
+    for stage in STAGES {
+        // RETURNDATASIZE, POP, STOP: no call, no buffer.
+        let c = translate(&[0x3d, 0x50, 0x00], &at(stage)).unwrap().c;
+        assert!(
+            !c.contains("evm_rdata") && !c.contains("evm_calls_begin"),
+            "{c}"
+        );
+        // ... and with a STATICCALL anywhere in the code, the buffer.
+        let c = translate(&[0x3d, 0x50, 0x00, 0xfa], &at(stage)).unwrap().c;
+        assert!(
+            c.contains("evm_rdata_len") && c.contains("evm_calls_begin();"),
+            "{c}"
+        );
+        // The ERC-20 makes no call: its C has none of it.
+        let c = translate(&erc20_code(), &at(stage)).unwrap().c;
+        assert!(
+            !c.contains("evm_call(") && !c.contains("evm_calls_begin") && !c.contains("evm_rdata"),
+            "{c}"
+        );
+    }
 }
 
 /// The block head: underflow, then overflow, then the static charge, each omitted when it cannot
 /// fire.
 #[test]
 fn the_block_head_checks_the_stack_then_charges() {
-    // ADD, POP, STOP: needs 2, never grows.
-    let c = translate(&[0x01, 0x50, 0x00], &Options::default())
-        .unwrap()
-        .c;
-    let under = c
-        .find("if (evm_sp < 2u) { evm_halt(EVM_HALT_STACK_UNDERFLOW, 0); }")
-        .expect(&c);
-    let charge = c.find("evm_charge(5);").expect(&c);
-    assert!(under < charge);
-    assert!(!c.contains("EVM_HALT_STACK_OVERFLOW"), "{c}");
-    // PUSH1 1, PUSH1 2, POP, POP, STOP: grows by 2 from any depth.
-    let c = translate(&[0x60, 1, 0x60, 2, 0x50, 0x50, 0x00], &Options::default())
-        .unwrap()
-        .c;
-    assert!(
-        c.contains("if (evm_sp + 2u > STACK_LIMIT) { evm_halt(EVM_HALT_STACK_OVERFLOW, 0); }"),
-        "{c}"
-    );
-    assert!(!c.contains("EVM_HALT_STACK_UNDERFLOW"), "{c}");
-    // STOP alone: no checks, no charge.
-    let c = translate(&[0x00], &Options::default()).unwrap().c;
-    assert!(!c.contains("evm_charge"), "{c}");
+    for stage in STAGES {
+        // ADD, POP, STOP: needs 2, never grows.
+        let c = translate(&[0x01, 0x50, 0x00], &at(stage)).unwrap().c;
+        let under = c
+            .find("if (evm_sp < 2u) { evm_halt(EVM_HALT_STACK_UNDERFLOW, 0); }")
+            .expect(&c);
+        let charge = c.find("evm_charge(5);").expect(&c);
+        assert!(under < charge);
+        assert!(!c.contains("EVM_HALT_STACK_OVERFLOW"), "{c}");
+        // PUSH1 1, PUSH1 2, POP, POP, STOP: grows by 2 from any depth.
+        let c = translate(&[0x60, 1, 0x60, 2, 0x50, 0x50, 0x00], &at(stage))
+            .unwrap()
+            .c;
+        assert!(
+            c.contains("if (evm_sp + 2u > STACK_LIMIT) { evm_halt(EVM_HALT_STACK_OVERFLOW, 0); }"),
+            "{c}"
+        );
+        assert!(!c.contains("EVM_HALT_STACK_UNDERFLOW"), "{c}");
+        // STOP alone: no checks, no charge.
+        let c = translate(&[0x00], &at(stage)).unwrap().c;
+        assert!(!c.contains("evm_charge"), "{c}");
+    }
 }
 
 /// A dynamic JUMP/JUMPI goes through the one switch over the jumpdest set, after checking the
@@ -466,7 +518,7 @@ fn the_block_head_checks_the_stack_then_charges() {
 #[test]
 fn jumps_dynamic_and_static() {
     // 0: PUSH1 4, JUMP, INVALID, 4: JUMPDEST, STOP — a static jump; no switch is emitted.
-    let c = translate(&[0x60, 0x04, 0x56, 0xfe, 0x5b, 0x00], &Options::default())
+    let c = translate(&[0x60, 0x04, 0x56, 0xfe, 0x5b, 0x00], &one())
         .unwrap()
         .c;
     assert!(c.contains("goto L_4;"), "{c}");
@@ -475,27 +527,24 @@ fn jumps_dynamic_and_static() {
     assert!(c.contains("L_4: "), "{c}");
 
     // A constant that is not a jumpdest (5 is STOP) or does not fit a u32.
-    let c = translate(&[0x60, 0x05, 0x56, 0xfe, 0x5b, 0x00], &Options::default())
+    let c = translate(&[0x60, 0x05, 0x56, 0xfe, 0x5b, 0x00], &one())
         .unwrap()
         .c;
     assert!(c.contains("evm_halt(EVM_HALT_BAD_JUMP, 0);"), "{c}");
     let wide = [0x64, 0x01, 0, 0, 0, 0x06, 0x56, 0x5b, 0x00]; // PUSH5 0x0100000006
-    let c = translate(&wide, &Options::default()).unwrap().c;
+    let c = translate(&wide, &one()).unwrap().c;
     assert!(c.contains("evm_halt(EVM_HALT_BAD_JUMP, 0);"), "{c}");
     assert!(!c.contains("goto L_7;"), "{c}");
     // PUSH1 3, JUMP, 3: JUMPDEST, STOP resolves.
-    let c = translate(&[0x60, 0x03, 0x56, 0x5b, 0x00], &Options::default())
+    let c = translate(&[0x60, 0x03, 0x56, 0x5b, 0x00], &one())
         .unwrap()
         .c;
     assert!(c.contains("goto L_3;"), "{c}");
 
     // A static JUMPI: the condition is the top word once the destination is folded away.
-    let c = translate(
-        &[0x60, 1, 0x60, 0x06, 0x57, 0x00, 0x5b, 0x00],
-        &Options::default(),
-    )
-    .unwrap()
-    .c;
+    let c = translate(&[0x60, 1, 0x60, 0x06, 0x57, 0x00, 0x5b, 0x00], &one())
+        .unwrap()
+        .c;
     assert!(
         c.contains("{ int c_ = !u256_is_zero(&evm_stack[evm_sp-1]); evm_sp--; if (c_) goto L_6; }"),
         "{c}"
@@ -503,12 +552,9 @@ fn jumps_dynamic_and_static() {
 
     // A dynamic JUMP (the destination from calldata): the switch, every jumpdest a case.
     // PUSH0, CALLDATALOAD, JUMP, 3: JUMPDEST, STOP, 5: JUMPDEST, STOP
-    let c = translate(
-        &[0x5f, 0x35, 0x56, 0x5b, 0x00, 0x5b, 0x00],
-        &Options::default(),
-    )
-    .unwrap()
-    .c;
+    let c = translate(&[0x5f, 0x35, 0x56, 0x5b, 0x00, 0x5b, 0x00], &one())
+        .unwrap()
+        .c;
     assert!(c.contains("switch (jd) {"), "{c}");
     assert!(c.contains("case 3u: goto L_3;"), "{c}");
     assert!(c.contains("case 5u: goto L_5;"), "{c}");
@@ -524,38 +570,85 @@ fn jumps_dynamic_and_static() {
         c_of(0x57),
         "{ const u256 *d_ = &evm_stack[evm_sp-1]; int c_ = !u256_is_zero(&evm_stack[evm_sp-2]); evm_sp -= 2; if (c_) { if (!u256_hi_zero(d_)) evm_halt(EVM_HALT_BAD_JUMP, 0); jd = d_->l[0]; goto dispatch; } }"
     );
+
+    // Stage two: every constant destination resolves (not only a push right before the jump),
+    // and a dynamic one goes through the same switch with the same checks.
+    let two = |code: &[u8]| translate(code, &at(Stage::Two)).unwrap().c;
+    let c = two(&[0x60, 0x04, 0x56, 0xfe, 0x5b, 0x00]);
+    assert!(c.contains("goto L_4;") && c.contains("L_4: "), "{c}");
+    assert!(!c.contains("switch"), "{c}");
+    let c = two(&[0x60, 0x05, 0x56, 0xfe, 0x5b, 0x00]);
+    assert!(c.contains("evm_halt(EVM_HALT_BAD_JUMP, 0);"), "{c}");
+    let c = two(&wide);
+    assert!(
+        c.contains("evm_halt(EVM_HALT_BAD_JUMP, 0);") && !c.contains("goto L_7;"),
+        "{c}"
+    );
+    // PUSH1 6, PUSH1 1, POP, JUMP, 6: JUMPDEST, STOP — the destination was pushed two ops before
+    // the jump, which stage one sends through the switch.
+    let code = [0x60, 0x06, 0x60, 0x01, 0x50, 0x56, 0x5b, 0x00];
+    let c = two(&code);
+    assert!(c.contains("goto L_6;") && !c.contains("switch"), "{c}");
+    assert!(translate(&code, &one()).unwrap().c.contains("switch"));
+    // A constant condition and destination: no spill (nothing is left), a direct branch.
+    let c = two(&[0x60, 1, 0x60, 0x06, 0x57, 0x00, 0x5b, 0x00]);
+    assert!(c.contains("{ int c_ = 1; if (c_) goto L_6; }"), "{c}");
+    let c = two(&[0x5f, 0x35, 0x56, 0x5b, 0x00, 0x5b, 0x00]);
+    assert!(c.contains("switch (jd) {"), "{c}");
+    assert!(
+        c.contains("case 3u: goto L_3;") && c.contains("case 5u: goto L_5;"),
+        "{c}"
+    );
+    assert!(
+        c.contains("default: evm_halt(EVM_HALT_BAD_JUMP, 0);"),
+        "{c}"
+    );
+    assert!(
+        c.contains("const u256 *d_ = &r0; if (!u256_hi_zero(d_)) evm_halt(EVM_HALT_BAD_JUMP, 0); jd = d_->l[0]; goto dispatch; }"),
+        "{c}"
+    );
 }
 
 /// Running off the end is STOP; code over the cap halts OutOfBounds without burning the limit
 /// (the interpreter's pre_halt reports gas_used 0).
 #[test]
 fn the_end_of_the_code_and_code_over_the_cap() {
-    let c = translate(&[0x60, 0x01], &Options::default()).unwrap().c;
-    assert!(
-        c.trim_end().ends_with("evm_halt(EVM_HALT_STOP, 0);\n}"),
-        "{c}"
-    );
+    for stage in STAGES {
+        let c = translate(&[0x60, 0x01], &at(stage)).unwrap().c;
+        assert!(
+            c.trim_end().ends_with("evm_halt(EVM_HALT_STOP, 0);\n}"),
+            "{c}"
+        );
 
-    let big = vec![0x5b; MAX_CODE_BYTES + 1];
-    let e = translate(&big, &Options::default()).unwrap();
-    assert_eq!(e.blocks, 1);
-    assert!(
-        e.c.contains("evm_halt_code = EVM_HALT_OUT_OF_BOUNDS; evm_halt_arg = 0; evm_rt_unwind();"),
-        "{}",
-        e.c
-    );
-    assert!(!e.c.contains("evm_charge"), "{}", e.c);
+        let big = vec![0x5b; MAX_CODE_BYTES + 1];
+        let e = translate(&big, &at(stage)).unwrap();
+        assert_eq!(e.blocks, 1);
+        assert!(
+            e.c.contains(
+                "evm_halt_code = EVM_HALT_OUT_OF_BOUNDS; evm_halt_arg = 0; evm_rt_unwind();"
+            ),
+            "{}",
+            e.c
+        );
+        assert!(!e.c.contains("evm_charge"), "{}", e.c);
+    }
 }
 
 /// The ERC-20's C compiles clean for rv32im under -Wall -Wextra -Werror against evm-rt's headers,
 /// and every label it defines is used (only jump targets and the entry are labelled).
 #[test]
 fn the_erc20_compiles_clean_for_rv32im() {
-    let e = translate(&erc20_code(), &Options::default()).unwrap();
+    for stage in STAGES {
+        erc20_compiles_clean(stage);
+    }
+}
+
+fn erc20_compiles_clean(stage: Stage) {
+    let e = translate(&erc20_code(), &at(stage)).unwrap();
     assert_eq!(e.blocks, 74);
     let dir = root().join("evm2rv/target/emit-test");
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("erc20.c");
+    let file = dir.join(format!("erc20-{stage:?}.c"));
     std::fs::write(&file, &e.c).unwrap();
     let clang = ["/opt/homebrew/opt/llvm/bin/clang", "clang"]
         .into_iter()
@@ -585,13 +678,27 @@ fn the_erc20_compiles_clean_for_rv32im() {
 /// charge, such as a lone `EXP`). Each byte, a PUSHn with its immediate, in one file.
 #[test]
 fn every_one_opcode_contract_compiles_clean_for_rv32im() {
+    for stage in STAGES {
+        one_opcode_contracts_compile_clean(stage);
+    }
+}
+
+fn one_opcode_contracts_compile_clean(stage: Stage) {
     let mut all = String::new();
     for op in 0..=255u8 {
         let mut code = vec![op];
         if (0x60..=0x7f).contains(&op) {
             code.extend(std::iter::repeat_n(0x11, (op - 0x5f) as usize));
         }
-        let c = translate(&code, &Options { chain_id: Some(1) }).unwrap().c;
+        let c = translate(
+            &code,
+            &Options {
+                chain_id: Some(1),
+                stage,
+            },
+        )
+        .unwrap()
+        .c;
         let c = c.replace(
             "void evm_entry(void)",
             &format!("void evm_entry_{op}(void)"),
@@ -604,7 +711,7 @@ fn every_one_opcode_contract_compiles_clean_for_rv32im() {
     }
     let dir = root().join("evm2rv/target/emit-test");
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("one-opcode.c");
+    let file = dir.join(format!("one-opcode-{stage:?}.c"));
     std::fs::write(&file, &all).unwrap();
     let o = Command::new(riscv_clang())
         .args(C_FLAGS)
@@ -737,7 +844,8 @@ fn the_shim_crate() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// The CLI: writes the five files, refuses stage 2, and refuses CHAINID without --chain-id.
+/// The CLI: writes the five files, takes stages 1 and 2 (and refuses any other), and refuses
+/// CHAINID without --chain-id.
 #[test]
 fn the_cli() {
     let bin = env!("CARGO_BIN_EXE_evm2rv");
@@ -755,6 +863,11 @@ fn the_cli() {
         String::from_utf8_lossy(&o.stderr)
     );
     assert!(s.contains("1296 code bytes: 74 blocks"), "{s}");
+    // Stage two is the default.
+    assert!(s.contains("(stage 2)"), "{s}");
+    assert!(std::fs::read_to_string(dir.join("contract.c"))
+        .unwrap()
+        .contains("(stage two)"));
     assert!(s.contains("no trapping opcodes present"), "{s}");
     for f in [
         "contract.c",
@@ -770,9 +883,20 @@ fn the_cli() {
     assert!(toml.contains("name = \"erc20-runtime\""), "{toml}");
     assert!(toml.contains("path = \"../../../../guest-sdk\""), "{toml}");
 
+    for (stage, header) in [("1", "(stage one)"), ("2", "(stage two)")] {
+        let o = Command::new(bin)
+            .arg(root().join("guests-compiled/evm/contracts/erc20.runtime.hex"))
+            .args(["--stage", stage, "--out"])
+            .arg(&dir)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let c = std::fs::read_to_string(dir.join("contract.c")).unwrap();
+        assert!(c.contains(header), "--stage {stage}");
+    }
     let o = Command::new(bin)
         .arg(root().join("guests-compiled/evm/contracts/erc20.runtime.hex"))
-        .args(["--stage", "2"])
+        .args(["--stage", "3"])
         .output()
         .unwrap();
     assert!(!o.status.success());

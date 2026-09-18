@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use evm2rv::emit::Stage;
 use evm_core::ffi::halt_code;
 use evm_core::interp::{Halt, Outcome};
 
@@ -61,16 +62,33 @@ pub fn rand_guest() -> &'static Path {
     })
 }
 
-/// Translate `contract` into `dir` (inside the checkout, as `rand-guest build` requires) as crate
-/// `name` and build it; returns the image and its `hc`. `outcome` turns the shim's `emit-outcome`
-/// feature on for this build.
-pub fn build_shim(contract: &Path, dir: &Path, name: &str, outcome: bool) -> (PathBuf, String) {
+/// Both stages, for the tests that run under each.
+pub const STAGES: [Stage; 2] = [Stage::One, Stage::Two];
+
+/// The CLI's `--stage` value.
+pub fn stage_arg(stage: Stage) -> &'static str {
+    match stage {
+        Stage::One => "1",
+        Stage::Two => "2",
+    }
+}
+
+/// Translate `contract` at `stage` into `dir` (inside the checkout, as `rand-guest build`
+/// requires) as crate `name` and build it; returns the image and its `hc`. `outcome` turns the
+/// shim's `emit-outcome` feature on for this build.
+pub fn build_shim(
+    contract: &Path,
+    dir: &Path,
+    name: &str,
+    outcome: bool,
+    stage: Stage,
+) -> (PathBuf, String) {
     let _ = std::fs::remove_dir_all(dir.join("src"));
     let o = Command::new(env!("CARGO_BIN_EXE_evm2rv"))
         .arg(contract)
         .arg("--out")
         .arg(dir)
-        .args(["--name", name])
+        .args(["--name", name, "--stage", stage_arg(stage)])
         .output()
         .unwrap();
     assert!(

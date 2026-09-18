@@ -10,6 +10,7 @@
 mod common;
 
 use common::{build_shim, root};
+use evm2rv::emit::Stage;
 use evm_core::u256::U256;
 use rand_zkvm::evm::{erc20_transfer, ALICE, BOB};
 use rand_zkvm::isa::Program;
@@ -44,6 +45,7 @@ fn the_translated_erc20_transfer_proves_and_verifies() {
         &base.join("erc20"),
         "erc20-evm2rv-proof",
         false,
+        Stage::One,
     );
     eprintln!("proving the translated ERC-20 (hc {hc})");
     let program = Program::from_flat_image(&std::fs::read(&image).unwrap()).unwrap();

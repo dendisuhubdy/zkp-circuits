@@ -23,6 +23,10 @@
 //! and out-of-gas at three limits — inside the first block, at an `SSTORE`, and one short of the
 //! transfer's own gas — plus that transfer at exactly its gas.
 //!
+//! Every vector runs under both stages (Task 8): the stage-one and the stage-two translation each
+//! build their two images, and each is held to the same oracle. Each stage's default image has its
+//! own pinned `hc`.
+//!
 //! No RISC-V clang is a failure here, not a skip: the shim's `build.rs` panics naming the clang it
 //! could not find, and `rand-guest build` fails with it.
 
@@ -31,7 +35,8 @@ mod common;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use common::{build_shim, encoded_halt, root, run};
+use common::{build_shim, encoded_halt, root, run, STAGES};
+use evm2rv::emit::Stage;
 use evm_core::interp::Halt;
 use evm_core::u256::U256;
 use rand_zkvm::evm::{
@@ -44,8 +49,8 @@ fn erc20_hex() -> PathBuf {
 }
 
 /// Translate and build the ERC-20 into `dir`.
-fn build_erc20(dir: &std::path::Path, outcome: bool) -> (PathBuf, String) {
-    build_shim(&erc20_hex(), dir, "erc20-evm2rv", outcome)
+fn build_erc20(dir: &std::path::Path, outcome: bool, stage: Stage) -> (PathBuf, String) {
+    build_shim(&erc20_hex(), dir, "erc20-evm2rv", outcome, stage)
 }
 
 /// The two images, the default build (what a chain deploys) and the `emit-outcome` build, and
@@ -56,12 +61,17 @@ struct Images {
     plain_hc: String,
 }
 
-fn images() -> &'static Images {
-    static IMAGES: OnceLock<Images> = OnceLock::new();
-    IMAGES.get_or_init(|| {
+fn images(stage: Stage) -> &'static Images {
+    static ONE: OnceLock<Images> = OnceLock::new();
+    static TWO: OnceLock<Images> = OnceLock::new();
+    let (cell, dir) = match stage {
+        Stage::One => (&ONE, "erc20"),
+        Stage::Two => (&TWO, "erc20-stage2"),
+    };
+    cell.get_or_init(|| {
         let base = root().join("evm2rv/target/parity");
-        let (plain, plain_hc) = build_erc20(&base.join("erc20"), false);
-        let (outcome, _) = build_erc20(&base.join("erc20-outcome"), true);
+        let (plain, plain_hc) = build_erc20(&base.join(dir), false, stage);
+        let (outcome, _) = build_erc20(&base.join(format!("{dir}-outcome")), true, stage);
         Images {
             plain,
             outcome,
@@ -70,21 +80,31 @@ fn images() -> &'static Images {
     })
 }
 
-/// The default ERC-20 translation's program digest. It binds the translator's output, evm-rt,
+/// The stage-one ERC-20 translation's program digest. It binds the translator's output, evm-rt,
 /// evm-core, guest-sdk, the pinned cc and the clang that compiled the C (build.rs prints its
 /// version), so a change to any of them moves it — deliberately: re-derive it and say why.
 const ERC20_HC: &str = "3307bfc4aaf87e4021941d18a9e813441354bb6fa19b357c5b604839e516579d";
 
-/// `hc` of the default ERC-20 translation, pinned (fix round 1, item 7). Uses the parity build.
+/// The same for the stage-two translation (Task 8): a different program, so a different digest.
+const ERC20_HC_STAGE2: &str = "16d27dfb0bd7846faf7f7312398cd92ce88de9c71f1dae318f34c25055b25e96";
+
+/// `hc` of the stage-one ERC-20 translation (`--stage 1`), pinned (fix round 1, item 7). Uses
+/// the parity build.
 #[test]
 fn the_default_erc20_translation_hc_is_pinned() {
-    assert_eq!(images().plain_hc, ERC20_HC);
+    assert_eq!(images(Stage::One).plain_hc, ERC20_HC);
 }
 
-/// Runs `call` through the interpreter natively, `evm.bin` and both translated images; asserts
-/// the parity the module doc lists, and returns `(interpreter cycles, translated cycles)`.
-fn check(name: &str, call: &EvmCall, want_status: u32) -> (usize, usize) {
-    let Images { plain, outcome, .. } = images();
+/// `hc` of the stage-two ERC-20 translation (`--stage 2`), pinned.
+#[test]
+fn the_stage_two_erc20_translation_hc_is_pinned() {
+    assert_eq!(images(Stage::Two).plain_hc, ERC20_HC_STAGE2);
+}
+
+/// Runs `call` through the interpreter natively, `evm.bin` and both translated images of each
+/// stage; asserts the parity the module doc lists, and returns `(interpreter cycles, stage-one
+/// cycles, stage-two cycles)`.
+fn check(name: &str, call: &EvmCall, want_status: u32) -> (usize, usize, usize) {
     let words = call.input_words();
     let (want, o, _post) = call.expected();
     assert_eq!(want[0], want_status, "{name}: the oracle's own status");
@@ -95,31 +115,36 @@ fn check(name: &str, call: &EvmCall, want_status: u32) -> (usize, usize) {
         "{name}: evm.bin disagrees with the native interpreter"
     );
 
-    let (got, cycles) = run(plain, &words);
-    assert_eq!(
-        got, want,
-        "{name}: the translated program's eight public words"
-    );
+    let mut cycles = [0usize; 2];
+    for (k, stage) in STAGES.into_iter().enumerate() {
+        let Images { plain, outcome, .. } = images(stage);
+        let (got, c) = run(plain, &words);
+        assert_eq!(
+            got, want,
+            "{name} ({stage:?}): the translated program's eight public words"
+        );
 
-    let (dbg, _) = run(outcome, &words);
-    assert_eq!(
-        dbg[..6],
-        want[..6],
-        "{name}: the emit-outcome build's status and digest words 0..4"
-    );
-    assert_eq!(
-        dbg[6],
-        encoded_halt(&o),
-        "{name}: the halt ({:?} in the interpreter)",
-        o.halt
-    );
-    assert_eq!(dbg[7] as u64, o.gas_used, "{name}: gas_used");
+        let (dbg, _) = run(outcome, &words);
+        assert_eq!(
+            dbg[..6],
+            want[..6],
+            "{name} ({stage:?}): the emit-outcome build's status and digest words 0..4"
+        );
+        assert_eq!(
+            dbg[6],
+            encoded_halt(&o),
+            "{name} ({stage:?}): the halt ({:?} in the interpreter)",
+            o.halt
+        );
+        assert_eq!(dbg[7] as u64, o.gas_used, "{name} ({stage:?}): gas_used");
+        cycles[k] = c;
+    }
 
     eprintln!(
-        "{name}: status {} halt {:?} gas_used {} — cycles: interpreter {interp_cycles}, translated {cycles}",
-        want[0], o.halt, o.gas_used
+        "{name}: status {} halt {:?} gas_used {} — cycles: interpreter {interp_cycles}, stage one {}, stage two {}",
+        want[0], o.halt, o.gas_used, cycles[0], cycles[1]
     );
-    (interp_cycles, cycles)
+    (interp_cycles, cycles[0], cycles[1])
 }
 
 fn transfer_250() -> EvmCall {

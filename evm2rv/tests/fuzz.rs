@@ -38,6 +38,9 @@
 //! `a_sample_runs_through_the_real_pipeline` (ruling 1) takes cases from the same corpus, loops
 //! included, through `evm2rv`, `rand-guest build` and `rand-guest run`, so the host build cannot
 //! drift from the target build.
+//!
+//! **Both stages** (Task 8): the corpus, its coverage, the real-pipeline sample, `CHAINID` and the
+//! return-data model run under stage one and under stage two, each against the same oracle.
 
 mod common;
 
@@ -46,9 +49,9 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use common::{build_shim, host, root, run_out_of_cycles};
+use common::{build_shim, host, root, run_out_of_cycles, STAGES};
 use evm2rv::blocks::static_gas;
-use evm2rv::emit::{translate, Options};
+use evm2rv::emit::{translate, Options, Stage};
 use evm2rv::gen::{case, non_trapping, Case, Gas};
 use evm_core::abi::{run_call_with, Workspace};
 use evm_core::ffi::HALT_INVALID;
@@ -123,15 +126,23 @@ fn interpret(c: &Case, ws: &mut Workspace) -> (Vec<u32>, [u32; 8], Outcome) {
     (words, out, o)
 }
 
-fn translate_case(c: &Case) -> String {
+fn translate_case(c: &Case, stage: Stage) -> String {
     translate(
         &c.code,
         &Options {
             chain_id: c.chain_id,
+            stage,
         },
     )
     .unwrap_or_else(|e| panic!("seed {}: {e}", c.seed))
     .c
+}
+
+fn at(stage: Stage) -> Options {
+    Options {
+        chain_id: None,
+        stage,
+    }
 }
 
 /// One divergence, printable.
@@ -165,15 +176,28 @@ fn report(
 
 #[test]
 fn the_translation_matches_the_interpreter_on_the_fuzz_corpus() {
+    corpus(Stage::One);
+}
+
+#[test]
+fn the_stage_two_translation_matches_the_interpreter_on_the_fuzz_corpus() {
+    corpus(Stage::Two);
+}
+
+fn corpus(stage: Stage) {
     let t0 = Instant::now();
     let seeds = seeds();
     let cases: Vec<Case> = seeds.iter().map(|&s| case(s)).collect();
-    let cs: Vec<String> = cases.iter().map(translate_case).collect();
+    let cs: Vec<String> = cases.iter().map(|c| translate_case(c, stage)).collect();
     let t_gen = t0.elapsed();
     let t1 = Instant::now();
+    let tag = match stage {
+        Stage::One => "",
+        Stage::Two => "-stage2",
+    };
     let name = match seeds.as_slice() {
-        [one] => format!("fuzz-seed-{one}"),
-        _ => format!("fuzz-{}", seeds.len()),
+        [one] => format!("fuzz-seed-{one}{tag}"),
+        _ => format!("fuzz-{}{tag}", seeds.len()),
     };
     let lib = host::build(&name, &cs);
     let t_build = t1.elapsed();
@@ -218,7 +242,7 @@ fn the_translation_matches_the_interpreter_on_the_fuzz_corpus() {
 
     let compared = cases.len() - excluded;
     eprintln!(
-        "fuzz: {} cases, {} compared, {} excluded (a call reached a precompile), {} diverged",
+        "fuzz ({stage:?}): {} cases, {} compared, {} excluded (a call reached a precompile), {} diverged",
         cases.len(),
         compared,
         excluded,
@@ -247,7 +271,7 @@ fn the_translation_matches_the_interpreter_on_the_fuzz_corpus() {
 
     // Coverage, over the whole corpus (the excluded cases' executions too).
     let cov = lib.coverage();
-    let mut table = String::from("fuzz: executed per opcode (translated code):\n");
+    let mut table = format!("fuzz ({stage:?}): executed per opcode (translated code):\n");
     for (k, op) in non_trapping().into_iter().enumerate() {
         table.push_str(&format!(
             "  {:02x} {:<14} {:>8}",
@@ -261,7 +285,7 @@ fn the_translation_matches_the_interpreter_on_the_fuzz_corpus() {
     }
     eprintln!("{table}");
     eprintln!(
-        "fuzz: dynamic bad jumps executed {}",
+        "fuzz ({stage:?}): dynamic bad jumps executed {}",
         lib.dynamic_bad_jumps()
     );
     if seeds.len() >= 10_000 {
@@ -285,15 +309,23 @@ fn the_translation_matches_the_interpreter_on_the_fuzz_corpus() {
 fn chainid_is_the_translation_time_constant() {
     let ids = [0u64, 1, 5, 0xffff_ffff, 1 << 32, 1 << 63, u64::MAX];
     let code_of = |op: u8| vec![op, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
-    let mut cs: Vec<String> = ids
-        .iter()
-        .map(|&id| {
-            translate(&code_of(0x46), &Options { chain_id: Some(id) })
-                .unwrap()
-                .c
-        })
-        .collect();
-    cs.push(translate(&code_of(0x32), &Options::default()).unwrap().c);
+    // Per stage: each id's CHAINID contract, then the ORIGIN one.
+    let per = ids.len() + 1;
+    let mut cs: Vec<String> = Vec::new();
+    for stage in STAGES {
+        cs.extend(ids.iter().map(|&id| {
+            translate(
+                &code_of(0x46),
+                &Options {
+                    chain_id: Some(id),
+                    stage,
+                },
+            )
+            .unwrap()
+            .c
+        }));
+        cs.push(translate(&code_of(0x32), &at(stage)).unwrap().c);
+    }
     let lib = host::build("chainid", &cs);
     let caller = U256([0x1234_5678, 0x9abc_def0, 7, 0, 0x8000_0000, 0, 0, 0]);
     let run = |i: usize, code: Vec<u8>| {
@@ -310,18 +342,24 @@ fn chainid_is_the_translation_time_constant() {
         let (w, o, _) = lib.run_words(&mut HostRef, i, &call.input_words());
         (w, o)
     };
-    for (i, &id) in ids.iter().enumerate() {
-        let (w, o) = run(i, code_of(0x46));
-        assert_eq!((w[0], o.gas_used), (1, 15), "chain id {id}");
+    for (k, stage) in STAGES.iter().enumerate() {
+        for (i, &id) in ids.iter().enumerate() {
+            let (w, o) = run(k * per + i, code_of(0x46));
+            assert_eq!((w[0], o.gas_used), (1, 15), "{stage:?}: chain id {id}");
+            assert_eq!(
+                o.ret[..32],
+                U256::from_u64(id).to_be_bytes(),
+                "{stage:?}: chain id {id}"
+            );
+        }
+        let (w, o) = run(k * per + ids.len(), code_of(0x32));
+        assert_eq!((w[0], o.gas_used), (1, 15), "{stage:?}: ORIGIN");
         assert_eq!(
             o.ret[..32],
-            U256::from_u64(id).to_be_bytes(),
-            "chain id {id}"
+            caller.to_be_bytes(),
+            "{stage:?}: ORIGIN is CALLER"
         );
     }
-    let (w, o) = run(ids.len(), code_of(0x32));
-    assert_eq!((w[0], o.gas_used), (1, 15), "ORIGIN");
-    assert_eq!(o.ret[..32], caller.to_be_bytes(), "ORIGIN is CALLER");
 }
 
 // ---- the return-data buffer after a call -----------------------------------------------------
@@ -555,13 +593,23 @@ fn the_return_data_buffer_matches_a_model_after_a_call() {
         }
         models.push((m, input));
     }
-    let cs: Vec<String> = models
+    // Every model at stage one, then at stage two.
+    let cs: Vec<String> = STAGES
         .iter()
-        .map(|(m, _)| translate(&m.code, &Options::default()).unwrap().c)
+        .flat_map(|&stage| {
+            models
+                .iter()
+                .map(move |(m, _)| translate(&m.code, &at(stage)).unwrap().c)
+        })
         .collect();
     let lib = host::build("returndata-model", &cs);
     let mut tally: BTreeMap<String, usize> = BTreeMap::new();
-    for (i, (m, input)) in models.iter().enumerate() {
+    for (i, (m, input)) in models.iter().enumerate().chain(
+        models
+            .iter()
+            .enumerate()
+            .map(|(i, x)| (i + models.len(), x)),
+    ) {
         let call = EvmCall {
             code: m.code.clone(),
             calldata: input.clone(),
@@ -574,7 +622,9 @@ fn the_return_data_buffer_matches_a_model_after_a_call() {
         };
         let (w, o, _) = lib.run_words(&mut HostRef, i, &call.input_words());
         let halt = m.halt.expect("every model halts");
-        *tally.entry(format!("{halt:?}")).or_default() += 1;
+        if i < models.len() {
+            *tally.entry(format!("{halt:?}")).or_default() += 1;
+        }
         let ctx = || format!("model {i}: code {}", hex::encode(&m.code));
         if halt == Halt::Return {
             assert_eq!(w[0], 1, "{}", ctx());
@@ -627,7 +677,7 @@ fn sample() -> &'static Vec<Case> {
 /// a table of the codes themselves would not fit the loader's data prologue). The shim, its
 /// build.rs, the runtime, the flags, rand-guest build and rand-guest run are the real ones; only
 /// the dispatch is the test's.
-fn sample_c(cases: &[Case]) -> String {
+fn sample_c(cases: &[Case], stage: Stage) -> String {
     let fnv = |b: &[u8]| {
         b.iter().fold(0x811c_9dc5u32, |h, &x| {
             (h ^ x as u32).wrapping_mul(0x0100_0193)
@@ -642,7 +692,7 @@ fn sample_c(cases: &[Case]) -> String {
     assert_eq!(keys.len(), cases.len(), "two sampled codes share a key");
     let mut s = String::from("#include <stdint.h>\n#include \"evm_rt.h\"\n\n");
     for (i, c) in cases.iter().enumerate() {
-        let t = translate_case(c)
+        let t = translate_case(c, stage)
             .replace("void evm_entry(void)", &format!("void evm_entry_{i}(void)"))
             .replace("#include <stdint.h>\n#include \"evm_rt.h\"\n", "");
         s.push_str(&t);
@@ -664,6 +714,15 @@ fn sample_c(cases: &[Case]) -> String {
 /// first five words, the halt and gas_used). The interpreter's words must match on every case.
 #[test]
 fn a_sample_runs_through_the_real_pipeline() {
+    pipeline(Stage::One);
+}
+
+#[test]
+fn a_sample_runs_through_the_real_pipeline_at_stage_two() {
+    pipeline(Stage::Two);
+}
+
+fn pipeline(stage: Stage) {
     let cases = sample();
     let with_loops = cases.iter().filter(|c| c.tags.loops > 0).count();
     assert!(
@@ -675,16 +734,21 @@ fn a_sample_runs_through_the_real_pipeline() {
     std::fs::create_dir_all(&base).unwrap();
     let t = Instant::now();
     let mut images = Vec::new();
+    let tag = match stage {
+        Stage::One => "",
+        Stage::Two => "-stage2",
+    };
     for (sub, outcome) in [("plain", false), ("outcome", true)] {
-        let dir = base.join(sub);
-        let first = base.join("first.bin");
+        let sub = format!("{sub}{tag}");
+        let dir = base.join(&sub);
+        let first = base.join(format!("first{tag}.bin"));
         // (The CLI takes no --chain-id through `build_shim`: the first case without CHAINID.)
         let cli = cases.iter().find(|c| c.chain_id.is_none()).unwrap();
         std::fs::write(&first, &cli.code).unwrap();
         // The CLI writes the crate (and a single-contract contract.c, which the build below
         // replaces); `build_shim` runs evm2rv, patches emit-outcome in, and builds.
-        let _ = build_shim(&first, &dir, &format!("fuzz-sample-{sub}"), outcome);
-        std::fs::write(dir.join("contract.c"), sample_c(cases)).unwrap();
+        let _ = build_shim(&first, &dir, &format!("fuzz-sample-{sub}"), outcome, stage);
+        std::fs::write(dir.join("contract.c"), sample_c(cases, stage)).unwrap();
         let o = common::scrubbed(common::rand_guest())
             .arg("build")
             .arg(&dir)
@@ -700,7 +764,7 @@ fn a_sample_runs_through_the_real_pipeline() {
             String::from_utf8_lossy(&o.stderr)
         );
         eprintln!(
-            "sample {sub}: {}",
+            "sample {sub} ({stage:?}): {}",
             String::from_utf8_lossy(&o.stdout)
                 .lines()
                 .find(|l| l.starts_with("wrote"))
@@ -721,7 +785,11 @@ fn a_sample_runs_through_the_real_pipeline() {
             continue;
         }
         let got = run_words(&images[0], &words);
-        assert_eq!(got, want, "seed {}: the eight public words", c.seed);
+        assert_eq!(
+            got, want,
+            "seed {} ({stage:?}): the eight public words",
+            c.seed
+        );
         let dbg = run_words(&images[1], &words);
         assert_eq!(
             dbg[..6],
@@ -741,7 +809,7 @@ fn a_sample_runs_through_the_real_pipeline() {
         ran_loops += (c.tags.loops > 0) as usize;
     }
     eprintln!(
-        "sample: {ran} cases ({ran_loops} with loops) through rand-guest run, {too_long} past the 2^20 cycles; build {:.1}s, runs {:.1}s",
+        "sample ({stage:?}): {ran} cases ({ran_loops} with loops) through rand-guest run, {too_long} past the 2^20 cycles; build {:.1}s, runs {:.1}s",
         t_build.as_secs_f64(),
         t.elapsed().as_secs_f64()
     );
