@@ -22,8 +22,8 @@ translation is off-chain (user ruling 2026-09-18): the developer runs `sbpf2rv`,
 ```
 program.so (sBPF ELF) ──▶ sbpf2rv ──▶ <name>/  ├── program.c      (the translated functions)
                                                ├── Cargo.toml      (the shim crate: sbpf-core + guest-sdk + cc)
-                                               └── src/main.rs     (the interpreter's main with run_call
-                                                                    calling the translated entry instead of Vm::run)
+                                               └── src/main.rs     (the interpreter's main: run_call_with_executor
+                                                                    runs the translated entry instead of Vm::run, §4)
                      ──▶ rand-guest build <name>/ ──▶ image.bin ──▶ rand program deploy image.bin
 ```
 
@@ -32,9 +32,11 @@ program.so (sBPF ELF) ──▶ sbpf2rv ──▶ <name>/  ├── program.c  
 The ELF is loaded with `sbpf-core::elf` exactly as the interpreter loads it: text, read-only
 data rebased into `REGION_PROGRAM`, the entrypoint, the syscall relocations (a `call` whose
 immediate is a murmur3 hash resolved through `syscalls::SUPPORTED`), and the internal call
-targets (a `call` whose immediate is a pc offset). Both sBPF v1 and v2 encodings are accepted;
-which one the ELF declares selects the v2-only instruction semantics below. An ELF the
-interpreter would refuse (`elf.rs`'s errors) is refused here with the same message.
+targets (a `call` whose immediate is a pc offset). **Amended 2026-09-18 (final review)**: sBPF
+**v1 only**. `sbpf-core::elf::load` refuses a v2 file (`e_flags == 0x20`, `elf.rs` ~181), so the
+translator, which loads through it, does too; the v2-only opcodes are `UnknownOpcode` warnings and
+`BadInsn` traps, as in the interpreter. An ELF the interpreter would refuse (`elf.rs`'s errors) is
+refused here with the same message.
 
 ## 3. The translation
 
@@ -122,20 +124,34 @@ statically and reports it (a `Warning`), it just no longer *refuses* the program
 64-bit virtual address is `region << 32 | offset`; `tr(addr, n)` looks the region up in a
 four-entry table of `(base, len, writable)`, bounds-checks `offset + n`, and traps on a miss
 exactly as `Memory` does. The stack (`STACK_FRAME × MAX_CALL_DEPTH`), heap (`HEAP_BYTES`) and
-input region live in the shim crate's `.bss` as today's `Workspace`. When an address is
-syntactically `r10 ± imm`, the translator emits the stack access with the frame's static bounds
-check folded and no table lookup.
+input region live in the shim crate's `.bss` as today's `Workspace`. **Amended 2026-09-18 (final
+review)**: there is no folded `r10` access. An earlier draft had the translator emit a
+syntactically `r10 ± imm` access with the frame's bounds check folded and no table lookup; ruling 3
+(Task 4) dropped it, and every access, `r10`-relative ones included, goes through `sbpf-rt`'s
+`sbpf_ld*`/`sbpf_st*` and the region table.
 
 ## 4. The shim crate and the ABI
 
-The generated `src/main.rs` is the interpreter's `sbpf/src/main.rs` with one change:
-`run_call_with` receives a closure that calls the translated entry `f_<entry>` instead of
-constructing a `Vm`. Input decoding, `check_region`, `canonical_input_hash`, `output_hash`,
-`public_output` and the `SBPF_OUT` digest are `sbpf-core::abi` unchanged. The ELF still arrives
-as the **public** input segment and is still hashed into the digest as `program_id`, so the
-chain binds the translated program to the sBPF it came from even though it never executes the
-sBPF: a verifier can re-run `sbpf2rv` on the published ELF and check `hc`. The C file is
-compiled by `rand-guest` through the crate's `build.rs` (`cc` with the toolchain's clang flags).
+**Amended 2026-09-18 (final review).** The generated `src/main.rs` is the interpreter's
+`sbpf/src/main.rs` with two changes. First, it calls `abi::run_call_with_executor` (added beside
+`run_call_with`, which is untouched so the pinned `sbpf.bin` cannot move) with an executor that
+runs the translated entry (`sbpf_entry` in `program.c`) over the interpreter's own `Memory`
+instead of constructing a `Vm`. Input decoding, `check_region`, `canonical_input_hash`,
+`output_hash`, `public_output` and the `SBPF_OUT` digest are `sbpf-core::abi` unchanged. Second,
+the ELF guard.
+
+What binds what: the ELF arrives as the **public** input segment, so the proof's `H_PUB` binds it;
+it is not in `public_output`'s preimage, and `program_id` is read from the instruction region, not
+derived from the ELF. The image bakes the translated text, but the harness still reads `.rodata`,
+the addresses and the entry from the tape's ELF, so `program.c` also bakes a digest of the source
+ELF (`sbpf2rv::shim::elf_digest`: the `POSEIDON2` sponge over the tape encoding, chained in
+4 096-word calls). The shim stages the public words as `decode_input` reads them, and the executor
+hashes them and refuses any other ELF with `Halt::BadElf`, status 2 (accepted divergence #3,
+`sbpf2rv/README.md`). So `hc` binds the ELF: a proof that verifies against `hc` is a run of that
+ELF. Whether `hc` is the faithful translation of the ELF is checked by rebuilding it with the pinned
+toolchain — Rust 1.98.1, clang 23.1.1, `cc` 1.4.6 — and comparing `hc`. The chain does not record
+the source ELF's hash. The C file is compiled by `rand-guest` through the crate's `build.rs` (`cc`
+with the toolchain's clang flags and `--no-default-config`; a clang other than 23.1.1 is refused).
 
 ## 5. The runtime
 
@@ -182,7 +198,10 @@ it finds (a `Warning`), it just no longer refuses the program over one.
   interpreter's, is the milestone's number; the spec sets no target, since the point of v0.4 is
   to measure it.
 - **A real proof.** The translated SPL Token transfer proves under the research prover's test
-  profile and verifies, once, as the exit gate.
+  profile and verifies. **Amended 2026-09-18 (Task 6 ruling)**: not an exit gate. The one attempt
+  on the 48 GB laptop was stopped at 30.77 GB, still proving (tier 20, like the interpreter's own
+  ignored proof), so the real proof is deferred to a machine with at least 64 GB (a DO droplet, or
+  the fleet's biggest box); the test is `#[ignore]`d with its command.
 
 ## 7. Out of scope
 

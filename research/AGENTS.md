@@ -61,26 +61,32 @@ prologue (`evm.ld`, `sbpf.ld`: `guest.ld` with the origin moved), and
 more than one, and it refuses to guess rather than picking wrong.
 
 **`sbpf2rv`, piece 2 of the two translator specs above, is done through Task 7
-(2026-09-18), on branch `feat/sbpf2rv`**: an ahead-of-time sBPF → RV32 translator, emitting one
+(2026-09-18)**: an ahead-of-time sBPF → RV32 translator, emitting one
 C function per sBPF function into a shim crate `rand-guest build` compiles, so the proof executes
 the program directly instead of interpreting it one instruction at a time. Nothing is refused at
 translation — unknown syscalls, CPI, bad registers, bad opcodes and bad jumps all become
 scanner warnings plus the interpreter's own runtime trap, matching `interp.rs`'s own
-raise-only-on-execution rule; a `callx` to a real instruction that is not its target function's
-entry is the one accepted divergence (`Halt::BadJump` where the interpreter might run real code,
-fuzzed 117-for-117 sound). The committed SPL Token `Transfer`, `MintTo` and `Burn` all match the
-interpreter word for word — the eight public output words and the halt — at **64 825** of the
-65 535-word cap. Translated execution itself is about 2.4× cheaper per sBPF instruction, but the
-harness `sbpf-core::abi` shares with the interpreter is about 98% of every run's cycles on both
-sides, so the net for SPL Token is roughly a wash and both stay in tier 20; translation only pays
-for compute-heavy programs. Software Ed25519 (RFC 8032) and secp256k1 recovery exist in
+raise-only-on-execution rule. Three accepted divergences, each erring on the safe side (the
+README lists them): any `callx` target outside the set the scanner found gives `BadJump` (where
+the interpreter might run real code; fuzzed 117-for-117 sound); a deferred budget check can change
+the halt kind inside the one limit-crossing block; and an image refuses (`BadElf`, status 2) any
+ELF but the one it was translated from. The committed SPL Token `Transfer`, `MintTo` and `Burn` all
+match the interpreter word for word — the eight public output words and the halt — at **64 945**
+of the 65 535-word cap. Translated execution itself is about 2.4–2.5× cheaper per sBPF
+instruction, but the harness `sbpf-core::abi` shares with the interpreter is about 98% of every
+run's cycles, and the ELF guard adds 116 k (staging the public tape, then hashing it with
+`POSEIDON2`), so the translated SPL Token transfer is 809 k cycles against the interpreter's 694 k;
+both stay in tier 20, and translation only pays for compute-heavy programs. Software Ed25519 (RFC 8032) and secp256k1 recovery exist in
 `sbpf-rt/` but ship unlinked — both cost tens of millions of cycles, above any tier, and the
 interpreter traps both syscalls for parity — as a coprocessor backlog for a future machine
-milestone. The trust rule is external to the image: it does not check which ELF it was given, so
-a verifier checks `hc == translate(ELF)`, and the chain records the source ELF's hash beside the
-deployed program id. A real proof of the translated transfer was attempted once and stopped by a
-24 GB watchdog at 30.77 GB peak — the harness sets the tier, so this needs the same ≥ 64 GB
-machine as the interpreter's own tier-20 proof. `sbpf2rv/README.md` has the full walkthrough
+milestone. Trust: the ELF is on the public tape, so `H_PUB` binds it (`public_output` has no ELF
+in its preimage, and `program_id` comes from the instruction region); the image bakes the text and
+a digest of the source ELF and refuses any other, so `hc` binds the ELF by itself. Whether `hc` is
+the faithful translation is checked by rebuilding with the pinned toolchain (Rust 1.98.1, clang
+23.1.1, `cc` 1.4.6) and comparing `hc`; the chain does not record the ELF's hash. A real proof of
+the translated transfer was attempted once and stopped by a 24 GB watchdog at 30.77 GB peak — the
+harness sets the tier, so it is deferred to a machine with at least 64 GB, like the interpreter's
+own tier-20 proof. `sbpf2rv/README.md` has the full walkthrough
 (commands and their real output) and every measured number; the design spec is
 `docs/superpowers/specs/2026-09-18-sbpf-to-rv32-translator-design.md`.
 
