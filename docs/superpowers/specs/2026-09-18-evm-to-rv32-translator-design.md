@@ -53,7 +53,7 @@ so the per-opcode checks disappear in straight-line code.
 | arithmetic, comparison, bitwise, shifts, `SIGNEXTEND`, `BYTE`, `EXP`, `ADDMOD`, `MULMOD` | runtime calls into the eight-limb library (the interpreter's `u256.rs` semantics, ported to C) |
 | `PUSH0..32`, `DUP1..16`, `SWAP1..16`, `POP` | inline array moves; a `PUSHn` immediate is a constant |
 | `MLOAD`, `MSTORE`, `MSTORE8`, `MSIZE`, `CALLDATALOAD`, `CALLDATACOPY`, `CODECOPY`, `RETURNDATACOPY`, `KECCAK256` | runtime calls over the interpreter's memory model, with memory expansion charged as it charges it; `KECCAK256` on the coprocessor via the SDK |
-| `SLOAD`, `SSTORE` | runtime calls into the interpreter's Merkle-witness `StorageTree` (Rust, exposed to C by `extern "C"` shims), including the warm/cold and refund rules |
+| `SLOAD`, `SSTORE` | runtime calls into the interpreter's Merkle-witness `StorageTree` (Rust, exposed to C by `extern "C"` shims), with the interpreter's gas: `SLOAD` a flat 2100, `SSTORE` 20 000 when a zero slot becomes non-zero and 2 900 otherwise, read from the pre-value — no warm/cold access list and no refunds, as `interp.rs` has none |
 | `JUMP`, `JUMPI` | `switch (dest_low_word) { case <pc>: goto L_<pc>; … default: trap(BadJump) }` over the jumpdest set, after checking the high limbs are zero; `JUMPI` tests the condition first |
 | `PC`, `JUMPDEST`, `GAS` | a constant; nothing (its gas is charged); the runtime's gas counter |
 | environment: `ADDRESS`, `CALLER`, `CALLVALUE`, `CALLDATASIZE`, `CODESIZE`, `RETURNDATASIZE` | the decoded call's `Env`, calldata and code, exactly as the interpreter reads them; the input vector is the interpreter's, with no extra words |
@@ -67,7 +67,8 @@ so the per-opcode checks disappear in straight-line code.
 
 **Gas.** The Shanghai static schedule the interpreter implements is summed per basic block at
 translation and charged once at the block head; the dynamic parts (memory expansion, `KECCAK256`
-per word, copy costs per word, `SSTORE`/`SLOAD` warm and cold and refunds, `LOG` data and
+per word, copy costs per word, `SSTORE`'s set/reset on the pre-value — the interpreter has no
+warm/cold access list and no refunds, and its `SLOAD` is a static 2100 — `LOG` data and
 topics, `EXP` per byte, precompile costs) are charged inside the runtime calls, with the
 interpreter's exact formulas. Out of gas traps where the interpreter traps: since the static
 charge is taken at the block head rather than per opcode, a block that would have run out of gas
