@@ -342,7 +342,11 @@ fn case_text(c: &Case) -> String {
 /// saying why, without one — this crate's default suite must not need a C toolchain, as
 /// `rand-guest/tests/sbpf_rt.rs` skips without a RISC-V clang.
 fn host_cc() -> bool {
-    let found = Command::new("cc").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    let found = Command::new("cc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     if !found {
         eprintln!("no host C compiler (`cc`); skipping the sbpf-rt host build");
     }
