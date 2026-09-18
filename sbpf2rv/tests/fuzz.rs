@@ -13,17 +13,21 @@
 //!
 //! * **The instruction limit** (Global Constraints, as amended in Task 3 and ruled final in Task 4):
 //!   the translation charges a block at its head, or defers the check of a block to its successors.
-//!   So when exactly one side reports `InstructionLimit`, the interpreter's meter must be within one
-//!   block, plus one unchecked predecessor block, of the limit ([`limit_window`]); and when it is the
-//!   interpreter that stopped, the pc it stopped at must lie in a block the translation leaves
-//!   unchecked.
+//!   The host build records the count the translation had charged when it stopped (the emitted
+//!   `SBPF_AT_LIMIT` hook at `L_limit`). When only the translation stopped, that count must be
+//!   exactly the head-check arithmetic of a checked block holding the interpreter's stopping pc, and
+//!   the meter within one block, plus one unchecked predecessor block, of the limit
+//!   ([`limit_window`]); when both stopped at a checked block, it must be that block's count
+//!   exactly; and when it is the interpreter that stopped, the pc it stopped at must lie in a block
+//!   the translation leaves unchecked. Budget cases sized to end a few hundred instructions below
+//!   the limit must be exactly equal.
 //! * **A `callx` to real code that is not a known function entry** (Task 5 ruling 3): the
 //!   translation halts `BadJump` at the `callx`. The generator reaches such code in exactly one way —
 //!   the *pad* — which halts `AccessViolation(MAGIC)` in the interpreter, so that pair, and only it,
 //!   is accepted.
 //!
-//! The corpus is `FUZZ_CASES` cases (default 10 000), seeds `0..FUZZ_CASES`, so every case is
-//! replayable from its seed alone (`FUZZ_ONLY=<seed>` runs one and prints its program and C). All
+//! The corpus is `FUZZ_CASES` cases (default 10 000), seeds `FUZZ_SEED_BASE..` (default 0), so
+//! every case is replayable from its seed alone (`FUZZ_ONLY=<seed>` runs one and prints its program and C). All
 //! C is compiled in batches: one `cc` invocation per batch of files, one driver process per batch,
 //! batches in parallel. A second test runs the first 1 000 seeds again under ASan and UBSan
 //! (`FUZZ_SANITIZED_CASES` to change that).
@@ -34,7 +38,7 @@
 #[allow(dead_code)]
 mod gen;
 
-use gen::{assemble, case, input_region, Case, Mix, MAGIC, MARK_BASE, NAMED};
+use gen::{assemble, case, input_region, Case, Mix, MAGIC, MARK_BASE, MARK_BYTES, NAMED};
 use sbpf2rv::emit::emit_program;
 use sbpf2rv::scan::{scan, Scan};
 use sbpf_core::elf::Program;
@@ -134,6 +138,7 @@ fn interpret(text: &[u8], data: &[u8]) -> Interp {
     };
     let (code, arg) = halt_code(&result);
     let m = (MARK_BASE - REGION_HEAP) as usize;
+    let marks = heap[m..m + MARK_BYTES as usize].to_vec();
     Interp {
         seen: Seen {
             code,
@@ -146,7 +151,7 @@ fn interpret(text: &[u8], data: &[u8]) -> Interp {
         },
         meter,
         pc,
-        marks: heap[m..m + 512].to_vec(),
+        marks,
     }
 }
 
@@ -154,6 +159,9 @@ fn interpret(text: &[u8], data: &[u8]) -> Interp {
 struct Prepared {
     seed: u64,
     budget: bool,
+    /// A budget case sized to end a few hundred instructions below the limit: only
+    /// [`Verdict::Equal`], with neither side at the limit, is acceptable.
+    below: bool,
     text: Vec<u8>,
     data: Vec<u8>,
     c: String,
@@ -162,11 +170,12 @@ struct Prepared {
 
 /// Assembles `c` at the host's text address. A budget case's parameters are chosen so the run's
 /// last instruction (its planned fault, or `exit`) lands a few instructions either side of the
-/// limit: the count is `m0 + per·(T − 1) + 2·(P − 1) + C` (`gen::budget_body`), measured here —
-/// the affinity itself asserted — and solved for.
+/// limit, or (one in eight) 200 to 499 below it: the count is `m0 + per·(T − 1) + 2·(P − 1) + C`
+/// (`gen::budget_body`), measured here — the affinity itself asserted — and solved for.
 fn prepare(c: &Case) -> Prepared {
     let (text, _) = assemble(&c.items, REGION_PROGRAM);
     let mut data = c.data.clone();
+    let mut below = false;
     if c.budget {
         let count = |t: u64, p: u64, k: u64| {
             let mut d = data.clone();
@@ -186,10 +195,15 @@ fn prepare(c: &Case) -> Prepared {
             c.seed
         );
         let mut r = Mix(c.seed ^ 0xb0d6e7);
-        // Exactly at the limit, or one past it, a quarter of the time; else anywhere within 12.
+        // Exactly at the limit, or one past it, a quarter of the time; a few hundred below it an
+        // eighth of the time; else anywhere within 12.
         let target = match r.below(8) {
             0 => MAX_INSTRUCTIONS,
             1 => MAX_INSTRUCTIONS + 1,
+            2 => {
+                below = true;
+                MAX_INSTRUCTIONS - 200 - r.below(300)
+            }
             _ => MAX_INSTRUCTIONS + r.below(25) - 12,
         };
         let t = ((target - m0) / per).saturating_sub(1);
@@ -205,6 +219,7 @@ fn prepare(c: &Case) -> Prepared {
     Prepared {
         seed: c.seed,
         budget: c.budget,
+        below,
         text,
         data,
         c: c_src,
@@ -228,8 +243,11 @@ fn work(name: &str) -> PathBuf {
 }
 
 /// Reads `<idx> <text hex> <input hex>` per line, runs entry `idx` over those regions, prints
-/// `<idx> <code> <arg> <r0> <heap_used> <stack fnv> <heap fnv> <input fnv>`.
+/// `<idx> <code> <arg> <r0> <heap_used> <stack fnv> <heap fnv> <input fnv> <budget at L_limit>` —
+/// the last is what the emitted `SBPF_AT_LIMIT` hook recorded ([`AT_LIMIT_HOOK`]), or `LLONG_MIN`
+/// if no `L_limit` ran.
 const DRIVER: &str = r#"
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -239,6 +257,7 @@ typedef uint32_t (*entry_t)(uint64_t *);
 extern const entry_t fuzz_entries[];
 
 static uint8_t text[1 << 20], input[1 << 16], stack[SBPF_STACK_BYTES], heap[SBPF_HEAP_BYTES];
+long long sbpf_fuzz_at_limit;
 
 static size_t unhex(uint8_t *out, const char *h) {
     size_t n = strlen(h) / 2;
@@ -281,11 +300,13 @@ int main(void) {
         sbpf_r.input = input;
         sbpf_r.input_len = (uint32_t)il;
         sbpf_rt_reset();
+        sbpf_fuzz_at_limit = LLONG_MIN;
         uint64_t r0 = 0;
         uint32_t code = fuzz_entries[idx](&r0);
-        printf("%d %u %llu %llu %u %llu %llu %llu\n", idx, code, (unsigned long long)sbpf_halt_arg,
+        printf("%d %u %llu %llu %u %llu %llu %llu %lld\n", idx, code, (unsigned long long)sbpf_halt_arg,
                (unsigned long long)r0, sbpf_heap_used, (unsigned long long)fnv(stack, sizeof stack),
-               (unsigned long long)fnv(heap, sizeof heap), (unsigned long long)fnv(input, il));
+               (unsigned long long)fnv(heap, sizeof heap), (unsigned long long)fnv(input, il),
+               sbpf_fuzz_at_limit);
         fflush(stdout);
     }
     free(line);
@@ -312,8 +333,20 @@ fn cc(dir: &Path, args: &[&str], sanitize: bool) {
     );
 }
 
+/// Defines the emitted C's `SBPF_AT_LIMIT` hook (empty in every real build) to record the
+/// function-local budget at `L_limit`, for the driver to print.
+const AT_LIMIT_HOOK: &str = "extern long long sbpf_fuzz_at_limit;\n\
+     #define SBPF_AT_LIMIT(budget) (sbpf_fuzz_at_limit = (long long)(budget))\n";
+
+/// What the translation did on one case: what it left, and the instruction count it had charged
+/// when it stopped at an `L_limit` (`MAX_INSTRUCTIONS` minus the recorded budget), if it did.
+struct CRun {
+    seen: Seen,
+    at_limit: Option<u64>,
+}
+
 /// Builds one driver over `batch`'s programs and runs every case through it.
-fn run_c(name: &str, batch: &[&Prepared], sanitize: bool) -> Vec<Seen> {
+fn run_c(name: &str, batch: &[&Prepared], sanitize: bool) -> Vec<CRun> {
     let dir = work(name);
     let mut table = String::from("#include <stdint.h>\ntypedef uint32_t (*entry_t)(uint64_t *);\n");
     let mut files: Vec<String> = Vec::new();
@@ -321,7 +354,7 @@ fn run_c(name: &str, batch: &[&Prepared], sanitize: bool) -> Vec<Seen> {
         let f = format!("c{k}.c");
         std::fs::write(
             dir.join(&f),
-            format!("#define sbpf_entry sbpf_entry_{k}\n{}", p.c),
+            format!("#define sbpf_entry sbpf_entry_{k}\n{AT_LIMIT_HOOK}{}", p.c),
         )
         .unwrap();
         files.push(f);
@@ -380,18 +413,22 @@ fn run_c(name: &str, batch: &[&Prepared], sanitize: bool) -> Vec<Seen> {
     let o = child.wait_with_output().unwrap();
     let _ = writer.join().unwrap();
     let out = String::from_utf8(o.stdout).unwrap();
-    let mut seen: Vec<Option<Seen>> = vec![None; batch.len()];
+    let mut seen: Vec<Option<CRun>> = batch.iter().map(|_| None).collect();
     for l in out.lines() {
         let f: Vec<&str> = l.split(' ').collect();
         let n = |i: usize| f[i].parse::<u64>().unwrap();
-        seen[n(0) as usize] = Some(Seen {
-            code: n(1) as u32,
-            arg: n(2),
-            r0: n(3),
-            heap_used: n(4),
-            stack: n(5),
-            heap: n(6),
-            input: n(7),
+        let budget: i64 = f[8].parse().unwrap();
+        seen[n(0) as usize] = Some(CRun {
+            seen: Seen {
+                code: n(1) as u32,
+                arg: n(2),
+                r0: n(3),
+                heap_used: n(4),
+                stack: n(5),
+                heap: n(6),
+                input: n(7),
+            },
+            at_limit: (budget != i64::MIN).then(|| (MAX_INSTRUCTIONS as i64 - budget) as u64),
         });
     }
     assert!(
@@ -561,10 +598,44 @@ enum Verdict {
     CallxNonEntry,
 }
 
-fn compare(p: &Prepared, i: &Interp, c: &Seen) -> Result<Verdict, String> {
+fn compare(p: &Prepared, i: &Interp, run: &CRun) -> Result<Verdict, String> {
     let a = &i.seen;
+    let c = &run.seen;
+    // The count the translation stopped at, recorded at `L_limit`: present exactly when it halted
+    // there, and past the limit, or the head check itself is wrong.
+    let count = match (c.code == HALT_LIMIT, run.at_limit) {
+        (true, Some(n)) if n > MAX_INSTRUCTIONS => Some(n),
+        (false, None) => None,
+        (_, n) => {
+            return Err(format!(
+                "translated {c:?} with count at L_limit {n:?}: an InstructionLimit halt comes from \
+                 an L_limit, after charging past {MAX_INSTRUCTIONS}, and nothing else does"
+            ))
+        }
+    };
     if a.code == c.code && a.arg == c.arg && (a.code != HALT_EXIT || a.r0 == c.r0) {
-        if a.code == HALT_LIMIT || a == c {
+        if a.code == HALT_LIMIT {
+            // Both stopped: the interpreter before `pc` (its meter at the limit). If every emitted
+            // block holding `pc` checks at its head, the translation stopped at that head, having
+            // charged exactly what ran before `pc` in the block plus the block's whole count. (If
+            // one only charges, the translation ran on to a later head; the count is only bounded.)
+            let n = count.unwrap();
+            let bs = blocks_containing(p, i.pc);
+            if !bs.is_empty()
+                && bs.iter().all(|(b, _)| b.checked)
+                && !bs
+                    .iter()
+                    .any(|(b, before)| MAX_INSTRUCTIONS - before + b.charge == n)
+            {
+                return Err(format!(
+                    "both at the limit (interpreter before pc {}), but the translation stopped at \
+                     count {n}, which no checked block holding pc charges to",
+                    i.pc
+                ));
+            }
+            return Ok(Verdict::Equal);
+        }
+        if a == c {
             return Ok(Verdict::Equal);
         }
         return Err(format!(
@@ -574,20 +645,21 @@ fn compare(p: &Prepared, i: &Interp, c: &Seen) -> Result<Verdict, String> {
     if a.code == HALT_AV && a.arg == MAGIC && c.code == HALT_BAD_JUMP {
         return Ok(Verdict::CallxNonEntry);
     }
-    if c.code == HALT_LIMIT {
+    if let Some(n) = count {
         // The translation stops at the head of a checked block B exactly when the count at B's
-        // start plus B's charge passes the limit. The interpreter stopped inside B, at `pc`, having
-        // run `before + 1` of B's instructions (its meter counts the one at `pc`).
+        // start plus B's charge passes the limit, and the count it recorded there is that sum. The
+        // interpreter stopped inside B, at `pc`, having run `before + 1` of B's instructions (its
+        // meter counts the one at `pc`).
         let exact = blocks_containing(p, i.pc).iter().any(|(b, before)| {
-            b.checked && i.meter > *before && i.meter - before - 1 + b.charge > MAX_INSTRUCTIONS
+            b.checked && i.meter > *before && i.meter - before - 1 + b.charge == n
         });
         let w = limit_window(&p.scan, i.pc);
         if exact && MAX_INSTRUCTIONS - i.meter < w {
             return Ok(Verdict::LimitTranslationOnly);
         }
         return Err(format!(
-            "translated InstructionLimit, interpreter {a:?} at meter {} (pc {}), {} before the \
-             limit (window {w}, head check crossed: {exact})",
+            "translated InstructionLimit at count {n}, interpreter {a:?} at meter {} (pc {}), {} \
+             before the limit (window {w}, head check at exactly that count: {exact})",
             i.meter,
             i.pc,
             MAX_INSTRUCTIONS - i.meter
@@ -793,15 +865,36 @@ fn required_classes() -> Vec<String> {
     v
 }
 
-fn classes_of(p: &Prepared, i: &Interp) -> Vec<String> {
+/// The classes a case executed, read off its marks — or an error if the marks cannot be trusted.
+/// The page is out of every program write's reach by construction (`gen`'s module docs): `main`
+/// allocates it first, so no allocator block can overlap it, which holds exactly when the cursor
+/// is at least the page's size (the first block on an empty heap is the heap's first bytes); and
+/// nothing but a mark writes there, so every byte is 0 or 1. Either failing means a mark could
+/// have been set by something other than the code it names, and the case fails rather than
+/// counting.
+fn classes_of(p: &Prepared, i: &Interp) -> Result<Vec<String>, String> {
+    if MARK_BASE != REGION_HEAP || i.seen.heap_used < MARK_BYTES {
+        return Err(format!(
+            "the coverage page was not the allocator's first block (cursor {:#x}): its marks \
+             cannot be trusted",
+            i.seen.heap_used
+        ));
+    }
+    if let Some((id, m)) = i.marks.iter().enumerate().find(|(_, &m)| m > 1) {
+        return Err(format!(
+            "coverage byte {id} is {m}: something other than a mark wrote the page"
+        ));
+    }
     let mut v: Vec<String> = Vec::new();
     for (id, &m) in i.marks.iter().enumerate() {
-        // (A byte past the table is a program's own heap write that reached the marks' page.)
         if m != 0 {
             if id < 256 {
                 v.push(format!("op {id:#04x}"));
-            } else if let Some(n) = NAMED.get(id - 256) {
-                v.push(n.to_string());
+            } else {
+                match NAMED.get(id - 256) {
+                    Some(n) => v.push(n.to_string()),
+                    None => return Err(format!("coverage byte {id} is set: no class has it")),
+                }
             }
         }
     }
@@ -809,7 +902,10 @@ fn classes_of(p: &Prepared, i: &Interp) -> Vec<String> {
     if p.budget {
         v.push("budget case".into());
     }
-    v
+    if p.below {
+        v.push("budget:a few hundred below the limit".into());
+    }
+    Ok(v)
 }
 
 // ---- the run ----------------------------------------------------------------------------------------
@@ -852,6 +948,16 @@ fn fuzz(seeds: &[u64], batch: usize, tag: &str, sanitize: bool) -> Totals {
                 let mut pads = Vec::new();
                 for ((p, i), c) in prepared.iter().zip(&interp).zip(&c) {
                     match compare(p, i, c) {
+                        Ok(v) if p.below && (v != Verdict::Equal || i.seen.code == HALT_LIMIT) => {
+                            failures.push(format!(
+                                "a run a few hundred instructions below the limit (meter {}): \
+                                 {v:?}, interpreter {:?}, translated {:?}\n{}",
+                                i.meter,
+                                i.seen,
+                                c.seen,
+                                replay(p)
+                            ))
+                        }
                         Ok(v) => {
                             verdicts.push(format!("{v:?}"));
                             match v {
@@ -859,7 +965,7 @@ fn fuzz(seeds: &[u64], batch: usize, tag: &str, sanitize: bool) -> Totals {
                                     pads.push(prepare(&gen::with_pad_named(&case(p.seed))))
                                 }
                                 Verdict::LimitInterpreterOnly if p.budget => {
-                                    match recheck_fault(p, c) {
+                                    match recheck_fault(p, &c.seen) {
                                         Ok(()) => verdicts.push(
                                             "LimitInterpreterOnly, rechecked with fewer trips"
                                                 .into(),
@@ -900,8 +1006,13 @@ fn fuzz(seeds: &[u64], batch: usize, tag: &str, sanitize: bool) -> Totals {
                 }
                 t.failures.extend(failures);
                 for (p, i) in prepared.iter().zip(&interp) {
-                    for class in classes_of(p, i) {
-                        *t.classes.entry(class).or_default() += 1;
+                    match classes_of(p, i) {
+                        Ok(classes) => {
+                            for class in classes {
+                                *t.classes.entry(class).or_default() += 1;
+                            }
+                        }
+                        Err(e) => t.failures.push(format!("{e}\n{}", replay(p))),
                     }
                 }
             });
@@ -925,8 +1036,18 @@ fn cases_wanted() -> u64 {
         .unwrap_or(10_000)
 }
 
-/// The corpus: seeds `0..FUZZ_CASES`, every one equal (or one of the two accepted differences), and
-/// every class of ruling 2 reached at least 100 times in the default 10 000.
+/// `FUZZ_SEED_BASE`: where the seed range starts (default 0), so a run can cover fresh seeds
+/// without replaying the default corpus.
+fn seed_base() -> u64 {
+    std::env::var("FUZZ_SEED_BASE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The corpus: seeds `FUZZ_SEED_BASE..+FUZZ_CASES` (default `0..10 000`), every one equal (or one
+/// of the two accepted differences), and every class of ruling 2 reached at least 100 times in any
+/// run of 10 000 or more.
 #[test]
 fn the_translation_matches_the_interpreter_on_random_programs() {
     if let Ok(only) = std::env::var("FUZZ_ONLY") {
@@ -936,14 +1057,14 @@ fn the_translation_matches_the_interpreter_on_random_programs() {
         let c = &run_c("only", &[&p], false)[0];
         eprintln!("{}\n{}", replay(&p), p.c);
         eprintln!(
-            "interpreter {:?} meter {} pc {}\ntranslated  {c:?}",
-            i.seen, i.meter, i.pc
+            "interpreter {:?} meter {} pc {}\ntranslated  {:?} (count at L_limit {:?})",
+            i.seen, i.meter, i.pc, c.seen, c.at_limit
         );
         compare(&p, &i, c).unwrap();
         return;
     }
     let n = cases_wanted();
-    let seeds: Vec<u64> = (0..n).collect();
+    let seeds: Vec<u64> = (seed_base()..seed_base() + n).collect();
     let t = fuzz(&seeds, 200, "corpus", false);
     eprintln!("verdicts: {:?}", t.verdicts);
     eprintln!("classes reached (cases that executed each):");
@@ -976,8 +1097,8 @@ fn the_translation_matches_the_interpreter_on_random_programs() {
     }
 }
 
-/// ASan and UBSan over the runtime and the emitted C, on the first 1 000 seeds
-/// (`FUZZ_SANITIZED_CASES` changes the count).
+/// ASan and UBSan over the runtime and the emitted C, on the first 1 000 seeds from
+/// `FUZZ_SEED_BASE` (`FUZZ_SANITIZED_CASES` changes the count).
 #[test]
 fn the_host_build_is_clean_under_asan_and_ubsan() {
     if std::env::var("FUZZ_ONLY").is_ok() {
@@ -987,7 +1108,7 @@ fn the_host_build_is_clean_under_asan_and_ubsan() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| cases_wanted().min(1_000));
-    let seeds: Vec<u64> = (0..n).collect();
+    let seeds: Vec<u64> = (seed_base()..seed_base() + n).collect();
     let t = fuzz(&seeds, 100, "sanitized", true);
     assert!(t.failures.is_empty(), "{}", t.failures[0]);
 }
@@ -1003,6 +1124,7 @@ fn check_program(words: &[u64], data: &[u8]) -> Result<u64, Halt> {
     let prepared = Prepared {
         seed: u64::MAX,
         budget: false,
+        below: false,
         c: emit_program(&p, &s).c,
         text: text.clone(),
         data: data.to_vec(),
@@ -1017,8 +1139,9 @@ fn check_program(words: &[u64], data: &[u8]) -> Result<u64, Halt> {
     assert_eq!(
         compare(&prepared, &i, c),
         Ok(Verdict::Equal),
-        "interpreter {:?}, translated {c:?}\n{}",
+        "interpreter {:?}, translated {:?}\n{}",
         i.seen,
+        c.seen,
         prepared.c
     );
     match i.seen.code {

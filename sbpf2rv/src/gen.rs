@@ -31,11 +31,22 @@
 //! # Coverage
 //!
 //! Each generated instruction of interest is followed (a jump: preceded) by a one-byte store of 1 at
-//! `r9 + id` — `r9` is [`MARK_BASE`] in the heap, set once by `main` and never written again, so every
-//! callee reads it before writing it (a live-in across every call). `id` below 256 is the opcode byte
-//! that ran; from 256 up it is [`NAMED`]'s index + 256. A class was *executed* in a run exactly when
-//! its byte is set in the heap afterwards; the heap is part of what the fuzzer compares, so the two
-//! sides agree on it.
+//! `r9 + id` — `r9` is [`MARK_BASE`] in the heap, set by `main`, so every callee reads it before
+//! writing it (a live-in across every call). `id` below 256 is the opcode byte that ran; from 256 up
+//! it is [`NAMED`]'s index + 256. A class was *executed* in a run exactly when its byte is set in the
+//! heap afterwards; the heap is part of what the fuzzer compares, so the two sides agree on it.
+//!
+//! A body may still write `r9` like any other register: [`Gen::dst`] hands it out, and
+//! [`Gen::settle`] stores what it holds to the frame and loads the base back before the next mark,
+//! jump, call or `exit` can see it. A callee may also clobber `r9` just before its final `exit`,
+//! after its last mark: the caller's own marks then land only if `r9` came back as the frame's.
+//!
+//! The marks page is out of reach of everything else by construction. `main` first allocates it
+//! (the first block a bump allocator hands out on an empty heap is the heap's first bytes, and it
+//! never hands them out again), ordinary heap traffic starts right above it ([`HEAP_TRAFFIC`]), and
+//! no syscall is given a heap destination. The fuzzer asserts, for every case, that the
+//! reservation happened (the allocator's cursor is at least [`MARK_BYTES`]) and that every mark
+//! byte is 0 or 1.
 
 use sbpf_core::isa::{self, opc, Insn};
 use sbpf_core::memory::{HEAP_BYTES, REGION_HEAP, REGION_INPUT, REGION_STACK, STACK_BYTES};
@@ -78,9 +89,15 @@ pub enum It {
     },
 }
 
-/// The coverage bytes: `r9 + id`, 512 of them at the top of the heap.
-pub const MARK_BASE: u64 = REGION_HEAP + 0x7e00;
-/// How far into the heap ordinary heap traffic reaches (the marks sit above it).
+/// The coverage bytes: `r9 + id`, [`MARK_BYTES`] of them at the bottom of the heap — the block
+/// `main`'s first call to `sol_alloc_free_` is handed on an empty heap, so the allocator never
+/// hands any of them out again.
+pub const MARK_BASE: u64 = REGION_HEAP;
+/// The coverage page's size: 256 opcode bytes, then the named classes.
+pub const MARK_BYTES: u64 = 512;
+/// Where ordinary heap traffic starts: right above the coverage page.
+const HEAP_TRAFFIC: u64 = MARK_BASE + MARK_BYTES;
+/// How far ordinary heap traffic reaches from [`HEAP_TRAFFIC`].
 const HEAP_SPAN: u64 = 0x4000;
 
 /// What a `callx` to the pad ends in: a load from this address, which no region contains. The
@@ -156,6 +173,9 @@ pub const NAMED: &[&str] = &[
     "fallthrough-into-next-function",
     "call:member-inside-a-loop",
     "call:into-lddw-second-slot",
+    "r9:written",
+    "callee:clobbers-r9-before-exit",
+    "div32:divisor-0x80000000",
     "budget:call-in-loop",
     "budget:fault-in-callee",
 ];
@@ -484,6 +504,8 @@ struct Gen {
     member_in_loop: Option<Label>,
     /// A function that is one `lddw` and an `exit`, and the label of that `lddw`'s second slot.
     split: (Label, Label),
+    /// [`Gen::dst`] handed out `r9`, the coverage base, since the last [`Gen::settle`].
+    r9_dirty: bool,
 }
 
 impl Gen {
@@ -495,8 +517,22 @@ impl Gen {
         self.out.push(It::I(ins(opc, dst, src, off, imm)));
     }
     fn mark(&mut self, id: u16) {
+        self.settle();
         // `stb [r9 + id], 1`.
         self.i(opc::ST_B_IMM, 9, 0, id as i16, 1);
+    }
+    /// If a body may have written `r9` since the last call: store what it holds to the scratch
+    /// frame (so the write is observable — `main` folds its frame into `r0`), then load the
+    /// coverage base back. Emitted before every mark, at the start of every chunk and terminal and
+    /// after an `lddw` pair a jump may land inside, so no jump, call, `exit` or mark is ever
+    /// emitted while `r9` may be something else: every path into a mark passes through a settle.
+    fn settle(&mut self) {
+        if self.r9_dirty {
+            self.r9_dirty = false;
+            self.i(opc::ST_DW_REG, 10, 9, -496, 0);
+            self.out.push(It::Lddw(9, MARK_BASE));
+            self.mark(named("r9:written"));
+        }
     }
     fn mark_named(&mut self, name: &str) {
         self.mark(named(name));
@@ -508,8 +544,21 @@ impl Gen {
             self.r.pick(IMMS)
         }
     }
-    /// A register a body may write: `r0..r8`, minus the locked loop counters.
+    /// A register a body may write: `r0..r9`, minus the locked ones (the loop counters; a budget
+    /// case also locks `r9`). `r9` is the coverage base, so handing it out leaves it to be
+    /// [`Gen::settle`]d before the next mark.
     fn dst(&mut self) -> u8 {
+        loop {
+            let d = self.r.below(10) as u8;
+            if self.locked & (1 << d) == 0 {
+                self.r9_dirty |= d == 9;
+                return d;
+            }
+        }
+    }
+    /// [`Gen::dst`] without `r9`: a `callx` register, whose callee reads `r9` as its coverage
+    /// base before anything could settle it.
+    fn dst_below9(&mut self) -> u8 {
         loop {
             let d = self.r.below(9) as u8;
             if self.locked & (1 << d) == 0 {
@@ -534,11 +583,26 @@ impl Gen {
                     k = 3;
                 }
                 self.i(o, d, 0, 0, k);
+            } else if o & 0x07 == 0x04 && self.r.chance(1, 3) {
+                // A 32-bit divisor whose low half is exactly bit 31 — the value the guard below
+                // skips — set right here, so it runs unguarded.
+                let s = self.dst();
+                let v = self.r.pick(&[
+                    0x8000_0000u64,
+                    0xffff_ffff_8000_0000,
+                    0x1_8000_0000,
+                    0x8000_0000_8000_0000,
+                ]);
+                self.out.push(It::Lddw(s, v));
+                self.i(o, d, s, 0, 0);
+                self.mark(o as u16);
+                self.mark_named("div32:divisor-0x80000000");
+                return;
             } else {
                 let s = self.src();
                 let skip = self.label();
                 // A 32-bit divisor is its low half: divide only when one of its low 31 bits is set
-                // (a divisor with only bit 31 set is skipped too, which costs nothing).
+                // (a divisor with only bit 31 set is skipped here; the branch above runs it).
                 if o & 0x07 == 0x04 {
                     let go = self.label();
                     self.out.push(It::J {
@@ -627,7 +691,7 @@ impl Gen {
         } else {
             let t = self.dst();
             let (addr, span, store_ok, class) = match kind {
-                5 | 6 => (REGION_HEAP, HEAP_SPAN, true, "mem:heap"),
+                5 | 6 => (HEAP_TRAFFIC, HEAP_SPAN, true, "mem:heap"),
                 7 | 8 => (RAW - 64, 128, true, "mem:input"),
                 _ => (0, 64, false, "mem:program"),
             };
@@ -822,7 +886,7 @@ impl Gen {
             if self.r.chance(1, 2) {
                 self.out.push(It::Call(if into { hi } else { whole }));
             } else {
-                let t = self.dst();
+                let t = self.dst_below9();
                 self.out.push(It::Addr(t, if into { hi } else { whole }, 0));
                 self.i(opc::CALL_REG, 0, 0, 0, t as i32);
             }
@@ -860,7 +924,7 @@ impl Gen {
                 self.mark_named(if to_member { "call:member" } else { "call" });
             }
             _ => {
-                let t = self.dst();
+                let t = self.dst_below9();
                 let to = if to_member {
                     self.funcs[f].member.unwrap()
                 } else {
@@ -940,7 +1004,9 @@ impl Gen {
                 self.frame_ptr(1, a);
                 let memmove = pick == 4;
                 match self.r.below(4) {
-                    0 => self.out.push(It::Lddw(2, REGION_HEAP + self.r.below(1024))),
+                    0 => self
+                        .out
+                        .push(It::Lddw(2, HEAP_TRAFFIC + self.r.below(1024))),
                     1 => self.out.push(It::Lddw(2, RAW - 64)),
                     2 => self.out.push(It::Addr(2, 0, self.r.below(32) as i64)),
                     _ => {
@@ -1067,6 +1133,7 @@ impl Gen {
     /// `n` chunks. `budget` is how many more nested control structures this function may open.
     fn body(&mut self, n: usize, budget: &mut usize) {
         for _ in 0..n {
+            self.settle();
             let roll = self.r.below(100);
             let control_ok = self.depth < 3 && *budget > 0;
             match roll {
@@ -1094,7 +1161,7 @@ impl Gen {
                     self.i(opc::EXIT, 0, 0, 0, 0);
                 }
                 94..=95 => self.jump_into_lddw(),
-                96..=97
+                96..=98
                     if self.loops == 0
                         && self.cur > 0
                         && self.funcs[self.cur].member.is_some()
@@ -1116,6 +1183,7 @@ impl Gen {
     /// The one planned terminal event, where it stands.
     fn terminal(&mut self, t: Terminal) {
         use Terminal::*;
+        self.settle();
         let d = self.dst();
         match t {
             AvOutOfRegion => {
@@ -1384,6 +1452,8 @@ impl Gen {
             hi: ins(o, hd, hs, 0, k),
             label: l,
         });
+        // Both ways through the pair meet here.
+        self.settle();
         if always {
             self.mark_named("lddw:jump-into-second-slot");
         }
@@ -1434,10 +1504,11 @@ impl Gen {
         }
     }
 
-    /// `main`'s epilogue: fold the scratch frame, the heap's low 512 bytes and the instruction
-    /// data into r0 (the real pipeline publishes only r0 of all this), then exit.
+    /// `main`'s epilogue: fold the scratch frame, the first 512 bytes of heap traffic and the
+    /// instruction data into r0 (the real pipeline publishes only r0 of all this), then exit.
     fn fold_and_exit(&mut self) {
-        for (base, words) in [(None, 64), (Some(REGION_HEAP), 64), (Some(RAW - 64), 16)] {
+        self.settle();
+        for (base, words) in [(None, 64), (Some(HEAP_TRAFFIC), 64), (Some(RAW - 64), 16)] {
             match base {
                 None => self.frame_ptr(2, 512),
                 Some(a) => self.out.push(It::Lddw(2, a)),
@@ -1465,8 +1536,9 @@ impl Gen {
 /// The case for `seed`.
 pub fn case(seed: u64) -> Case {
     let mut r = Mix(seed ^ 0x5bf0_3635_d1a2_2c47);
-    // About 1.25% budget cases.
-    let budget = r.below(80) == 0;
+    // About 1.6% budget cases (a mean of 156 in any 10 000 seeds, so the class clears 100 in every
+    // range, not just the default one).
+    let budget = r.below(64) == 0;
     let mut g = Gen {
         r,
         out: Vec::new(),
@@ -1483,6 +1555,7 @@ pub fn case(seed: u64) -> Case {
         helpers: Vec::new(),
         member_in_loop: None,
         split: (0, 0),
+        r9_dirty: false,
     };
     // Label 0 is the text's first slot (main's entry): `It::Addr(_, 0, k)` is text_va + k.
     g.out.push(It::L(0));
@@ -1524,7 +1597,10 @@ pub fn case(seed: u64) -> Case {
             counter,
         });
     }
-    let terminal = if !budget && g.r.chance(1, 2) {
+    // Two cases in three carry a terminal: each of the 28 is then planned about 235 times in 10 000
+    // seeds, and the rarest halt class (a terminal that is sometimes not reached) keeps a margin
+    // over 100 in any seed range (`FUZZ_SEED_BASE`).
+    let terminal = if !budget && g.r.chance(2, 3) {
         Some(g.r.pick(TERMINALS))
     } else {
         None
@@ -1537,6 +1613,17 @@ pub fn case(seed: u64) -> Case {
 
     // ---- main ----
     g.out.push(It::L(main));
+    // Reserve the coverage page: the first allocation on an empty heap is its first bytes, and a
+    // bump allocator never hands them out again. (Four instructions, none of which can fault.)
+    g.i(opc::MOV64_IMM, 1, 0, 0, MARK_BYTES as i32);
+    g.i(opc::MOV64_IMM, 2, 0, 0, 0);
+    g.out.push(It::I(ins(
+        opc::CALL_IMM,
+        0,
+        1,
+        0,
+        syscalls::SOL_ALLOC_FREE as i32,
+    )));
     g.out.push(It::Lddw(9, MARK_BASE));
     if budget {
         budget_body(&mut g);
@@ -1594,6 +1681,25 @@ pub fn case(seed: u64) -> Case {
             g.mark_named("fallthrough-into-next-function");
         } else {
             g.mark_named("exit:callee");
+            if g.r.chance(1, 3) {
+                // The caller's r9 (the coverage base) must come back as it was: r6..r9 are the
+                // frame's, not the callee's.
+                g.mark_named("callee:clobbers-r9-before-exit");
+                match g.r.below(3) {
+                    0 => {
+                        let v = g.r.next();
+                        g.out.push(It::Lddw(9, v));
+                    }
+                    1 => {
+                        let s = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10][g.r.below(10) as usize];
+                        g.i(opc::MOV64_REG, 9, s, 0, 0);
+                    }
+                    _ => {
+                        let k = g.imm();
+                        g.i(opc::XOR64_IMM, 9, 0, 0, k | 1);
+                    }
+                }
+            }
             g.i(opc::EXIT, 0, 0, 0, 0);
         }
     }
@@ -1602,7 +1708,7 @@ pub fn case(seed: u64) -> Case {
     let helpers = std::mem::take(&mut g.helpers);
     for (l, fault) in helpers {
         g.out.push(It::L(l));
-        g.locked = 0x1c0;
+        g.locked = 0x3c0;
         for _ in 0..g.r.below(8) {
             safe_op(&mut g);
         }
@@ -1723,7 +1829,7 @@ fn budget_body(g: &mut Gen) {
         g.out.push(It::Lddw(r, param(k)));
         g.i(opc::LD_DW_REG, r, r, 0, 0);
     }
-    g.locked = 0x1c0;
+    g.locked = 0x3c0;
     let skip = g.label();
     g.out.push(It::J {
         opc: opc::JEQ_IMM,

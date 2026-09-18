@@ -419,7 +419,9 @@ fn a_small_program_translates_to_the_expected_functions() {
     assert!(c.contains("L_3:\n    if ((budget -= 1) < 0) goto L_limit;\n    SBPF_CALL(f_5(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, r10 + SBPF_STACK_FRAME), r0 = x_.r0;);\n    goto L_4;\n"), "{c}");
     assert!(c.contains("    SBPF_RETURN();\n"), "{c}");
     assert!(
-        c.contains("L_limit:\n    sbpf_trap(SBPF_HALT_INSTRUCTION_LIMIT, 0);\n}"),
+        c.contains(
+            "L_limit:\n    SBPF_AT_LIMIT(budget);\n    sbpf_trap(SBPF_HALT_INSTRUCTION_LIMIT, 0);\n}"
+        ),
         "{c}"
     );
     // `Vm::new`: r1 = the input region, r10 = the top of frame 0, everything else zero.

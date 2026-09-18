@@ -996,14 +996,26 @@ fn the_call_and_budget_vectors_match_the_interpreter() {
 /// must equal `run_call`'s and the halt (with its payload, and `r0`) the interpreter's.
 ///
 /// Several cases share one ELF behind a dispatcher on the instruction data's first word (the
-/// generator reserves it as a selector), so each image is built once. The sample is the first
-/// cases from seed 1 000 000 on that are not budget cases, run under 4 000 instructions alone (the
-/// machine's cycle tiers) and can be an ELF at all ([`fuzz_elf`]), 12 per image, 3 images. A case
-/// that `callx`es the pad (the accepted divergence) is kept and asserted to be exactly that.
+/// generator reserves it as a selector), so each image is built once. The sample is taken from seed
+/// 1 000 000 on, among cases that are not budget cases, run under 4 000 instructions alone (the
+/// machine's cycle tiers) and can be an ELF at all ([`fuzz_elf`]), 12 per image, 3 images: first
+/// the earliest cases that fill [`SAMPLE_QUOTAS`] — the outcomes and paths the host build cannot
+/// vouch for on the target (a `DivByZero` and a `CallDepth` halt, `sol_sha256`'s real
+/// compressions, and 64-bit division and remainder, which RV32IM has no instruction for) — then
+/// the earliest of the rest. The mix is asserted afterwards, on the real run: the halts from the
+/// interpreter the translation matched, and the division helpers from a pc histogram of the
+/// translated image on the emulator against its own symbols.
+///
+/// Which 64-bit division runs: the shim is a Rust crate, so `compiler_builtins`' `__udivdi3` and
+/// `__umoddi3` (over its `specialized_div_rem::u64_div_rem`) — rand-guest's `rt.c` is not linked
+/// into shim images. sBPF v1 has no signed division, so `__divdi3`/`__moddi3` never occur; the test
+/// asserts they are absent. A case that `callx`es the pad (the accepted divergence) is kept and
+/// asserted to be exactly that.
 #[test]
 fn a_sample_of_the_fuzz_corpus_matches_through_the_real_pipeline() {
     use sbpf_core::memory::REGION_PROGRAM;
-    let mut picked = Vec::new();
+    let mut need: std::collections::BTreeMap<&str, usize> = SAMPLE_QUOTAS.iter().copied().collect();
+    let mut picked: Vec<(gen::Case, Vec<&str>)> = Vec::new();
     let mut seed = 1_000_000u64;
     while picked.len() < 36 {
         let c = gen::case(seed);
@@ -1012,13 +1024,31 @@ fn a_sample_of_the_fuzz_corpus_matches_through_the_real_pipeline() {
             continue;
         }
         let (text, _) = gen::assemble(&c.items, REGION_PROGRAM);
-        let alone = sbpf::run_text(&text, &mut gen::input_region(&c.data));
-        if alone.instructions < 4_000 && call_srcs(&text).iter().all(|&s| s <= 1) {
-            picked.push(c);
+        let (instructions, result, marks) = run_with_marks(&text, &c.data);
+        if instructions >= 4_000 || call_srcs(&text).iter().any(|&s| s > 1) {
+            continue;
+        }
+        let tags = sample_tags(&result, &marks);
+        let fills = tags.iter().any(|t| need.get(t).is_some_and(|&n| n > 0));
+        let open: usize = need.values().sum();
+        if fills || picked.len() + open < 36 {
+            for t in &tags {
+                if let Some(n) = need.get_mut(t) {
+                    *n = n.saturating_sub(1);
+                }
+            }
+            picked.push((c, tags));
         }
     }
+    assert!(
+        need.values().all(|&n| n == 0),
+        "the sample could not fill its quotas: {need:?}"
+    );
     let mut checked = 0;
     let mut halts: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut tagged: std::collections::BTreeMap<&str, usize> = Default::default();
+    // (helper, cycles spent in it) over the division cases' emulator runs.
+    let mut helper_cycles: std::collections::BTreeMap<&str, usize> = Default::default();
     for (g, group) in picked.chunks(12).enumerate() {
         // The dispatcher: r2 = selector; jump to case k with r2 zero again, so every case starts
         // from `Vm::new`'s registers.
@@ -1048,7 +1078,7 @@ fn a_sample_of_the_fuzz_corpus_matches_through_the_real_pipeline() {
                 to: start(k),
             });
         }
-        for (k, c) in group.iter().enumerate() {
+        for (k, (c, _)) in group.iter().enumerate() {
             items.push(It::L(start(k)));
             items.extend(gen::relabel(&c.items, k as u64 + 1));
         }
@@ -1062,7 +1092,14 @@ fn a_sample_of_the_fuzz_corpus_matches_through_the_real_pipeline() {
         std::fs::write(&path, &elf).unwrap();
         let t = translate(&path, &name);
         assert!(t.words <= 65_535, "{name}: {} words, over the cap", t.words);
-        for (k, c) in group.iter().enumerate() {
+        let symbols = symbols(&work().join(&name), &name);
+        for gone in ["__divdi3", "__moddi3"] {
+            assert!(
+                !symbols.iter().any(|(_, _, n)| n == gone),
+                "{name}: {gone} is linked, but sBPF v1 has no signed division"
+            );
+        }
+        for (k, (c, tags)) in group.iter().enumerate() {
             let mut data = c.data.clone();
             data[..8].copy_from_slice(&(k as u64).to_le_bytes());
             let call = SbpfCall {
@@ -1092,12 +1129,173 @@ fn a_sample_of_the_fuzz_corpus_matches_through_the_real_pipeline() {
                 Err(h) => format!("{h:?}").split('(').next().unwrap().to_string(),
             };
             *halts.entry(key).or_default() += 1;
+            for t in tags {
+                *tagged.entry(t).or_default() += 1;
+            }
+            // The division cases, on the emulator: the cycles spent inside each helper.
+            if tags.iter().any(|t| t.starts_with("64-bit")) {
+                let bytes = std::fs::read(&t.image).unwrap();
+                let program = rand_zkvm::isa::Program::from_flat_image(&bytes).unwrap();
+                let exec = rand_zkvm::emulator::execute(
+                    &program,
+                    &call.input_words(),
+                    &call.public_words(),
+                    1 << 21,
+                )
+                .unwrap();
+                assert_eq!(
+                    exec.outputs, want,
+                    "{what}: the library emulator vs rand-guest run"
+                );
+                for helper in ["__udivdi3", "__umoddi3", "u64_div_rem"] {
+                    let n = cycles_in(&symbols, helper, &exec);
+                    *helper_cycles.entry(helper).or_default() += n;
+                }
+            }
             checked += 1;
         }
         eprintln!("{name}: {} program words, 12 cases equal", t.words);
     }
-    eprintln!("real-pipeline sample: {checked} cases, outcomes {halts:?}");
-    assert!(checked >= 30);
+    eprintln!(
+        "real-pipeline sample: {checked} cases, outcomes {halts:?}, tags {tagged:?}, cycles in \
+         the 64-bit division helpers {helper_cycles:?}"
+    );
+    assert_eq!(checked, 36);
+    // The mix, as the real runs came out.
+    for (halt, at_least) in [("DivByZero", 1), ("CallDepth", 1)] {
+        assert!(
+            halts.get(halt).copied().unwrap_or(0) >= at_least,
+            "the sample has no {halt} halt: {halts:?}"
+        );
+    }
+    for (tag, at_least) in SAMPLE_QUOTAS {
+        assert!(
+            tagged.get(tag).copied().unwrap_or(0) >= *at_least,
+            "the sample has fewer than {at_least} cases of {tag}: {tagged:?}"
+        );
+    }
+    for helper in ["__udivdi3", "__umoddi3"] {
+        assert!(
+            helper_cycles.get(helper).copied().unwrap_or(0) > 0,
+            "no sample case ran {helper} on the emulator: {helper_cycles:?}"
+        );
+    }
+}
+
+/// What the real-pipeline sample must contain, as `(tag, cases)`; see [`sample_tags`].
+const SAMPLE_QUOTAS: &[(&str, usize)] = &[
+    ("halt DivByZero", 2),
+    ("halt CallDepth", 2),
+    ("sol_sha256", 3),
+    ("64-bit division by a register", 2),
+    ("64-bit remainder by a register", 2),
+];
+
+/// A case's tags, from its interpreter run on the host: its halt, and what its coverage marks say
+/// ran. The register forms of 64-bit division are the ones clang cannot turn into a multiply, so
+/// they are what reaches the division helpers.
+fn sample_tags(result: &Result<u64, Halt>, marks: &[u8]) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    match result {
+        Err(Halt::DivByZero) => v.push("halt DivByZero"),
+        Err(Halt::CallDepth) => v.push("halt CallDepth"),
+        _ => {}
+    }
+    let named = |n: &str| marks[gen::named(n) as usize] != 0;
+    if named("sys:sol_sha256") {
+        v.push("sol_sha256");
+    }
+    if marks[opc::DIV64_REG as usize] != 0 {
+        v.push("64-bit division by a register");
+    }
+    if marks[opc::MOD64_REG as usize] != 0 {
+        v.push("64-bit remainder by a register");
+    }
+    v
+}
+
+/// A generated case run by the interpreter on the host exactly as `tests/fuzz.rs` runs it: the
+/// instruction count, the result, and the coverage page.
+fn run_with_marks(text: &[u8], data: &[u8]) -> (u64, Result<u64, Halt>, Vec<u8>) {
+    use sbpf_core::memory::{Memory, HEAP_BYTES, REGION_HEAP, STACK_BYTES};
+    let p = sbpf_core::elf::Program::from_text(text).unwrap();
+    let mut stack = vec![0u8; STACK_BYTES].into_boxed_slice();
+    let mut heap = vec![0u8; HEAP_BYTES].into_boxed_slice();
+    let mut input = gen::input_region(data);
+    let (result, n) = {
+        let mem = Memory {
+            text: p.text,
+            text_va: p.text_va,
+            rodata: p.rodata,
+            rodata_base: p.rodata_va,
+            stack: (&mut stack[..]).try_into().unwrap(),
+            heap: (&mut heap[..]).try_into().unwrap(),
+            input: &mut input,
+        };
+        let mut h = sbpf::HostRef;
+        let mut vm = sbpf_core::interp::Vm::new(&mut h, &p, mem);
+        let r = vm.run();
+        (r, vm.instructions_executed())
+    };
+    let m = (gen::MARK_BASE - REGION_HEAP) as usize;
+    (n, result, heap[m..m + gen::MARK_BYTES as usize].to_vec())
+}
+
+/// The generated crate's ELF's symbols, `(start, end, name)`, from `llvm-nm -n` beside the clang
+/// the build used — each symbol runs to the next one's address.
+fn symbols(dir: &Path, name: &str) -> Vec<(u32, u32, String)> {
+    let elf = dir
+        .join("target/riscv32im-unknown-none-elf/release")
+        .join(name);
+    let clang = std::env::var_os("CLANG").map_or_else(
+        || PathBuf::from("/opt/homebrew/opt/llvm/bin/clang"),
+        PathBuf::from,
+    );
+    let o = Command::new(clang.with_file_name("llvm-nm"))
+        .args(["-n", "--defined-only"])
+        .arg(&elf)
+        .output()
+        .unwrap();
+    let out = check(&o, &format!("llvm-nm {}", elf.display()));
+    let syms: Vec<(u32, String)> = out
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let a = u32::from_str_radix(f.next()?, 16).ok()?;
+            let _kind = f.next()?;
+            Some((a, f.next()?.to_string()))
+        })
+        .collect();
+    syms.iter()
+        .enumerate()
+        .map(|(i, (a, n))| {
+            let end = syms[i + 1..]
+                .iter()
+                .map(|(b, _)| *b)
+                .find(|b| b > a)
+                .unwrap_or(u32::MAX);
+            (*a, end, n.clone())
+        })
+        .collect()
+}
+
+/// Cycles `exec` spent with the pc inside the symbol called `name`, or (a mangled Rust symbol)
+/// whose name contains `name` as a path segment.
+fn cycles_in(
+    symbols: &[(u32, u32, String)],
+    name: &str,
+    exec: &rand_zkvm::emulator::Execution,
+) -> usize {
+    let segment = format!("{}{name}", name.len());
+    let ranges: Vec<(u32, u32)> = symbols
+        .iter()
+        .filter(|(_, _, n)| n == name || n.ends_with(&segment))
+        .map(|&(a, b, _)| (a, b))
+        .collect();
+    exec.events
+        .iter()
+        .filter(|e| ranges.iter().any(|&(a, b)| (a..b).contains(&e.pc)))
+        .count()
 }
 
 /// The `src` of every `call imm` in `text`, walking it as the loader does (an `lddw` is two slots).

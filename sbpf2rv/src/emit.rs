@@ -392,6 +392,14 @@ typedef struct {
 typedef sbpf_ret (*sbpf_callee)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                                 uint64_t, uint64_t, uint64_t, uint64_t);
 
+/* A test hook at every function's `L_limit`: the host fuzz build (sbpf2rv/tests/fuzz.rs) defines it
+ * to record the function-local budget there — `SBPF_MAX_INSTRUCTIONS` minus everything charged so
+ * far — so the count the translation stopped at is compared exactly with the head-check arithmetic.
+ * Everywhere else it is empty and emits no code. */
+#ifndef SBPF_AT_LIMIT
+#define SBPF_AT_LIMIT(budget) ((void)0)
+#endif
+
 /* Every translated function is size-optimised: the image's program-word cap, not speed, is what a
  * whole SPL program runs into first. The toolchain's flags are unchanged; this is per function. */
 #define SBPF_FN __attribute__((minsize)) static sbpf_ret
@@ -659,7 +667,9 @@ fn emit_function(
         n += eblocks[i].insns.len();
         emit_block(c, program, n_slots, &eblocks[i], checked[i], hosts, calls);
     }
-    c.push_str("L_limit:\n    sbpf_trap(SBPF_HALT_INSTRUCTION_LIMIT, 0);\n}\n\n");
+    c.push_str(
+        "L_limit:\n    SBPF_AT_LIMIT(budget);\n    sbpf_trap(SBPF_HALT_INSTRUCTION_LIMIT, 0);\n}\n\n",
+    );
     (eblocks.len(), n)
 }
 
