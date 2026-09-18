@@ -43,10 +43,21 @@ interpreter would refuse (`elf.rs`'s errors) is refused here with the same messa
 immediate or a read-only-data word past the text that points 8-aligned at a real instruction
 start — `sbpf2rv/src/scan.rs`'s `lddw_and_rodata_function_roots`; a function reached *only*
 through `callx`, never a `call imm`, is otherwise invisible to the scan, which is exactly the
-committed SPL Token ELF's pc 12244) become one C function each: `static uint64_t f_<pc>(uint64_t
-r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5)` returning `r0`. `r6..r9` are C locals
-saved and restored around calls, which is the sBPF calling convention; `r10` (the frame pointer)
-is a local advanced by `STACK_FRAME` per call depth. Unreachable text is not translated.
+committed SPL Token ELF's pc 12244) become one C function each. **Amended 2026-09-18 (Task 4)**:
+an earlier draft had `f_<pc>(r1..r5)` returning `r0`, which is narrower than `interp.rs`'s call —
+a callee sees *every* register the caller had (`r0` and `r6..r9` included) and hands back `r0..r5`
+as it left them (`exit` restores only `r6..r10`). So every function is
+`sbpf_ret f_<pc>(uint64_t r0, …, uint64_t r9, uint64_t r10)` with
+`typedef struct { uint64_t r0, r1, r2, r3, r4, r5; } sbpf_ret`: a call passes `r0..r9` and `r10`
+advanced by one `STACK_FRAME`, and copies back `r0..r5`; `r6..r10` are the caller's own C locals,
+which the call cannot touch. Both lists are narrowed per call site by an interprocedural liveness
+pass (`sbpf2rv/src/emit.rs`, `Calls`, a least fixpoint over the call graph with `callx` as a call to
+every known function): a register the callee cannot read before writing is passed as 0, and one it
+cannot write is not copied back — neither is observable. `callx` goes through
+`sbpf_callx_target(addr)`, which maps `interp.rs`'s `(addr - text_va) / 8` to a function pointer
+over the known function set, or traps `BadJump`. A function whose entry lies inside another's code
+is emitted once, as an extra entry label of the larger one (`Hosts`; the caller sets `sbpf_sel`).
+`r10` is an ordinary local: a program may write it. Unreachable text is not translated.
 Registers are `uint64_t` locals, so clang, not this tool, chooses the RV32 register pairs and
 spills — the "direct lowering with register pairs" of the approved design, done by the compiler.
 
@@ -55,15 +66,15 @@ spills — the "direct lowering with register pairs" of the approved design, don
 | class | translation |
 |---|---|
 | `ld` (`lddw` imm64) | a constant |
-| `ldx` / `st` / `stx`, all four widths | `rd = *(uintN_t*)tr(addr, N)` / `*(uintN_t*)tr(addr, N) = v`, with `tr` the region translation below; little-endian as sBPF is |
-| `alu32` / `alu64`: add sub mul div or and lsh rsh neg mod xor mov arsh | the C operator on `uint32_t` (alu32 zero-extends the result, as the interpreter does) or `uint64_t`; shifts mask the count to 31 / 63 |
-| v2 signed ops (`sdiv`, `srem`, the pqr product/quotient/remainder family), `hor64` | the matching signed C operator on `int32_t` / `int64_t`, with the interpreter's exact overflow and zero rules |
+| `ldx` / `st` / `stx`, all four widths | `rd = sbpf_ldN(rs, off)` / `sbpf_stN(rd, off, v)` (**amended, Task 4**: never a pointer cast — there is no alignment rule — and the runtime forms `interp.rs`'s wrapped `base + off`, which is also the fault payload); little-endian as sBPF is |
+| `alu32` / `alu64`: add sub mul div or and lsh rsh neg mod xor mov arsh | the C operator on `uint32_t` or `uint64_t`; shifts mask the count to 31 / 63 (**amended, Task 4**: as the interpreter does, alu32 `add`/`sub`/`mul` *sign*-extend their result and every other alu32 op zero-extends) |
+| v2 signed ops (`sdiv`, `srem`, the pqr product/quotient/remainder family), `hor64` | (**amended, Task 4**: not v1 opcodes — `isa::classify` assigns none of them, so, like the interpreter, the translation traps `BadInsn` on each) |
 | `le` / `be` byte swaps (16/32/64) | `__builtin_bswap*` or a mask |
 | `ja` / `jeq` / `jgt` / `jge` / `jlt` / `jle` / `jset` / `jne` / `jsgt` / `jsge` / `jslt` / `jsle` (imm and reg) | `if (…) goto L_<pc>;` |
-| `call imm` (internal) | `r0 = f_<target>(r1..r5)` after the depth check |
-| `call imm` (syscall by hash) | `r0 = sol_<name>(r1..r5)` from the runtime (§5) |
-| `callx` | `switch (reg) { case <pc>: r0 = f_<pc>(…); break; … default: trap(BadJump) }` over the known function set (**amended 2026-09-18, review round 1**: an unknown target is a bad *fetch*, `interp.rs`'s `slot_at` — `Halt::BadJump`, not `BadInsn`; an earlier draft of this row said `BadInsn`) |
-| `exit` | `return r0` |
+| `call imm` (internal) | `SBPF_CALL(f_<target>(r0, …, r10 + STACK_FRAME), <copy-back>)`: the depth check, then the call (see **Functions**) |
+| `call imm` (syscall by hash) | `r0 = sbpf_sys_<name>(r1, r2, r3, r4, r5)` from the runtime (§5); an unimplemented hash is `sbpf_trap(UnknownSyscall, hash)` |
+| `callx` | the depth check, then a call through `sbpf_callx_target(reg)` — a `switch` over the known function set, `default: trap(BadJump)` (**amended 2026-09-18, review round 1**: an unknown target is a bad *fetch*, `interp.rs`'s `slot_at` — `Halt::BadJump`, not `BadInsn`; an earlier draft of this row said `BadInsn`) |
+| `exit` | `return (sbpf_ret){r0, …, r5}` |
 
 Every instruction that can trap does so through `sbpf_trap(code)`, which unwinds to the harness
 with the interpreter's `Halt` value so the canonical failure output is byte-identical: division
@@ -78,11 +89,13 @@ a head check does not meet): the halt lands at the head of the block that would 
 and the halt kind may differ from the interpreter's — which counts one instruction at a time —
 only in that block (a fault part-way through it may be reported as `InstructionLimit`). The status
 and the eight public words are equal either way, since every exceptional halt publishes status 2
-over the pre-state. **Task 4, pending review**: to fit the SPL Token program into the machine's
-65 535-word program cap, a block whose every successor checks, that ends in neither `exit` nor a
-call, and that has no deferred neighbour only *charges* its length and leaves the check to the
-next block's head (`sbpf2rv/src/emit.rs`, `choose_checked`); the halt kind still differs only in
-the block that crosses the limit, and no run the interpreter completes is ever halted. **Amended
+over the pre-state. **Deferred checks (Task 4, ruled final in its review)**: a block may skip its
+check only if it does not end in `exit`/`call`/`callx`, has no self-loop, and every in-function
+neighbour checks (`sbpf2rv/src/emit.rs`, `choose_checked`). Such a block only *charges* its
+length; if it is the one that crosses the limit, it runs to its end and the next block's head
+halts `InstructionLimit` (or it faults on the way: a different kind, but only in the crossing
+block), and no run the interpreter completes is ever halted. It is what fits the SPL Token program
+into the machine's 65 535-word program cap. **Amended
 2026-09-18**: a static `ja`/`j*`/internal-`call` target outside the text, and a bad register or
 opcode, are *runtime* traps like everything else in this paragraph, not rejected at translation
 as an earlier draft of this spec had it — none of it is a load-time check in the interpreter
