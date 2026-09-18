@@ -1,42 +1,84 @@
-//! `sbpf2rv <program.so>`: loads an sBPF ELF and reports the scan — functions, blocks and any
-//! warning. The scan itself cannot fail (see `scan::scan`'s docs); only loading the ELF can. The
-//! emitter (`program.c`, the shim crate) is a later task; this stub is enough to exercise the
-//! scanner end to end against a real ELF from the command line.
+//! `sbpf2rv <program.so> --out <dir> [--name <crate>]`: loads an sBPF ELF, scans and translates it,
+//! and writes the shim crate `rand-guest build <dir>` turns into an image — `program.c`,
+//! `Cargo.toml`, `build.rs`, `src/main.rs` and `shim.ld` (see `sbpf2rv::shim`). Without `--out` it
+//! only reports the scan. The scan itself cannot fail (see `scan::scan`'s docs); only loading the
+//! ELF can, with the interpreter's own refusal.
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use sbpf2rv::scan::scan;
+use sbpf2rv::{emit, scan::scan, shim};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "sbpf2rv", version, about = "Scan an sBPF ELF (the C emitter is a later task)")]
+#[command(
+    name = "sbpf2rv",
+    version,
+    about = "Translate an sBPF ELF into C and the shim crate rand-guest builds"
+)]
 struct Cli {
-    /// The sBPF v1 shared object to scan.
+    /// The sBPF v1 shared object to translate.
     program: PathBuf,
+    /// Where to write the shim crate (created if needed; must be inside a circuits checkout).
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// The crate's name (default: the ELF's file stem).
+    #[arg(long)]
+    name: Option<String>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut elf = std::fs::read(&cli.program)
         .with_context(|| format!("reading {}", cli.program.display()))?;
-    let program = sbpf_core::elf::load(&mut elf)
-        .map_err(|halt| anyhow!("{} is not a loadable sBPF v1 ELF: {halt:?}", cli.program.display()))?;
+    let program = sbpf_core::elf::load(&mut elf).map_err(|halt| {
+        anyhow!(
+            "{} is not a loadable sBPF v1 ELF: {halt:?}",
+            cli.program.display()
+        )
+    })?;
     let scanned = scan(&program);
+    let emitted = emit::emit_program(&program, &scanned);
     println!(
-        "entry pc {}: {} function(s), {} callx target(s), {} warning(s)",
+        "entry pc {}: {} function(s), {} block(s), {} instruction(s), {} callx target(s), 0 refusal(s), {} warning(s)",
         scanned.entry,
-        scanned.functions.len(),
+        emitted.functions,
+        emitted.blocks,
+        emitted.instructions,
         scanned.callx_targets.len(),
         scanned.warnings.len(),
     );
     for f in &scanned.functions {
         println!("  fn {}: {} block(s)", f.entry, f.blocks.len());
     }
-    // A warning names a syscall this translator will emit as a runtime trap (identical to the
-    // interpreter's `Halt::UnknownSyscall`) rather than a real call — not fatal, but worth telling
-    // the developer, since it means proof coverage doesn't extend to whatever calls it.
+    // Nothing is refused (the interpreter refuses none of it at load either); a warning names code
+    // translated as the interpreter's own runtime trap, so proof coverage stops wherever it is.
     for w in &scanned.warnings {
         println!("  warning: {w:?}");
+    }
+    if let Some(out) = &cli.out {
+        let stem = cli
+            .program
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = match &cli.name {
+            Some(n) => {
+                let clean = shim::crate_name(n);
+                anyhow::ensure!(
+                    &clean == n,
+                    "--name {n:?} is not a crate name (try {clean:?})"
+                );
+                clean
+            }
+            None => shim::crate_name(&stem),
+        };
+        shim::write_crate(out, &name, &emitted.c)?;
+        println!(
+            "wrote {} ({} bytes of C) and the {name} shim crate: rand-guest build {}",
+            out.join("program.c").display(),
+            emitted.c.len(),
+            out.display()
+        );
     }
     Ok(())
 }
