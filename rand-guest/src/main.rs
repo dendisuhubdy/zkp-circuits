@@ -170,9 +170,20 @@ fn main() -> Result<()> {
                     for (i, w) in exec.outputs.iter().enumerate() { println!("out[{i}] = {w}"); }
                     let cycles = exec.cycles();
                     println!("cycles {cycles}");
-                    match rand_zkvm::machine::Tier::for_cycles(cycles + program.digest_rows() + rand_zkvm::hash::input_digest_row_count(inputs.len()) + rand_zkvm::hash::public_digest_row_count(public.len())) {
+                    // Mirrors `Machine::prove_salted`'s `None =>` arm term by term (`research/src/machine.rs`
+                    // ~1226-1235): the cycle budget alone is not enough to pick a tier — the Poseidon2 table
+                    // holds only `2^(t-3)` blocks against up to ~`2^t` permutation-emitting rows (digest,
+                    // indigest, public-digest and in-guest `POSEIDON2` absorb rows all cost one permutation
+                    // each), a second, independent constraint from the cycle one (Audit ZH1, `Tier::for_workload`'s
+                    // doc comment) — so the tier this prints must be picked by `Tier::for_workload`, not
+                    // `Tier::for_cycles`, or `run` could report a tier that `prove` would refuse.
+                    let digest_rows = program.digest_rows() + rand_zkvm::hash::input_digest_row_count(inputs.len()) + rand_zkvm::hash::public_digest_row_count(public.len());
+                    let total_cycles = cycles + digest_rows;
+                    let absorb_rows = exec.events.iter().filter(|e| matches!(e.hash_row, Some(rand_zkvm::emulator::HashRow::Absorb { .. }))).count();
+                    let permutations = digest_rows + absorb_rows;
+                    match rand_zkvm::machine::Tier::for_workload(total_cycles, permutations) {
                         Some(t) => println!("tier {}", t.0),
-                        None => println!("no tier fits {cycles} cycles"),
+                        None => println!("no tier fits {total_cycles} cycles"),
                     }
                     if !exec.halted { println!("note: the program did not halt (ran out of the largest tier's budget)"); }
                 }
