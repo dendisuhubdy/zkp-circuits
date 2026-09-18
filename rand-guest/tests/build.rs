@@ -154,3 +154,18 @@ fn the_cap_is_measured_against_the_loaders_word_count_not_an_estimate() {
     let exact = Command::new(bin()).arg("check").arg(&image).args(["--max-words", "18009"]).output().unwrap();
     assert!(exact.status.success(), "{}", String::from_utf8_lossy(&exact.stdout));
 }
+
+/// The C path end to end: clang compiles `guests-compiled/c-fib` for the same machine the Rust
+/// guests target, and the image runs to the same `fib(20)` the Rust `fib` guest gives. Gated on a
+/// clang that has a `riscv32` target (`build::find_clang`), since Apple's system clang has none.
+#[test]
+fn a_c_guest_builds_checks_and_runs_like_the_rust_one() {
+    let Some(_) = rand_guest::build::find_clang() else { eprintln!("no RISC-V clang; skipping"); return; };
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("c-fib.bin");
+    let o = Command::new(bin()).args(["build", "--lang", "c"]).arg(root().join("guests-compiled/c-fib")).arg("--out").arg(&out).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let r = Command::new(bin()).args(["run"]).arg(&out).args(["--input", "20"]).output().unwrap();
+    let s = String::from_utf8_lossy(&r.stdout);
+    assert!(s.contains("out[0] = 6765"), "{s}");
+}

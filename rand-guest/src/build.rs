@@ -115,9 +115,133 @@ pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutp
     finish(elf, out)
 }
 
-/// Placeholder for the C path (Task 6): clang for the same target, then the same pack.
-pub fn build_c(dir: &Path, _ld: Option<&Path>, _out: &Path) -> Result<BuildOutput> {
-    bail!("C support lands in Task 6 ({})", dir.display())
+/// A clang that can target this machine: `$CLANG`, else Homebrew's LLVM, else whatever `clang`
+/// is on PATH — and only one whose `--print-targets` lists `riscv32`, since Apple's system clang
+/// (the `clang` on PATH here) is built without the RISC-V backend and would fail at the first
+/// source file with a target-not-found error instead.
+pub fn find_clang() -> Option<PathBuf> {
+    let candidates = [
+        std::env::var("CLANG").ok().map(PathBuf::from),
+        Some(PathBuf::from("/opt/homebrew/opt/llvm/bin/clang")),
+        Some(PathBuf::from("clang")),
+    ];
+    candidates.into_iter().flatten().find(|c| {
+        Command::new(c)
+            .arg("--print-targets")
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("riscv32"))
+            .unwrap_or(false)
+    })
+}
+
+/// `rust-lld` from the pinned Rust sysroot's llvm-tools, so a C guest needs only clang installed:
+/// the linker is the same one `build_rust` links with, and the same `guest.ld` drives it.
+fn rust_lld() -> Result<PathBuf> {
+    let sysroot = String::from_utf8(Command::new("rustc").arg(format!("+{TOOLCHAIN}")).args(["--print", "sysroot"]).output()?.stdout)?;
+    let host = String::from_utf8(Command::new("rustc").arg(format!("+{TOOLCHAIN}")).arg("-vV").output()?.stdout)?
+        .lines()
+        .find_map(|l| l.strip_prefix("host: ").map(str::to_string))
+        .context("rustc -vV printed no host line")?;
+    let p = PathBuf::from(sysroot.trim()).join("lib/rustlib").join(host).join("bin/rust-lld");
+    if !p.exists() {
+        bail!("{} not found: rustup +{TOOLCHAIN} component add llvm-tools", p.display());
+    }
+    Ok(p)
+}
+
+/// The clang flags every C guest gets — the C counterpart of [`flags`], and, like it, the only
+/// place the set is written down (the two translator tracks emit C into exactly this path).
+///
+///  * `--target=riscv32-unknown-none-elf`  bare metal, no host libc, no PIC.
+///  * `-march=rv32im -mabi=ilp32`  the machine's exact ISA: the `M` extension is in the decoder,
+///                      compressed (`C`) instructions are not, and `ilp32` keeps floats — which
+///                      this machine has no registers for — out of the ABI.
+///  * `-mno-relax`      linker relaxation rewrites `auipc`/`jalr` pairs into `jal` against a `gp`
+///                      this machine never sets up; the Rust guests are equally unrelaxed.
+///  * `-nostdlib -ffreestanding -fno-builtin`  there is no libc and no compiler runtime here, so
+///                      the compiler must not synthesise calls into either.
+///  * `-fdebug-prefix-map` is [`flags`]'s `--remap-path-prefix`: an image reproduces byte for
+///                      byte wherever the checkout lives.
+fn clang_flags(root: &Path) -> Vec<String> {
+    vec![
+        "--target=riscv32-unknown-none-elf".into(),
+        "-march=rv32im".into(),
+        "-mabi=ilp32".into(),
+        "-mno-relax".into(),
+        "-nostdlib".into(),
+        "-ffreestanding".into(),
+        "-fno-builtin".into(),
+        "-Os".into(),
+        format!("-fdebug-prefix-map={}=/rand-circuits", root.display()),
+    ]
+}
+
+/// The C path: clang over every `.c` in the guest directory plus this crate's own `start.S`,
+/// linked by `rust_lld` against the same `guest.ld` the Rust guests use, then the same pack.
+///
+/// The guest carries neither the entry point nor the syscall wrappers: `guest.h` and `start.S`
+/// are written into the guest's `target/rand-guest/` and that directory is the include path, so
+/// a C guest is its own source and nothing else — the shape the sBPF and EVM translators will
+/// emit into.
+pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput> {
+    let clang = find_clang().context("no clang with a riscv32 target: brew install llvm, or set CLANG")?;
+    // Absolute from here on, for `build_rust`'s reason: the paths below go into the object files
+    // and the linker command line, and must not depend on the caller's cwd.
+    let dir = &dir.canonicalize().with_context(|| format!("no such guest directory: {}", dir.display()))?;
+    let root = checkout_root(dir)?;
+    let ld = match ld {
+        Some(l) => l.to_path_buf(),
+        None => find_ld(dir, &root)?,
+    };
+    let ld_abs = if ld.is_absolute() { ld } else { dir.join(ld) };
+    let target_dir = dir.join("target/rand-guest");
+    std::fs::create_dir_all(&target_dir)?;
+    let start = target_dir.join("start.S");
+    std::fs::write(target_dir.join("guest.h"), include_str!("../guest.h"))?;
+    std::fs::write(&start, include_str!("../start.S"))?;
+    let mut sources: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |e| e == "c"))
+        .collect();
+    // Sorted, so the link order — and with it the image — does not depend on the directory's.
+    sources.sort();
+    if sources.is_empty() {
+        bail!("no .c files in {}", dir.display());
+    }
+    let mut objects = Vec::new();
+    // `start.S` last on the command line but first in the image: `guest.ld` puts `.text._start`
+    // at `ORIGIN` whatever order the objects come in.
+    for src in sources.iter().chain(std::iter::once(&start)) {
+        let obj = target_dir.join(src.file_name().unwrap()).with_extension("o");
+        let status = Command::new(&clang)
+            .args(clang_flags(&root))
+            .arg("-c")
+            .arg("-I")
+            .arg(&target_dir)
+            .arg(src)
+            .arg("-o")
+            .arg(&obj)
+            .status()
+            .with_context(|| format!("running {} on {}", clang.display(), src.display()))?;
+        if !status.success() {
+            bail!("clang failed on {}", src.display());
+        }
+        objects.push(obj);
+    }
+    let elf = target_dir.join("guest.elf");
+    let status = Command::new(rust_lld()?)
+        .args(["-flavor", "gnu"])
+        .arg("-T")
+        .arg(&ld_abs)
+        .args(&objects)
+        .arg("-o")
+        .arg(&elf)
+        .status()?;
+    if !status.success() {
+        bail!("linking {} failed", elf.display());
+    }
+    finish(elf, out)
 }
 
 /// Pack an ELF into `out` and read back what the loader will make of it.
