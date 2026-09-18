@@ -16,8 +16,8 @@
 
 - The public output (the eight `SBPF_OUT` words) of the translated program must equal the interpreter's for every vector, including every failing one; `abi::{decode_input, check_region, canonical_input_hash, output_hash, public_output}` are reused, never reimplemented.
 - The interpreter's `Halt` variants and status mapping are the contract: `Exit`, `AccessViolation`, `BadInsn`, `DivByZero`, `UnknownSyscall`, `CallDepth`, `InstructionLimit`, `BadElf`, `BadJump`, `StackOverflow`, `Trap`. `MAX_CALL_DEPTH = 8`, `STACK_FRAME = 4096`, `HEAP_BYTES = 32 768`, the four regions at `0x1..0x4 << 32`.
-- Registers are `uint64_t` C locals; an instruction naming `dst > 10` or `src > 10` is refused at translation (the interpreter's `BadInsn`).
-- Cross-program invocation (`sol_invoke_signed_c`, `sol_invoke_signed_rust`, any `sol_invoke*`) is refused at translation with a message naming the syscall.
+- Registers are `uint64_t` C locals. **Amended 2026-09-18** (ruling on Task 2's SPL Token finding): an instruction naming `dst > 10` or `src > 10`, an unassigned opcode byte, or a static jump/call target outside the function's text is *not* refused at translation — none of it is a load-time check in `interp.rs`/`elf.rs` either (the interpreter only halts on it when it *executes* that instruction), and the committed SPL Token ELF itself contains unreached code Solana's own toolchain emitted that this translator must still accept (see the CPI amendment below; the same reasoning applies uniformly). Each becomes a runtime trap identical to the `Halt` the interpreter would raise (`BadInsn`/`BadJump`) plus a scanner-level warning naming the pc, so a vector that never reaches it still translates and runs.
+- Cross-program invocation (`sol_invoke_signed_c`, `sol_invoke_signed_rust`, any `sol_invoke*` this scanner can name from a hash). **Amended 2026-09-18**: not refused at translation — the interpreter only checks a syscall hash against `syscalls::SUPPORTED` when the `call imm` naming it is actually executed, and the committed SPL Token ELF calls two syscalls (`sol_set_return_data`, `sol_get_sysvar`) neither implemented, from instruction handlers the `Transfer` vector never reaches (`research/tests/sbpf_elf.rs`); refusing the whole program over that broke parity with the interpreter, which loads and runs this exact file today. CPI and every other unrecognised syscall hash alike become an ordinary syscall call site translated as a runtime trap (`Halt::UnknownSyscall`) plus a warning naming the syscall (or the raw hash, if it names nothing this scanner recognises).
 - The C is compiled with exactly the toolchain's flags (`--target=riscv32-unknown-none-elf -march=rv32im -mabi=ilp32 -mno-relax -nostdlib -ffreestanding -fno-builtin -Os`); no `rv32imc`.
 - The instruction-limit check is per basic block at the block head and must halt within the block that crosses the limit (never earlier).
 - Commit prefixes `sbpf2rv:`, `sbpf-core:`, `sbpf-rt:`, `docs:`; the two attribution lines from the session's system reminder.
@@ -91,24 +91,55 @@ Use the file's existing helper names for the host, workspace and readers.
 - Test: `sbpf2rv/tests/scan.rs`
 
 **Interfaces:**
+
+**Amended 2026-09-18, twice, both same-day rulings on this task's own findings (see the task-2
+report's fix notes for the full reasoning — parity with the interpreter, which never checks any of
+this except when it executes the instruction in question, and the committed SPL Token ELF contains
+unreached code that fails every one of these checks). `scan` is now infallible: there is no
+`Refusal` type. Everything the first ruling (below) still lists as a refusal was refused only
+because pass 1 checked it before pass 2 even began; the second ruling removed pass 1's checks
+entirely and folded them into pass 2, where every other check already lived.**
+
 - Produces:
 
 ```rust
 pub struct Function { pub entry: usize, pub blocks: Vec<Block> }                     // pcs in slots
 pub struct Block { pub start: usize, pub end: usize, pub insns: Vec<sbpf_core::isa::Insn>, pub term: Term }
-pub enum Term { Fallthrough(usize), Jump(usize), CondJump { taken: usize, not: usize }, Exit, Call { target: usize, next: usize }, Syscall { hash: u32, next: usize }, CallX { next: usize } }
-pub struct Scan { pub functions: Vec<Function>, pub entry: usize, pub callx_targets: Vec<usize> }
-pub enum Refusal { RegisterOutOfRange { pc: usize, opc: u8 }, JumpOutOfText { pc: usize, target: i64 }, Cpi { pc: usize, name: &'static str }, UnknownOpcode { pc: usize, opc: u8 } }
-pub fn scan(program: &sbpf_core::elf::Program<'_>) -> Result<Scan, Refusal>;
+pub enum Term { Fallthrough(usize), Jump(usize), CondJump { taken: usize, not: usize }, Exit, Call { target: usize, next: usize }, Syscall { hash: u32, next: usize }, CallX { next: usize }, Trap(TrapKind) }
+pub enum TrapKind { BadInsn(u8), BadJump }             // exactly interp.rs's Halt, so Task 4 needs no cross-reference
+pub struct Scan { pub functions: Vec<Function>, pub entry: usize, pub callx_targets: Vec<usize>, pub warnings: Vec<Warning> }
+pub enum Warning { UnknownSyscall { pc: usize, hash: u32 }, Cpi { pc: usize, name: &'static str }, RegisterOutOfRange { pc: usize, opc: u8 }, UnknownOpcode { pc: usize, opc: u8 }, JumpOutOfText { pc: usize, target: i64 } }
+pub fn scan(program: &sbpf_core::elf::Program<'_>) -> Scan;                          // infallible
 ```
 
-- [ ] **Step 1: Write the failing tests** — build tiny programs with `sbpf_core::isa::encode` (an `exit`; a function with a `call` to a second function; a `ja` past the text; a `mov r11, 0`; a `call` whose hash is `murmur3_32(b"sol_invoke_signed_c", 0)`) and assert: the function count, the block splits at every jump target and after every jump/call/exit, `Refusal::JumpOutOfText`, `Refusal::RegisterOutOfRange`, `Refusal::Cpi`.
+A bad jump/call *target* has no in-text pc a `Term` field can name, so every function shares one
+synthetic pc (one past its text's last real slot) that a bad edge redirects to instead: a `Block`
+with no instructions and `term: Term::Trap(TrapKind::BadJump)`. The one exception is an internal
+call whose *target* (not its return point) is bad: there is no function to call, so the call site
+traps directly (`Term::Trap`, no `Term::Call` at all) rather than naming a non-function as a
+target.
 
-- [ ] **Step 2: Run to verify they fail.**
+- [x] **Step 1: Write the failing tests** — build tiny programs with `sbpf_core::isa::encode` (an
+  `exit`; a function with a `call` to a second function; a `ja` past the text; a `mov r11, 0`; a
+  `call` whose hash is `murmur3_32(b"sol_invoke_signed_c", 0)`) and assert: the function count, the
+  block splits at every jump target and after every jump/call/exit, and — following both rulings
+  above — that none of this refuses the scan: each becomes a `Warning` plus a `Term::Trap` (or, for
+  the two syscall cases, an ordinary `Term::Syscall`) instead.
 
-- [ ] **Step 3: Implement `scan`** — decode every slot with `isa::decode` (an `lddw` occupies two); collect jump targets (`pc + 1 + off`) and call targets; refuse targets outside the text; walk from the entry and every call target, splitting blocks at targets and after terminators; classify a `call imm` as internal when the loader marked it as a pc target and as a syscall when its immediate matches a hash in `syscalls::SUPPORTED` or the two software ones (`sol_ed25519_program`… — take the exact names from `syscalls.rs`); refuse `sol_invoke*` names; collect `callx` targets as every function entry.
+- [x] **Step 2: Run to verify they fail.**
 
-- [ ] **Step 4: Run the tests; commit** — `sbpf2rv: the scanner — functions, blocks, targets, and the four refusals`.
+- [x] **Step 3: Implement `scan`** — decode every slot with `isa::decode` (an `lddw` occupies two);
+  walk from the entry and every internal call target, splitting blocks at jump targets and after
+  terminators; classify a `call imm` as internal when `src == 0` and as a syscall when `src == 1`,
+  the immediate a `syscalls::SUPPORTED` hash if implemented, else a `Warning` either way (`Cpi` for
+  a `sol_invoke*` name this scanner can check a hash against, `UnknownSyscall` otherwise) plus an
+  ordinary `Term::Syscall` regardless — Task 4 emits a runtime trap for an unrecognised hash rather
+  than a real call; collect `callx` targets as every function entry; every register-range,
+  opcode-validity and jump/call-target check happens once per reachable pc in this same walk (not
+  in a separate whole-text pass), producing a `Warning` plus `Term::Trap` rather than refusing.
+
+- [x] **Step 4: Run the tests; commit** — `sbpf2rv: the scanner — functions, blocks, targets, and
+  the four refusals`, then the two same-day amendment commits.
 
 ---
 

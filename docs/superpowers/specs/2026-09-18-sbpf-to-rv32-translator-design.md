@@ -63,13 +63,23 @@ pairs" of the approved design, done by the compiler.
 
 Every instruction that can trap does so through `sbpf_trap(code)`, which unwinds to the harness
 with the interpreter's `Halt` value so the canonical failure output is byte-identical: division
-by zero, a bad jump (a `ja`/`j*` target outside the function's text is rejected at translation;
-a `callx` to an unknown target traps at runtime), call depth over `MAX_CALL_DEPTH`, and the
-instruction limit, kept as a counter decremented by the block's length at the head of each basic
-block and checked there (the interpreter counts one per instruction; the block-granular check
-halts at the same or a later instruction, never earlier, and never past the limit plus one
-block — the spec pins this as "halts within the block that crosses the limit", and the
-differential tests compare outputs, not the exact halting pc).
+by zero, a bad jump (`Halt::BadJump` — a `ja`/`j*`/internal-`call` target outside the function's
+text, or a `callx` to an unknown target), a bad instruction (`Halt::BadInsn` — a register nibble
+above `r10`, or an opcode byte `isa::classify` does not assign), an unrecognised syscall hash
+(`Halt::UnknownSyscall`, including a cross-program-invocation name, §5), call depth over
+`MAX_CALL_DEPTH`, and the instruction limit, kept as a counter decremented by the block's length
+at the head of each basic block and checked there (the interpreter counts one per instruction;
+the block-granular check halts at the same or a later instruction, never earlier, and never past
+the limit plus one block — the spec pins this as "halts within the block that crosses the
+limit", and the differential tests compare outputs, not the exact halting pc). **Amended
+2026-09-18**: a static `ja`/`j*`/internal-`call` target outside the text, and a bad register or
+opcode, are *runtime* traps like everything else in this paragraph, not rejected at translation
+as an earlier draft of this spec had it — none of it is a load-time check in the interpreter
+either (`interp.rs` raises each only when it executes the instruction in question), and the
+committed SPL Token ELF contains reachable-but-unexercised code that fails some of these checks,
+so a translator that refused them outright would refuse a program the interpreter runs
+successfully today. The scanner (`sbpf2rv/src/scan.rs`) still finds every one of these
+statically and reports it (a `Warning`), it just no longer *refuses* the program over it.
 
 **Memory.** The interpreter's four regions (`memory.rs`) are kept as the address model: a
 64-bit virtual address is `region << 32 | offset`; `tr(addr, n)` looks the region up in a
@@ -100,8 +110,16 @@ return 0, `abort` and `sol_panic_` as traps; `sol_poseidon` where the interprete
 the interpreter, **`sol_ed25519` verify and `sol_secp256k1_recover` are provided as pure C**
 (the reference-style field and group arithmetic, no lookup tables), correct and slow: they are
 measured in cycles and listed as the coprocessor backlog, which is a machine milestone, not this
-tool's. **Cross-program invocation (`sol_invoke_signed*`) is refused at translation** with a
-message: a proof carries one program's execution, and a multi-program model is a chain design.
+tool's. **Cross-program invocation (`sol_invoke_signed*`) is translated, not refused**: a proof
+carries one program's execution and a multi-program model is a chain design, so `sbpf-rt` has
+nothing to call for it, but the call site itself is ordinary translated code — `sbpf_trap` with
+the interpreter's own `Halt::UnknownSyscall`, the same as any other syscall hash `sbpf-rt` has no
+implementation for. **Amended 2026-09-18**: an earlier draft of this spec refused CPI at
+translation; ruled out because the interpreter itself only ever raises `UnknownSyscall` when a
+`call imm` naming it is executed, never at load, so refusing the whole program over an unreached
+CPI call would refuse programs the interpreter accepts (the committed SPL Token ELF's own
+unreached, unsupported syscalls are the same case). The scanner still reports every CPI call site
+it finds (a `Warning`), it just no longer refuses the program over one.
 
 ## 6. Testing
 
