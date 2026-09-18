@@ -119,7 +119,33 @@ fn main() -> Result<()> {
             )?;
             println!("wrote {} ({} bytes)", out.display(), image.len());
         }
-        Cmd::Run { .. } => bail!("run lands in the next task"),
+        Cmd::Run { image, inputs, public } => {
+            let bytes = std::fs::read(&image)?;
+            // `load` (the image-container reader `build`/`check`/`info` share) is tried first, since
+            // that is what `rand-guest build`/`pack` themselves produce; a guest with no data segment
+            // — `fib.bin`, `keccak256.bin` — predates this tool and was committed as a bare flat
+            // binary instead (`research/src/guests.rs`'s `compiled::fib`/`compiled::keccak256`), so a
+            // container-magic miss falls back to that loader at `guest-sdk/guest.ld`'s fixed `ORIGIN`.
+            let program = load(&bytes).or_else(|_| rand_zkvm::isa::Program::from_flat_binary(0x1000, &bytes).map_err(|e| anyhow::anyhow!("{e:?}")))?;
+            let max = rand_zkvm::machine::Tier(*rand_zkvm::machine::TIERS.last().unwrap()).max_cycles();
+            match rand_zkvm::emulator::execute(&program, &inputs, &public, max) {
+                Ok(exec) => {
+                    for (i, w) in exec.outputs.iter().enumerate() { println!("out[{i}] = {w}"); }
+                    let cycles = exec.cycles();
+                    println!("cycles {cycles}");
+                    match rand_zkvm::machine::Tier::for_cycles(cycles + program.digest_rows() + rand_zkvm::hash::input_digest_row_count(inputs.len()) + rand_zkvm::hash::public_digest_row_count(public.len())) {
+                        Some(t) => println!("tier {}", t.0),
+                        None => println!("no tier fits {cycles} cycles"),
+                    }
+                    if !exec.halted { println!("note: the program did not halt (ran out of the largest tier's budget)"); }
+                }
+                Err(e) => {
+                    // The emulator's error carries the faulting pc where it has one; print what it has.
+                    println!("trap at pc: {e:?}");
+                    std::process::exit(2);
+                }
+            }
+        }
         Cmd::Info { image, max_words } => {
             let bytes = std::fs::read(&image)?;
             let (info, text, data) = pack::split(&bytes)?;
