@@ -156,10 +156,12 @@ pub unsafe extern "C" fn evm_sstore(
 /// this crate's [`keccak256`]. `ptr` may be null when `len` is 0.
 ///
 /// # Safety
-/// `host` points to a live [`HostBox`]; `ptr` is readable for `len` bytes (or `len` is 0); `out` is
-/// writable for 32 bytes.
+/// `host` points to a live [`HostBox`]; `ptr` is readable for `len` bytes (or `len` is 0); `len` is
+/// at most `isize::MAX` (2^31 − 1 on the 32-bit guest — `slice::from_raw_parts`'s own bound; the
+/// runtime's memory is 64 KiB, so a real call is far below it); `out` is writable for 32 bytes.
 #[no_mangle]
 pub unsafe extern "C" fn evm_keccak256(host: *mut c_void, ptr: *const u8, len: u32, out: *mut u8) {
+    debug_assert!(len <= isize::MAX as u32);
     let h = &mut *(host as *mut HostBox<'_>);
     let msg: &[u8] = if len == 0 {
         &[]

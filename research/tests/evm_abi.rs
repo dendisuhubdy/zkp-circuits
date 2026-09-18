@@ -9,8 +9,8 @@
 use std::ffi::c_void;
 
 use evm_core::abi::{
-    decode_env_ext, decode_input, hash_words, logs_hash, public_output, run_call, run_call_with,
-    run_call_with_executor, EnvExt, InputCursor, ParseError, Workspace, ENV_EXT_WORDS,
+    decode_input, hash_words, logs_hash, public_output, run_call, run_call_with,
+    run_call_with_executor, InputCursor, ParseError, Workspace,
 };
 use evm_core::ffi::{evm_keccak256, evm_sload, evm_sstore, halt_code, halt_from_code, HostBox};
 use evm_core::interp::{
@@ -429,44 +429,17 @@ fn one_workspace_runs_two_calls_without_leaking_state() {
     assert_eq!(no_jd.expected().1.halt, Halt::BadJump);
 }
 
-// ---- evm2rv Task 1: the executor hook, the trailing environment words and the storage FFI ----
+// ---- evm2rv Task 1: the executor hook and the storage FFI ----
 
-/// Eleven distinct values, one per `EnvExt` field, and the trailing words that carry them in the
-/// layout `decode_env_ext` reads: field order, a 256-bit value as its eight limbs, a 64-bit one as
-/// one word (as `gas_limit` is).
-fn env_ext_sample() -> (EnvExt, Vec<u32>) {
-    let u = |k: u32| U256(std::array::from_fn(|i| k * 0x0101_0000 + i as u32 + 1));
-    let e = EnvExt {
-        origin: u(1),
-        gasprice: u(2),
-        coinbase: u(3),
-        timestamp: 1_700_000_004,
-        number: 5_000_005,
-        prevrandao: u(6),
-        gaslimit: 30_000_007,
-        chainid: u(8),
-        selfbalance: u(9),
-        basefee: u(10),
-        blockhash: u(11),
-    };
-    let mut w = Vec::new();
-    for v in [e.origin, e.gasprice, e.coinbase] {
-        w.extend_from_slice(&v.0);
-    }
-    w.push(e.timestamp as u32);
-    w.push(e.number as u32);
-    w.extend_from_slice(&e.prevrandao.0);
-    w.push(e.gaslimit as u32);
-    for v in [e.chainid, e.selfbalance, e.basefee, e.blockhash] {
-        w.extend_from_slice(&v.0);
-    }
-    assert_eq!(w.len(), ENV_EXT_WORDS);
-    (e, w)
+/// The interpreter as an `Executor`.
+fn interp_exec(h: &mut HostRef, code: &[u8], cd: &[u8], env: Env, st: &mut StorageTree, b: &mut Buffers) -> Outcome {
+    Interpreter::new(h, code, cd, env, st, b).run()
 }
 
 /// (a) The executor hook with the interpreter as the executor is `run_call_with`, on the ERC-20
-/// `transfer` vector: the same eight words, the same outcome, the same post-state tree — and the
-/// executor sees exactly the decoded call.
+/// `transfer` vector — the same eight words, the same outcome, the same post-state tree, and the
+/// executor sees exactly the decoded call — and on a revert and an exceptional halt, whose outputs
+/// the shared `public_output` rules collapse. A malformed vector never reaches the executor.
 #[test]
 fn the_executor_hook_with_the_interpreter_is_run_call_with() {
     use rand_zkvm::evm::{erc20_transfer, ALICE, BOB};
@@ -478,14 +451,16 @@ fn the_executor_hook_with_the_interpreter_is_run_call_with() {
     assert_eq!(out_ref[0], 1, "the transfer succeeds");
 
     let mut calls = 0;
-    let mut exec = |h: &mut HostRef, code: &[u8], cd: &[u8], env: Env, ext: &EnvExt, st: &mut StorageTree, b: &mut Buffers| {
+    let mut exec = |h: &mut HostRef, code: &[u8], cd: &[u8], env: Env, st: &mut StorageTree, b: &mut Buffers| {
         calls += 1;
         assert_eq!(code, &call.code[..]);
         assert_eq!(cd, &call.calldata[..]);
+        assert_eq!(env.address, call.address);
         assert_eq!(env.caller, call.caller);
+        assert_eq!(env.callvalue, call.callvalue);
         assert_eq!(env.gas_limit, call.gas_limit);
-        assert_eq!(*ext, EnvExt::ZERO, "a vector without the tail reads as zeros");
-        Interpreter::new(h, code, cd, env, st, b).run()
+        assert_eq!(st.root(), call.tree.root());
+        interp_exec(h, code, cd, env, st, b)
     };
     let mut ws = Box::new(Workspace::ZERO);
     let (out, o) = run_call_with_executor(&mut HostRef, &mut ws, |i| w[i as usize], w.len() as u32, &mut exec);
@@ -495,11 +470,26 @@ fn the_executor_hook_with_the_interpreter_is_run_call_with() {
     assert_eq!((o.halt, o.gas_used, &o.ret[..o.ret_len], o.n_logs), (o_ref.halt, o_ref.gas_used, &o_ref.ret[..o_ref.ret_len], o_ref.n_logs));
     assert_eq!(o.logs, o_ref.logs);
     assert_eq!(ws.input.storage.root(), ws_ref.input.storage.root());
+    assert_ne!(ws.input.storage.root(), call.tree.root(), "the transfer moved the root");
+
+    // a revert and an exceptional halt after a store and a log: the same collapsed outputs
+    for tail in [vec![0x60, 0x2a, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xfd], vec![0xfe]] {
+        let mut c = sample();
+        c.code = store_and_log();
+        c.code.extend_from_slice(&tail);
+        let w = c.input_words();
+        let mut ws = Box::new(Workspace::ZERO);
+        let (out, o) = run_call_with_executor(&mut HostRef, &mut ws, |i| w[i as usize], w.len() as u32, &mut interp_exec);
+        let (want, o_want, _) = c.expected();
+        assert_eq!(out, want);
+        assert_ne!(out[0], 1);
+        assert_eq!((o.halt, o.gas_used, o.n_logs), (o_want.halt, o_want.gas_used, o_want.n_logs));
+    }
 
     // a malformed vector never reaches the executor and is the canonical malformed output
     let mut bad = w.clone();
     bad.truncate(w.len() - 1);
-    let mut never = |_: &mut HostRef, _: &[u8], _: &[u8], _: Env, _: &EnvExt, _: &mut StorageTree, _: &mut Buffers| -> Outcome {
+    let mut never = |_: &mut HostRef, _: &[u8], _: &[u8], _: Env, _: &mut StorageTree, _: &mut Buffers| -> Outcome {
         panic!("the executor ran on a vector that does not parse")
     };
     let mut ws = Box::new(Workspace::ZERO);
@@ -508,68 +498,7 @@ fn the_executor_hook_with_the_interpreter_is_run_call_with() {
     assert_eq!((o.halt, o.gas_used), (Halt::OutOfBounds, 0));
 }
 
-/// (b) Eleven trailing environment values: `decode_input` stops where the standard layout ends
-/// and ignores them, so the interpreter's `run_call_with` gives the same output with or without
-/// them; `decode_env_ext` reads them back after `decode_input` (zeros when absent, a
-/// `Truncated` refusal when only part of the tail is there); and `run_call_with_executor` hands
-/// them to its executor.
-#[test]
-fn the_trailing_environment_words_are_optional_and_ignored_by_the_interpreter() {
-    use rand_zkvm::evm::{erc20_transfer, ALICE, BOB};
-    let call = erc20_transfer(ALICE, BOB, U256::from_u32(250), &[(ALICE, U256::from_u32(1000))]);
-    let plain = call.input_words();
-    let (ext, tail) = env_ext_sample();
-    let mut with = plain.clone();
-    with.extend_from_slice(&tail);
-
-    // the interpreter's path, unchanged, ignores the tail
-    let run = |w: &Vec<u32>| {
-        let mut ws = Box::new(Workspace::ZERO);
-        let (out, o) = run_call_with(&mut HostRef, &mut ws, |i| w[i as usize], w.len() as u32);
-        (out, o.halt, o.gas_used)
-    };
-    assert_eq!(run(&with), run(&plain));
-    assert_eq!(run(&plain).0[0], 1);
-
-    // decode_input consumes exactly the standard vector, then decode_env_ext reads the tail
-    let ext_of = |w: &Vec<u32>| {
-        let mut ws = Box::new(Workspace::ZERO);
-        let mut c = InputCursor::new(|i| w[i as usize], w.len() as u32);
-        decode_input(&mut HostRef, &mut ws.input, &mut c).expect("the standard vector parses");
-        decode_env_ext(&mut c)
-    };
-    assert_eq!(ext_of(&with), Ok(ext));
-    assert_eq!(ext_of(&plain), Ok(EnvExt::ZERO));
-    for cut in [1, 8, ENV_EXT_WORDS - 1] {
-        let mut part = with.clone();
-        part.truncate(with.len() - cut);
-        assert_eq!(ext_of(&part), Err(ParseError::Truncated), "a tail short by {cut} words");
-    }
-
-    // the executor path hands the tail to its executor and, with the interpreter, publishes the
-    // same output as the plain vector
-    let mut seen = None;
-    let mut exec = |h: &mut HostRef, code: &[u8], cd: &[u8], env: Env, e: &EnvExt, st: &mut StorageTree, b: &mut Buffers| {
-        seen = Some(*e);
-        Interpreter::new(h, code, cd, env, st, b).run()
-    };
-    let mut ws = Box::new(Workspace::ZERO);
-    let (out, _) = run_call_with_executor(&mut HostRef, &mut ws, |i| with[i as usize], with.len() as u32, &mut exec);
-    assert_eq!(seen, Some(ext));
-    assert_eq!(out, run(&plain).0);
-
-    // a partial tail is a malformed vector on the executor path
-    let mut part = with.clone();
-    part.pop();
-    let mut ws = Box::new(Workspace::ZERO);
-    let mut exec2 = |h: &mut HostRef, code: &[u8], cd: &[u8], env: Env, _: &EnvExt, st: &mut StorageTree, b: &mut Buffers| {
-        Interpreter::new(h, code, cd, env, st, b).run()
-    };
-    let (out, _) = run_call_with_executor(&mut HostRef, &mut ws, |i| part[i as usize], part.len() as u32, &mut exec2);
-    assert_eq!(out, out_words(2, digest(&[], [0; 8], [0; 8], &[], &no_logs())));
-}
-
-/// (c) `evm_sload`/`evm_sstore` through the C ABI on a two-slot tree match `StorageTree::load`/
+/// (b) `evm_sload`/`evm_sstore` through the C ABI on a two-slot tree match `StorageTree::load`/
 /// `store` step for step — values, roots and refusals — and `evm_keccak256` is `keccak256`.
 #[test]
 fn the_storage_and_keccak_ffi_match_the_storage_tree() {
