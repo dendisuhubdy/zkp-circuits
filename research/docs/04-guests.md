@@ -106,23 +106,15 @@ development machine. M4.1 adds one:
   output slot 7 set to `0xdead_beef`), and `guest.ld`, the linker script
   placing RAM at `ORIGIN = 0x1000` with a 64 KiB stack region.
 - **`guests-compiled/<name>/`**: one crate per compiled guest, targeting
-  `riscv32im-unknown-none-elf` (`.cargo/config.toml`: `-C
-  link-arg=-T../../guest-sdk/guest.ld` — a path relative to the crate
-  root, since the linker's cwd during the link step is the guest crate's
-  own directory, one level below where `guest.ld` lives; `-C
-  target-feature=-unaligned-scalar-mem`, explicit even though it is this
-  target's default, since a misaligned load/store is a constraint
-  violation in this machine, not something the compiler may assume the
-  hardware tolerates). Each guest's `Makefile` resolves `llvm-objcopy` out
-  of the toolchain's own sysroot (`rustc --print sysroot`, not a hardcoded
-  host triple — it isn't on `PATH`), builds with `cargo +1.98.1 build
-  --release`, and converts the ELF to a flat image with `llvm-objcopy -O
-  binary`; the Makefile header records the exact `rustc +1.98.1 --version`
-  the committed `.bin` was built with, and a clean rebuild reproduces the
-  identical sha256. The resulting `.bin` is committed (alongside its own
-  `.sha256`) so a reviewer without the target installed can still run
-  every test — `research/src/guests.rs`'s `compiled` module loads it with
-  `include_bytes!` + `Program::from_flat_binary(0x1000, BIN)`.
+  `riscv32im-unknown-none-elf`, with a linker script placing RAM at
+  `guest-sdk/guest.ld`'s `ORIGIN` (or a raised one, for a guest with data —
+  `docs/01-isa.md`'s "The image container"). Built by the `rand-guest`
+  toolchain crate, not by hand — `guests-compiled/README.md` has the exact
+  command and what it pins (compiler, flags, target). The resulting `.bin` is
+  committed (alongside its own `.sha256`) so a reviewer without the target
+  installed can still run every test — `research/src/guests.rs`'s `compiled`
+  module loads it with `include_bytes!` + `Program::from_flat_binary(0x1000,
+  BIN)`.
 
 The flat loader only ever populates the instruction space — RAM starts zero
 and nothing copies `.rodata`/`.data` bytes into it — so a guest loaded that

@@ -1,5 +1,6 @@
 //! Driving rustc (and, in Task 6, clang) for the guest target, then pack. The flags are the
-//! four Makefiles', generated here so no guest carries them.
+//! former four Makefiles' (`guests-compiled/README.md`), generated here so no guest carries
+//! them.
 
 use crate::pack;
 use anyhow::{bail, Context, Result};
@@ -30,6 +31,18 @@ pub struct BuildOutput {
 /// This is the only place the set is written down: cargo *merges* `--config` rustflags with a
 /// `.cargo/config.toml`'s rather than overriding them, so a guest that also carried them would
 /// link with a duplicate `-T`. The guests carry none.
+///
+/// Note what is *not* here (moved verbatim from the former `guests-compiled/evm/Makefile`):
+/// nothing suppresses the opcode dispatch's jump tables. Before the image container existed they
+/// had to be suppressed (`-C llvm-args=-max-jump-table-size=1`), because a jump table in an
+/// unloadable `.rodata` means a jump to `pc 0`. With the container carrying them they are simply
+/// faster, measured both ways on the ERC-20 transfer: 121 763 executed cycles and 17 983 program
+/// words with the tables (126 491 all in, counting the digest prefixes) against 123 659 and
+/// 17 065 with the compare-and-branch chain (128 158 all in) — the tables cost ~900 more program
+/// words and save ~1 900 execution cycles. (Both figures are from the same build pair, which
+/// predates two later `storage.rs` changes — a tidy-up and the duplicate-leaf-index check; the
+/// committed image measures 121 638 executed cycles over 18 009 program words,
+/// `docs/04-guests.md`.)
 pub fn flags(root: &Path, ld: &Path) -> Vec<String> {
     vec![
         "-C".into(),

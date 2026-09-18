@@ -252,12 +252,11 @@ Three properties make this the whole feature:
   over the committed `keccak256.bin`). `fib` and `keccak256` keep their flat
   `.bin` files and their loader call untouched.
 
-`guests-compiled/mkimage.py` builds a container from a linked ELF (`.text`
-as the text segment, every other allocated `PROGBITS` section as one
-contiguous data segment, `.bss` excluded because it is `NOBITS`), and the
-guest Makefile calls it instead of `llvm-objcopy -O binary`. `LoadError` gains
-`Magic`, `Version`, `Segments`, `Base` and `PrologueRoom` for a container that
-is not one.
+`rand-guest build` (the standalone zkVM toolchain crate; see `guests-compiled/README.md`) is what
+builds a container from a linked ELF today — `.text` as the text segment, every other allocated
+`PROGBITS` section as one contiguous data segment, `.bss` excluded because it is `NOBITS` — in
+place of the hand-maintained `mkimage.py` and per-guest Makefiles it replaced. `LoadError` gains
+`Magic`, `Version`, `Segments`, `Base` and `PrologueRoom` for a container that is not one.
 
 Two committed guests take this path. M4.3's `evm` is 2 444 bytes of `.rodata`
 (jump tables, panic locations, materialised constants) costing 1 639 prologue
