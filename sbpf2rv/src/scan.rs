@@ -9,19 +9,39 @@
 //! name. This scanner reads exactly that convention — it never re-derives it from relocations,
 //! since a [`Program`] built by [`Program::from_text`] (as every test here does) never had any.
 //!
-//! # The four refusals (plus [`Refusal::UnknownSyscall`])
+//! # Refusals versus warnings
+//!
+//! Parity with the interpreter on every vector is the spec's binding requirement (spec §1), and
+//! the interpreter only checks a syscall hash against `syscalls::SUPPORTED` when a `call imm` that
+//! names it is actually *executed* — `interp.rs::dispatch`'s `other => Err(Halt::UnknownSyscall)`
+//! fires per call, not per program. A real ELF can and does name an unsupported syscall on a path
+//! no vector this translator is asked to prove ever takes (the committed SPL Token ELF calls
+//! `sol_set_return_data` and `sol_get_sysvar`, neither implemented, from instruction handlers the
+//! `Transfer` vector never reaches — `research/tests/sbpf_elf.rs`). Refusing the whole program for
+//! that would break parity in the other direction: a program the interpreter runs successfully
+//! would become untranslatable. So an unrecognised syscall hash — whether it matches no name this
+//! scanner knows at all, or matches a cross-program-invocation name — is not a [`Refusal`]; it is
+//! a [`Warning`] plus an ordinary [`Term::Syscall`], translated as code that traps at *runtime*
+//! with exactly the `Halt::UnknownSyscall(hash)` the interpreter would raise if that call is ever
+//! reached (Task 4's job; this scanner only records which pcs need it).
+//!
+//! What stays a hard [`Refusal`] is everything the *plan* (Global Constraints) and the *design
+//! spec* (§3) call out by name as rejected at translation regardless of reachability — code no
+//! toolchain emits and that the interpreter's own load-independent structural checks (`BadInsn`
+//! for a bad register or an unassigned opcode, `BadJump` for a static jump/call target outside the
+//! text) would trap on the moment it *is* reached, but that a well-formed program never contains
+//! in the first place:
 //!
 //! - [`Refusal::RegisterOutOfRange`]: a `dst`/`src` nibble naming `r11..r15`, which do not exist
-//!   (the interpreter's own check in `interp.rs::step`).
+//!   (plan Global Constraints: "an instruction naming `dst > 10` or `src > 10` is refused at
+//!   translation").
 //! - [`Refusal::JumpOutOfText`]: a `ja`/conditional-jump/internal-`call` target outside the text,
-//!   or landing on a slot that is not the start of an instruction (the second slot of an `lddw`).
-//! - [`Refusal::Cpi`]: a syscall hash equal to `murmur3_32` of a cross-program-invocation name
-//!   (`sol_invoke_signed_c`, `sol_invoke_signed_rust`, …) — CPI is a multi-program model this
-//!   translator does not support (spec §5, plan Global Constraints).
-//! - [`Refusal::UnknownOpcode`]: a byte `isa::classify` does not assign to any v1 class.
-//! - [`Refusal::UnknownSyscall`]: a syscall hash that is none of the above and not in
-//!   `syscalls::SUPPORTED` either — the runtime has no implementation for it (mirrors
-//!   `Halt::UnknownSyscall` in `interp.rs`, at translation time instead of run time).
+//!   or landing on a slot that is not the start of an instruction (the second slot of an `lddw`) —
+//!   design spec §3: "a `ja`/`j*` target outside the function's text is rejected at translation".
+//! - [`Refusal::UnknownOpcode`]: a byte `isa::classify` does not assign to any v1 class — the same
+//!   class of provably-malformed code as a bad register, by the same reasoning (not named
+//!   explicitly by either document, but nothing a compiler emits triggers it; see the task-2
+//!   report for the case this scanner cannot yet decide either way).
 
 use sbpf_core::elf::Program;
 use sbpf_core::isa::{self, opc, Class, Insn};
@@ -63,7 +83,11 @@ pub enum Term {
     Exit,
     /// `call imm`, `src == 0`: an internal call. Execution resumes at `next` on return.
     Call { target: usize, next: usize },
-    /// `call imm`, `src == 1`, hash in `syscalls::SUPPORTED`. Execution resumes at `next`.
+    /// `call imm`, `src == 1`: a syscall named by `hash`, `murmur3_32` of its name. Execution
+    /// resumes at `next` on return. `hash` may or may not be in `syscalls::SUPPORTED` — a hash
+    /// this scanner cannot place (unknown, or a CPI name) is still a `Term::Syscall`, with the pc
+    /// recorded in [`Scan::warnings`] instead of refusing the scan (see the module docs); Task 4
+    /// emits a real call for a supported hash and a runtime trap for anything else.
     Syscall { hash: u32, next: usize },
     /// `callx` (`call reg`, i.e. `isa::opc::CALL_REG`): the target is a register value, unknown
     /// statically. Execution resumes at `next` on return; the possible targets are
@@ -75,6 +99,9 @@ pub enum Term {
 /// calls), and the static approximation of every `callx`'s possible target.
 #[derive(Clone, Debug)]
 pub struct Scan {
+    /// `functions[0]` is always the entrypoint's function (`functions[0].entry == entry`); every
+    /// other function follows, sorted ascending by its entry pc. Discovery order (which call site
+    /// found a function first) is not preserved.
     pub functions: Vec<Function>,
     /// `program.entry_pc` — also `functions[0].entry`.
     pub entry: usize,
@@ -82,24 +109,42 @@ pub struct Scan {
     /// value, so the emitter's `switch` (spec §3) covers the whole known function set rather than
     /// one statically-determined pc.
     pub callx_targets: Vec<usize>,
+    /// Every `call imm` syscall site the scan could not place as a `syscalls::SUPPORTED` hash —
+    /// still translated (as a [`Term::Syscall`] that traps at runtime if actually reached; see the
+    /// module docs), but worth a diagnostic, since it means the source ELF's proof coverage does
+    /// not extend to whatever instruction handler contains it.
+    pub warnings: Vec<Warning>,
 }
 
-/// Why the scan refused to go on. Four the design calls for
-/// (`RegisterOutOfRange`/`JumpOutOfText`/`Cpi`/`UnknownOpcode`), plus [`Refusal::UnknownSyscall`]
-/// (this crate's own addition — see the module docs).
+/// Why the scan refused to go on: code a well-formed program never contains, rejected regardless
+/// of reachability (see the module docs for why this differs from [`Warning`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
     RegisterOutOfRange { pc: usize, opc: u8 },
     JumpOutOfText { pc: usize, target: i64 },
-    Cpi { pc: usize, name: &'static str },
     UnknownOpcode { pc: usize, opc: u8 },
-    UnknownSyscall { pc: usize, hash: u32 },
 }
 
-/// Cross-program-invocation syscall names: refused wherever their hash appears in a `call imm`,
-/// named in the [`Refusal::Cpi`] it produces (plan Global Constraints, spec §5). Not exhaustive of
-/// every `sol_invoke*` Solana defines — these are the two the design names — but every hash this
-/// scanner can actually recognise as a CPI call has to be checked against a name, and these are it.
+/// A syscall hash the scan translated anyway (as a runtime trap if reached) rather than refusing
+/// the whole program over — see the module docs' "Refusals versus warnings".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Warning {
+    /// `hash` names neither a `syscalls::SUPPORTED` entry nor a [`CPI_NAMES`] entry — the runtime
+    /// has no implementation for it at all (mirrors `Halt::UnknownSyscall` in `interp.rs`).
+    UnknownSyscall { pc: usize, hash: u32 },
+    /// `hash` matches `murmur3_32` of a cross-program-invocation name. CPI is a multi-program
+    /// model this translator does not support (spec §5), but — unlike the plan's original
+    /// "refused at translation" — an unreached CPI call must not block a program that never takes
+    /// that path, so it is translated the same as any other unrecognised syscall: a runtime trap,
+    /// with the name recorded here for diagnostics.
+    Cpi { pc: usize, name: &'static str },
+}
+
+/// Cross-program-invocation syscall names, checked against a syscall hash to produce
+/// [`Warning::Cpi`]'s name (plan Global Constraints, spec §5). Not exhaustive of every
+/// `sol_invoke*` Solana defines — these are the two the design names — but a name is not
+/// recoverable from a hash alone, so only a hash in this finite list can be named at all; anything
+/// else unrecognised is [`Warning::UnknownSyscall`] instead.
 const CPI_NAMES: &[&str] = &["sol_invoke_signed_c", "sol_invoke_signed_rust"];
 
 /// Scans `program`'s text into functions and basic blocks, or refuses it.
@@ -116,10 +161,10 @@ const CPI_NAMES: &[&str] = &["sol_invoke_signed_c", "sol_invoke_signed_rust"];
 /// 2. **A reachability walk from the entrypoint and every internal call target found along the
 ///    way** (a worklist of function roots, so a call inside a called function discovers a third
 ///    function, and so on). Only *this* pass — not pass 1 — validates jump/call targets
-///    ([`Refusal::JumpOutOfText`]) and classifies `call imm` sites
-///    ([`Refusal::Cpi`]/[`Refusal::UnknownSyscall`]/internal/syscall), matching the design's
-///    "unreachable text is not translated" (spec §3): a `ja` past the text in dead code is never
-///    visited and never refused.
+///    ([`Refusal::JumpOutOfText`]) and classifies `call imm` sites (internal, a supported syscall,
+///    or a syscall recorded as a [`Warning`] and translated as a runtime trap), matching the
+///    design's "unreachable text is not translated" (spec §3): a `ja` past the text in dead code
+///    is never visited and never refused.
 pub fn scan(program: &Program<'_>) -> Result<Scan, Refusal> {
     let text = program.text;
     let n_slots = text.len() / 8;
@@ -149,17 +194,19 @@ pub fn scan(program: &Program<'_>) -> Result<Scan, Refusal> {
     worklist.push_back(program.entry_pc);
 
     let mut functions: Vec<Function> = Vec::new();
+    let mut warnings: Vec<Warning> = Vec::new();
     while let Some(entry) = worklist.pop_front() {
-        let f = scan_function(entry, &by_pc, n_slots, &mut known_functions, &mut worklist)?;
+        let f =
+            scan_function(entry, &by_pc, n_slots, &mut known_functions, &mut worklist, &mut warnings)?;
         functions.push(f);
     }
     // `program.entry_pc`'s function first, whatever order the worklist discovered the rest in —
-    // `Scan::entry` and `functions[0].entry` agree.
+    // `Scan::entry` and `functions[0].entry` agree (see `Scan::functions`'s doc comment).
     functions.sort_by_key(|f| if f.entry == program.entry_pc { (0, f.entry) } else { (1, f.entry) });
 
     let callx_targets: Vec<usize> = known_functions.into_iter().collect();
 
-    Ok(Scan { functions, entry: program.entry_pc, callx_targets })
+    Ok(Scan { functions, entry: program.entry_pc, callx_targets, warnings })
 }
 
 /// One slot's instruction span: two for `lddw`, one for everything else.
@@ -240,6 +287,7 @@ fn scan_function(
     n_slots: usize,
     known_functions: &mut BTreeSet<usize>,
     call_worklist: &mut VecDeque<usize>,
+    warnings: &mut Vec<Warning>,
 ) -> Result<Function, Refusal> {
     // ---- (a) reachability + jump targets + terminator classification --------------------------
     let mut reachable: HashSet<usize> = HashSet::new();
@@ -287,16 +335,19 @@ fn scan_function(
                 }
                 Class::Call if insn.opc == opc::CALL_IMM => {
                     if insn.src == 1 {
+                        // A syscall by hash: `Term::Syscall` either way. A hash this scanner
+                        // cannot place as `SUPPORTED` gets a `Warning` (and, from the emitter, a
+                        // runtime trap identical to the interpreter's `Halt::UnknownSyscall`) —
+                        // not a refusal; see the module docs' "Refusals versus warnings".
                         let hash = insn.imm as u32;
                         match classify_syscall(hash) {
-                            SyscallKind::Supported => {
-                                term_at.insert(pc, Term::Syscall { hash, next: next_pc });
-                            }
-                            SyscallKind::Cpi(name) => return Err(Refusal::Cpi { pc, name }),
+                            SyscallKind::Supported => {}
+                            SyscallKind::Cpi(name) => warnings.push(Warning::Cpi { pc, name }),
                             SyscallKind::Unknown => {
-                                return Err(Refusal::UnknownSyscall { pc, hash })
+                                warnings.push(Warning::UnknownSyscall { pc, hash })
                             }
                         }
+                        term_at.insert(pc, Term::Syscall { hash, next: next_pc });
                     } else {
                         // src == 0: an internal call (pass 1 already ruled out every dst/src above
                         // 10, and `elf.rs`/`interp.rs` never produce a `call imm` with any other

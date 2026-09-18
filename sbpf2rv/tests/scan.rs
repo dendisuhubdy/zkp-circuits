@@ -5,10 +5,16 @@
 use sbpf_core::elf::Program;
 use sbpf_core::isa::{opc, Insn};
 use sbpf_core::syscalls;
-use sbpf2rv::scan::{scan, Refusal, Term};
+use sbpf2rv::scan::{scan, Refusal, Term, Warning};
 
 fn insn(opc: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
     Insn { opc, dst, src, off, imm }
+}
+
+/// An internal `call imm`'s `imm`: unlike `ja`/a conditional jump, the relative offset from a
+/// call site to its target lives in `imm`, not `off` (`target = pc + 1 + imm`).
+fn call_offset(pc: usize, target: usize) -> i32 {
+    (target as i64 - (pc as i64 + 1)) as i32
 }
 
 /// Encodes a straight-line instruction stream into the byte buffer `Program::from_text` wants.
@@ -168,43 +174,78 @@ fn src_r11_is_also_register_out_of_range() {
 }
 
 #[test]
-fn a_call_to_sol_invoke_signed_c_is_refused_as_cpi() {
+fn a_call_to_sol_invoke_signed_c_is_a_warning_not_a_refusal() {
+    // Ruling 2026-09-18 (post-SPL-Token finding): CPI is not reachability-independent — an
+    // unreached CPI call must not block a program that never takes that path. It is translated as
+    // an ordinary `Term::Syscall` (a runtime trap if the call is ever reached) plus a `Warning`.
     let hash = syscalls::murmur3_32(b"sol_invoke_signed_c", 0);
     let t = text(&[insn(opc::CALL_IMM, 0, 1, 0, hash as i32), exit()]);
     let program = Program::from_text(&t).unwrap();
-    let err = scan(&program).unwrap_err();
-    assert_eq!(err, Refusal::Cpi { pc: 0, name: "sol_invoke_signed_c" });
-}
-
-#[test]
-fn a_call_to_sol_invoke_signed_rust_is_refused_as_cpi() {
-    let hash = syscalls::murmur3_32(b"sol_invoke_signed_rust", 0);
-    let t = text(&[insn(opc::CALL_IMM, 0, 1, 0, hash as i32), exit()]);
-    let program = Program::from_text(&t).unwrap();
-    let err = scan(&program).unwrap_err();
-    assert_eq!(err, Refusal::Cpi { pc: 0, name: "sol_invoke_signed_rust" });
-}
-
-#[test]
-fn a_supported_syscall_is_not_refused() {
-    let hash = syscalls::SOL_LOG;
-    let t = text(&[insn(opc::CALL_IMM, 0, 1, 0, hash as i32), exit()]);
-    let program = Program::from_text(&t).unwrap();
     let scanned = scan(&program).unwrap();
+    assert_eq!(scanned.warnings, vec![Warning::Cpi { pc: 0, name: "sol_invoke_signed_c" }]);
     let f = &scanned.functions[0];
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     assert_eq!(b0.term, Term::Syscall { hash, next: 1 });
 }
 
 #[test]
-fn an_unrecognised_syscall_hash_is_unknown_syscall() {
+fn a_call_to_sol_invoke_signed_rust_is_a_warning_not_a_refusal() {
+    let hash = syscalls::murmur3_32(b"sol_invoke_signed_rust", 0);
+    let t = text(&[insn(opc::CALL_IMM, 0, 1, 0, hash as i32), exit()]);
+    let program = Program::from_text(&t).unwrap();
+    let scanned = scan(&program).unwrap();
+    assert_eq!(scanned.warnings, vec![Warning::Cpi { pc: 0, name: "sol_invoke_signed_rust" }]);
+}
+
+/// A CPI call reachable only from inside a called function's body (not the entry function
+/// itself), to check the warning is recorded regardless of which function the site is in — the
+/// coordinator's ruling item 4's "a CPI in a function body yields a warning, not a refusal".
+#[test]
+fn a_cpi_call_inside_a_called_function_is_a_warning_not_a_refusal() {
+    // pc0: call target=2 (the second function)
+    // pc1: exit
+    // pc2: call sol_invoke_signed_c (src=1)
+    // pc3: exit
+    let hash = syscalls::murmur3_32(b"sol_invoke_signed_c", 0);
+    let t = text(&[
+        insn(opc::CALL_IMM, 0, 0, 0, call_offset(0, 2)),
+        exit(),
+        insn(opc::CALL_IMM, 0, 1, 0, hash as i32),
+        exit(),
+    ]);
+    let program = Program::from_text(&t).unwrap();
+    let scanned = scan(&program).unwrap();
+    assert_eq!(scanned.warnings, vec![Warning::Cpi { pc: 2, name: "sol_invoke_signed_c" }]);
+    let callee = scanned.functions.iter().find(|f| f.entry == 2).unwrap();
+    let b2 = callee.blocks.iter().find(|b| b.start == 2).unwrap();
+    assert_eq!(b2.term, Term::Syscall { hash, next: 3 });
+}
+
+#[test]
+fn a_supported_syscall_is_not_refused_and_warns_nothing() {
+    let hash = syscalls::SOL_LOG;
+    let t = text(&[insn(opc::CALL_IMM, 0, 1, 0, hash as i32), exit()]);
+    let program = Program::from_text(&t).unwrap();
+    let scanned = scan(&program).unwrap();
+    assert!(scanned.warnings.is_empty());
+    let f = &scanned.functions[0];
+    let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
+    assert_eq!(b0.term, Term::Syscall { hash, next: 1 });
+}
+
+#[test]
+fn an_unrecognised_syscall_hash_is_a_warning_not_a_refusal() {
     // Not in SUPPORTED, and its name does not start with "sol_invoke" — this crate's own addition
-    // to the four refusals the design calls for (see the facts in the task brief).
+    // to the refusals the design calls for (see the facts in the task-2 brief), demoted to a
+    // warning by the same ruling that demoted CPI.
     let hash = syscalls::murmur3_32(b"sol_definitely_not_a_real_syscall", 0);
     let t = text(&[insn(opc::CALL_IMM, 0, 1, 0, hash as i32), exit()]);
     let program = Program::from_text(&t).unwrap();
-    let err = scan(&program).unwrap_err();
-    assert_eq!(err, Refusal::UnknownSyscall { pc: 0, hash });
+    let scanned = scan(&program).unwrap();
+    assert_eq!(scanned.warnings, vec![Warning::UnknownSyscall { pc: 0, hash }]);
+    let f = &scanned.functions[0];
+    let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
+    assert_eq!(b0.term, Term::Syscall { hash, next: 1 });
 }
 
 #[test]
@@ -233,4 +274,50 @@ fn callx_is_a_terminator_and_does_not_add_call_targets() {
     let b0 = f.blocks.iter().find(|b| b.start == 0).unwrap();
     assert_eq!(b0.term, Term::CallX { next: 1 });
     assert_eq!(scanned.callx_targets, vec![0]);
+}
+
+// ---- the real SPL Token ELF (ruling item 4, 2026-09-18) ------------------------------------
+
+/// The committed SPL Token ELF (`research/tests/sbpf_elf.rs`'s own fixture) names two syscalls
+/// `syscalls::SUPPORTED` does not implement — `sol_set_return_data` and `sol_get_sysvar` — from
+/// instruction handlers the `Transfer` vector never reaches (`GetAccountDataSize`/
+/// `AmountToUiAmount`/`UiAmountToAmount`, and the rent read `InitializeAccount` does). The scan
+/// must still succeed with zero refusals: refusing the whole program over a syscall no vector this
+/// translator is asked to prove ever reaches would break parity with the interpreter, which loads
+/// and runs this exact file today.
+#[test]
+fn the_real_spl_token_elf_scans_with_zero_refusals_and_warns_the_two_unsupported_syscalls() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../guests-compiled/sbpf/programs/spl_token.so");
+    let mut bytes = std::fs::read(path).expect("the committed SPL Token ELF");
+    let program = sbpf_core::elf::load(&mut bytes).expect("SPL Token must load");
+
+    let scanned = scan(&program).expect("SPL Token must scan with zero refusals");
+
+    let unsupported = ["sol_set_return_data", "sol_get_sysvar"];
+    let unsupported_hashes: Vec<u32> =
+        unsupported.iter().map(|n| syscalls::murmur3_32(n.as_bytes(), 0)).collect();
+    for (name, hash) in unsupported.iter().zip(&unsupported_hashes) {
+        assert!(
+            scanned
+                .warnings
+                .iter()
+                .any(|w| matches!(w, Warning::UnknownSyscall { hash: h, .. } if h == hash)),
+            "expected a Warning::UnknownSyscall naming {name} ({hash:#010x}); got {:?}",
+            scanned.warnings
+        );
+    }
+    // Every warning is one of the two known-unsupported syscalls above — nothing else in the
+    // committed file is unrecognised (`research/tests/sbpf_elf.rs` pins the file to exactly these
+    // seven referenced names, five supported and two not).
+    for w in &scanned.warnings {
+        match *w {
+            Warning::UnknownSyscall { hash, .. } => {
+                assert!(
+                    unsupported_hashes.contains(&hash),
+                    "unexpected unknown syscall hash {hash:#010x}"
+                );
+            }
+            Warning::Cpi { name, .. } => panic!("SPL Token names no CPI syscall: {name}"),
+        }
+    }
 }

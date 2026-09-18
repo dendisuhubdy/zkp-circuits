@@ -22,13 +22,20 @@ fn main() -> Result<()> {
         .map_err(|halt| anyhow!("{} is not a loadable sBPF v1 ELF: {halt:?}", cli.program.display()))?;
     let scanned = scan(&program).map_err(|refusal| anyhow!("sbpf2rv refuses this program: {refusal:?}"))?;
     println!(
-        "entry pc {}: {} function(s), {} callx target(s)",
+        "entry pc {}: {} function(s), {} callx target(s), {} warning(s)",
         scanned.entry,
         scanned.functions.len(),
         scanned.callx_targets.len(),
+        scanned.warnings.len(),
     );
     for f in &scanned.functions {
         println!("  fn {}: {} block(s)", f.entry, f.blocks.len());
+    }
+    // A warning names a syscall this translator will emit as a runtime trap (identical to the
+    // interpreter's `Halt::UnknownSyscall`) rather than a real call — not fatal, but worth telling
+    // the developer, since it means proof coverage doesn't extend to whatever calls it.
+    for w in &scanned.warnings {
+        println!("  warning: {w:?}");
     }
     Ok(())
 }
