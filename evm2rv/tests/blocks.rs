@@ -56,10 +56,18 @@ fn jumpdests_excludes_push_immediates() {
     assert_eq!(jumpdests(&code), vec![2]);
 }
 
+/// Every byte but two: `ORIGIN` (0x32) and `CHAINID` (0x46) cost Shanghai's G_BASE = 2 in the
+/// translation (fix round 1 of Task 4, item 6 — a controller ruling). The interpreter traps on both,
+/// so its table has no gas for them, and the translation implements them.
 #[test]
 fn static_gas_matches_interpreter_for_every_opcode_byte() {
     for op in 0u16..=255 {
         let op = op as u8;
+        if op == 0x32 || op == 0x46 {
+            assert_eq!(evm_core::interp::static_gas(op), 0);
+            assert_eq!(static_gas(op), 2, "{op:#04x}: G_BASE in the translation");
+            continue;
+        }
         assert_eq!(
             static_gas(op),
             evm_core::interp::static_gas(op),

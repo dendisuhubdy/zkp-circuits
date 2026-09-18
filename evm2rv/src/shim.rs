@@ -5,12 +5,14 @@
 //!
 //! * `Cargo.toml` — the guest crate: `guest-sdk`, and `evm-core` with its `ffi` feature (the
 //!   `extern "C"` storage and Keccak entry points the runtime calls back into); `cc` to build the C.
-//!   Its own workspace root and the interpreter guest's release profile. One cargo feature,
+//!   Its own workspace root and the interpreter guest's release profile. `cc` is pinned to
+//!   `=1.4.6`, and a generated `Cargo.lock` ([`cargo_lock`]) fixes it and its dependencies. One cargo feature,
 //!   `emit-outcome`, off by default, is for the parity test only (see `src/main.rs`).
 //! * `build.rs` — compiles `contract.c` and `evm-rt/`'s `evm_rt.c` and `u256.c` with the `cc`
 //!   crate, driving the clang `rand-guest` would pick (`$CLANG`, else Homebrew's LLVM, else `clang`
 //!   on `PATH`, and only one with a `riscv32` target) with **exactly `rand-guest`'s C flags**
-//!   ([`C_FLAGS`], rv32im — never rv32imc — `-Os`, the path remap). Rust's `compiler_builtins`
+//!   ([`C_FLAGS`], rv32im — never rv32imc — `-Os`, the path remap), inheriting no rustflags and
+//!   ignoring `CFLAGS`, and prints the clang's `--version` line as a cargo warning. Rust's `compiler_builtins`
 //!   supplies `memcpy`/`memset` and the 64-bit division helpers, so `rand-guest`'s `rt.c` is not
 //!   linked. No RISC-V clang is a build failure naming what was tried, never a skip.
 //! * `src/main.rs` — decode the interpreter's exact input vector, run the translated code, publish
@@ -99,6 +101,7 @@ pub fn crate_name(s: &str) -> String {
 /// The shim's files, as text, for a crate named `name` whose checkout is `up` above it.
 pub struct Files {
     pub cargo_toml: String,
+    pub cargo_lock: String,
     pub build_rs: String,
     pub main_rs: String,
     pub ld: String,
@@ -107,6 +110,7 @@ pub struct Files {
 pub fn files(name: &str, up: &str) -> Files {
     Files {
         cargo_toml: cargo_toml(name, up),
+        cargo_lock: cargo_lock(name),
         build_rs: build_rs(up),
         main_rs: MAIN_RS.to_string(),
         ld: LD.to_string(),
@@ -132,6 +136,7 @@ pub fn write_crate(out: &Path, name: &str, contract_c: &str) -> Result<()> {
     for (path, text) in [
         (out.join("contract.c"), contract_c),
         (out.join("Cargo.toml"), &f.cargo_toml),
+        (out.join("Cargo.lock"), &f.cargo_lock),
         (out.join("build.rs"), &f.build_rs),
         (out.join("src/main.rs"), &f.main_rs),
         (out.join("shim.ld"), &f.ld),
@@ -157,7 +162,9 @@ guest-sdk = {{ path = "{up}/guest-sdk" }}
 evm-core = {{ path = "{up}/guests-compiled/evm-core", features = ["ffi"] }}
 
 [build-dependencies]
-cc = "1.4"
+# Pinned exactly, with the generated Cargo.lock beside this file: the build script is part of
+# what produces the image, so its compiler driver must not move with a crates.io release.
+cc = "=1.4.6"
 
 [features]
 default = []
@@ -174,6 +181,68 @@ codegen-units = 1
 # Its own workspace root, like every guest crate.
 [workspace]
 "#
+    )
+}
+
+/// The shim's registry dependencies, exactly: `cc` 1.4.6 and what it pulls in, as the first
+/// parity build resolved them (name, version, checksum, dependencies).
+const LOCKED: [(&str, &str, &str, &[&str]); 3] = [
+    (
+        "cc",
+        "1.4.6",
+        "a3eb0f42d6c360dc3f8a821f6bf2fdea7f72bfd36b3076eb0e6d1e9e0752fff4",
+        &["find-msvc-tools", "shlex"],
+    ),
+    (
+        "find-msvc-tools",
+        "0.1.12",
+        "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d",
+        &[],
+    ),
+    (
+        "shlex",
+        "2.0.1",
+        "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba",
+        &[],
+    ),
+];
+
+/// The generated crate's `Cargo.lock`, in cargo's own format (version 4, packages sorted by
+/// name), so cargo uses it as written: `rand-guest build` passes no `--locked`, but cargo never
+/// re-resolves a lock that already satisfies the manifest, and the parity test checks the file is
+/// unchanged and no `Locking`/`Updating` line appears.
+pub fn cargo_lock(name: &str) -> String {
+    let mut pkgs: Vec<(String, String)> = Vec::new();
+    for (n, v, sum, deps) in LOCKED {
+        let mut s = format!(
+            "[[package]]\nname = \"{n}\"\nversion = \"{v}\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{sum}\"\n"
+        );
+        if !deps.is_empty() {
+            s.push_str("dependencies = [\n");
+            for d in deps {
+                s.push_str(&format!(" \"{d}\",\n"));
+            }
+            s.push_str("]\n");
+        }
+        pkgs.push((n.to_string(), s));
+    }
+    pkgs.push((
+        name.to_string(),
+        format!(
+            "[[package]]\nname = \"{name}\"\nversion = \"0.1.0\"\ndependencies = [\n \"cc\",\n \"evm-core\",\n \"guest-sdk\",\n]\n"
+        ),
+    ));
+    for local in ["evm-core", "guest-sdk"] {
+        pkgs.push((
+            local.to_string(),
+            format!("[[package]]\nname = \"{local}\"\nversion = \"0.1.0\"\n"),
+        ));
+    }
+    pkgs.sort_by(|a, b| a.0.cmp(&b.0));
+    let body: Vec<String> = pkgs.into_iter().map(|(_, s)| s).collect();
+    format!(
+        "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n{}",
+        body.join("\n")
     )
 }
 
@@ -258,11 +327,23 @@ fn main() {
         std::env::remove_var(v);
     }
     let clang = find_clang();
+    // Which compiler produced the C half of the image (and so its hc), in the build's output.
+    let version = Command::new(&clang)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.lines().next().map(str::to_string))
+        .unwrap_or_else(|| "(no --version output)".into());
+    println!("cargo:warning=evm2rv: clang {version} ({})", clang.display());
     let sources = [dir.join("contract.c"), rt.join("evm_rt.c"), rt.join("u256.c")];
     let mut b = cc::Build::new();
     b.compiler(&clang)
         .archiver(find_ar(&clang))
         .no_default_flags(true)
+        // cc 1.4.6 otherwise translates some of the Rust target's rustflags into C flags; the C
+        // flags are exactly C_FLAGS and nothing else.
+        .inherit_rustflags(false)
         .warnings(false)
         .extra_warnings(false)
         .include(&rt);
@@ -320,17 +401,20 @@ struct CLog {
     topics: [[u32; 8]; MAX_TOPICS],
 }
 
+// Every runtime global is `static mut`: C writes all of them (the result ones during the run),
+// so Rust must not assume any is immutable. Each is read and written only through `addr_of!` /
+// `addr_of_mut!`, never through a reference to the static itself.
 extern "C" {
     static mut evm_address: [u32; 8];
     static mut evm_caller: [u32; 8];
     static mut evm_callvalue: [u32; 8];
     static mut evm_tree: *mut c_void;
     static mut evm_host: *mut c_void;
-    static evm_ret: [u8; MAX_RETURN_BYTES];
-    static evm_ret_len: u32;
-    static evm_logs: [CLog; MAX_LOGS];
-    static evm_n_logs: u32;
-    static evm_halt_arg: u32;
+    static mut evm_ret: [u8; MAX_RETURN_BYTES];
+    static mut evm_ret_len: u32;
+    static mut evm_logs: [CLog; MAX_LOGS];
+    static mut evm_n_logs: u32;
+    static mut evm_halt_arg: u32;
     fn evm_rt_init(code: *const u8, code_len: u32, calldata: *const u8, calldata_len: u32, gas_limit: u64) -> u32;
     fn evm_rt_enter(entry: unsafe extern "C" fn()) -> u32;
     fn evm_gas_used() -> u64;

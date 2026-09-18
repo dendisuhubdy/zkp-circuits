@@ -1,12 +1,12 @@
 //! `evm2rv <contract> --out <dir> [--name <crate>] [--stage 1|2] [--chain-id <N>]` — the CLI.
 //!
 //! Translates the contract's runtime bytecode into `<dir>/contract.c` and writes the shim crate
-//! around it (`Cargo.toml`, `build.rs`, `src/main.rs`, `shim.ld`), ready for
+//! around it (`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/main.rs`, `shim.ld`), ready for
 //! `rand-guest build <dir> --max-words 65535`. Prints the block and opcode counts and a warning
 //! per trapping opcode present. Without `--out` it only analyses and prints.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -18,8 +18,9 @@ use evm2rv::emit::{mnemonic, translate, Options};
 #[derive(Parser, Debug)]
 #[command(name = "evm2rv")]
 struct Args {
-    /// The contract's runtime bytecode (not the creation code): a `.bin` (raw bytes) or `.hex`
-    /// (ASCII hex, an optional `0x` prefix) file.
+    /// The contract's runtime bytecode (not the creation code). A `.hex` file is hex text
+    /// (whitespace ignored, an optional `0x` prefix; anything else is an error); a file with any
+    /// other extension is the raw bytes.
     contract: PathBuf,
 
     /// Where the shim crate is written (inside a circuits checkout, as `rand-guest build`
@@ -41,16 +42,21 @@ struct Args {
     chain_id: Option<u64>,
 }
 
-/// A `.hex` file is ASCII hex (an optional `0x` prefix); anything else is read as raw bytes.
-fn read_bytecode(path: &PathBuf) -> Result<Vec<u8>> {
-    if let Ok(text) = fs::read_to_string(path) {
-        let trimmed = text.trim();
-        let hex_digits = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-        if !hex_digits.is_empty() && hex_digits.chars().all(|c| c.is_ascii_hexdigit()) {
-            return hex::decode(hex_digits).context("decoding hex bytecode");
-        }
+/// The input format is the extension's: a `.hex` file is hex text — every whitespace character
+/// is stripped, an optional `0x` prefix is allowed, and anything that is then not an even number
+/// of hex digits is an error (never a fall back to raw bytes). Every other extension, or none, is
+/// the raw bytes.
+fn read_bytecode(path: &Path) -> Result<Vec<u8>> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if path.extension().is_some_and(|e| e == "hex") {
+        let text = std::str::from_utf8(&bytes)
+            .with_context(|| format!("{} is a .hex file but not text", path.display()))?;
+        let digits: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let digits = digits.strip_prefix("0x").unwrap_or(&digits);
+        return hex::decode(digits)
+            .with_context(|| format!("{} is a .hex file but not valid hex", path.display()));
     }
-    fs::read(path).with_context(|| format!("reading {}", path.display()))
+    Ok(bytes)
 }
 
 fn main() -> Result<()> {
@@ -108,7 +114,7 @@ fn main() -> Result<()> {
         };
         evm2rv::shim::write_crate(out, &name, &emitted.c)?;
         println!(
-            "wrote {} (crate {name}): contract.c, Cargo.toml, build.rs, src/main.rs, shim.ld",
+            "wrote {} (crate {name}): contract.c, Cargo.toml, Cargo.lock, build.rs, src/main.rs, shim.ld",
             out.display()
         );
     }

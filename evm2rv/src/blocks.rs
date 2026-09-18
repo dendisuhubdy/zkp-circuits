@@ -1,6 +1,6 @@
 //! Basic-block analysis: the interpreter's jumpdest rule, block splitting at every `JUMPDEST` and
-//! after every terminator, per-block static gas (mirroring the interpreter's own `static_gas`
-//! table byte for byte) and the stack bounds (`min_depth`/`max_growth`) a single comparison at
+//! after every terminator, per-block static gas (the interpreter's own `static_gas` table byte
+//! for byte, except `ORIGIN`/`CHAINID`, which the interpreter traps on — see [`static_gas`]) and the stack bounds (`min_depth`/`max_growth`) a single comparison at
 //! the block head checks instead of a check per opcode.
 //!
 //! **The trapping-opcode boundary** (binding ruling, amending the task brief). The interpreter
@@ -21,8 +21,8 @@
 //! the block continues past them.
 //!
 //! `CHAINID` and `ORIGIN` are likewise ordinary ops — a translation-time constant and `CALLER`,
-//! respectively — even though the interpreter itself does not implement either (its static-gas
-//! table charges both zero, which this crate's table mirrors exactly, byte for byte).
+//! respectively — even though the interpreter itself does not implement either (it traps on both).
+//! Each costs Shanghai's `G_BASE` = 2 in the translation ([`static_gas`]).
 //!
 //! [`warnings`] reports every occurrence (in code order, immediates correctly skipped) of any
 //! opcode in [`WARN_SET`] — [`TRAP_TERM`]'s sixteen plus [`CALL_FAMILY`]'s four — as a
@@ -153,17 +153,17 @@ pub const WARN_SET: [u8; 20] = [
     0xf1, 0xf2, 0xf4, 0xfa, // CALL_FAMILY
 ];
 
-/// The Shanghai static gas of `op`, mirroring `evm_core::interp::static_gas`'s table exactly —
-/// same match, same arms, same constants — so this crate is not tied to the interpreter's `pub`
-/// visibility for its own translation logic. `tests/blocks.rs`'s `static_gas_matches_interpreter`
-/// asserts the two agree for every opcode byte, so any future drift in either table fails CI
-/// rather than double- or under-charging a translated contract.
+/// The Shanghai static gas of `op` in the translation: `evm_core::interp::static_gas`'s table —
+/// same match, same arms, same constants — plus `ORIGIN` (0x32) and `CHAINID` (0x46) at
+/// Shanghai's `G_BASE` = 2 (Task 4 fix round 1, a controller ruling: the interpreter traps on both,
+/// so it has no gas for them, and the translation implements them). `tests/blocks.rs`'s
+/// `static_gas_matches_interpreter_for_every_opcode_byte` asserts the two tables agree on every
+/// other byte, so drift in either fails CI rather than double- or under-charging a translated
+/// contract. [`blocks`] uses this one function for both `Block::static_gas` and `Op::gas_after`.
 ///
 /// Opcodes whose cost is wholly dynamic (`EXP`, `KECCAK256`, `SSTORE`, `LOGn`) are charged inside
 /// the runtime calls Task 4 emits and are zero here, as are the free ones (`STOP`, `RETURN`,
-/// `REVERT`, `INVALID`), `CHAINID`/`ORIGIN` (the interpreter's table has no entry for either,
-/// even though this translator implements both as ordinary ops), and every opcode this crate
-/// traps on.
+/// `REVERT`, `INVALID`), and every opcode this crate traps on.
 pub const fn static_gas(op: u8) -> u64 {
     const G_BASE: u64 = 2;
     const G_VERYLOW: u64 = 3;
@@ -174,6 +174,8 @@ pub const fn static_gas(op: u8) -> u64 {
     const G_SLOAD: u64 = 2_100;
     match op {
         0x5b => G_JUMPDEST,
+        // ORIGIN and CHAINID: G_BASE in the translation only (the interpreter traps on both).
+        0x32 | 0x46 => G_BASE,
         // base
         0x30 | 0x33 | 0x34 | 0x36 | 0x38 | 0x3d | 0x50 | 0x58 | 0x59 | 0x5a | 0x5f => G_BASE,
         // verylow: ADD/SUB, every comparison and bitwise opcode, CALLDATALOAD, MLOAD/MSTORE/

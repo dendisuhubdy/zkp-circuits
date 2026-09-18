@@ -92,8 +92,8 @@ fn erc20_hex() -> PathBuf {
 }
 
 /// Translate the ERC-20 into `dir` (inside the checkout, as `rand-guest build` requires) and build
-/// it; returns the image. `outcome` turns the shim's `emit-outcome` feature on for this build.
-fn build_shim(dir: &Path, outcome: bool) -> PathBuf {
+/// it; returns the image and its `hc`. `outcome` turns the shim's `emit-outcome` feature on for this build.
+fn build_shim(dir: &Path, outcome: bool) -> (PathBuf, String) {
     let _ = std::fs::remove_dir_all(dir.join("src"));
     let o = Command::new(env!("CARGO_BIN_EXE_evm2rv"))
         .arg(erc20_hex())
@@ -118,6 +118,10 @@ fn build_shim(dir: &Path, outcome: bool) -> PathBuf {
         );
         std::fs::write(&toml, patched).unwrap();
     }
+    // The generated crate carries its own Cargo.lock (cc and its dependencies pinned exactly);
+    // the build must use it as written, never re-resolve it.
+    let lock_before =
+        std::fs::read_to_string(dir.join("Cargo.lock")).expect("a generated Cargo.lock");
     let image = dir.join("image.bin");
     let o = scrubbed(rand_guest())
         .arg("build")
@@ -134,27 +138,67 @@ fn build_shim(dir: &Path, outcome: bool) -> PathBuf {
         String::from_utf8_lossy(&o.stdout),
         String::from_utf8_lossy(&o.stderr)
     );
-    eprintln!(
-        "{}: {}",
-        dir.display(),
-        String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .filter(|l| l.starts_with("wrote"))
-            .collect::<Vec<_>>()
-            .join(" ")
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("Cargo.lock")).unwrap(),
+        lock_before,
+        "the build rewrote the generated Cargo.lock"
     );
-    image
+    assert!(
+        !stderr.contains("Locking") && !stderr.contains("Updating crates.io index"),
+        "the build re-resolved the lock: {stderr}"
+    );
+    // build.rs names the compiler that produced the image.
+    assert!(
+        stderr.contains("evm2rv: clang "),
+        "no clang version line: {stderr}"
+    );
+    let wrote = stdout
+        .lines()
+        .find(|l| l.starts_with("wrote"))
+        .unwrap_or_else(|| panic!("no `wrote` line: {stdout}"));
+    eprintln!("{}: {wrote}", dir.display());
+    let hc = wrote
+        .split("hc ")
+        .nth(1)
+        .and_then(|s| s.split(',').next())
+        .expect("an hc in the `wrote` line")
+        .to_string();
+    (image, hc)
 }
 
-/// The two images: the default build (what a chain deploys) and the `emit-outcome` build.
-fn images() -> &'static (PathBuf, PathBuf) {
-    static IMAGES: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+/// The two images, the default build (what a chain deploys) and the `emit-outcome` build, and
+/// the default build's `hc`.
+struct Images {
+    plain: PathBuf,
+    outcome: PathBuf,
+    plain_hc: String,
+}
+
+fn images() -> &'static Images {
+    static IMAGES: OnceLock<Images> = OnceLock::new();
     IMAGES.get_or_init(|| {
         let base = root().join("evm2rv/target/parity");
-        let plain = build_shim(&base.join("erc20"), false);
-        let outcome = build_shim(&base.join("erc20-outcome"), true);
-        (plain, outcome)
+        let (plain, plain_hc) = build_shim(&base.join("erc20"), false);
+        let (outcome, _) = build_shim(&base.join("erc20-outcome"), true);
+        Images {
+            plain,
+            outcome,
+            plain_hc,
+        }
     })
+}
+
+/// The default ERC-20 translation's program digest. It binds the translator's output, evm-rt,
+/// evm-core, guest-sdk, the pinned cc and the clang that compiled the C (build.rs prints its
+/// version), so a change to any of them moves it — deliberately: re-derive it and say why.
+const ERC20_HC: &str = "3307bfc4aaf87e4021941d18a9e813441354bb6fa19b357c5b604839e516579d";
+
+/// `hc` of the default ERC-20 translation, pinned (fix round 1, item 7). Uses the parity build.
+#[test]
+fn the_default_erc20_translation_hc_is_pinned() {
+    assert_eq!(images().plain_hc, ERC20_HC);
 }
 
 /// `rand-guest run image --input words…`: the eight output words and the executed cycles.
@@ -204,7 +248,7 @@ fn encoded_halt(o: &Outcome) -> u32 {
 /// Runs `call` through the interpreter natively, `evm.bin` and both translated images; asserts
 /// the parity the module doc lists, and returns `(interpreter cycles, translated cycles)`.
 fn check(name: &str, call: &EvmCall, want_status: u32) -> (usize, usize) {
-    let (plain, outcome) = images();
+    let Images { plain, outcome, .. } = images();
     let words = call.input_words();
     let (want, o, _post) = call.expected();
     assert_eq!(want[0], want_status, "{name}: the oracle's own status");
