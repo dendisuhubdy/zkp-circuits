@@ -10,4 +10,7 @@
 
 pub mod blocks;
 pub mod emit;
+/// Test-only: the fuzz corpus generator (`tests/fuzz.rs`). Not part of the translator.
+#[doc(hidden)]
+pub mod gen;
 pub mod shim;
