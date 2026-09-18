@@ -160,8 +160,11 @@ fn rust_lld() -> Result<PathBuf> {
 ///                      this machine never sets up; the Rust guests are equally unrelaxed.
 ///  * `-nostdlib -ffreestanding -fno-builtin`  there is no libc and no compiler runtime here, so
 ///                      the compiler must not synthesise calls into either.
-///  * `-fdebug-prefix-map` is [`flags`]'s `--remap-path-prefix`: an image reproduces byte for
-///                      byte wherever the checkout lives.
+///  * `-ffile-prefix-map` is [`flags`]'s `--remap-path-prefix`: an image reproduces byte for
+///                      byte wherever the checkout lives. `-fdebug-prefix-map` alone would rewrite
+///                      only DWARF, but the image container carries `.rodata` into the guest's RAM
+///                      (`__FILE__`, assert text), and only the file map — the union of the debug
+///                      and macro maps — reaches those strings too.
 fn clang_flags(root: &Path) -> Vec<String> {
     vec![
         "--target=riscv32-unknown-none-elf".into(),
@@ -172,7 +175,7 @@ fn clang_flags(root: &Path) -> Vec<String> {
         "-ffreestanding".into(),
         "-fno-builtin".into(),
         "-Os".into(),
-        format!("-fdebug-prefix-map={}=/rand-circuits", root.display()),
+        format!("-ffile-prefix-map={}=/rand-circuits", root.display()),
     ]
 }
 
@@ -184,10 +187,20 @@ fn clang_flags(root: &Path) -> Vec<String> {
 /// a C guest is its own source and nothing else — the shape the sBPF and EVM translators will
 /// emit into.
 pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput> {
-    let clang = find_clang().context("no clang with a riscv32 target: brew install llvm, or set CLANG")?;
     // Absolute from here on, for `build_rust`'s reason: the paths below go into the object files
     // and the linker command line, and must not depend on the caller's cwd.
     let dir = &dir.canonicalize().with_context(|| format!("no such guest directory: {}", dir.display()))?;
+    // A guest's own `guest.h` or `start.S` would shadow the toolchain's copy of the same name
+    // written into `target/rand-guest/` below and put on the include path: `#include "guest.h"`
+    // would resolve to the guest's stale copy silently, with no compiler diagnostic. Checked before
+    // `find_clang`/`checkout_root` so the failure is cheap and does not depend on either being
+    // available.
+    for name in ["guest.h", "start.S"] {
+        if dir.join(name).exists() {
+            bail!("{} carries its own {name}, which would shadow the toolchain's copy written into target/rand-guest/; remove it", dir.display());
+        }
+    }
+    let clang = find_clang().context("no clang with a riscv32 target: brew install llvm, or set CLANG")?;
     let root = checkout_root(dir)?;
     let ld = match ld {
         Some(l) => l.to_path_buf(),
@@ -213,7 +226,10 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
     // `start.S` last on the command line but first in the image: `guest.ld` puts `.text._start`
     // at `ORIGIN` whatever order the objects come in.
     for src in sources.iter().chain(std::iter::once(&start)) {
-        let obj = target_dir.join(src.file_name().unwrap()).with_extension("o");
+        // The generated start object is named `_rand_guest_start.o`, not `start.o`, so a guest
+        // that happens to carry its own `start.c` cannot collide with it; every other object keeps
+        // its source's name.
+        let obj = if src == &start { target_dir.join("_rand_guest_start.o") } else { target_dir.join(src.file_name().unwrap()).with_extension("o") };
         let status = Command::new(&clang)
             .args(clang_flags(&root))
             .arg("-c")

@@ -169,3 +169,18 @@ fn a_c_guest_builds_checks_and_runs_like_the_rust_one() {
     let s = String::from_utf8_lossy(&r.stdout);
     assert!(s.contains("out[0] = 6765"), "{s}");
 }
+
+/// A guest directory that carries its own `guest.h` would silently shadow the toolchain's copy
+/// (`#include "guest.h"` resolves via `-I`, and a local file wins); `build --lang c` must refuse
+/// it instead, naming the offending file. No clang needed: the guard runs before `find_clang`.
+#[test]
+fn a_guest_with_its_own_guest_h_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("fib.c"), "#include \"guest.h\"\nvoid main(void) { rand_halt(); }\n").unwrap();
+    std::fs::write(tmp.path().join("guest.h"), "// a stray copy that would shadow the toolchain's\n").unwrap();
+    let out = tmp.path().join("out.bin");
+    let o = Command::new(bin()).args(["build", "--lang", "c"]).arg(tmp.path()).arg("--out").arg(&out).output().unwrap();
+    assert!(!o.status.success());
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(stderr.contains("guest.h"), "{stderr}");
+}
