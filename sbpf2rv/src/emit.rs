@@ -216,7 +216,7 @@ pub fn emit_insn(pc: usize, i: &Insn) -> String {
         if is_reg {
             format!("({s} & {mask})")
         } else {
-            format!("({k} & {mask})")
+            format!("({} & {mask})", int_lit(k))
         }
     };
     match i.opc {
