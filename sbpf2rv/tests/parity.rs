@@ -28,6 +28,10 @@
 #[allow(dead_code)]
 mod builder;
 
+#[path = "../src/gen.rs"]
+#[allow(dead_code)]
+mod gen;
+
 use rand_zkvm::sbpf::{self, asm, insn, lddw, spl_transfer, Account, SbpfCall};
 use sbpf_core::abi;
 use sbpf_core::interp::Halt;
@@ -982,4 +986,170 @@ fn the_call_and_budget_vectors_match_the_interpreter() {
             "{what}"
         );
     }
+}
+
+// ---- a sample of the fuzz corpus through the real pipeline (Task 5) ------------------------------
+
+/// `tests/fuzz.rs` runs its programs through the emitted C compiled for the *host*. This runs a
+/// sample of the same generator's programs through the real pipeline — `sbpf2rv`, `rand-guest
+/// build`, `rand-guest run` — so the host build cannot drift from the target's: the eight words
+/// must equal `run_call`'s and the halt (with its payload, and `r0`) the interpreter's.
+///
+/// Several cases share one ELF behind a dispatcher on the instruction data's first word (the
+/// generator reserves it as a selector), so each image is built once. The sample is the first
+/// cases from seed 1 000 000 on that are not budget cases, run under 4 000 instructions alone (the
+/// machine's cycle tiers) and can be an ELF at all ([`fuzz_elf`]), 12 per image, 3 images. A case
+/// that `callx`es the pad (the accepted divergence) is kept and asserted to be exactly that.
+#[test]
+fn a_sample_of_the_fuzz_corpus_matches_through_the_real_pipeline() {
+    use sbpf_core::memory::REGION_PROGRAM;
+    let mut picked = Vec::new();
+    let mut seed = 1_000_000u64;
+    while picked.len() < 36 {
+        let c = gen::case(seed);
+        seed += 1;
+        if c.budget {
+            continue;
+        }
+        let (text, _) = gen::assemble(&c.items, REGION_PROGRAM);
+        let alone = sbpf::run_text(&text, &mut gen::input_region(&c.data));
+        if alone.instructions < 4_000 && call_srcs(&text).iter().all(|&s| s <= 1) {
+            picked.push(c);
+        }
+    }
+    let mut checked = 0;
+    let mut halts: std::collections::BTreeMap<String, usize> = Default::default();
+    for (g, group) in picked.chunks(12).enumerate() {
+        // The dispatcher: r2 = selector; jump to case k with r2 zero again, so every case starts
+        // from `Vm::new`'s registers.
+        use gen::It;
+        let mut items = vec![It::L(0), It::I(ins(opc::LD_DW_REG, 2, 1, 16, 0))];
+        let land = |k: usize| 0xfff0_0000 + k as u64;
+        let start = |k: usize| 0xfff1_0000 + k as u64;
+        for k in 0..group.len() {
+            items.push(It::J {
+                opc: opc::JEQ_IMM,
+                dst: 2,
+                src: 0,
+                imm: k as i32,
+                to: land(k),
+            });
+        }
+        items.push(It::I(ins(opc::MOV64_IMM, 0, 0, 0, 0xdead)));
+        items.push(It::I(ins(opc::EXIT, 0, 0, 0, 0)));
+        for k in 0..group.len() {
+            items.push(It::L(land(k)));
+            items.push(It::I(ins(opc::MOV64_IMM, 2, 0, 0, 0)));
+            items.push(It::J {
+                opc: opc::JA,
+                dst: 0,
+                src: 0,
+                imm: 0,
+                to: start(k),
+            });
+        }
+        for (k, c) in group.iter().enumerate() {
+            items.push(It::L(start(k)));
+            items.extend(gen::relabel(&c.items, k as u64 + 1));
+        }
+        let text_va = {
+            let mut e = fuzz_elf(&gen::assemble(&items, 0).0);
+            sbpf_core::elf::load(&mut e).unwrap().text_va
+        };
+        let elf = fuzz_elf(&gen::assemble(&items, text_va).0);
+        let name = format!("fuzz-sample-{g}");
+        let path = work().join(format!("{name}.so"));
+        std::fs::write(&path, &elf).unwrap();
+        let t = translate(&path, &name);
+        assert!(t.words <= 65_535, "{name}: {} words, over the cap", t.words);
+        for (k, c) in group.iter().enumerate() {
+            let mut data = c.data.clone();
+            data[..8].copy_from_slice(&(k as u64).to_le_bytes());
+            let call = SbpfCall {
+                elf: elf.clone(),
+                input: sbpf::serialize_aligned(&[], &data, &[7u8; 32]),
+            };
+            let (want, result, _) = call.expected();
+            let what = format!("{name} case {k} (seed {})", c.seed);
+            let (got, _) = run(&t.image, &call);
+            assert_eq!(got, want, "{what}: eight words, translated vs run_call");
+            let (halt, _) = run(&t.halt_image, &call);
+            let accepted = matches!(result, Err(Halt::AccessViolation(gen::MAGIC)));
+            let hw = if accepted {
+                // The callx to the pad: the translation halts BadJump at the callx.
+                halt_words(&Err(Halt::BadJump))
+            } else {
+                halt_words(&result)
+            };
+            assert_eq!(
+                halt,
+                [want[0], hw[0], hw[1], hw[2], 0, 0, 0, 0],
+                "{what}: translated halt vs the interpreter's {result:?}"
+            );
+            let key = match result {
+                Ok(_) => "exit".to_string(),
+                Err(h) if accepted => format!("{h:?} (accepted: translated BadJump)"),
+                Err(h) => format!("{h:?}").split('(').next().unwrap().to_string(),
+            };
+            *halts.entry(key).or_default() += 1;
+            checked += 1;
+        }
+        eprintln!("{name}: {} program words, 12 cases equal", t.words);
+    }
+    eprintln!("real-pipeline sample: {checked} cases, outcomes {halts:?}");
+    assert!(checked >= 30);
+}
+
+/// The `src` of every `call imm` in `text`, walking it as the loader does (an `lddw` is two slots).
+fn call_srcs(text: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    let mut i = 0;
+    while i + 8 <= text.len() {
+        if text[i] == opc::CALL_IMM {
+            v.push(text[i + 1] >> 4);
+        }
+        i += if text[i] == opc::LD_DW_IMM { 16 } else { 8 };
+    }
+    v
+}
+
+/// A generated text as an SBPF v1 shared object. The generator writes a syscall the way the
+/// *interpreter* holds it (`src = 1`, the name's hash); a file says it the way the toolchain does —
+/// an unresolved `call` plus an `R_BPF_64_32` naming the symbol, which `elf::load` turns back into
+/// exactly that. An unsupported hash becomes a symbol no syscall has.
+fn fuzz_elf(text: &[u8]) -> Vec<u8> {
+    use builder::{Rel, Sym, R_BPF_64_32, TEXT_ADDR};
+    let mut text = text.to_vec();
+    let mut syms: Vec<Sym> = Vec::new();
+    let mut rels: Vec<Rel> = Vec::new();
+    let mut i = 0;
+    while i + 8 <= text.len() {
+        if text[i] == opc::CALL_IMM && text[i + 1] >> 4 == 1 {
+            let hash = u32::from_le_bytes(text[i + 4..i + 8].try_into().unwrap());
+            let name = sbpf_core::syscalls::SUPPORTED
+                .iter()
+                .find(|(h, _)| *h == hash)
+                .map_or("sol_fuzz_unknown_", |(_, n)| n);
+            let k = match syms.iter().position(|s| s.name == name) {
+                Some(k) => k,
+                None => {
+                    syms.push(Sym {
+                        name,
+                        info: 0x10,
+                        value: 0,
+                    });
+                    syms.len() - 1
+                }
+            };
+            rels.push(Rel {
+                offset: TEXT_ADDR + i as u64,
+                sym: k as u32 + 1,
+                kind: R_BPF_64_32,
+            });
+            text[i + 1] &= 0x0f;
+            text[i + 4..i + 8].copy_from_slice(&(-1i32).to_le_bytes());
+        }
+        i += if text[i] == opc::LD_DW_IMM { 16 } else { 8 };
+    }
+    builder::build_elf(&text, &[], &syms, &rels, 0)
 }
