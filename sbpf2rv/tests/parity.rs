@@ -31,7 +31,7 @@ mod builder;
 use rand_zkvm::sbpf::{self, asm, insn, lddw, spl_transfer, Account, SbpfCall};
 use sbpf_core::abi;
 use sbpf_core::interp::Halt;
-use sbpf_core::isa::opc;
+use sbpf_core::isa::{opc, Insn};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -436,4 +436,484 @@ fn an_access_violation_halts_exactly_as_the_interpreter_does() {
         ),
         Err(Halt::AccessViolation(0))
     );
+}
+
+// ---- the call and budget vectors (fix round 1) ------------------------------------------------
+
+/// A tiny assembler with labels, for the one hand-built program that carries every call and budget
+/// vector (a case selector in the instruction data picks which), so one image serves them all.
+enum It {
+    /// One instruction.
+    I(Insn),
+    /// `lddw dst, imm`.
+    Lddw(u8, u64),
+    /// A jump (`ja` or conditional, immediate form) to a label.
+    J {
+        opc: u8,
+        dst: u8,
+        imm: i32,
+        to: String,
+    },
+    /// An internal `call` to a label.
+    Call(String),
+    /// `lddw dst, <the label's address>` — a function pointer for `callx`.
+    Addr(u8, String),
+    /// A label.
+    L(String),
+}
+
+fn ins(opc: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
+    Insn {
+        opc,
+        dst,
+        src,
+        off,
+        imm,
+    }
+}
+
+fn assemble(items: &[It], text_va: u64) -> Vec<u8> {
+    use std::collections::HashMap;
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    let mut pc = 0;
+    for it in items {
+        match it {
+            It::L(l) => assert!(at.insert(l, pc).is_none(), "label {l} twice"),
+            It::Lddw(..) | It::Addr(..) => pc += 2,
+            _ => pc += 1,
+        }
+    }
+    let rel = |to: &str, pc: usize| at[to] as i64 - (pc as i64 + 1);
+    let lddw = |d: u8, v: u64| {
+        [
+            ins(opc::LD_DW_IMM, d, 0, 0, v as u32 as i32),
+            ins(0, 0, 0, 0, (v >> 32) as u32 as i32),
+        ]
+    };
+    let mut out: Vec<Insn> = Vec::new();
+    for it in items {
+        let pc = out.len();
+        match it {
+            It::I(i) => out.push(*i),
+            It::Lddw(d, v) => out.extend(lddw(*d, *v)),
+            It::J { opc, dst, imm, to } => out.push(ins(*opc, *dst, 0, rel(to, pc) as i16, *imm)),
+            It::Call(to) => out.push(ins(opc::CALL_IMM, 0, 0, 0, rel(to, pc) as i32)),
+            It::Addr(d, to) => out.extend(lddw(*d, text_va + 8 * at[to.as_str()] as u64)),
+            It::L(_) => {}
+        }
+    }
+    out.iter()
+        .flat_map(|i| sbpf_core::isa::encode(*i).to_le_bytes())
+        .collect()
+}
+
+/// The dead instructions padding each big budget-loop iteration: charged like any other (the
+/// interpreter counts them) but deleted by clang, so 200 000 sBPF instructions cost the translated
+/// image few enough cycles to fit the machine's largest tier.
+const PAD: usize = 18;
+
+/// The vector program. `main` loads `case`, `a`, `b`, `c` (u64s at `r1 + 16..48`, the instruction
+/// data of a region with no accounts) into r2..r5 and jumps to the case.
+fn vector_program() -> Vec<It> {
+    use It::*;
+    let l = |s: &str| L(s.to_string());
+    let j = |opc: u8, dst: u8, imm: i32, to: &str| J {
+        opc,
+        dst,
+        imm,
+        to: to.to_string(),
+    };
+    let call = |to: &str| Call(to.to_string());
+    let i = |opc: u8, dst: u8, src: u8, off: i16, imm: i32| I(ins(opc, dst, src, off, imm));
+    let exit = || I(ins(opc::EXIT, 0, 0, 0, 0));
+    let mov = |d: u8, v: i32| I(ins(opc::MOV64_IMM, d, 0, 0, v));
+    let movr = |d: u8, s: u8| I(ins(opc::MOV64_REG, d, s, 0, 0));
+    let add = |d: u8, s: u8| I(ins(opc::ADD64_REG, d, s, 0, 0));
+    let lsh = |d: u8, v: i32| I(ins(opc::LSH64_IMM, d, 0, 0, v));
+
+    let cases = [
+        (1, "c_stb"),
+        (2, "c_sth"),
+        (3, "c_stw"),
+        (4, "c_stdw"),
+        (5, "c_regs_in"),
+        (6, "c_some_out"),
+        (7, "c_member"),
+        (8, "c_member_x"),
+        (9, "c_host"),
+        (10, "c_depth"),
+        (11, "c_r10"),
+        (12, "c_budget"),
+        (13, "c_av"),
+        (14, "c_badinsn"),
+        (15, "c_stimm"),
+        (16, "c_host_x"),
+    ];
+    let mut p = vec![
+        l("main"),
+        i(opc::LD_DW_REG, 2, 1, 16, 0),
+        i(opc::LD_DW_REG, 3, 1, 24, 0),
+        i(opc::LD_DW_REG, 4, 1, 32, 0),
+        i(opc::LD_DW_REG, 5, 1, 40, 0),
+    ];
+    for (k, to) in cases {
+        p.push(j(opc::JEQ_IMM, 2, k, to));
+    }
+    p.extend([mov(0, 0xdead), exit()]);
+
+    // A callee that reads its argument (r3, set only by the caller) only through a store.
+    for (w, st, ld) in [
+        ("b", opc::ST_B_REG, opc::LD_B_REG),
+        ("h", opc::ST_H_REG, opc::LD_H_REG),
+        ("w", opc::ST_W_REG, opc::LD_W_REG),
+        ("dw", opc::ST_DW_REG, opc::LD_DW_REG),
+    ] {
+        p.extend([
+            l(&format!("c_st{w}")),
+            Lddw(3, 0x1122_3344_5566_7788),
+            call(&format!("f_st{w}")),
+            exit(),
+        ]);
+        p.extend([
+            l(&format!("f_st{w}")),
+            i(st, 10, 3, -8, 0),
+            i(ld, 0, 10, -8, 0),
+            exit(),
+        ]);
+    }
+    // A store immediate whose encoding carries src = 3: nothing but its base is read.
+    p.extend([l("c_stimm"), mov(3, 0x42), call("f_stimm"), exit()]);
+    p.extend([
+        l("f_stimm"),
+        i(opc::ST_DW_IMM, 10, 3, -8, 0x77),
+        i(opc::LD_DW_REG, 0, 10, -8, 0),
+        exit(),
+    ]);
+
+    // A callee that reads r0 and r6..r9 before writing them, then clobbers r6..r9 (which the
+    // caller must get back as they were).
+    p.extend([
+        l("c_regs_in"),
+        mov(0, 1),
+        mov(6, 2),
+        mov(7, 3),
+        mov(8, 4),
+        mov(9, 5),
+        call("f_regs_in"),
+    ]);
+    p.extend([add(0, 6), movr(1, 9), lsh(1, 40), add(0, 1), exit()]);
+    p.push(l("f_regs_in"));
+    for (r, sh) in [(6, 8), (7, 16), (8, 24), (9, 32)] {
+        p.extend([movr(1, r), lsh(1, sh), add(0, 1)]);
+    }
+    p.extend([mov(6, 0), mov(7, 0), mov(8, 0), mov(9, 0), exit()]);
+
+    // A callee that writes only some of r0..r5 — r3 only on one path, chosen by `b` (in r4).
+    p.extend([
+        l("c_some_out"),
+        mov(0, 0),
+        mov(1, 1),
+        mov(2, 2),
+        mov(3, 3),
+        mov(5, 5),
+        call("f_some"),
+    ]);
+    for (r, sh) in [(1, 4), (2, 8), (3, 16), (4, 24), (5, 32)] {
+        p.extend([movr(6, r), lsh(6, sh), add(0, 6)]);
+    }
+    p.push(exit());
+    p.extend([
+        l("f_some"),
+        j(opc::JEQ_IMM, 4, 4, "some_skip"),
+        mov(3, 9),
+        l("some_skip"),
+        mov(2, 7),
+        mov(0, 0x50),
+        exit(),
+    ]);
+
+    // A function inside another's code (merged into it): called directly and through callx, and
+    // its host called both ways too.
+    p.extend([
+        l("f_host"),
+        mov(0, 100),
+        l("f_member"),
+        i(opc::ADD64_IMM, 0, 0, 0, 5),
+        exit(),
+    ]);
+    p.extend([l("c_member"), mov(0, 1000), call("f_member"), exit()]);
+    p.extend([
+        l("c_member_x"),
+        mov(0, 2000),
+        Addr(5, "f_member".into()),
+        i(opc::CALL_REG, 0, 0, 0, 5),
+        exit(),
+    ]);
+    p.extend([l("c_host"), mov(0, 0), call("f_host"), exit()]);
+    p.extend([
+        l("c_host_x"),
+        Addr(5, "f_host".into()),
+        i(opc::CALL_REG, 0, 0, 0, 5),
+        exit(),
+    ]);
+
+    // Recursion `a` levels below the case's own call: depth a + 1; the 8th push is CallDepth.
+    p.extend([l("c_depth"), movr(1, 3), call("f_rec"), exit()]);
+    p.extend([
+        l("f_rec"),
+        j(opc::JEQ_IMM, 1, 0, "rec_done"),
+        i(opc::SUB64_IMM, 1, 0, 0, 1),
+        call("f_rec"),
+    ]);
+    p.extend([l("rec_done"), mov(0, 0x55), exit()]);
+
+    // A program that moves r10: the callee's frame is one frame above the *moved* r10, and the
+    // caller gets its moved r10 back. r0 = 4096 + 0x33.
+    p.extend([
+        l("c_r10"),
+        i(opc::ADD64_IMM, 10, 0, 0, -512),
+        i(opc::ST_DW_IMM, 10, 0, -8, 0x33),
+        call("f_r10"),
+        i(opc::SUB64_REG, 0, 10, 0, 0),
+        i(opc::LD_DW_REG, 2, 10, -8, 0),
+        add(0, 2),
+        exit(),
+    ]);
+    p.extend([
+        l("f_r10"),
+        movr(0, 10),
+        i(opc::ST_DW_IMM, 10, 0, -8, 1),
+        exit(),
+    ]);
+
+    // The budget: one optional instruction (c != 0), `b` iterations of a 2-instruction loop, then
+    // `a` iterations of a (3 + PAD)-instruction loop in two blocks, then `r0 = 0; exit`.
+    p.extend([l("c_budget"), j(opc::JEQ_IMM, 5, 0, "b_small"), mov(7, 0)]);
+    p.extend([
+        l("b_small"),
+        i(opc::SUB64_IMM, 4, 0, 0, 1),
+        j(opc::JNE_IMM, 4, 0, "b_small"),
+    ]);
+    p.extend([
+        l("b_big"),
+        i(opc::SUB64_IMM, 3, 0, 0, 1),
+        j(opc::JEQ_IMM, 3, 0, "b_done"),
+    ]);
+    for k in 0..PAD {
+        p.push(mov(7, k as i32));
+    }
+    p.extend([j(opc::JA, 0, 0, "b_big"), l("b_done"), mov(0, 0), exit()]);
+
+    // A fault's payload, and a refused opcode.
+    p.extend([l("c_av"), i(opc::LD_DW_REG, 3, 0, 0x123, 0), exit()]);
+    p.extend([l("c_badinsn"), mov(0, 0), i(0xff, 0, 0, 0, 0), exit()]);
+    p
+}
+
+fn vector_call(elf: &[u8], case: u64, a: u64, b: u64, c: u64) -> SbpfCall {
+    let data: Vec<u8> = [case, a, b, c]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    SbpfCall {
+        elf: elf.to_vec(),
+        input: sbpf::serialize_aligned(&[], &data, &[9u8; 32]),
+    }
+}
+
+/// How many instructions the interpreter executes on a vector (natively).
+fn instructions(call: &SbpfCall) -> u64 {
+    sbpf::run_elf(&mut call.elf.clone(), &mut call.input.clone()).instructions
+}
+
+/// Fix round 1: the call convention's corners and the budget boundary, through the emulator,
+/// against the interpreter — one program, one image (and its halt-words twin), a case per vector.
+#[test]
+fn the_call_and_budget_vectors_match_the_interpreter() {
+    // Assemble once to learn where the loader puts the text, then again with the real addresses.
+    let text_va = {
+        let mut e = builder::build_elf(&assemble(&vector_program(), 0), &[], &[], &[], 0);
+        sbpf_core::elf::load(&mut e).unwrap().text_va
+    };
+    let elf = builder::build_elf(&assemble(&vector_program(), text_va), &[], &[], &[], 0);
+    let path = work().join("vectors.so");
+    std::fs::write(&path, &elf).unwrap();
+    let t = translate(&path, "vectors");
+    let interp = interpreter_guest();
+    let interp = Some(interp.as_path());
+    let v = |case, a, b, c| vector_call(&elf, case, a, b, c);
+    let ok = |r: Result<u64, Halt>, want: u64, what: &str| assert_eq!(r, Ok(want), "{what}");
+
+    for (case, what, mask) in [
+        (1, "stxb", 0xff),
+        (2, "stxh", 0xffff),
+        (3, "stxw", 0xffff_ffff),
+        (4, "stxdw", u64::MAX),
+    ] {
+        let r = parity(
+            &t,
+            interp,
+            &format!("a callee reads its argument through {what}"),
+            &v(case, 0, 0, 0),
+            0,
+        );
+        ok(r, 0x1122_3344_5566_7788 & mask, what);
+    }
+    ok(
+        parity(
+            &t,
+            interp,
+            "a store immediate reads no source",
+            &v(15, 0, 0, 0),
+            0,
+        ),
+        0x77,
+        "st imm",
+    );
+    ok(
+        parity(
+            &t,
+            interp,
+            "a callee reads r0 and r6..r9 before writing them",
+            &v(5, 0, 0, 0),
+            0,
+        ),
+        1 + (2 << 8) + (3 << 16) + (4 << 24) + (5 << 32) + 2 + (5 << 40),
+        "regs in",
+    );
+    let some = |r3: u64, r4: u64| 0x50 + (1 << 4) + (7 << 8) + (r3 << 16) + (r4 << 24) + (5 << 32);
+    let r = parity(
+        &t,
+        interp,
+        "a callee writes r0 and r2 (r3 not on this path)",
+        &v(6, 0, 4, 0),
+        0,
+    );
+    ok(r, some(3, 4), "some out");
+    ok(
+        parity(
+            &t,
+            interp,
+            "a callee writes r0, r2 and r3",
+            &v(6, 0, 5, 0),
+            0,
+        ),
+        some(9, 5),
+        "some out, r3",
+    );
+    ok(
+        parity(
+            &t,
+            interp,
+            "a call to a merged member entry",
+            &v(7, 0, 0, 0),
+            0,
+        ),
+        1005,
+        "member",
+    );
+    ok(
+        parity(
+            &t,
+            interp,
+            "a callx to a merged member entry",
+            &v(8, 0, 0, 0),
+            0,
+        ),
+        2005,
+        "member callx",
+    );
+    ok(
+        parity(&t, interp, "a call to the member's host", &v(9, 0, 0, 0), 0),
+        105,
+        "host",
+    );
+    ok(
+        parity(
+            &t,
+            interp,
+            "a callx to the member's host",
+            &v(16, 0, 0, 0),
+            0,
+        ),
+        105,
+        "host callx",
+    );
+    ok(
+        parity(&t, interp, "call depth 7", &v(10, 6, 0, 0), 0),
+        0x55,
+        "depth 7",
+    );
+    assert_eq!(
+        parity(&t, interp, "call depth 8", &v(10, 7, 0, 0), 2),
+        Err(Halt::CallDepth)
+    );
+    ok(
+        parity(&t, interp, "a program that moves r10", &v(11, 0, 0, 0), 0),
+        4096 + 0x33,
+        "r10",
+    );
+    assert_eq!(
+        parity(&t, interp, "a fault's payload", &v(13, 0, 0, 0), 2),
+        Err(Halt::AccessViolation(0x123))
+    );
+    assert_eq!(
+        parity(&t, interp, "a refused opcode", &v(14, 0, 0, 0), 2),
+        Err(Halt::BadInsn(0xff))
+    );
+
+    // The budget. The count is affine in (a, b, c) — measured, not assumed: 3 + PAD per big
+    // iteration after the first, 2 per small one, 1 for c. The trip counts come from the input, so
+    // clang cannot fold the loops. The interpreter guest cannot run these (200 000 interpreted
+    // instructions are millions of cycles, past the machine's largest tier), so they compare with
+    // the host interpreter only.
+    let big = 3 + PAD as u64;
+    let base = instructions(&v(12, 1, 1, 0));
+    for (a, b, c) in [(2, 1, 0), (1, 2, 0), (1, 1, 1), (7, 5, 1)] {
+        assert_eq!(
+            instructions(&v(12, a, b, c)),
+            base + big * (a - 1) + 2 * (b - 1) + c,
+            "affine at {a} {b} {c}"
+        );
+    }
+    // Parameters that make the whole run exactly `total` instructions.
+    let exactly = |total: u64| {
+        let rest = total - base;
+        let a = rest / big - 1;
+        let r = rest - big * a;
+        (a + 1, r / 2 + 1, r % 2)
+    };
+    let (a, b, c) = exactly(200_000);
+    assert_eq!(instructions(&v(12, a, b, c)), 200_000);
+    assert_eq!(
+        parity(&t, None, "exactly 200 000 instructions", &v(12, a, b, c), 1),
+        Ok(0)
+    );
+    let (a, b, c) = exactly(200_001);
+    let what = "200 001 instructions (the 200 001st is the exit)";
+    assert_eq!(
+        parity(&t, None, what, &v(12, a, b, c), 2),
+        Err(Halt::InstructionLimit)
+    );
+
+    // The limit crossed inside each of the big loop's two blocks (one of them only charges and
+    // leaves its check to the other): the 200 001st instruction's position in an iteration is
+    // 0 (the sub) or 1 (the jeq) in the first block, 2.. in the second.
+    let pre = |b: u64, c: u64| instructions(&v(12, 1, b, c)) - 4; // before the big loop's first sub
+    for second in [false, true] {
+        let (b, c) = (1..40u64)
+            .flat_map(|b| [(b, 0), (b, 1)])
+            .find(|&(b, c)| ((200_001 - pre(b, c) - 1) % big >= 2) == second)
+            .unwrap();
+        let what = if second {
+            "the limit crossed in the big loop's second block"
+        } else {
+            "the limit crossed in its first block"
+        };
+        assert_eq!(
+            parity(&t, None, what, &v(12, 20_000, b, c), 2),
+            Err(Halt::InstructionLimit),
+            "{what}"
+        );
+    }
 }
