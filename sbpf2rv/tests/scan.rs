@@ -2,11 +2,11 @@
 //! `Program::from_text` (no relocations — this scanner reads the `call imm` `src` convention
 //! `sbpf_core::elf::load` would otherwise have written, so the tests just write it directly).
 //!
-//! `scan` is infallible (ruling 2026-09-18): nothing this scanner cannot fully verify statically
-//! is refused — it becomes a `Warning` plus a `Term` that traps at runtime if actually reached,
+//! `scan` refuses nothing about a program's content (ruling 2026-09-18; its only failure is the
+//! work limit, `try_scan`): nothing this scanner cannot fully verify statically is refused — it becomes a `Warning` plus a `Term` that traps at runtime if actually reached,
 //! exactly as `interp.rs` would. See `scan::scan`'s module docs.
 
-use sbpf2rv::scan::{scan, Term, TrapKind, Warning};
+use sbpf2rv::scan::{scan, try_scan_with_limit, Term, TrapKind, Warning, MAX_SCAN_STEPS};
 use sbpf_core::elf::Program;
 use sbpf_core::isa::{opc, Insn};
 use sbpf_core::syscalls;
@@ -660,6 +660,82 @@ fn a_function_reachable_only_through_callx_is_discovered_via_a_rodata_word() {
         f.blocks.iter().find(|b| b.start == hidden).unwrap().insns,
         vec![insn(opc::MOV64_IMM, 0, 0, 0, 9), exit()]
     );
+}
+
+#[test]
+fn a_rodata_word_below_the_text_is_a_root_too() {
+    // The read-only run need not begin at `.text`: here an 8-byte table word sits *below* the text
+    // (rodata_va < text_va), naming pc 2 — reachable only through it. The scan takes every
+    // 8-aligned rodata word outside the text, wherever the text sits inside the run.
+    let hidden = 2usize;
+    let rodata_va = sbpf_core::memory::REGION_PROGRAM;
+    let text_va = rodata_va + 8;
+    let addr = |pc: u64| text_va + pc * 8;
+    let mut t = text(&[
+        insn(opc::CALL_REG, 0, 0, 0, 1),
+        exit(),
+        insn(opc::MOV64_IMM, 0, 0, 0, 9),
+        exit(),
+    ]);
+    // An unreachable slot whose raw bytes are pc 3's address: the text's own words are code, never
+    // table entries, so this is not a root.
+    t.extend_from_slice(&addr(3).to_le_bytes());
+    let mut rodata_buf = addr(hidden as u64).to_le_bytes().to_vec();
+    rodata_buf.extend_from_slice(&t);
+    let program = Program {
+        text: &rodata_buf[8..],
+        text_va,
+        rodata: &rodata_buf,
+        rodata_va,
+        entry_pc: 0,
+        relocs_applied: false,
+    };
+    let scanned = scan(&program);
+    assert!(
+        scanned.callx_targets.contains(&hidden),
+        "{:?}",
+        scanned.callx_targets
+    );
+    assert!(scanned.functions.iter().any(|f| f.entry == hidden));
+    assert!(
+        !scanned.callx_targets.contains(&3),
+        "a word inside the text is not a table entry: {:?}",
+        scanned.callx_targets
+    );
+}
+
+/// A pathological ELF can name every instruction as a `callx` root, and each root's function walks
+/// the rest of the text: quadratic work a verifier re-running the translation must not be stalled
+/// by. The scan counts every instruction it visits and stops with an error past the limit.
+#[test]
+fn the_scan_stops_with_an_error_past_its_work_limit() {
+    // 40 `lddw`s, each naming a different pc of one 200-instruction straight-line body: 40 roots,
+    // each walking ~100 instructions on average.
+    let body_at = 40 * 2 + 1;
+    let mut insns = Vec::new();
+    for k in 0..40u64 {
+        let addr = sbpf_core::memory::REGION_PROGRAM + (body_at as u64 + 5 * k) * 8;
+        insns.push(insn(opc::LD_DW_IMM, 1, 0, 0, addr as u32 as i32));
+        insns.push(insn(0, 0, 0, 0, (addr >> 32) as i32));
+    }
+    insns.push(exit());
+    for _ in 0..200 {
+        insns.push(insn(opc::ADD64_IMM, 0, 0, 0, 1));
+    }
+    insns.push(exit());
+    let t = text(&insns);
+    let program = Program::from_text(&t).unwrap();
+    let full = try_scan_with_limit(&program, MAX_SCAN_STEPS).expect("well under the default");
+    assert_eq!(full.functions.len(), 41);
+    let err = try_scan_with_limit(&program, 1_000)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("1000") && err.contains("instructions"),
+        "{err}"
+    );
+    // `scan` is `try_scan` at the default limit.
+    assert_eq!(scan(&program).functions.len(), 41);
 }
 
 /// The reviewer's own probe: pc 12244 (`mov r6, r2`, right after `exit` at pc 12243) is a real

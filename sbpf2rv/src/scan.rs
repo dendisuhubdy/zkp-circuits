@@ -28,9 +28,10 @@
 //! notes). Refusing the whole program over any of this would break parity in the other direction:
 //! a program the interpreter runs successfully would become untranslatable.
 //!
-//! So none of it is a hard refusal (there is no `Refusal` type in this module — `scan` cannot
-//! fail). Instead, every such site becomes an ordinary [`Term`] the block it is in ends with, and
-//! a [`Warning`] recording why:
+//! So none of it is a hard refusal (there is no `Refusal` type in this module — nothing about a
+//! program's content makes the scan fail; the one failure, [`try_scan`]'s [`TooMuchWork`], is a
+//! bound on the scan's own running time). Instead, every such site becomes an ordinary [`Term`] the
+//! block it is in ends with, and a [`Warning`] recording why:
 //!
 //! - A bad register (`dst`/`src` naming `r11..r15`), an opcode `isa::classify` does not assign, or
 //!   a `call imm` with `src` in `2..=10`: [`Warning::RegisterOutOfRange`] /
@@ -241,8 +242,9 @@ pub enum Warning {
 /// else unrecognised is [`Warning::UnknownSyscall`] instead.
 const CPI_NAMES: &[&str] = &["sol_invoke_signed_c", "sol_invoke_signed_rust"];
 
-/// Scans `program`'s text into functions and basic blocks. Infallible — see the module docs'
-/// "Warnings, not refusals".
+/// Scans `program`'s text into functions and basic blocks. Nothing about the program's content is
+/// refused — see the module docs' "Warnings, not refusals" — but the scan's work is bounded: this is
+/// [`try_scan`], panicking past [`MAX_SCAN_STEPS`] (the CLI calls [`try_scan`] and reports it).
 ///
 /// Three passes:
 ///
@@ -261,6 +263,45 @@ const CPI_NAMES: &[&str] = &["sol_invoke_signed_c", "sol_invoke_signed_rust"];
 ///    discovers a further function, and so on). Every check — register range, opcode validity,
 ///    jump/call targets, syscall hashes — happens exactly once per reachable pc, here.
 pub fn scan(program: &Program<'_>) -> Scan {
+    try_scan(program).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// How many instructions the scan may visit, summed over every function it walks, before it gives
+/// up ([`try_scan`]). The committed SPL Token ELF needs about 13 000; this leaves room for any real
+/// program while bounding a pathological one — one that names every instruction as a `callx` root,
+/// so that each root's function walks the rest of the text — to seconds, not the quadratic hours a
+/// verifier re-running the translation could otherwise be stalled for.
+pub const MAX_SCAN_STEPS: usize = 4_000_000;
+
+/// The scan gave up: it visited more than its limit of instructions (see [`MAX_SCAN_STEPS`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TooMuchWork {
+    pub limit: usize,
+    pub functions: usize,
+    pub roots: usize,
+}
+
+impl std::fmt::Display for TooMuchWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the scan visited more than {} instructions ({} functions walked, from {} roots): this ELF's code is reachable from too many function entries to translate (the interpreter still runs it)",
+            self.limit, self.functions, self.roots
+        )
+    }
+}
+
+impl std::error::Error for TooMuchWork {}
+
+/// [`scan`], refusing (with [`TooMuchWork`]) a program whose functions together take more than
+/// [`MAX_SCAN_STEPS`] instruction visits. The only failure: nothing about a program's *content* is
+/// refused (the module docs' "Warnings, not refusals").
+pub fn try_scan(program: &Program<'_>) -> Result<Scan, TooMuchWork> {
+    try_scan_with_limit(program, MAX_SCAN_STEPS)
+}
+
+/// [`try_scan`] with the limit as a parameter (for tests).
+pub fn try_scan_with_limit(program: &Program<'_>, limit: usize) -> Result<Scan, TooMuchWork> {
     let text = program.text;
     let n_slots = text.len() / 8;
 
@@ -293,8 +334,11 @@ pub fn scan(program: &Program<'_>) -> Scan {
     }
 
     // ---- pass 3: reachability walk, function by function ---------------------------------------
+    // One function's walk is bounded by the text; the sum over functions is what a pathological
+    // program can blow up, so it is checked after each.
     let mut functions: Vec<Function> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
+    let mut steps = 0usize;
     while let Some(entry) = worklist.pop_front() {
         let f = scan_function(
             entry,
@@ -304,7 +348,15 @@ pub fn scan(program: &Program<'_>) -> Scan {
             &mut worklist,
             &mut warnings,
         );
+        steps += f.blocks.iter().map(|b| b.insns.len() + 1).sum::<usize>();
         functions.push(f);
+        if steps > limit {
+            return Err(TooMuchWork {
+                limit,
+                functions: functions.len(),
+                roots: known_functions.len(),
+            });
+        }
     }
     // `program.entry_pc`'s function first, whatever order the worklist discovered the rest in —
     // `Scan::entry` and `functions[0].entry` agree (see `Scan::functions`'s doc comment).
@@ -318,12 +370,12 @@ pub fn scan(program: &Program<'_>) -> Scan {
 
     let callx_targets: Vec<usize> = known_functions.into_iter().collect();
 
-    Scan {
+    Ok(Scan {
         functions,
         entry: program.entry_pc,
         callx_targets,
         warnings,
-    }
+    })
 }
 
 /// Every pc `interp.rs`'s `callx` (`CALL_REG`) could statically land on beyond what a `call imm`
@@ -338,11 +390,12 @@ pub fn scan(program: &Program<'_>) -> Scan {
 ///   `lddw` is itself reachable yet; a function pointer can be constructed by code no call target
 ///   has been discovered to reach, which is exactly the committed SPL Token ELF's pc 12244 case
 ///   (loaded by `lddw`s at pc 11595 and 12352, never named by any `call imm`).
-/// - **Every 8-byte-aligned word of the read-only data past the text** (`program.rodata` begins at
-///   `.text` — `elf.rs`'s own docs — so `program.rodata[program.text.len()..]` is exactly the
-///   `.rodata`/`.data.rel.ro`/`.eh_frame` bytes `.text` does not cover): a `R_BPF_64_RELATIVE`
-///   relocation writes an address there as eight little-endian bytes (`elf.rs`), which is how a
-///   `callx` jump table is laid out.
+/// - **Every 8-byte-aligned word of the read-only data outside the text** — the
+///   `.rodata`/`.data.rel.ro`/`.eh_frame` bytes `.text` does not cover, wherever the text sits
+///   inside the run: at `text_va - rodata_va` (zero for every v1 file `elf.rs` loads today, where
+///   the run begins at `.text`, but not assumed), with words on either side of it scanned. Aligned by
+///   virtual address. A `R_BPF_64_RELATIVE` relocation writes an address there as eight
+///   little-endian bytes (`elf.rs`), which is how a `callx` jump table is laid out.
 ///
 /// A candidate is kept only if, converted to a slot with `interp.rs`'s own division, it lands
 /// exactly 8-aligned (no truncated remainder) on a pc [`Block`]-worth of real code starts at
@@ -366,12 +419,23 @@ fn lddw_and_rodata_function_roots(
         }
     }
 
-    let extra = &program.rodata[text.len()..];
-    for chunk in extra.as_chunks::<8>().0 {
-        let value = u64::from_le_bytes(*chunk);
-        if let Some(target) = text_slot(value, program.text_va, n_slots, by_pc) {
-            roots.insert(target);
+    // The text's byte range inside the run, if it lies there at all: its words are code.
+    let text_at = program
+        .text_va
+        .checked_sub(program.rodata_va)
+        .and_then(|o| usize::try_from(o).ok());
+    let in_text =
+        |off: usize| text_at.is_some_and(|at| off < at.saturating_add(text.len()) && off + 8 > at);
+    let rodata = program.rodata;
+    let mut off = (program.rodata_va.wrapping_neg() % 8) as usize;
+    while off + 8 <= rodata.len() {
+        if !in_text(off) {
+            let value = u64::from_le_bytes(rodata[off..off + 8].try_into().unwrap());
+            if let Some(target) = text_slot(value, program.text_va, n_slots, by_pc) {
+                roots.insert(target);
+            }
         }
+        off += 8;
     }
 
     roots

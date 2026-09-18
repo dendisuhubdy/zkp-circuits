@@ -1,12 +1,13 @@
 //! `sbpf2rv <program.so> --out <dir> [--name <crate>]`: loads an sBPF ELF, scans and translates it,
 //! and writes the shim crate `rand-guest build <dir>` turns into an image — `program.c`,
-//! `Cargo.toml`, `Cargo.lock`, `build.rs`, `src/main.rs` and `shim.ld` (see `sbpf2rv::shim`). Without `--out` it
-//! only reports the scan. The scan itself cannot fail (see `scan::scan`'s docs); only loading the
-//! ELF can, with the interpreter's own refusal.
+//! `Cargo.toml`, `Cargo.lock`, `build.rs`, `src/main.rs` and `shim.ld` (see `sbpf2rv::shim`).
+//! Without `--out` it only reports the scan. The scan refuses nothing about the program's content (see `scan::scan`'s
+//! docs); loading the ELF can fail, with the interpreter's own refusal, and a pathological ELF can
+//! exceed the scan's work limit (`scan::MAX_SCAN_STEPS`).
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use sbpf2rv::{emit, scan::scan, shim};
+use sbpf2rv::{emit, scan::try_scan, shim};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -38,7 +39,7 @@ fn main() -> Result<()> {
             cli.program.display()
         )
     })?;
-    let scanned = scan(&program);
+    let scanned = try_scan(&program).map_err(|e| anyhow!("{}: {e}", cli.program.display()))?;
     let emitted = emit::emit_program(&program, &scanned);
     println!(
         "entry pc {}: {} function(s), {} block(s), {} instruction(s), {} callx target(s), 0 refusal(s), {} warning(s)",
