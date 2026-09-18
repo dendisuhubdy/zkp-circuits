@@ -237,6 +237,17 @@ fn cases() -> Vec<Case> {
         calls: false,
     });
 
+    // A DUP shares a local; an operation on one copy must not write its result over the other:
+    // CALLDATASIZE, DUP1, PUSH1 1, ADD, ADD -> cs + (cs + 1), returned.
+    v.push(Case {
+        name: "a shared local",
+        code: vec![
+            0x36, 0x80, 0x60, 0x01, 0x01, 0x01, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3,
+        ],
+        calldata: word(1),
+        calls: false,
+    });
+
     // LOG3 over an entry slot, a local and a constant: [e] -> CALLDATASIZE, PUSH32 k, PUSH1 32,
     // PUSH0, LOG3 (after an MSTORE, so the data is not all zero).
     let mut log = vec![0x5f, 0x35, 0x5b, 0x60, 0x77, 0x5f, 0x52, 0x36, 0x7f];
