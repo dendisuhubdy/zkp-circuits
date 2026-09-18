@@ -38,8 +38,22 @@ sBPF is itself a small load/store ISA — 11 general registers, 64-bit
 values — so unlike the EVM's stack machine, a direct sBPF→RV32 *translator*
 (compiling sBPF instructions to native RV32IM ahead of execution, rather
 than interpreting them one at a time) is a natural later optimisation once
-correctness is established through the interpreter. Coprocessors this path
-wants:
+correctness is established through the interpreter.
+
+**That translator, `sbpf2rv`, is done (2026-09-18, `circuits/sbpf2rv`)**: it emits one C
+function per sBPF function into a shim crate `rand-guest build` turns into an image, reusing the
+interpreter's own ABI harness so the chain-visible contract does not change. It refuses nothing —
+unknown syscalls, CPI, bad registers/opcodes/jumps become scanner warnings plus the interpreter's
+own runtime trap, never a translation-time refusal, matching `interp.rs`'s raise-only-on-execution
+rule. The committed SPL Token `Transfer`/`MintTo`/`Burn` all match the interpreter word for word
+(the eight public output words and the halt) at 64 825 of the 65 535-word cap. Measured on this
+translated program: about 2.4× fewer cycles per sBPF instruction, but the shared harness (decoding
+both tapes, `elf::load`, the region scan) is about 98% of every run's cycles either way, so for SPL
+Token the total is unchanged and both sides land in tier 20 — translation only pays off once a
+program's own execution, not the harness, dominates the run. `sbpf2rv/README.md` has the full
+walkthrough with real command output, the trust rule (`hc == translate(ELF)`, the chain records
+the source ELF's hash beside the program id), and the coprocessor backlog below. Coprocessors this
+path wants:
 
 | SVM primitive | Coprocessor needed | Notes |
 |---|---|---|

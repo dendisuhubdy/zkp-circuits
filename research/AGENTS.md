@@ -60,6 +60,30 @@ prologue (`evm.ld`, `sbpf.ld`: `guest.ld` with the origin moved), and
 `rand-guest` picks the one `.ld` file it finds in the guest's own directory —
 more than one, and it refuses to guess rather than picking wrong.
 
+**`sbpf2rv`, piece 2 of the two translator specs above, is done through Task 7
+(2026-09-18), on branch `feat/sbpf2rv`**: an ahead-of-time sBPF → RV32 translator, emitting one
+C function per sBPF function into a shim crate `rand-guest build` compiles, so the proof executes
+the program directly instead of interpreting it one instruction at a time. Nothing is refused at
+translation — unknown syscalls, CPI, bad registers, bad opcodes and bad jumps all become
+scanner warnings plus the interpreter's own runtime trap, matching `interp.rs`'s own
+raise-only-on-execution rule; a `callx` to a real instruction that is not its target function's
+entry is the one accepted divergence (`Halt::BadJump` where the interpreter might run real code,
+fuzzed 117-for-117 sound). The committed SPL Token `Transfer`, `MintTo` and `Burn` all match the
+interpreter word for word — the eight public output words and the halt — at **64 825** of the
+65 535-word cap. Translated execution itself is about 2.4× cheaper per sBPF instruction, but the
+harness `sbpf-core::abi` shares with the interpreter is about 98% of every run's cycles on both
+sides, so the net for SPL Token is roughly a wash and both stay in tier 20; translation only pays
+for compute-heavy programs. Software Ed25519 (RFC 8032) and secp256k1 recovery exist in
+`sbpf-rt/` but ship unlinked — both cost tens of millions of cycles, above any tier, and the
+interpreter traps both syscalls for parity — as a coprocessor backlog for a future machine
+milestone. The trust rule is external to the image: it does not check which ELF it was given, so
+a verifier checks `hc == translate(ELF)`, and the chain records the source ELF's hash beside the
+deployed program id. A real proof of the translated transfer was attempted once and stopped by a
+24 GB watchdog at 30.77 GB peak — the harness sets the tier, so this needs the same ≥ 64 GB
+machine as the interpreter's own tier-20 proof. `sbpf2rv/README.md` has the full walkthrough
+(commands and their real output) and every measured number; the design spec is
+`docs/superpowers/specs/2026-09-18-sbpf-to-rv32-translator-design.md`.
+
 **Constraint set 6 in one paragraph**, because it is what most recently moved
 under everyone's feet: `SYS_READ_PUBLIC = 6` reads a second, independently
 indexed input vector bound to `H_PUB = pv::PUB0..PUB7`, which — unlike `H_IN` —

@@ -52,10 +52,23 @@ as it left them (`exit` restores only `r6..r10`). So every function is
 advanced by one `STACK_FRAME`, and copies back `r0..r5`; `r6..r10` are the caller's own C locals,
 which the call cannot touch. Both lists are narrowed per call site by an interprocedural liveness
 pass (`sbpf2rv/src/emit.rs`, `Calls`, a least fixpoint over the call graph with `callx` as a call to
-every known function): a register the callee cannot read before writing is passed as 0, and one it
-cannot write is not copied back — neither is observable. `callx` goes through
-`sbpf_callx_target(addr)`, which maps `interp.rs`'s `(addr - text_va) / 8` to a function pointer
-over the known function set, or traps `BadJump`. A function whose entry lies inside another's code
+every known function). For a direct `call imm`, whose one callee is known statically, a register
+the callee cannot read before writing is passed as 0, and one it cannot write is not copied
+back — neither is observable, since exactly that callee runs. **Amended 2026-09-18 (Task 5,
+`bafe72a`)**: `callx`'s single call site cannot do this per-target narrowing, because which of the
+known functions actually runs is a runtime value — the emitted switch has one uniform parameter
+list for every candidate. So a `callx` passes, and copies back, `callx_live | callx_mod`: the
+*union* of every target's reads and of every target's possible writes, not just what is live. A
+register that only some targets write must still receive its caller's real value on the way in,
+because whichever target actually runs might be one that does not write it and simply passes it
+through unchanged; passing 0 for a register no target *reads* but some target *writes* corrupted
+the caller's value under exactly that mismatch (the fix's regression case: `main` sets r2, calls
+through a `callx` whose live target writes only r0, while a different, unreached target of the
+same `callx` would have written r2 — the old code passed r2 as 0 and lost it). It is false that
+such a register "is passed as 0" for `callx`; only a direct `call imm` narrows that way. `callx`
+goes through `sbpf_callx_target(addr)`, which maps `interp.rs`'s `(addr - text_va) / 8` to a
+function pointer over the known function set, or traps `BadJump`. A function whose entry lies
+inside another's code
 is emitted once, as an extra entry label of the larger one (`Hosts`; the caller sets `sbpf_sel`).
 `r10` is an ordinary local: a program may write it. Unreachable text is not translated.
 Registers are `uint64_t` locals, so clang, not this tool, chooses the RV32 register pairs and
@@ -131,10 +144,17 @@ twelve syscalls `SUPPORTED` lists today, with `sol_sha256` on the coprocessor vi
 `sol_memcpy_`/`memmove_`/`memset_`/`memcmp_` as bounds-checked region loops,
 `sol_alloc_free_` as the bump allocator over the heap region, the log family as no-ops that
 return 0, `abort` and `sol_panic_` as traps; `sol_poseidon` where the interpreter has it. Beyond
-the interpreter, **`sol_ed25519` verify and `sol_secp256k1_recover` are provided as pure C**
-(the reference-style field and group arithmetic, no lookup tables), correct and slow: they are
-measured in cycles and listed as the coprocessor backlog, which is a machine milestone, not this
-tool's. **Cross-program invocation (`sol_invoke_signed*`) is translated, not refused**: a proof
+the interpreter, **`sol_ed25519` verify and `sol_secp256k1_recover` exist as pure C**
+(`sbpf-rt/sbpf_ed25519.c`, `sbpf-rt/sbpf_secp256k1.c`: reference-style field and group
+arithmetic, no lookup tables), correct and slow, but **not linked into any generated shim, and
+not in `sbpf_syscall`'s dispatch** (**amended 2026-09-18, Task 3/7**: an earlier draft of this
+spec implied they were reachable; ruled out for parity, since the interpreter itself only ever
+raises `Halt::UnknownSyscall` for both hashes — neither is in `syscalls::SUPPORTED` — so a
+translated call that actually reached the C implementation would disagree with the interpreter it
+must match byte for byte). They are measured in cycles (`sbpf2rv/README.md`'s coprocessor-backlog
+section) and left in the tree, unlinked, as a coprocessor backlog for a future machine milestone,
+not this tool's; a `call imm` naming either hash traps `UnknownSyscall` exactly like any other
+unimplemented syscall, below. **Cross-program invocation (`sol_invoke_signed*`) is translated, not refused**: a proof
 carries one program's execution and a multi-program model is a chain design, so `sbpf-rt` has
 nothing to call for it, but the call site itself is ordinary translated code — `sbpf_trap` with
 the interpreter's own `Halt::UnknownSyscall`, the same as any other syscall hash `sbpf-rt` has no
