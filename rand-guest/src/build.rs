@@ -94,7 +94,7 @@ pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutp
         .arg(&config)
         .current_dir(dir)
         .status()
-        .context("running cargo (is the pinned toolchain installed?)")?;
+        .with_context(|| format!("running cargo for {} (is the pinned toolchain installed?)", dir.display()))?;
     if !status.success() {
         bail!("cargo build failed for {}", dir.display());
     }

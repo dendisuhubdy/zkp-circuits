@@ -3,6 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rand_guest::{build, check, pack};
+use rand_zkvm::isa::Program;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -66,10 +67,17 @@ fn hex8(w: &[u32; 8]) -> String {
     w.iter().map(|x| format!("{x:08x}")).collect()
 }
 
+/// The loader's own view of an image: what it will be on chain, which is what the cap is measured
+/// against. The prologue is not a function of the data word count — `li` is one word or two and
+/// the base register is reset periodically — so it is counted, never estimated.
+fn load(image: &[u8]) -> Result<Program> {
+    Program::from_flat_image(image).map_err(|e| anyhow::anyhow!("{e:?}"))
+}
+
 fn report_image(image: &[u8], max_words: usize) -> Result<check::Report> {
-    let (info, text, data) = pack::split(image)?;
-    let nonzero = data.iter().filter(|w| **w != 0).count();
-    Ok(check::check_text(info.text_base, &text, nonzero, max_words))
+    let (info, text, _data) = pack::split(image)?;
+    let program = load(image)?;
+    Ok(check::check_text(info.text_base, &text, program.words.len(), max_words))
 }
 
 fn main() -> Result<()> {
@@ -115,7 +123,7 @@ fn main() -> Result<()> {
         Cmd::Info { image, max_words } => {
             let bytes = std::fs::read(&image)?;
             let (info, text, data) = pack::split(&bytes)?;
-            let program = rand_zkvm::isa::Program::from_flat_image(&bytes).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            let program = load(&bytes)?;
             let nonzero = data.iter().filter(|w| **w != 0).count();
             println!(
                 "text {} words at {:#x}; data {} words ({} non-zero) at {:#x}; prologue {} words; program {} words from base_pc {:#x}",
@@ -124,7 +132,7 @@ fn main() -> Result<()> {
                 data.len(),
                 nonzero,
                 info.data_base,
-                2 * nonzero,
+                program.words.len() - text.len(),
                 program.words.len(),
                 program.base_pc
             );

@@ -75,9 +75,11 @@ fn info_and_check_agree_with_build_on_the_evm_image() {
     assert!(info.status.success(), "{}", String::from_utf8_lossy(&info.stderr));
     let s = String::from_utf8_lossy(&info.stdout);
     // `docs/04-guests.md` measures the committed interpreter at 18 009 program words: the 16 370
-    // text words plus the 1 178-word prologue (two per non-zero data word) the loader synthesises.
+    // text words plus the 1 639-word prologue the loader synthesises. The three numbers add up
+    // because the prologue is the loader's own, counted rather than estimated from the 589
+    // non-zero data words (a two-word estimate would say 1 178 and be 461 words short).
     assert!(s.contains("text 16370 words"), "{s}");
-    assert!(s.contains("prologue 1178 words"), "{s}");
+    assert!(s.contains("prologue 1639 words"), "{s}");
     assert!(s.contains("program 18009 words"), "{s}");
     assert!(s.contains("does not fit"), "the interpreter is over the 4096 cap: {s}");
     let check = Command::new(bin()).arg("check").arg(&image).args(["--max-words", "65535"]).output().unwrap();
@@ -121,4 +123,17 @@ fn a_guest_named_by_a_relative_path_builds_the_same_image() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(sha256_hex(&std::fs::read(&out).unwrap()), pinned("evm"));
+}
+
+#[test]
+fn the_cap_is_measured_against_the_loaders_word_count_not_an_estimate() {
+    // 18 009 is what `Program::from_flat_image` makes of `evm.bin`, so the cap must bite at
+    // exactly one word below it — not at the 17 548 an estimated two-word-per-data-word prologue
+    // would give, which would let an over-cap image through.
+    let image = root().join("guests-compiled/bin/evm.bin");
+    let over = Command::new(bin()).arg("check").arg(&image).args(["--max-words", "18008"]).output().unwrap();
+    assert!(!over.status.success(), "{}", String::from_utf8_lossy(&over.stdout));
+    assert!(String::from_utf8_lossy(&over.stdout).contains("18009 words (text 16370 + prologue 1639)"), "{}", String::from_utf8_lossy(&over.stdout));
+    let exact = Command::new(bin()).arg("check").arg(&image).args(["--max-words", "18009"]).output().unwrap();
+    assert!(exact.status.success(), "{}", String::from_utf8_lossy(&exact.stdout));
 }

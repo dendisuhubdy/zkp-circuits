@@ -14,8 +14,10 @@ pub struct Finding { pub addr: u32, pub word: u32, pub rule: Rule, pub what: Str
 #[derive(Clone, Debug, Default)]
 pub struct Report {
     pub findings: Vec<Finding>,
-    /// Text words plus the data prologue's words (two per non-zero data word: `li` + `sw`,
-    /// which is what `Program::from_flat_image` emits; a zero data word costs nothing).
+    /// The loader's own word count for this image: the text plus the data prologue
+    /// `Program::from_flat_image` synthesises. Not an estimate — a prologue `li` is one word or
+    /// two depending on the constant, and the base register is reset whenever the store's
+    /// immediate would leave range, so only the loader can say.
     pub words: usize,
     pub cap: usize,
     pub unresolved_ecalls: usize,
@@ -31,9 +33,10 @@ pub const SYSCALLS: [(u32, &str); 7] = [(0, "HALT"), (1, "WRITE_OUTPUT"), (2, "R
 const OP_MISC_MEM: u32 = 0x0f;
 const OP_SYSTEM: u32 = 0x73;
 
-/// `data_nonzero` is how many data words are non-zero (the prologue skips zeros); pass the total
-/// when the caller has not counted, which only over-estimates.
-pub fn check_text(base_pc: u32, text: &[u32], data_nonzero: usize, max_words: usize) -> Report {
+/// `program_words` is `Program::words.len()` for the image the text came from — the text plus the
+/// loader's data prologue. It is what the chain counts against the cap, so it is what the caller
+/// must pass; for a bare text with no data it is simply `text.len()`.
+pub fn check_text(base_pc: u32, text: &[u32], program_words: usize, max_words: usize) -> Report {
     let mut r = Report { cap: max_words, ..Default::default() };
     if base_pc % 4 != 0 {
         r.findings.push(Finding { addr: base_pc, word: 0, rule: Rule::Layout, what: format!("text base {base_pc:#x} is not word-aligned") });
@@ -71,9 +74,9 @@ pub fn check_text(base_pc: u32, text: &[u32], data_nonzero: usize, max_words: us
             }
         }
     }
-    r.words = text.len() + 2 * data_nonzero;
+    r.words = program_words;
     if r.words > max_words {
-        r.findings.push(Finding { addr: base_pc, word: 0, rule: Rule::Cap, what: format!("{} words (text {} + prologue {}) exceed the cap of {max_words}", r.words, text.len(), 2 * data_nonzero) });
+        r.findings.push(Finding { addr: base_pc, word: 0, rule: Rule::Cap, what: format!("{} words (text {} + prologue {}) exceed the cap of {max_words}", r.words, text.len(), r.words.saturating_sub(text.len())) });
     }
     r
 }
