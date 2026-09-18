@@ -135,3 +135,24 @@ fn a_section_name_past_the_string_table_is_refused_not_panicked() {
     let err = rand_guest::pack::pack(&elf).unwrap_err().to_string();
     assert!(err.contains("outside the file"), "{err}");
 }
+
+#[test]
+fn a_section_whose_end_wraps_the_address_space_is_refused_not_panicked() {
+    // `.rodata` at 0xFFFF_FFF0 with size 0x20: its end, `addr + size`, is past `u32::MAX`. The
+    // packer computes each data section's end to size the span, and must refuse this by name
+    // rather than overflow. The text is a real one-word `.text` at 0x1000; the `.rodata` bytes
+    // themselves are in the file, so only the address arithmetic can fail.
+    // Layout: header(52) + 3 entries(72) = 124, string table "\0.text\0.rodata\0" (15 bytes) to
+    // 139, `.text` 4 bytes to 143, `.rodata` 0x20 bytes to 175.
+    let mut elf = elf_header(52, 24, 3, 0);
+    elf.extend_from_slice(&section_entry(0, 3, 0, 0, 124, 15)); // the string table
+    elf.extend_from_slice(&section_entry(1, SHT_PROGBITS, SHF_ALLOC, 0x1000, 139, 4)); // .text
+    elf.extend_from_slice(&section_entry(7, SHT_PROGBITS, SHF_ALLOC, 0xFFFF_FFF0, 143, 0x20)); // .rodata
+    elf.extend_from_slice(b"\0.text\0.rodata\0");
+    elf.extend_from_slice(&0x0000_0073u32.to_le_bytes()); // ecall
+    elf.extend_from_slice(&[0u8; 0x20]);
+    assert_eq!(elf.len(), 175);
+
+    let err = format!("{:#}", rand_guest::pack::pack(&elf).unwrap_err());
+    assert!(err.contains(".rodata") && err.contains("address space"), "{err}");
+}

@@ -22,9 +22,20 @@ pub fn pack(elf: &[u8]) -> Result<Vec<u8>> {
     data_sections.sort_by_key(|s| s.addr);
     let (data_base, data_bytes) = if let Some(first) = data_sections.first() {
         let base = first.addr;
-        let end = data_sections.iter().map(|s| s.addr + s.size).max().unwrap();
+        // Checked, not `+`: the addresses and sizes come from an untrusted ELF, and a section
+        // whose end wraps the 32-bit address space must be refused by name, not panic.
+        let mut end = 0u32;
+        for s in &data_sections {
+            let e = s.addr.checked_add(s.size).with_context(|| {
+                format!("section {} at {:#x} with size {:#x} runs past the end of the 32-bit address space", s.name, s.addr, s.size)
+            })?;
+            end = end.max(e);
+        }
+        let text_end = text.addr.checked_add(text.size).with_context(|| {
+            format!("section .text at {:#x} with size {:#x} runs past the end of the 32-bit address space", text.addr, text.size)
+        })?;
         if base % 4 != 0 { bail!("data segment base {base:#x} is not word-aligned"); }
-        if base < text.addr + text.size { bail!("the data segment overlaps .text"); }
+        if base < text_end { bail!("the data segment overlaps .text"); }
         let mut data = vec![0u8; ((end - base) as usize + 3) / 4 * 4];
         for s in &data_sections {
             let at = (s.addr - base) as usize;
