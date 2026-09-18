@@ -10,11 +10,12 @@ use std::process::Command;
 pub const TARGET: &str = "riscv32im-unknown-none-elf";
 pub const TOOLCHAIN: &str = "1.98.1";
 
+/// Where a build left its two files. What the image *is* — words, `hc`, the checker's verdict —
+/// is the caller's to ask, through the same path `check` takes, so a build that produced an image
+/// the loader refuses still reports the checker's named findings rather than a bare load error.
 pub struct BuildOutput {
     pub elf: PathBuf,
     pub image: PathBuf,
-    pub hc: [u32; 8],
-    pub words: usize,
 }
 
 /// The rustflags list every guest gets. `root` is the checkout root (for the path remap), `ld`
@@ -262,12 +263,13 @@ pub fn build_c(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutput>
     finish(elf, out)
 }
 
-/// Pack an ELF into `out` and read back what the loader will make of it.
+/// Pack an ELF into `out`. Not loaded here: the loader refuses an undecodable word outright, and
+/// the checker, which the caller runs next, is what names it.
 fn finish(elf: PathBuf, out: &Path) -> Result<BuildOutput> {
-    let image = pack::pack(&std::fs::read(&elf)?)?;
-    std::fs::write(out, &image)?;
-    let program = rand_zkvm::isa::Program::from_flat_image(&image).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    Ok(BuildOutput { elf, image: out.to_path_buf(), hc: program.digest(), words: program.words.len() })
+    let image = pack::pack(&std::fs::read(&elf).with_context(|| format!("reading the linked ELF {}", elf.display()))?)
+        .with_context(|| format!("packing {}", elf.display()))?;
+    std::fs::write(out, &image).with_context(|| format!("writing {}", out.display()))?;
+    Ok(BuildOutput { elf, image: out.to_path_buf() })
 }
 
 /// The one executable ELF in the release dir (cargo names it after the bin target).

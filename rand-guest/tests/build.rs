@@ -184,3 +184,23 @@ fn a_guest_with_its_own_guest_h_is_refused() {
     let stderr = String::from_utf8_lossy(&o.stderr);
     assert!(stderr.contains("guest.h"), "{stderr}");
 }
+
+/// `build` reaches the checker's named report by the same path `check` takes: a guest whose text
+/// the loader would refuse outright (a `fence`) is reported by rule, not as a bare load error, and
+/// the build still fails.
+#[test]
+fn build_names_a_decode_class_rule_instead_of_a_load_error() {
+    let Some(_) = rand_guest::build::find_clang() else { eprintln!("no RISC-V clang; skipping"); return; };
+    let guest = tempfile::tempdir_in(root().join("guests-compiled")).unwrap();
+    std::fs::write(
+        guest.path().join("fence.c"),
+        "#include \"guest.h\"\nvoid main(void) { __asm__ volatile(\"fence\"); rand_write_output(0, 1); rand_halt(); }\n",
+    )
+    .unwrap();
+    let out = guest.path().join("fence.bin");
+    let o = Command::new(bin()).args(["build", "--lang", "c"]).arg(guest.path()).arg("--out").arg(&out).output().unwrap();
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    assert!(!o.status.success(), "{stdout}");
+    assert!(stdout.contains("Fence: "), "{stdout}\n{}", String::from_utf8_lossy(&o.stderr));
+    assert!(stdout.contains("REJECTED"), "{stdout}");
+}

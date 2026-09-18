@@ -1,9 +1,9 @@
 //! `rand-guest`: one binary from a guest's source to the image the chain deploys.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rand_guest::{build, check, pack};
-use rand_zkvm::isa::Program;
+use rand_zkvm::isa::{LoadError, Program, IMAGE_MAGIC};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -94,31 +94,80 @@ impl std::fmt::Display for Loaded {
 /// against. The prologue is not a function of the data word count — `li` is one word or two and
 /// the base register is reset periodically — so it is counted, never estimated.
 ///
-/// Tries the image container first, since that is what a fresh `build`/`pack` produces; a
-/// `Magic` mismatch alone (not any other container error) falls back to the flat form, so every
-/// subcommand that takes an image accepts both without asking the caller which one it has.
-fn load(image: &[u8]) -> Result<(Program, Loaded)> {
-    match Program::from_flat_image(image) {
-        Ok(p) => Ok((p, Loaded::Image)),
-        Err(rand_zkvm::isa::LoadError::Magic(_)) => {
-            let p = Program::from_flat_binary(0x1000, image).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-            Ok((p, Loaded::Flat))
-        }
-        Err(e) => Err(anyhow::anyhow!("{e:?}")),
+/// The form is read off the first word — `IMAGE_MAGIC` is a container, anything else a flat
+/// binary — so every subcommand that takes an image accepts both without asking the caller which
+/// one it has. (Not "try the container loader and fall back on its `Magic` error": that loader
+/// checks the length against its six-word header first, so a flat binary shorter than six words
+/// would come back as `Length`, not `Magic`, and never reach the flat loader.)
+fn load(image: &[u8]) -> std::result::Result<(Program, Loaded), LoadError> {
+    if is_container(image) {
+        Ok((Program::from_flat_image(image)?, Loaded::Image))
+    } else {
+        Ok((Program::from_flat_binary(FLAT_BASE, image)?, Loaded::Flat))
     }
 }
 
-fn report_image(image: &[u8], max_words: usize) -> Result<check::Report> {
-    let (program, form) = load(image)?;
-    match form {
-        Loaded::Image => {
-            let (info, text, _data) = pack::split(image)?;
-            Ok(check::check_text(info.text_base, &text, program.words.len(), max_words))
-        }
+fn is_container(image: &[u8]) -> bool {
+    image.len() >= 4 && u32::from_le_bytes(image[..4].try_into().unwrap()) == IMAGE_MAGIC
+}
+
+/// `guest-sdk/guest.ld`'s `ORIGIN`: where a headerless flat binary is loaded, since it carries no
+/// base of its own.
+const FLAT_BASE: u32 = 0x1000;
+
+/// What `check` (and `build`, through the same path) makes of an image: the report, and the
+/// loader's program when the loader accepted it.
+struct Checked {
+    report: check::Report,
+    /// `None` when the loader refused an undecodable word — which the report then names.
+    program: Option<Program>,
+    /// Set when the loader refused the image for a decode reason: the report is still printed,
+    /// but its word count is the text alone, since the prologue is the loader's to count.
+    uncounted: Option<LoadError>,
+}
+
+/// The ISA report over an image in either form.
+///
+/// The checker runs over the *text words themselves* — the container's text segment
+/// (`pack::split`), or the whole of a flat binary — before, and independently of, the loader: the
+/// loader refuses any word `Instr::decode` rejects, so asking it first would turn every
+/// decode-class finding (`Compressed`, `Undecodable`, `Fence`, `Csr`, `Ebreak`) into a bare
+/// `LoadError::Decode` instead of the named line the checker exists to print. The loader is then
+/// asked only for the program word count the cap is measured against; if it refuses the image for
+/// a decode reason the report stands with `text.len()` as the count, and any other loader error is
+/// an error of its own.
+fn report_image(image: &[u8], max_words: usize) -> Result<Checked> {
+    let (base, text) = if is_container(image) {
+        let (info, text, _data) = pack::split(image).context("reading the image container's segments")?;
+        (info.text_base, text)
+    } else {
         // No container header, so no separate prologue: the whole program is the text, starting
-        // at the loader's own base_pc (`check_text`'s doc: "for a bare text with no data it is
+        // at the flat loader's base (`check_text`'s doc: "for a bare text with no data it is
         // simply text.len()").
-        Loaded::Flat => Ok(check::check_text(program.base_pc, &program.words, program.words.len(), max_words)),
+        if image.is_empty() || image.len() % 4 != 0 {
+            bail!("not an image container and not a flat binary: {} bytes is not a whole, non-zero number of words", image.len());
+        }
+        (FLAT_BASE, image.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect())
+    };
+    match load(image) {
+        Ok((program, _)) => {
+            let report = check::check_text(base, &text, program.words.len(), max_words);
+            Ok(Checked { report, program: Some(program), uncounted: None })
+        }
+        Err(e @ LoadError::Decode { .. }) => {
+            let report = check::check_text(base, &text, text.len(), max_words);
+            Ok(Checked { report, program: None, uncounted: Some(e) })
+        }
+        Err(e) => bail!("the loader refuses the image: {e:?}"),
+    }
+}
+
+impl std::fmt::Display for Checked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(e) = &self.uncounted {
+            writeln!(f, "note: the loader refuses this image ({e:?}), so its data prologue could not be counted; the word count below is the text alone")?;
+        }
+        write!(f, "{}", self.report)
     }
 }
 
@@ -130,23 +179,27 @@ fn main() -> Result<()> {
                 Lang::Rust => build::build_rust(&dir, ld.as_deref(), &out)?,
                 Lang::C => build::build_c(&dir, ld.as_deref(), &out)?,
             };
-            let image = std::fs::read(&b.image)?;
-            let r = report_image(&image, max_words)?;
-            println!("{r}");
-            println!("wrote {} ({} words, hc {})", b.image.display(), b.words, hex8(&b.hc));
-            if !r.is_ok() {
+            let image = std::fs::read(&b.image).with_context(|| format!("reading back {}", b.image.display()))?;
+            let c = report_image(&image, max_words).with_context(|| format!("checking {}", b.image.display()))?;
+            println!("{c}");
+            match &c.program {
+                Some(p) => println!("wrote {} ({} words, hc {})", b.image.display(), p.words.len(), hex8(&p.digest())),
+                None => println!("wrote {} (the loader refuses it: no hc)", b.image.display()),
+            }
+            if !c.report.is_ok() {
                 bail!("the image is rejected by the checker (it was still written)");
             }
         }
         Cmd::Check { file, max_words } => {
-            let bytes = std::fs::read(&file)?;
-            let r = if bytes.starts_with(b"\x7fELF") {
-                report_image(&pack::pack(&bytes)?, max_words)?
+            let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            let image = if bytes.starts_with(b"\x7fELF") {
+                pack::pack(&bytes).with_context(|| format!("packing the ELF {}", file.display()))?
             } else {
-                report_image(&bytes, max_words)?
+                bytes
             };
-            println!("{r}");
-            if !r.is_ok() {
+            let c = report_image(&image, max_words).with_context(|| format!("checking {}", file.display()))?;
+            println!("{c}");
+            if !c.report.is_ok() {
                 std::process::exit(1);
             }
         }
@@ -162,8 +215,8 @@ fn main() -> Result<()> {
             println!("wrote {} ({} bytes)", out.display(), image.len());
         }
         Cmd::Run { image, inputs, public } => {
-            let bytes = std::fs::read(&image)?;
-            let (program, _form) = load(&bytes)?;
+            let bytes = std::fs::read(&image).with_context(|| format!("reading {}", image.display()))?;
+            let (program, _form) = load(&bytes).map_err(|e| anyhow::anyhow!("{e:?}")).with_context(|| format!("loading {}", image.display()))?;
             let max = rand_zkvm::machine::Tier(*rand_zkvm::machine::TIERS.last().unwrap()).max_cycles();
             match rand_zkvm::emulator::execute(&program, &inputs, &public, max) {
                 Ok(exec) => {
@@ -195,8 +248,8 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Info { image, max_words } => {
-            let bytes = std::fs::read(&image)?;
-            let (program, form) = load(&bytes)?;
+            let bytes = std::fs::read(&image).with_context(|| format!("reading {}", image.display()))?;
+            let (program, form) = load(&bytes).map_err(|e| anyhow::anyhow!("{e:?}")).with_context(|| format!("loading {}", image.display()))?;
             println!("form: {form}");
             match form {
                 Loaded::Image => {
