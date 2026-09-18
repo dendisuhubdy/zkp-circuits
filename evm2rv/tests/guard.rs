@@ -135,3 +135,59 @@ fn long_codes_pass_the_guard_and_one_changed_byte_is_refused() {
         eprintln!("guard: {len} bytes, last byte changed: refused in {cycles} cycles");
     }
 }
+
+/// A code one byte longer than what it was translated from: the source plus a trailing `0x00`
+/// (unreached — the fixed prefix already `RETURN`s), through the real pipeline. `code_words`
+/// packs bytes four to a word, so a code whose length is not a multiple of four already carries
+/// implicit zero padding in its last word; appending a real `0x00` there can leave every packed
+/// word bit-identical (`the_message_carries_the_length` above: `code_words(&[0x60])` and
+/// `code_words(&[0x60, 0x00])` share their one data word). Only the message's leading length word
+/// tells the two codes apart, so this pins that the guard is keyed on it.
+#[test]
+fn a_trailing_zero_byte_is_refused_by_the_guard() {
+    let code = long_code(64);
+    let dir = root().join("evm2rv/target/guard/trailing-zero");
+    std::fs::create_dir_all(&dir).unwrap();
+    let hex = dir.join("code.bin");
+    std::fs::write(&hex, &code).unwrap();
+    let (plain, _) = build_shim(
+        &hex,
+        &dir.join("plain"),
+        "guard-trailing-zero",
+        false,
+        Stage::Two,
+    );
+    let (outcome, _) = build_shim(
+        &hex,
+        &dir.join("outcome"),
+        "guard-trailing-zero",
+        true,
+        Stage::Two,
+    );
+
+    let mut extended = code.clone();
+    extended.push(0x00);
+    let call = call_of(extended.clone());
+    let pre = Outcome {
+        halt: Halt::OutOfBounds,
+        gas_used: 0,
+        ret: [0; MAX_RETURN_BYTES],
+        ret_len: 0,
+        logs: [Log::EMPTY; MAX_LOGS],
+        n_logs: 0,
+    };
+    let r = call.tree.root();
+    let want = public_output(&mut HostRef, &extended, &r, &r, &pre);
+    let (got, cycles) = run(&plain, &call.input_words());
+    assert_eq!(
+        got, want,
+        "source code plus a trailing 0x00: the pre_halt output"
+    );
+    let (dbg, _) = run(&outcome, &call.input_words());
+    assert_eq!(
+        (dbg[0], dbg[6], dbg[7]),
+        (2, encoded_halt(&pre), 0),
+        "status 2, OutOfBounds, gas_used 0"
+    );
+    eprintln!("guard: source plus a trailing 0x00 refused in {cycles} cycles");
+}
