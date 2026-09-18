@@ -607,7 +607,7 @@ impl<'a, H: Host> Interpreter<'a, H> {
 
 /// Set bit `i` for every `JUMPDEST` at `i` that is not inside a `PUSHn`'s immediate — the one scan
 /// of the code the interpreter does, and the reason `JUMP` is a bitmap test rather than a rescan.
-fn scan_jumpdests(code: &[u8], bits: &mut [u32; MAX_CODE_BYTES / 32]) {
+pub fn scan_jumpdests(code: &[u8], bits: &mut [u32; MAX_CODE_BYTES / 32]) {
     let mut i = 0;
     while i < code.len() {
         let op = code[i];
@@ -623,7 +623,7 @@ fn scan_jumpdests(code: &[u8], bits: &mut [u32; MAX_CODE_BYTES / 32]) {
 /// cost is wholly dynamic (`EXP`, `KECCAK256`, `SSTORE`, `LOGn`) charge it in their own arm and are
 /// zero here, as are the free ones (`STOP`, `RETURN`, `REVERT`, `INVALID`) and every unsupported
 /// byte, which traps before its cost could matter.
-const fn static_gas(op: u8) -> u64 {
+pub const fn static_gas(op: u8) -> u64 {
     match op {
         0x5b => G_JUMPDEST,
         // base
