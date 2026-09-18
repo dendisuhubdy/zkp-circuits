@@ -72,10 +72,17 @@ text, or a `callx` to an unknown target), a bad instruction (`Halt::BadInsn` —
 above `r10`, or an opcode byte `isa::classify` does not assign), an unrecognised syscall hash
 (`Halt::UnknownSyscall`, including a cross-program-invocation name, §5), call depth over
 `MAX_CALL_DEPTH`, and the instruction limit, kept as a counter decremented by the block's length
-at the head of each basic block and checked there (the interpreter counts one per instruction;
-the block-granular check halts at the same or a later instruction, never earlier, and never past
-the limit plus one block — the spec pins this as "halts within the block that crosses the
-limit", and the differential tests compare outputs, not the exact halting pc). **Amended
+at the head of each basic block and checked there. **Amended 2026-09-18** (Task 3 review ruling;
+an earlier draft said the check "halts at the same or a later instruction, never earlier", which
+a head check does not meet): the halt lands at the head of the block that would cross the limit,
+and the halt kind may differ from the interpreter's — which counts one instruction at a time —
+only in that block (a fault part-way through it may be reported as `InstructionLimit`). The status
+and the eight public words are equal either way, since every exceptional halt publishes status 2
+over the pre-state. **Task 4, pending review**: to fit the SPL Token program into the machine's
+65 535-word program cap, a block whose every successor checks, that ends in neither `exit` nor a
+call, and that has no deferred neighbour only *charges* its length and leaves the check to the
+next block's head (`sbpf2rv/src/emit.rs`, `choose_checked`); the halt kind still differs only in
+the block that crosses the limit, and no run the interpreter completes is ever halted. **Amended
 2026-09-18**: a static `ja`/`j*`/internal-`call` target outside the text, and a bad register or
 opcode, are *runtime* traps like everything else in this paragraph, not rejected at translation
 as an earlier draft of this spec had it — none of it is a load-time check in the interpreter
