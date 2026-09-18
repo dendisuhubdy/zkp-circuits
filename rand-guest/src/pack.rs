@@ -2,7 +2,7 @@
 //! `mkimage.py` built it: `.text`, then every other allocated PROGBITS section as one span from
 //! the lowest to the highest address, gaps zero-filled. `.bss` never appears.
 
-use crate::elf::read_sections;
+use crate::elf::{read_sections, span};
 use anyhow::{bail, Result};
 use rand_zkvm::isa::{IMAGE_HEADER_WORDS, IMAGE_MAGIC, IMAGE_VERSION};
 
@@ -16,7 +16,7 @@ pub fn pack(elf: &[u8]) -> Result<Vec<u8>> {
     if text.addr % 4 != 0 || text.size % 4 != 0 {
         bail!(".text must be word-aligned in both address ({:#x}) and size ({})", text.addr, text.size);
     }
-    let text_bytes = &elf[text.offset as usize..(text.offset + text.size) as usize];
+    let text_bytes = span(elf, text.offset, text.size)?;
     let mut data_sections: Vec<_> = loadable.iter().filter(|s| s.name != ".text").collect();
     data_sections.sort_by_key(|s| s.addr);
     let (data_base, data_bytes) = if let Some(first) = data_sections.first() {
@@ -27,7 +27,7 @@ pub fn pack(elf: &[u8]) -> Result<Vec<u8>> {
         let mut data = vec![0u8; ((end - base) as usize + 3) / 4 * 4];
         for s in &data_sections {
             let at = (s.addr - base) as usize;
-            data[at..at + s.size as usize].copy_from_slice(&elf[s.offset as usize..(s.offset + s.size) as usize]);
+            data[at..at + s.size as usize].copy_from_slice(span(elf, s.offset, s.size)?);
         }
         (base, data)
     } else {
