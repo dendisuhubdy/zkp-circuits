@@ -36,6 +36,30 @@ chain-side aggregation lands, per the user's 2026-09-15 ruling. `recursion/` is
 its own cargo package root (never a workspace member — that would void
 `research`'s `[profile.*]` tables); commands run from inside it.
 
+**`rand-guest`, the sibling guest toolchain, is done through Task 7 and merged
+on 2026-09-18** — v0.4 piece 1 of 3 (the RPC track took v0.3 first; the two
+translator specs, `sbpf2rv` and `evm2rv`, are pieces 2 and 3): one binary,
+`build`/`check`/`pack`/`run`/`info`, replacing the four former per-guest
+Makefiles and `mkimage.py` (`guests-compiled/README.md`). `build` drives
+`rustc` for a Rust guest or `clang` for a C one (`rust-lld` linking, from the
+pinned toolchain's own sysroot via `rustup +1.98.1 component add
+llvm-tools`) — `c-fib`, the fifth guest, exercises the C path end to end at
+**25 words / 116 cycles**. The four pins (`fib`, `keccak256`, `evm`, `sbpf`)
+are unchanged: `evm`/`sbpf` gate byte for byte, `fib`/`keccak256` (legacy flat
+binaries predating the tool) gate on `base_pc`/`words`/`digest()` instead,
+since `build` only ever writes the image-container form. `check` runs the
+machine's own decoder over every text word — a 16-bit RVC encoding, an
+undecodable opcode/funct/shamt, `FENCE`, a CSR instruction, `EBREAK`, and an
+`ecall` whose statically-known `a7` names no syscall the machine implements
+are each a distinct, named finding, not lumped together — and the cap is
+measured against the *loader's own* word count (text plus the `li`/`sw` data
+prologue it synthesises), never estimated from the data word count, since an
+`li` is one word or two depending on the constant. **The one trap**: a guest
+with a data segment needs its own `.ld` with `ORIGIN` raised past that
+prologue (`evm.ld`, `sbpf.ld`: `guest.ld` with the origin moved), and
+`rand-guest` picks the one `.ld` file it finds in the guest's own directory —
+more than one, and it refuses to guess rather than picking wrong.
+
 **Constraint set 6 in one paragraph**, because it is what most recently moved
 under everyone's feet: `SYS_READ_PUBLIC = 6` reads a second, independently
 indexed input vector bound to `H_PUB = pv::PUB0..PUB7`, which — unlike `H_IN` —

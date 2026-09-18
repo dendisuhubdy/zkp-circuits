@@ -1,0 +1,150 @@
+# rand-guest
+
+The Rand zkVM toolchain: one binary from a guest's source to the image the chain deploys.
+`build` compiles a guest directory (Rust or C) with the fixed flags every guest needs, `check`
+runs the machine's own decoder over the result and refuses anything the circuit could not accept,
+`pack` wraps a bare ELF into the image container, `run` executes an image on the emulator, and
+`info` reports what a built image is without running it. `guests-compiled/README.md` is the
+committed guests' side of this; this file is the tool's.
+
+Run from this directory (`cd rand-guest`) with the pinned toolchain: `cargo +1.98.1 run -- <cmd>
+…`, or build once and use the binary directly.
+
+## The five subcommands
+
+### `build` — compile a guest directory to a packed image, checking it on the way
+
+    cargo +1.98.1 run -- build ../guests-compiled/fib --out ../guests-compiled/bin/fib.bin
+
+Rust is the default language; `--lang c` drives clang instead (see "The C path" below). Exits
+non-zero — after still writing the image — if `check` rejects the result.
+
+### `check` — the ISA report over an ELF or an image
+
+    cargo +1.98.1 run -- check ../guests-compiled/bin/evm.bin --max-words 65535
+
+Takes either form (`pack`s an ELF on the way in); prints every finding, one per line, then a
+summary line and `OK` or `REJECTED`.
+
+### `pack` — pack an ELF into the image container
+
+    cargo +1.98.1 run -- pack path/to/guest.elf --out guest.bin
+
+Also writes `guest.bin.sha256`, the pin format `guests-compiled/bin/*.bin.sha256` uses.
+
+### `run` — run an image on the emulator with the given inputs
+
+    cargo +1.98.1 run -- run ../guests-compiled/bin/fib.bin --input 20
+
+Prints each output word, the cycle count, and the smallest tier the run fits (mirroring
+`Machine::prove_salted`'s tier pick, not cycles alone — the Poseidon2 table is a second,
+independent constraint); a trap prints the faulting pc and exits 2.
+
+### `info` — words, hc, the cap
+
+    cargo +1.98.1 run -- info ../guests-compiled/bin/evm.bin
+
+Reports the on-disk form, the text/data/prologue word counts (image containers) or just the word
+count (flat binaries), the program digest `hc`, and whether the program fits `--max-words`.
+
+## Flags
+
+| subcommand | flag | default | what it does |
+|---|---|---|---|
+| `build` | `<dir>` (positional) | — | the guest directory |
+| `build` | `--lang rust\|c` | `rust` | which compiler drives the build |
+| `build` | `--ld <path>` | the one `.ld` in `<dir>`, else `guest-sdk/guest.ld` | the linker script, relative to `<dir>` as the former Makefiles wrote it |
+| `build` | `--out <path>` | `<dir>/image.bin` | where the packed image is written |
+| `build` | `--max-words <n>` | `4096` | the cap `check` measures the built image against |
+| `check` | `<file>` (positional) | — | an ELF or an image |
+| `check` | `--max-words <n>` | `4096` | the cap |
+| `pack` | `<elf>` (positional) | — | the ELF to pack |
+| `pack` | `--out <path>` | `<elf>` with a `.bin` extension | where the image (and its `.sha256`) are written |
+| `run` | `<image>` (positional) | — | a packed image or a legacy flat binary |
+| `run` | `--input <u32>...` | none | private input words, bound to `H_IN` (`READ_INPUT`) |
+| `run` | `--public <u32>...` | none | public input words, bound to `H_PUB` (`READ_PUBLIC`) |
+| `info` | `<image>` (positional) | — | a packed image or a legacy flat binary |
+| `info` | `--max-words <n>` | `4096` | the cap the report is measured against |
+
+`--lang` and `--ld` apply to `build` only, for both languages: a C guest's own `.ld` (if it has
+one) is found and used exactly like a Rust guest's, by the same `find_ld`. A guest with a data
+segment needs its own `.ld` with `ORIGIN` raised past the loader's `li`/`sw` prologue (`evm.ld`,
+`sbpf.ld`: `guest.ld` with the origin moved) — `rand-guest` picks the one `.ld` file it finds in
+the guest's own directory, and refuses to guess if there is more than one (`--ld` names it then).
+
+## What `check` rejects
+
+Every text word goes through the machine's own decoder (`Instr::decode`), so a guest that passes
+cannot fail in-circuit for an encoding, syscall-number, or layout reason. It refuses:
+
+- a 16-bit (RVC) encoding — the machine decodes only 32-bit RV32IM (`Compressed`)
+- an opcode, funct, or shift amount outside what the machine implements (`Undecodable`)
+- `FENCE`/`FENCE.I` — no memory-ordering instructions in this machine (`Fence`)
+- a CSR instruction — no CSRs in this machine (`Csr`)
+- `EBREAK` — traps are not modelled (`Ebreak`)
+- an `ecall` whose `a7` is statically known (a preceding `li a7, n` in straight-line code) but
+  names no syscall the machine implements (`Syscall`); an `ecall` whose `a7` is *not* statically
+  known — set by anything other than `li`, or reached after a branch — is counted separately
+  (`unresolved_ecalls`) rather than rejected, since the checker cannot know what it will be at
+  run time
+- more words than `--max-words`, counted the way the loader would count them — text plus the
+  data prologue it synthesises, never estimated from the data word count, since an `li` is one
+  word or two depending on the constant and the base register resets periodically (`Cap`)
+- a text base that is not word-aligned (`Layout`)
+
+## The cap: `--max-words` and its default
+
+The default, `4096`, is the fullnode's deploy cap today. Both loaders (`Program::from_flat_image`,
+`Program::from_flat_binary`) refuse anything over **65 535** words outright (`LoadError::TooLong`)
+regardless of `--max-words` — the hard ceiling the v0.4 chain is expected to raise the deploy cap
+to. The two committed interpreters are already over the default: `evm.bin` is 18 009 words and
+`sbpf.bin` is bigger still, so building or checking either needs `--max-words 65535` (as the
+committed guests' own build script and `rand-guest/tests/build.rs` pass it); `fib`, `keccak256`,
+and `c-fib` all fit comfortably under 4096.
+
+## The two image forms
+
+`build` and `pack` always write the **image container** (`IMAGE_MAGIC` header, `Program::from_flat_image`):
+a text span, a data span with its own base, and the loader's own `li`/`sw` prologue that writes
+the data words at load time. `evm.bin` and `sbpf.bin` are committed and gated in this form, byte
+for byte.
+
+`fib.bin` and `keccak256.bin` are **legacy flat binaries** — headerless, no data segment, predating
+this toolchain, loaded at the fixed `ORIGIN` `guest-sdk/guest.ld` gives every guest, `0x1000`
+(`Program::from_flat_binary(0x1000, …)`). `build` still only knows how to emit the container form
+for them, so rebuilding them does not reproduce their committed bytes; see "Byte/program identity"
+below for what is actually pinned instead. Every subcommand that loads an image (`check`, `run`,
+`info`) tries the container form first and falls back to the flat one on a bare `Magic` mismatch,
+so callers never need to say which one they have.
+
+## The C path
+
+`build --lang c` compiles every `.c` file in the guest directory (sorted, so link order does not
+depend on the directory's) plus this crate's own `start.S`, with `rust-lld` linking against the
+same `guest.ld` the Rust guests use. Prerequisites:
+
+- a clang that targets `riscv32`: either Homebrew's LLVM (`brew install llvm` — Apple's system
+  clang has no RISC-V backend) at its default path, or any other clang set via `$CLANG`
+- `rustup +1.98.1 component add llvm-tools`, for `rust-lld` — the same linker the Rust guests use,
+  found in the pinned toolchain's own sysroot, so a C guest needs no separate linker installed
+
+A C guest writes `#include "guest.h"` for the syscall wrappers (`rand_read_input`,
+`rand_read_public`, `rand_write_output`, `rand_poseidon2`, `rand_keccak`,
+`rand_sha256_compress`, `rand_halt`) and needs no `_start` of its own — both are written into the
+guest's `target/rand-guest/` and put on the include path, so a C guest directory is its own
+source and nothing else. Because of that, `build --lang c` refuses a guest directory that already
+has its own `guest.h` or `start.S`: either would shadow the toolchain's copy silently, since the
+include path and the link line would find the local one first.
+
+## Byte/program identity for the committed guests
+
+`fib`, `keccak256`, `evm`, and `sbpf` are the four guests pinned in `guests-compiled/bin/` (each
+`<name>.bin` with a `<name>.bin.sha256`), and `rand-guest/tests/build.rs` gates all four on every
+run. `evm` and `sbpf` are image containers: rebuilding must reproduce the committed bytes exactly,
+checked by comparing SHA-256 hashes. `fib` and `keccak256` are the legacy flat-binary pins: since
+`build` always writes the container form, the byte gate does not apply to them; instead the test
+compares the *program* the freshly built image loads to against the program the committed flat
+binary loads to — same `base_pc`, same `words`, same `digest()` (`hc`). `c-fib`, the C path's
+guest, is not one of the four pins; it exists to exercise `--lang c` end to end and is checked
+functionally (build, check, run to the same `fib(20) = 6765` the Rust `fib` guest gives), not
+pinned.

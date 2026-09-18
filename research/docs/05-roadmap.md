@@ -42,6 +42,10 @@ wallet — and is deliberately out of scope here; so are the fee and burn
 *destinations* (S2/S3), which is why `Ledger::fees_collected`/`burned` are
 running totals with nothing attached to them.
 
+**v0.4** is a separate track from S1/S2/S3, approved 2026-09-18 alongside the fullnode's v0.3 RPC
+work: `rand-guest`, the guest toolchain (piece 1 of 3, `docs/superpowers/specs/2026-09-18-rand-guest-toolchain-design.md`),
+is done through Task 7; the `sbpf2rv` and `evm2rv` RV32 translators (pieces 2 and 3) have not started.
+
 ## Plan errata — M4.4 constants the implementation had to correct
 
 Four numbers the M4.4 plan fixed in advance turned out to be wrong once the real

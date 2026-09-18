@@ -9,6 +9,7 @@
 | `zkp5` | Monero-style transactions | curve25519-dalek, bulletproofs | stealth addresses, Pedersen commitments, hand-written CLSAG ring signatures, key images |
 | `zkp6` | Tornado Cash mixer | arkworks | Merkle-membership withdraw proof, simulated contract with account balances, front-running / double-spend defences |
 | `research` | **Rand reference zkVM** | Plonky3 (Goldilocks, LogUp, hiding FRI) | RV32I guest programs proved under one universal relation; the guidance circuit for the whole protocol |
+| `rand-guest` | the guest toolchain: build (Rust, C), check, pack, run, info | rustc, clang, rust-lld | one binary from a guest's source to the image the chain deploys |
 
 Each crate: `cargo run --release` for a narrated demo, `cargo test --release` for the tests.
 
