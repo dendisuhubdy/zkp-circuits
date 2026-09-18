@@ -14,7 +14,9 @@
  * static gas is 0), `EXP`'s 10 + 50/byte, and `SSTORE`'s set/reset. `SLOAD`'s 2100 is static.
  *
  * **Offsets and lengths** are saturated u32s: pass `u256_sat_u32(&operand)` (see u256.h), never
- * the bare low limb, or an offset of 2^32 would alias offset 0.
+ * the bare low limb, or an offset of 2^32 would alias offset 0. Only offsets and lengths: a
+ * *value* — MSTORE8's byte — is `u256_low_u32(&value)`, unsaturated, since only its low byte is
+ * stored (saturating it would turn 0x1_00000012 into 0xff).
  *
  * **Halting.** `evm_halt` never returns: it records the code, its argument and the gas, and
  * unwinds to `evm_rt_enter`. An exceptional halt (every code but STOP/RETURN/REVERT) consumes
@@ -128,7 +130,8 @@ void evm_charge(uint64_t g);                          /* traps OutOfGas */
 uint32_t evm_mexpand(uint32_t offset, uint32_t len);
 void evm_mload(uint32_t off, u256 *r);
 void evm_mstore(uint32_t off, const u256 *v);
-void evm_mstore8(uint32_t off, uint32_t b);           /* the value's low byte */
+/* MSTORE8: `off` saturated, `b` = u256_low_u32(&value) (NOT saturated); the low byte is stored. */
+void evm_mstore8(uint32_t off, uint32_t b);
 void evm_calldataload(uint32_t off, u256 *r);         /* zero-padded */
 /* CALLDATACOPY / CODECOPY: G_COPY_WORD per word, the expansion, then zero-padded bytes. */
 void evm_copy_calldata(uint32_t dst, uint32_t src, uint32_t len);

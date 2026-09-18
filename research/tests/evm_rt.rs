@@ -221,6 +221,23 @@ fn vectors_header() -> String {
     for op in ["DIV", "MOD"] {
         add(op, &knuth_a, &knuth_d, &z, &mut table);
     }
+    // The add-back with a non-zero normalising shift (the review's pair): the remainder's
+    // denormalisation reads `un[dn]`, so a wrong carry into the top window limb shows (a mod d
+    // = 0x3ffffffff800054f000a8d27; dropping that carry gives 0xbffffffff800054f000a8d27). The
+    // pair case above has s = 0 and never reads it.
+    let addback_a = U256([0x000a_8d47, 0x3800_0546, 0x4000_0000, 0x3fff_fff8, 0, 0, 0, 0]);
+    let addback_d = U256([0x3fff_ffff, 0, 0x4000_0000, 0, 0, 0, 0, 0]);
+    assert_eq!(hex(&addback_a), "3ffffff84000000038000546000a8d47");
+    assert_eq!(hex(&addback_d), "40000000000000003fffffff");
+    assert_eq!(hex(&addback_a.rem(&addback_d)), "3ffffffff800054f000a8d27");
+    for op in ["DIV", "MOD", "SDIV", "SMOD"] {
+        add(op, &addback_a, &addback_d, &z, &mut table);
+    }
+    // ... and as ADDMOD/MULMOD's modulus, where the numerator is 16 limbs wide.
+    add("ADDMOD", &addback_a, &U256::ZERO, &addback_d, &mut table);
+    add("ADDMOD", &addback_a, &U256::MAX, &addback_d, &mut table);
+    add("MULMOD", &addback_a, &U256::ONE, &addback_d, &mut table);
+    add("MULMOD", &addback_a, &U256::MAX, &addback_d, &mut table);
     let core: Vec<U256> = [0usize, 1, 2, 8, 13, 16].iter().map(|&i| edges[i]).collect();
     for op in ["ADDMOD", "MULMOD"] {
         for a in &core {
@@ -299,21 +316,25 @@ fn the_committed_u256_vectors_are_what_the_interpreter_computes() {
 // ---------------------------------------------------------------------------------------------
 // The tables that must not drift.
 
-/// Every `#define <prefix><NAME> <integer>` in `text`, underscores and a `u`/`ull` suffix
-/// tolerated.
+/// Every `#define <prefix><NAME> <decimal>` in `text`; a matching define whose value is anything
+/// but a plain decimal literal panics.
 fn c_defines(text: &str, prefix: &str) -> BTreeMap<String, u64> {
     let mut m = BTreeMap::new();
     for line in text.lines() {
-        let mut w = line.split_whitespace();
+        // A trailing `/* ... */` or `// ...` comment is not part of the value.
+        let code = line.split("/*").next().unwrap().split("//").next().unwrap();
+        let mut w = code.split_whitespace();
         if w.next() != Some("#define") {
             continue;
         }
         let (Some(name), Some(val)) = (w.next(), w.next()) else { continue };
         if let Some(rest) = name.strip_prefix(prefix) {
-            let digits: String = val.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = digits.parse() {
-                m.insert(rest.to_string(), n);
-            }
+            // A plain decimal literal and nothing else: a hex value, a suffix, an expression or a
+            // value that is not there fails the test instead of being skipped.
+            let bare = val.chars().all(|c| c.is_ascii_digit()) && w.next().is_none();
+            let n = val.parse().ok().filter(|_| bare);
+            let n = n.unwrap_or_else(|| panic!("`{}`: not a plain decimal literal", line.trim()));
+            m.insert(rest.to_string(), n);
         }
     }
     m
