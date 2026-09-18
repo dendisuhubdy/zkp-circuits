@@ -19,25 +19,25 @@ expensive ones need dedicated coprocessor tables rather than a naive
 byte-by-byte simulation, or Solidity guests would be orders of magnitude
 slower than the RISC-V native path:
 
-**The translator, `evm2rv`, is done (2026-09-18, `circuits/evm2rv`).** It compiles the bytecode to
-C over `evm-rt/` ahead of time, in a shim crate `rand-guest build` turns into an image. The shim
-reuses the interpreter's ABI harness, so the input vector and the eight public output words do not
-change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 66 235 cycles
-against the interpreter's 121 638, at 11 686 program words against 18 009. The harness it shares
-with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 60%
-of those cycles, so further gains must come from the harness or the coprocessors below. One `hc`
-per contract: the image carries a digest of its source bytecode and refuses any other code
-(status 2), because `CODECOPY` reads the input code. All nine precompiles run in software;
-ecrecover (14.5 M cycles), bn256 mul (3.1 M), the pairing (about 1.9 G) and large modexp and
-blake2f are over 2^20 and wait on the coprocessors in this table. `evm2rv/README.md` has the
-walkthrough with real command output and every number.
-
 | EVM opcode(s) | Coprocessor needed | Notes |
 |---|---|---|
 | `KECCAK256` | Keccak-f\[1600\] table | **done (M4.2)** — the vendored Plonky3 0.7 set had `p3-keccak` (the permutation) but no `p3-keccak-air`, so the chip was hand-written: `tables::keccak`, 2 612 main columns, one row per round in 32-row blocks, `docs/02-tables-and-buses.md`'s `keccak` section. The sponge (rate, padding, squeeze) stays in guest code |
 | `ADDMOD`, `MULMOD`, `EXP` | 256-bit modular arithmetic | native words are 32-bit; a 256-bit value is eight limbs, and mulmod/expmod need a dedicated multi-limb multiplier, not four chained 32-bit ALU ops. **M4.3 ships them in software** (`evm-core::u256`: schoolbook multiply into a 16-limb product, Knuth algorithm D for division, checked against `num-bigint`), which is correct but is part of why an interpreted opcode costs what it does — a chip here is still the optimisation |
 | `ECRECOVER` (and any signature-checking precompile) | secp256k1 recovery | needs field/group arithmetic over a non-Goldilocks curve; this is exactly the CPI/secp256k1 gap noted for `randprotocol-svm` and is shared work |
 | `SLOAD`/`SSTORE` | Merkle-witness syscalls | EVM storage is a sparse Merkle tree keyed by 256-bit slots. **M4.3 does this in guest code**, not as a syscall: a depth-32 tree over the note layer's own domain-tagged Poseidon2 hashes, one witness per slot touched, verified and updated in Rust (`evm-core::storage`). That needed no machine change, and it is the single biggest line in the cycle budget below — 132 `POSEIDON2` calls for one `transfer` — so a looped `MERKLE_VERIFY`-shaped syscall (or a wider sponge rate) is the named follow-up |
+
+**The translator, `evm2rv`, is done (2026-09-18, `circuits/evm2rv`).** It compiles the bytecode to
+C over `evm-rt/` ahead of time, in a shim crate `rand-guest build` turns into an image. The shim
+reuses the interpreter's ABI harness, so the input vector and the eight public output words do not
+change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 66 235 cycles
+against the interpreter's 121 638, at 11 686 program words against 18 009. The harness it shares
+with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 60%
+of those cycles, so further gains must come from the harness or the coprocessors above. One `hc`
+per contract: the image carries a digest of its source bytecode and refuses any other code
+(status 2), because `CODECOPY` reads the input code. All nine precompiles run in software;
+ecrecover (14.5 M cycles), bn256 mul (3.1 M), the pairing (about 1.9 G) and large modexp and
+blake2f are over 2^20 and wait on the coprocessors in this table. `evm2rv/README.md` has the
+walkthrough with real command output and every number.
 
 ## The Solana path
 
