@@ -172,6 +172,12 @@ pub fn run_out_of_cycles(image: &Path, inputs: &[u32]) -> Option<String> {
 
 /// `rand-guest run image --input words…`: the eight output words and the executed cycles.
 pub fn run(image: &Path, inputs: &[u32]) -> ([u32; 8], usize) {
+    let (out, cycles, _) = run_tier(image, inputs);
+    (out, cycles)
+}
+
+/// [`run`], and the tier `rand-guest run` picks for the run (`None` when none fits).
+pub fn run_tier(image: &Path, inputs: &[u32]) -> ([u32; 8], usize, Option<u32>) {
     let o = scrubbed(rand_guest())
         .arg("run")
         .arg(image)
@@ -202,7 +208,11 @@ pub fn run(image: &Path, inputs: &[u32]) -> ([u32; 8], usize) {
         .expect("a cycles line")
         .parse()
         .unwrap();
-    (out, cycles)
+    let tier = s
+        .lines()
+        .find_map(|l| l.strip_prefix("tier "))
+        .map(|t| t.parse().unwrap());
+    (out, cycles, tier)
 }
 
 /// The halt as the `emit-outcome` build encodes it: the `ffi.rs` code, a trap's opcode above it.

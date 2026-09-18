@@ -25,7 +25,7 @@ mod count;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use common::{build_shim, encoded_halt, root, run, run_out_of_cycles, STAGES};
+use common::{build_shim, encoded_halt, root, run_out_of_cycles, run_tier, STAGES};
 use evm2rv::emit::Stage;
 use evm_core::abi::{run_call_with_executor, Workspace};
 use evm_core::interp::{Halt, Log, Outcome, MAX_LOGS, MAX_RETURN_BYTES};
@@ -173,13 +173,16 @@ fn words(image: &Path, call: &EvmCall, fits: bool) -> [u32; 8] {
     let (out, n) = count::count(&program, &input, 100_000_000).expect("the counter");
     if fits {
         // Where the run fits, the counter is the emulator: the same words, the same cycles.
-        let (got, cycles) = run(image, &input);
+        let (got, cycles, tier) = run_tier(image, &input);
         assert_eq!(
             (got, cycles as u64),
             (out, n),
             "the counter against rand-guest run"
         );
-        eprintln!("{}: {n} cycles (rand-guest run)", image.display());
+        eprintln!(
+            "{}: {n} cycles, tier {tier:?} (rand-guest run)",
+            image.display()
+        );
         return got;
     }
     assert!(

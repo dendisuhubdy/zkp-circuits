@@ -35,7 +35,7 @@ mod common;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use common::{build_shim, encoded_halt, root, run, STAGES};
+use common::{build_shim, encoded_halt, root, run, run_tier, STAGES};
 use evm2rv::emit::Stage;
 use evm_core::interp::Halt;
 use evm_core::u256::U256;
@@ -86,7 +86,7 @@ fn images(stage: Stage) -> &'static Images {
 const ERC20_HC: &str = "3307bfc4aaf87e4021941d18a9e813441354bb6fa19b357c5b604839e516579d";
 
 /// The same for the stage-two translation (Task 8): a different program, so a different digest.
-const ERC20_HC_STAGE2: &str = "16d27dfb0bd7846faf7f7312398cd92ce88de9c71f1dae318f34c25055b25e96";
+const ERC20_HC_STAGE2: &str = "87aba574b1dff3591631fbfc2ebd9e993098e9929219126ddc94ecaf2c60ccad";
 
 /// `hc` of the stage-one ERC-20 translation (`--stage 1`), pinned (fix round 1, item 7). Uses
 /// the parity build.
@@ -109,16 +109,19 @@ fn check(name: &str, call: &EvmCall, want_status: u32) -> (usize, usize, usize) 
     let (want, o, _post) = call.expected();
     assert_eq!(want[0], want_status, "{name}: the oracle's own status");
 
-    let (interp, interp_cycles) = run(&root().join("guests-compiled/bin/evm.bin"), &words);
+    let (interp, interp_cycles, interp_tier) =
+        run_tier(&root().join("guests-compiled/bin/evm.bin"), &words);
     assert_eq!(
         interp, want,
         "{name}: evm.bin disagrees with the native interpreter"
     );
 
     let mut cycles = [0usize; 2];
+    let mut tiers = [None; 2];
     for (k, stage) in STAGES.into_iter().enumerate() {
         let Images { plain, outcome, .. } = images(stage);
-        let (got, c) = run(plain, &words);
+        let (got, c, tier) = run_tier(plain, &words);
+        tiers[k] = tier;
         assert_eq!(
             got, want,
             "{name} ({stage:?}): the translated program's eight public words"
@@ -141,8 +144,8 @@ fn check(name: &str, call: &EvmCall, want_status: u32) -> (usize, usize, usize) 
     }
 
     eprintln!(
-        "{name}: status {} halt {:?} gas_used {} — cycles: interpreter {interp_cycles}, stage one {}, stage two {}",
-        want[0], o.halt, o.gas_used, cycles[0], cycles[1]
+        "{name}: status {} halt {:?} gas_used {} — cycles (tier): interpreter {interp_cycles} ({interp_tier:?}), stage one {} ({:?}), stage two {} ({:?})",
+        want[0], o.halt, o.gas_used, cycles[0], tiers[0], cycles[1], tiers[1]
     );
     (interp_cycles, cycles[0], cycles[1])
 }

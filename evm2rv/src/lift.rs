@@ -19,8 +19,9 @@
 //!   depends on its operand, nor anything that touches memory, storage or gas). An offset or length
 //!   operand that is a constant becomes a literal — saturated at translation exactly as
 //!   `u256_sat_u32` saturates — a constant jump destination a direct `goto` (or a static bad jump),
-//!   and a constant word a runtime call reads is materialised into a local (or, past 64 bits, a
-//!   function-scope `static const u256`, as stage one pushes it).
+//!   and a constant word a runtime call reads is a function-scope `static const u256` (one per
+//!   distinct value): the loader's data prologue writes its non-zero limbs once per run, where
+//!   building it at each use would cost a call every time.
 //! * `Env` — `ADDRESS`, `CALLER` (and `ORIGIN`), `CALLVALUE`: the runtime globals the shim fills
 //!   before the run and nothing writes during it, read in place.
 //!
@@ -62,8 +63,8 @@ use crate::emit::{comment, head_c, EmitError, Emitted, Options};
 /// shared with the precompiles `evm_call` runs).
 pub const MAX_LOCALS: usize = 96;
 
-/// What the cap keeps free at the start of every operation: three materialised constants and a
-/// result (`ADDMOD`/`MULMOD` over three constants), or a protected jump destination.
+/// What the cap keeps free at the start of every operation: its result, and the locals a spill's
+/// protection may take (a jump's destination, or `LOG`'s offset and size), with one to spare.
 const OP_ROOM: usize = 4;
 
 /// What one stack position holds (see the module docs).
@@ -91,7 +92,7 @@ enum Use {
 struct Func {
     /// The pool's size: one more than the highest local any block used.
     locals: usize,
-    /// The `static const u256 K<i>` table, for constants wider than 64 bits.
+    /// The `static const u256 K<i>` table: every constant a runtime call reads through a pointer.
     consts: Vec<[u32; 8]>,
     /// A spill rotated a cycle through `t_`.
     temp: bool,
@@ -284,8 +285,8 @@ impl<'f> Lift<'f> {
         }
     }
 
-    /// `v` as a `const u256 *`; a small constant is materialised into a local by `pre`.
-    fn ptr(&mut self, v: Val, pre: &mut String) -> String {
+    /// `v` as a `const u256 *`.
+    fn ptr(&mut self, v: Val) -> String {
         match v {
             Val::Arr(q) => format!("&{}", self.arr(q)),
             Val::Local(i) => {
@@ -293,11 +294,6 @@ impl<'f> Lift<'f> {
                 format!("&r{i}")
             }
             Val::Env(n) => format!("&{n}"),
-            Val::Const(l) if small(&l).is_some() => {
-                let t = self.alloc();
-                pre.push_str(&self.materialize(&format!("r{t}"), l));
-                format!("&r{t}")
-            }
             Val::Const(l) => format!("&K{}", self.f.konst(l)),
         }
     }
@@ -307,7 +303,7 @@ impl<'f> Lift<'f> {
         match v {
             Val::Const(l) if l[1..].iter().all(|&x| x == 0) => format!("{:#x}u", l[0]),
             Val::Const(_) => format!("{:#x}u", u32::MAX),
-            v => format!("u256_sat_u32({})", self.ptr(v, &mut String::new())),
+            v => format!("u256_sat_u32({})", self.ptr(v)),
         }
     }
 
@@ -315,7 +311,7 @@ impl<'f> Lift<'f> {
     fn low(&mut self, v: Val) -> String {
         match v {
             Val::Const(l) => format!("{:#x}u", l[0]),
-            v => format!("u256_low_u32({})", self.ptr(v, &mut String::new())),
+            v => format!("u256_low_u32({})", self.ptr(v)),
         }
     }
 
@@ -329,24 +325,24 @@ impl<'f> Lift<'f> {
     ) -> String {
         let vals: Vec<Val> = uses.iter().map(|_| self.pop()).collect();
         // Every operand local is in use until the call has read it — including one this pop left
-        // unreferenced, which a constant's temporary must not be allocated over.
+        // unreferenced, which nothing else may be allocated over before the call (the result may
+        // be: every runtime routine lets its result alias its operands).
         for v in &vals {
             if let Val::Local(i) = v {
                 self.busy.push(*i);
             }
         }
-        let mut pre = String::new();
         let mut args = Vec::with_capacity(uses.len());
         for (u, v) in uses.iter().zip(vals) {
             args.push(match u {
-                Use::Ptr => self.ptr(v, &mut pre),
+                Use::Ptr => self.ptr(v),
                 Use::Sat => self.sat(v),
                 Use::Low => self.low(v),
             });
         }
         let d = result.then(|| self.dst());
         let name = d.map(|d| format!("r{d}")).unwrap_or_default();
-        let code = pre + &render(&args, &name);
+        let code = render(&args, &name);
         if let Some(d) = d {
             self.push(Val::Local(d));
         }
@@ -693,7 +689,7 @@ impl<'f> Lift<'f> {
         j.dynamic = true;
         let ex = self.exit(h - 1);
         let d = self.pop();
-        let p = self.ptr(d, &mut String::new());
+        let p = self.ptr(d);
         self.busy.clear();
         format!("{{ {ex}const u256 *d_ = {p}; if (!u256_hi_zero(d_)) evm_halt(EVM_HALT_BAD_JUMP, 0); jd = d_->l[0]; goto dispatch; }}")
     }
@@ -707,7 +703,7 @@ impl<'f> Lift<'f> {
         let cond = self.pop();
         let c = match cond {
             Val::Const(l) => (if l == [0; 8] { "0" } else { "1" }).to_string(),
-            v => format!("!u256_is_zero({})", self.ptr(v, &mut String::new())),
+            v => format!("!u256_is_zero({})", self.ptr(v)),
         };
         self.busy.clear();
         // The destination sits just above the exit depth while the block spills, so the spill
@@ -728,7 +724,7 @@ impl<'f> Lift<'f> {
             }
             v => {
                 j.dynamic = true;
-                let p = self.ptr(v, &mut String::new());
+                let p = self.ptr(v);
                 self.busy.clear();
                 format!("{{ int c_ = {c}; {ex}const u256 *d_ = {p}; if (c_) {{ if (!u256_hi_zero(d_)) evm_halt(EVM_HALT_BAD_JUMP, 0); jd = d_->l[0]; goto dispatch; }} }}")
             }
