@@ -493,3 +493,50 @@ fn kem_key_versions_differ_and_version_zero_is_the_unversioned_key() {
     let (_, opened) = env.open_as_receiver_at(note.commitment(), &vk, 1).expect("the version-1 key opens it");
     assert_eq!(opened, note);
 }
+
+use rand_zkvm::viewing::{memo_field, memo_text, MEMO_FIELD_BYTES, MEMO_TEXT_MAX_BYTES};
+
+#[test]
+fn memo_field_round_trips_and_bounds() {
+    assert_eq!(memo_text(&memo_field("").unwrap()), None, "len 0 is no memo");
+    assert_eq!(memo_text(&memo_field("Invoice #42").unwrap()).as_deref(), Some("Invoice #42"));
+    let edge = "é".repeat(255); // 510 bytes
+    assert_eq!(edge.len(), MEMO_TEXT_MAX_BYTES);
+    assert_eq!(memo_text(&memo_field(&edge).unwrap()).as_deref(), Some(edge.as_str()));
+    assert!(memo_field(&"x".repeat(511)).is_none(), "511 bytes refused");
+}
+
+#[test]
+fn a_malformed_memo_field_reads_as_no_memo() {
+    let mut f = memo_field("ok").unwrap();
+    f[0] = 0x58; f[1] = 0x02; // len 600 > 510
+    assert_eq!(memo_text(&f), None);
+    let mut f = memo_field("ok").unwrap();
+    f[2] = 0xff; // not UTF-8
+    assert_eq!(memo_text(&f), None);
+    let mut f = memo_field("ok").unwrap();
+    f[MEMO_FIELD_BYTES - 1] = 1; // non-zero padding
+    assert_eq!(memo_text(&f), None);
+    assert_eq!(memo_text(&[0u8; 3]), None, "wrong length");
+}
+
+#[test]
+fn a_memo_envelope_is_1860_bytes_and_opens_for_the_same_keys() {
+    let (alice, bob) = (SpendKey::random().viewing_key(), SpendKey::random().viewing_key());
+    let note = Note::new(bob.pk(), alice.pk(), 5, 0, 7);
+    let key = TxKey::random();
+    let e = Envelope::seal_with_memo(&alice, &bob.address(), &note, &key, &memo_field("rent").unwrap());
+    let len = e.kem_ct.len() + e.to_receiver.len() + e.to_sender.len() + e.body.len();
+    assert_eq!(len, 1860);
+    let cm = note.commitment();
+    let (k, n) = e.open_as_receiver(cm, &bob).unwrap();
+    assert_eq!(n, note);
+    assert_eq!(e.memo(cm, &k).as_deref(), Some("rent"));
+    let (k2, _) = e.open_as_sender(cm, &alice).unwrap();
+    assert_eq!(e.memo(cm, &k2).as_deref(), Some("rent"));
+    assert_eq!(e.open_with_tx_key(cm, &key), Some(note));
+    // A legacy envelope still opens, and has no memo.
+    let old = Envelope::seal(&alice, &bob.address(), &note, &key);
+    assert_eq!(old.open_with_tx_key(cm, &key), Some(note));
+    assert_eq!(old.memo(cm, &key), None);
+}

@@ -107,6 +107,41 @@ fn open(key: &[u8; 32], aad: &[u8], ct: &[u8]) -> Option<Vec<u8>> {
     ChaCha20Poly1305::new(&Key::from(*key)).decrypt(&Nonce::from(nonce), Payload { msg: &ct[12..], aad }).ok()
 }
 
+/// The memo that rides in a note's body (fullnode spec 2026-09-26 §2.3): a fixed 512-byte field
+/// so its presence and length never show on chain.
+pub const MEMO_FIELD_BYTES: usize = 512;
+/// `len` (u16 LE) ‖ text ‖ zero padding: at most 510 bytes of UTF-8.
+pub const MEMO_TEXT_MAX_BYTES: usize = MEMO_FIELD_BYTES - 2;
+
+/// The field for `text`, or `None` if it does not fit.
+pub fn memo_field(text: &str) -> Option<[u8; MEMO_FIELD_BYTES]> {
+    let t = text.as_bytes();
+    if t.len() > MEMO_TEXT_MAX_BYTES { return None; }
+    let mut f = [0u8; MEMO_FIELD_BYTES];
+    f[..2].copy_from_slice(&(t.len() as u16).to_le_bytes());
+    f[2..2 + t.len()].copy_from_slice(t);
+    Some(f)
+}
+
+/// The text a field carries: `None` for an empty field and for any malformed one — a bad
+/// length, invalid UTF-8, or non-zero padding. A malformed memo never costs the payee the note.
+pub fn memo_text(field: &[u8]) -> Option<String> {
+    if field.len() != MEMO_FIELD_BYTES { return None; }
+    let len = u16::from_le_bytes([field[0], field[1]]) as usize;
+    if len == 0 || len > MEMO_TEXT_MAX_BYTES { return None; }
+    if field[2 + len..].iter().any(|&b| b != 0) { return None; }
+    String::from_utf8(field[2..2 + len].to_vec()).ok()
+}
+
+/// The body plaintext: the note alone (the original layout) or the note and a memo field.
+fn body_parts(pt: &[u8]) -> Option<(Note, Option<&[u8]>)> {
+    match pt.len() {
+        n if n == Note::BYTES => Some((Note::from_bytes(pt)?, None)),
+        n if n == Note::BYTES + MEMO_FIELD_BYTES => Some((Note::from_bytes(&pt[..Note::BYTES])?, Some(&pt[Note::BYTES..]))),
+        _ => None,
+    }
+}
+
 impl Envelope {
     /// Seals `note` (which must be the note whose commitment the transaction publishes) to
     /// `receiver`, with a copy of `tx_key` for `sender`'s viewing key.
@@ -123,11 +158,30 @@ impl Envelope {
         }
     }
 
+    /// Seals `note` and a memo field to `receiver`: the same four parts as [`Envelope::seal`],
+    /// the body carrying `note ‖ memo` (1 860 bytes in all).
+    pub fn seal_with_memo(sender: &ViewingKey, receiver: &Address, note: &Note, tx_key: &TxKey, memo: &[u8; MEMO_FIELD_BYTES]) -> Envelope {
+        let mut e = Envelope::seal(sender, receiver, note, tx_key);
+        let pt = [&note.to_bytes()[..], &memo[..]].concat();
+        e.body = seal(&tx_key.0, &aad(AAD_BODY, note.commitment()), &pt);
+        e
+    }
+
     /// Opens the note with the transaction key. `cm` is the on-chain commitment the
     /// envelope was published with.
     pub fn open_with_tx_key(&self, cm: Word8, key: &TxKey) -> Option<Note> {
-        let note = Note::from_bytes(&open(&key.0, &aad(AAD_BODY, cm), &self.body)?)?;
+        let pt = open(&key.0, &aad(AAD_BODY, cm), &self.body)?;
+        let (note, _) = body_parts(&pt)?;
         (note.commitment() == cm).then_some(note)
+    }
+
+    /// The memo sealed with the note, if any: open the body with the transaction key (from
+    /// [`Envelope::open_as_receiver`], [`Envelope::open_as_sender`] or a disclosure).
+    pub fn memo(&self, cm: Word8, key: &TxKey) -> Option<String> {
+        let pt = open(&key.0, &aad(AAD_BODY, cm), &self.body)?;
+        let (note, memo) = body_parts(&pt)?;
+        if note.commitment() != cm { return None; }
+        memo_text(memo?)
     }
     /// Opens as the receiver: decapsulate, unwrap the transaction key, open the body. Equals
     /// `open_as_receiver_at(cm, vk, 0)`.
