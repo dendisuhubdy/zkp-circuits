@@ -4,6 +4,7 @@ pub mod guests;
 pub mod emulator;
 pub mod tables;
 pub mod machine;
+pub mod poseidon2_constants;
 pub mod hash;
 pub mod keccak;
 pub mod sha256;

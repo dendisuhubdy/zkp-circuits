@@ -58,7 +58,8 @@ impl GpuProver {
     }
 
     /// Opens device 0, loads the PTX from `ptx_path()`, and uploads the twiddle tables
-    /// and Poseidon2 round constants (derived from `perm_seed`) once.
+    /// and Poseidon2 round constants (`constants::poseidon2_constants(perm_seed)` — the committed
+    /// table for the zkVM's seed) once.
     pub fn probe(perm_seed: u64) -> Result<Arc<Self>, CudaError> {
         let dev = Device::open(0).map_err(|msg| CudaError::Context { ordinal: 0, msg })?;
         let path = Self::ptx_path();
