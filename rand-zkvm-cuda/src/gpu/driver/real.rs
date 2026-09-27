@@ -25,6 +25,9 @@ impl Device {
     }
     pub fn free_bytes(&self) -> Result<usize, String> {
         let (mut free, mut total) = (0usize, 0usize);
+        // SAFETY: both pointers are to live, writable `usize` locals (`size_t` on every CUDA
+        // host), and `cuMemGetInfo_v2` writes one `size_t` through each and keeps neither.
+        // Without a current context it returns an error code, handled below.
         let r = unsafe { cuda_core::sys::cuMemGetInfo_v2(&mut free as *mut _, &mut total as *mut _) };
         if r == cuda_core::sys::cudaError_enum_CUDA_SUCCESS {
             Ok(free)
@@ -95,6 +98,16 @@ impl Device {
                 }
             }
         }
+        // SAFETY: `params` holds one pointer per kernel parameter, in declaration order — a
+        // `Buf` (a kernel's `&[u64]` or `DisjointSlice<u64>`) as its device pointer then its
+        // length, a `U32`/`U64` as itself. Each points into `ptrs`/`lens`/`u32s`/`u64s`, none of
+        // which is pushed to after the pointers were taken, and all outlive this call (the driver
+        // copies the values at launch). Every `Buf` names a live `DeviceBuffer` that `args`
+        // borrows until `synchronize` below has waited for the kernel, so no buffer is freed
+        // while the device uses it. What this function cannot check is that `args` matches
+        // `name`'s signature in the PTX (count, order, types): that is the caller's contract,
+        // kept by `gpu/ntt.rs` and `gpu/hash.rs`, whose argument lists the mock driver (`mock.rs`)
+        // decodes by position; a mismatched list would be undefined behaviour on the device.
         unsafe {
             cuda_core::simt::launch_kernel_on_stream(
                 &f,

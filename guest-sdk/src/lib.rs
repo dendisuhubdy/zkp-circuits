@@ -28,7 +28,7 @@ const SHA256_IV: [u32; 8] = [
 #[inline(always)]
 pub fn read_input(idx: u32) -> u32 {
     let out: u32;
-    unsafe {
+    unsafe { // SAFETY: `READ_INPUT` reads no guest memory and writes only `a0` (`lateout`), leaving every other register and all memory as they were (`research/src/emulator.rs`'s ecall arm; `research/docs/01-isa.md`, "Syscall ABI").
         core::arch::asm!(
             "ecall",
             in("a7") SYS_READ_INPUT,
@@ -49,7 +49,7 @@ pub fn read_input(idx: u32) -> u32 {
 #[inline(always)]
 pub fn read_public(idx: u32) -> u32 {
     let out: u32;
-    unsafe {
+    unsafe { // SAFETY: `READ_PUBLIC` reads no guest memory and writes only `a0` (`lateout`), leaving every other register and all memory as they were — `READ_INPUT`'s twin.
         core::arch::asm!(
             "ecall",
             in("a7") SYS_READ_PUBLIC,
@@ -63,7 +63,7 @@ pub fn read_public(idx: u32) -> u32 {
 
 #[inline(always)]
 pub fn write_output(slot: u32, word: u32) {
-    unsafe {
+    unsafe { // SAFETY: `WRITE_OUTPUT` reads `a0`/`a1` and writes no register and no guest memory; a bad or repeated slot makes the run unprovable, not undefined.
         core::arch::asm!(
             "ecall",
             in("a7") SYS_WRITE_OUTPUT,
@@ -93,7 +93,7 @@ pub fn write_output(slot: u32, word: u32) {
 #[inline(always)]
 pub fn poseidon2(ptr: *mut u32, n: usize) {
     debug_assert!((ptr as u32) % 4 == 0);
-    unsafe {
+    unsafe { // SAFETY: the syscall writes no register and reads `n` words and overwrites 8 at `ptr`, so this block is sound only if `ptr` is 4-aligned and valid for reads of `n` and writes of `max(n, 8)` words with nothing else borrowing them. NOT upheld here: this is a safe fn over a caller's raw pointer (R4 report) — every caller in this repository passes a live buffer it owns (`HASH_BUF`, a `&mut [u32]`).
         core::arch::asm!(
             "ecall",
             in("a7") SYS_POSEIDON2,
@@ -111,7 +111,7 @@ pub fn poseidon2(ptr: *mut u32, n: usize) {
 #[inline(always)]
 pub fn keccak(ptr: *mut u32) {
     debug_assert!((ptr as u32) % 4 == 0);
-    unsafe {
+    unsafe { // SAFETY: the syscall writes no register and permutes the 50 words at `ptr` in place, so this block is sound only if `ptr` is 4-aligned and valid for reads and writes of 50 words with nothing else borrowing them. NOT upheld here: this is a safe fn over a caller's raw pointer (R4 report) — every caller passes a live `[u32; 50]` it owns (`keccak256` below, the `Host::keccak_f` impls).
         core::arch::asm!(
             "ecall",
             in("a7") SYS_KECCAK,
@@ -157,7 +157,7 @@ pub fn keccak256(msg: &[u8]) -> [u8; 32] {
 #[inline(always)]
 pub fn sha256_compress(ptr: *mut u32) {
     debug_assert!((ptr as u32) % 4 == 0);
-    unsafe {
+    unsafe { // SAFETY: the syscall writes no register, reads 24 words at `ptr` and overwrites words `16..24`, so this block is sound only if `ptr` is 4-aligned and valid for reads and writes of 24 words with nothing else borrowing them. NOT upheld here: this is a safe fn over a caller's raw pointer (R4 report) — its one caller, `compress_bytes`, passes a live `[u32; 24]` it owns.
         core::arch::asm!(
             "ecall",
             in("a7") SYS_SHA256,
@@ -230,7 +230,7 @@ fn compress_bytes(buf: &mut [u32; 24], block: &[u8; 64]) {
 // the function still never returns, but now because it loops, not because LLVM promises it.
 #[inline(always)]
 pub fn halt() -> ! {
-    unsafe {
+    unsafe { // SAFETY: `HALT` reads only `a7` and ends execution: nothing after the ecall runs, so no register or memory the compiler relies on is observed afterwards; the `loop {}` below is the `!` the type needs, never reached.
         core::arch::asm!(
             "ecall",
             in("a7") SYS_HALT,

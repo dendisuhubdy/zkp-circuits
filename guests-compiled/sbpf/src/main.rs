@@ -40,7 +40,7 @@ static mut W: Workspace = Workspace::ZERO;
 
 #[no_mangle]
 pub extern "C" fn main() -> ! {
-    let w = unsafe { &mut *core::ptr::addr_of_mut!(W) };
+    let w = unsafe { &mut *core::ptr::addr_of_mut!(W) }; // SAFETY: the only reference to `W` ever made — `main` runs once, on the guest's one thread, and nothing else names `W`.
     // A read past either segment's committed length is unsatisfiable in-circuit — `READ_INPUT`
     // past `n_in` (M4.1's salted `H_IN`) and `READ_PUBLIC` past `n_pub` (the unsalted `H_PUB`) are
     // both unwitnessable — so the machine is the bound on both vectors and `u32::MAX` is the honest

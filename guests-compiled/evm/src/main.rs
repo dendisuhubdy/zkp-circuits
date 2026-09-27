@@ -38,7 +38,7 @@ static mut W: Workspace = Workspace::ZERO;
 /// See `evm_core::abi`'s module docs.
 #[no_mangle]
 pub extern "C" fn main() -> ! {
-    // One `&mut` to the `.bss` workspace, taken once and never aliased: `addr_of_mut!` rather
+    // SAFETY: one `&mut` to the `.bss` workspace, taken once and never aliased: `addr_of_mut!` rather
     // than `&mut W` so no reference to the `static mut` is created by the macro itself.
     let w = unsafe { &mut *core::ptr::addr_of_mut!(W) };
     let out = run_call(&mut Syscalls, w, read_input, u32::MAX);

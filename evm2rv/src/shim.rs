@@ -493,8 +493,8 @@ extern "C" {
 
 /// `n` words from `src` to `dst`, eight at a time. The loads are volatile so the compiler cannot
 /// turn the loop into a `memcpy` call (compiler_builtins' byte loop).
-///
-/// SAFETY: `src` and `dst` aligned, `n` words valid at each, not overlapping.
+/// # Safety
+/// `src` and `dst` 4-aligned, `n` words valid at each (reads at `src`, writes at `dst`), not overlapping.
 #[inline(always)]
 unsafe fn copy_words(src: *const u32, dst: *mut u32, n: usize) {
     let mut i = 0;
@@ -643,7 +643,7 @@ static mut W: Workspace = Workspace::ZERO;
 
 #[no_mangle]
 pub extern "C" fn main() -> ! {
-    let w = unsafe { &mut *addr_of_mut!(W) };
+    let w = unsafe { &mut *addr_of_mut!(W) }; // SAFETY: the only reference to `W` ever made — `main` runs once, on the guest's one thread, and nothing else names `W`.
     // `u32::MAX`: a READ_INPUT past the committed `n_in` is unsatisfiable in-circuit, so the
     // machine is the length check (`evm_core::abi::InputCursor`).
     let (out, _o) = run_call_with_executor(&mut Syscalls, w, read_input, u32::MAX, &mut translated);

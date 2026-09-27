@@ -104,7 +104,7 @@ fn storage_code(e: StorageError) -> u32 {
 /// # Safety
 /// `p` must be valid and 4-aligned for reading eight `u32`s.
 unsafe fn read_u256(p: *const u32) -> U256 {
-    U256(core::array::from_fn(|i| p.add(i).read()))
+    U256(core::array::from_fn(|i| p.add(i).read())) // SAFETY: `i < 8`, inside the eight aligned words the caller vouches for.
 }
 
 /// `SLOAD`: `StorageTree::load` of the slot at `slot`, the value written to `out` on success.
@@ -120,11 +120,11 @@ pub unsafe extern "C" fn evm_sload(
     slot: *const u32,
     out: *mut u32,
 ) -> u32 {
-    let (tree, h) = (&mut *tree, &mut *(host as *mut HostBox<'_>));
+    let (tree, h) = (&mut *tree, &mut *(host as *mut HostBox<'_>)); // SAFETY: `# Safety` above — both live and unaliased for this call (the shim's `translated` sets them and does not touch `tree`/`hb` while C runs).
     match tree.load(h, &read_u256(slot)) {
         Ok(v) => {
             for (i, limb) in v.0.iter().enumerate() {
-                out.add(i).write(*limb);
+                out.add(i).write(*limb); // SAFETY: `i < 8`, inside `out`'s eight writable words.
             }
             0
         }
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn evm_sstore(
     slot: *const u32,
     value: *const u32,
 ) -> u32 {
-    let (tree, h) = (&mut *tree, &mut *(host as *mut HostBox<'_>));
+    let (tree, h) = (&mut *tree, &mut *(host as *mut HostBox<'_>)); // SAFETY: as in `evm_sload`.
     match tree.store(h, &read_u256(slot), read_u256(value)) {
         Ok(_) => 0,
         Err(e) => storage_code(e),
@@ -162,12 +162,12 @@ pub unsafe extern "C" fn evm_sstore(
 #[no_mangle]
 pub unsafe extern "C" fn evm_keccak256(host: *mut c_void, ptr: *const u8, len: u32, out: *mut u8) {
     debug_assert!(len <= isize::MAX as u32);
-    let h = &mut *(host as *mut HostBox<'_>);
+    let h = &mut *(host as *mut HostBox<'_>); // SAFETY: `host` is a live `HostBox`, not otherwise borrowed during the call.
     let msg: &[u8] = if len == 0 {
         &[]
     } else {
-        core::slice::from_raw_parts(ptr, len as usize)
+        core::slice::from_raw_parts(ptr, len as usize) // SAFETY: `len != 0`, so `ptr` is non-null and readable for `len <= isize::MAX` bytes; `u8` needs no alignment.
     };
     let d = keccak256(h, msg);
-    core::ptr::copy_nonoverlapping(d.as_ptr(), out, 32);
+    core::ptr::copy_nonoverlapping(d.as_ptr(), out, 32); // SAFETY: `out` is writable for 32 bytes and cannot overlap the local `d`.
 }
