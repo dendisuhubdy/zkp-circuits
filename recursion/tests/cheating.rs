@@ -937,3 +937,46 @@ fn a_reduce_run_that_never_reaches_its_last_row_is_rejected() {
         "ZKR-4: a reduce run that never reached its last row VERIFIED, publishing 0 against an honest 267"
     );
 }
+
+// ── OPCODES-4: the public table's four rows are all real ──────────────────────────────────────
+
+/// OPCODES-4 (low): the public table let its trailing rows be padding, and a padding row pins
+/// nothing — so a program that published fewer than four words left the remaining public values
+/// free. Here a program publishes two; the proof claims four, the last two chosen at will.
+/// (Every shipped program publishes exactly the four-word interface digest, so this was not
+/// reachable through them; the table's own rule now says what R5 always meant.)
+#[test]
+fn public_values_a_program_never_published_are_rejected() {
+    let p = Program {
+        instrs: vec![
+            i(Op::Faddi, 1, 0, 5),
+            i(Op::Faddi, 2, 0, 6),
+            i(Op::Public, 0, 1, 0),
+            i(Op::Public, 0, 2, 0),
+            i(Op::Halt, 0, 0, 0),
+        ],
+        checkpoints: vec![],
+    };
+    let m = Machine::new(FriProfile::Test);
+    let mut exec = execute(&p, &[], 1000).unwrap();
+    assert_eq!(exec.public.len(), 2);
+    // The claimed four: the two published words, then two the program never produced.
+    exec.public.extend([F::from_u64(0xDEAD), F::from_u64(0xBEEF)]);
+    let reg = cpu::register_accesses(&exec.events);
+    let ram = cpu::ram_accesses(&exec.events);
+    let mut t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, None);
+    // Rows 2 and 3 of the public table become padding: nothing on the cpu side consumes them.
+    let w = public_table::col::WIDTH;
+    for row in 2..4 {
+        let r = &mut t.public.values[row * w..(row + 1) * w];
+        r[public_table::col::IS_REAL] = F::ZERO;
+        r[public_table::col::VALUE] = F::ZERO;
+        for k in 0..4 {
+            r[public_table::col::SEL0 + k] = F::ZERO;
+        }
+    }
+    assert!(
+        rejects(|| prove_and_verify(&m, &p, &t)),
+        "OPCODES-4: a proof claiming public values [5, 6, 0xDEAD, 0xBEEF] for a program that published two words VERIFIED"
+    );
+}
