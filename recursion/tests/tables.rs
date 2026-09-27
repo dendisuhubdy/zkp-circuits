@@ -195,6 +195,32 @@ fn the_table_widths_and_constraint_degrees_are_pinned() {
     assert_eq!(degs, vec![2, 8, 4, 4, 4, 2, 2]);
 }
 
+/// R4 (the 2026-09-27 rVM review): the pin above builds a program with no `REDUCE`, so its batch
+/// has seven instances and the reduce chip's width and degree were pinned by nothing — the chip
+/// every dormant high finding of that review (RVM-2, TABLES-1, V-TABLES-1) lives in. Here the same
+/// pin over a program that dispatches `REDUCE`, with the chip declared: eight instances, reduce
+/// last, and the other seven unchanged by its presence.
+#[test]
+fn the_reduce_chip_width_and_constraint_degree_are_pinned() {
+    assert_eq!(reduce_table::col::WIDTH, 39, "the reduce chip's designed width (Task 8's run row, ZKQ-3's range limbs)");
+    let p = Program {
+        instrs: vec![
+            Instr { op: Op::Faddi, rd: 2, ra: 0, b: F::from_u64(200) },
+            Instr { op: Op::Reduce, rd: 0, ra: 2, b: F::ZERO },
+            Instr { op: Op::Halt, rd: 0, ra: 0, b: F::ZERO },
+        ],
+        checkpoints: vec![],
+    };
+    let degs = recursion::machine::max_constraint_degrees_declaring(&p, Tier(8), true);
+    assert_eq!(degs.len(), 8, "program, cpu, reg, ram, poseidon2, public, range, reduce");
+    assert_eq!(&degs[..7], &[2, 8, 4, 4, 4, 2, 2], "declaring the reduce chip moves no other table's degree");
+    // Measured: 8 — like the cpu's, this config's budget ceiling (`log2_ceil(degree − 1) ≤
+    // log_blowup = 3`), so the reduce chip has no degree headroom left: one more degree-2 factor on
+    // any of its lookups or constraints and the batch needs a larger blowup. That is what a pin is
+    // for.
+    assert_eq!(degs[7], 8);
+}
+
 // ── The reduce chip's run rules, read off `ReduceAir::eval` (the 2026-09-27 zk scan) ──────────
 use recursion::tables::{bus, reduce as reduce_table};
 
