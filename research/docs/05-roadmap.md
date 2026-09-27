@@ -223,6 +223,56 @@ but is worth flagging alongside them (8); 7 is M4.3's measured tier.
    mnemonic, and constraints that read as "if `is_lb+is_lh+is_lw` then …"
    rather than sums over every individual instruction's own flag.
 
+## The next constraint set: what it must carry
+
+The 2026-09-27 zkVM and rVM reviews left a handful of findings whose fix is a change to the AIR, to
+a syscall's semantics or to the verifier keys — each a chain cut, none a same-chain release (chain
+15's keys, program digests and proof format are unchanged by everything on this branch). They are
+collected here with the exact rule each needs, so the next set is one cut, not five. Where a gap
+can be shown today it is pinned by a **failing-by-design** test in `tests/next_constraint_set.rs`
+(`#[ignore]`d with the reason; `--ignored` runs them and they fail), which loses its `#[ignore]`
+and passes when the rule lands.
+
+1. **ZKM-1 / ZKH-2 — input and public words are 32-bit in the AIR** (with ISA-2, ARITH-3, COV-4).
+   Today the `input` table provides `(IDX, WORD)` and nothing range-checks `WORD`, and the cpu's
+   `SYS_READ` row receives it into `C`, which is range-checked nowhere on that row either: a guest
+   can be handed `2^32 + 5` for `5` consistently in every table
+   (`a_non_u32_input_word_is_refused_by_the_air`). The rule, in `tables::input`: four byte limbs
+   `WL0..WL3` beside `WORD`, and
+   `IS_REAL · (WORD − (WL0 + 2^8·WL1 + 2^16·WL2 + 2^24·WL3)) = 0` with
+   `RANGE8.lookup_key([WL_k], IS_REAL)` for `k = 0..4` (and `WL_k` pinned to zero on padding, the
+   table's invariant 1). The `public` table's `WORD` gets the identical four limbs and rule. Cost:
+   4 columns and 4 `RANGE8` lookups per real row of each table. The salt words the `IS_SALT` row
+   absorbs (HCS-5) need nothing: the salt only has to hide, and `H_IN` binds whatever field
+   elements were absorbed. Output words are already refused above `u32::MAX` by `Machine::verify`
+   (ZKA-1, `check_public_values`); moving that in-circuit (four limbs on the `SYS_WRITE` row's
+   `MEM_VAL`) is what would let `recursion/src/aggregate.rs` drop the `expect` it keeps on it.
+2. **HCS-4 — `POSEIDON2` binds the message length.** The syscall's sponge starts from the zero
+   state, so within the first rate block `[a]` and `[a, 0]` collide and `[]` is the zero digest
+   (`poseidon2_binds_the_message_length`; ZKH-3 documented it, `docs/01-isa.md`). Changing
+   `POSEIDON2` itself would change every note commitment, nullifier, Merkle root and program
+   digest `hc` a chain holds, so the rule is a **new syscall**, `POSEIDON2_LEN = 7`, beside the
+   old one: a `SYS_HASH_LEN` selector whose group start seeds the capacity instead of zeroing it —
+   where `tables::cpu` today asserts `SYS_HASH · n(HS0 + i) = 0` for `i = 0..8` (the first absorb
+   row's input state), the new flag asserts `SYS_HASH_LEN · n(HS0 + i) = 0` for `i ∈ {0..3, 5..7}`
+   and `SYS_HASH_LEN · (n(HS0 + 4) − n(HASH_N)) = 0` — the length in capacity lane 4, the rest of
+   the group unchanged (the `POSEIDON2` bus and chip permute whatever state they are given).
+   `hash::sponge_hash_len`, the emulator and `guest_sdk::poseidon2_len` follow; the test above
+   then targets the new syscall.
+3. **VERIFIER-1, the rVM half.** `research`'s `Machine::verify` refuses a non-zero commit-phase
+   proof-of-work word since this branch (`check_commit_pow_witnesses`); the aggregate program still
+   reads each word and drops it (`recursion/docs/00-recursion-vm.md`, segment 7). The next
+   aggregate program version constrains each to zero (one `assert_eq` against a zero constant per
+   FRI round, in `programs/rv32.rs`'s FRI-commits loop) — a new aggregate program digest, which
+   is why it waits for the version bump rather than riding a same-chain release.
+4. **HCS-1 — stable verifier-key salts.** Switch every key config from `StdRng::seed_from_u64(
+   KEY_SEED)` to `key_derivation_v2` (research and recursion; the module comment is the recipe),
+   re-pin `tests/verifier_key.rs` in both crates, and the three exact `rand` pins can go back to
+   carets.
+5. **ISA-4 / ISA-5 — the decoder's two tolerances** (`docs/01-isa.md`, "Deliberate deviations"):
+   `JALR` clears bit 0 of its target and requires `funct3 = 0`. Each changes what the in-circuit
+   decoder accepts, so it is a program-table change and rides the cut.
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency
