@@ -89,6 +89,19 @@ no extra hashing and the program ~46 extra compressions per query against the am
 The public instance's openings flow through these segments exactly like every other instance's —
 one more matrix in the `random`, `main`, `quotient_chunks` and `permutation` rounds.
 
+**Segment 7's PoW words (VERIFIER-1, the 2026-09-27 reviews).** At zero commit-phase grinding bits
+p3 neither checks nor observes these words, and the program reads each one and drops it. Since
+2026-09-28 the RV32 verifier (`research`'s `Machine::verify`, `check_commit_pow_witnesses`) refuses
+any word other than the honest `0`, so a proof can no longer be re-encoded there. The program is
+**not** changed to match: an in-program `assert_zero` on the word adds instructions to the
+aggregate program, which changes its digest — and that digest is what a chain's aggregation
+section pins. It is recorded here for the next aggregate program version: `rv32.rs`'s FRI-commits
+loop should constrain each hinted word to zero (`Builder::assert_eq` against a zero constant, once per
+FRI round). Until then nothing is lost: every bundle an aggregate covers was admitted by the
+chain through `Machine::verify` first, so a rewritten word never reaches an aggregate from the
+chain's own queue, and the aggregate's statement (the inner proof verifies) does not depend on the
+word either way.
+
 ## The measured number
 
 Per verified inner proof (one RV32 bundle proof; **9 instances**, the public table last, no

@@ -651,6 +651,11 @@ pub enum VerifyError {
     /// the circuit does not pin that on its own (`SYS_READ` hands a guest the input table's
     /// `WORD`, which no lookup range-checks), so `check_public_values` does.
     OutputNotU32 { slot: usize },
+    /// Audit VERIFIER-1 (2026-09-27): FRI's commit-phase proof-of-work word for folding round
+    /// `round` is not the honest `0`. This machine grinds zero bits there, so p3 neither checks nor
+    /// even observes the word — it was free, and rewriting it re-encoded a valid proof (a second
+    /// transaction id for one bundle). `check_commit_pow_witnesses` has the reasoning.
+    CommitPowWitness { round: usize },
 }
 
 /// Every check `verify` runs on a proof's public values before any of its batch is touched:
@@ -686,6 +691,43 @@ pub fn check_public_values(hc: &[u32; 8], proof: &Proof) -> Result<(), VerifyErr
         }
     }
     Ok(())
+}
+
+/// Audit VERIFIER-1 (2026-09-27): every FRI commit-phase proof-of-work word must be the honest `0`.
+///
+/// `generic_config` grinds `commit_proof_of_work_bits: 0`, and at zero bits p3's
+/// `GrindingChallenger::check_witness` returns `true` before it observes the witness
+/// (`p3-challenger-0.7.0/src/grinding_challenger.rs:42-48`), so the words — one per folding round —
+/// are carried in the proof but bound to nothing in the transcript. The honest prover's `grind(0)`
+/// writes `F::ZERO` (`grinding_challenger.rs:117-120`); any other value verified just as well, which
+/// made every proof re-encodable into as many valid byte strings as there are field elements per
+/// round. That is not a soundness hole — the statement proved is unchanged — but bytes are an
+/// identity on a chain: a bundle's transaction id hashes its proof, so a relayer could re-encode a
+/// pending bundle and have the chain commit it under an id the wallet never saw. Requiring the honest
+/// value gives every proof one encoding of these words again, and costs a comparison per round.
+///
+/// Why this is safe on a live chain whose proofs were made before it existed: every proof ever
+/// produced by this crate's prover (any backend — the reference and CUDA configs share
+/// `generic_config`) carries zeros here, so no honestly produced proof is refused. What it refuses is
+/// only a proof someone rewrote. (A node running this check next to one that does not would disagree
+/// only on such a rewritten proof — the rollout's concern, not the check's.)
+///
+/// The count of words is p3's to check (`FriError::CommitPowWitnessCountMismatch`); this only reads
+/// what is there. The query-phase word needs nothing of the kind: it is observed before the query
+/// indices are drawn, so another passing witness moves every query and the openings stop matching.
+///
+/// The rVM's in-circuit verifier (`recursion/src/programs/rv32.rs`, the `FriCommits` tape segment
+/// `witness.rs` writes) reads these words and drops them the same way. It is deliberately *not*
+/// tightened here: an in-program check changes the aggregate program and therefore its digest. A
+/// covered bundle is admitted by the chain through this `verify` first, so a rewritten word never
+/// reaches an aggregate from the chain's own queue; the rVM-side check belongs with the next
+/// aggregate program version (`recursion/docs/`, VERIFIER-1).
+pub fn check_commit_pow_witnesses(proof: &Proof) -> Result<(), VerifyError> {
+    let fri = &proof.batch.opening_proof.1;
+    match fri.commit_pow_witnesses.iter().position(|w| *w != Val::ZERO) {
+        Some(round) => Err(VerifyError::CommitPowWitness { round }),
+        None => Ok(()),
+    }
 }
 
 /// Every range check `verify` runs on a proof's *declared shape* — the tier and the four
@@ -1464,6 +1506,10 @@ impl Machine {
             proof.public_log_height,
             proof.mem_log_height,
         )?;
+        // Audit VERIFIER-1: the commit-phase proof-of-work words, unobserved at zero bits, must be
+        // the honest zero — one encoding per proof (`check_commit_pow_witnesses`). A comparison per
+        // round, so it goes with the other cheap checks, before the key is built.
+        check_commit_pow_witnesses(proof)?;
         // M4.2 (Task 6): a `Vec` comparison, so this is simultaneously the check that
         // `degree_bits.len()` equals the batch's chip count — eight without a keccak table, nine
         // with one — and the check that every declared height matches. A proof that claims

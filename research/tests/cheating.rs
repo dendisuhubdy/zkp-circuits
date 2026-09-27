@@ -3034,3 +3034,36 @@ fn an_inflated_mult_read_on_a_real_public_row_is_rejected() {
     t.public.values[col::MULT_READ] = F::from_u32(2);
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
+
+/// VERIFIER-1 (the 2026-09-27 zkVM and rVM reviews): FRI's commit-phase proof-of-work words.
+///
+/// This machine grinds zero bits in the commit phase (`generic_config`'s
+/// `commit_proof_of_work_bits: 0`), and at zero bits p3's `check_witness` returns `true` without
+/// even observing the witness (`grinding_challenger.rs:42-48`) — so the words ride in the proof, one
+/// per folding round, bound to nothing. The honest prover's `grind(0)` always writes `F::ZERO`
+/// (`grinding_challenger.rs:117-120`), but any other value verified identically. The proof is then
+/// malleable: a relayer rewrites a word and the bytes — and on a chain the transaction id that hashes
+/// them — change while the proof stays valid, so a wallet watching for its own id reports a committed
+/// payment as never committed. `Machine::verify` now requires every such word to be the honest zero.
+/// (The query-phase word is not malleable: it is observed before the query indices are drawn, so any
+/// other passing witness moves every query and the openings no longer match.)
+#[test]
+fn a_rewritten_commit_phase_pow_word_is_refused() {
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::fib(10);
+    let (proof, _) = m.prove(&p, &[], &[], None).unwrap();
+    let words = &proof.batch.opening_proof.1.commit_pow_witnesses;
+    assert!(!words.is_empty(), "a tier-10 proof folds at least once");
+    assert!(words.iter().all(|w| *w == Val::ZERO), "the honest prover writes zero at zero bits");
+    m.verify(&p.digest(), &proof).unwrap();
+    for round in [0, words.len() - 1] {
+        let mut forged: rand_zkvm::machine::Proof = postcard::from_bytes(&proof.to_bytes()).unwrap();
+        forged.batch.opening_proof.1.commit_pow_witnesses[round] = Val::from_u64(0x1234_5678);
+        assert_ne!(forged.to_bytes(), proof.to_bytes(), "a different encoding of the proof");
+        assert!(
+            matches!(m.verify(&p.digest(), &forged), Err(rand_zkvm::machine::VerifyError::CommitPowWitness { round: r }) if r == round),
+            "round {round}: {:?}",
+            m.verify(&p.digest(), &forged)
+        );
+    }
+}
