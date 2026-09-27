@@ -77,6 +77,14 @@ pub fn write_output(slot: u32, word: u32) {
 /// `ptr`: a 4-byte-aligned pointer to `n` words hashed in place with the `POSEIDON2` sponge,
 /// `ptr..ptr+8` overwritten with the digest. `n <= 4096` (`isa::POSEIDON2_MAX_WORDS`).
 ///
+/// **The sponge does not pad, so it is not injective over variable-length input** (audit
+/// ZKH-3). It starts from the zero state and *overwrites* lanes with each 4-word chunk, so within
+/// the first chunk a trailing zero word and an absent one are the same: `[a]` and `[a, 0]` (and
+/// `[a, 0, 0]`, `[a, 0, 0, 0]`) hash identically. If the length of what you hash can vary — a
+/// short id, an amount, a variable-length record — put the length in the message (`[n, w0, ..]`)
+/// or hash a fixed-length encoding, and give each use its own domain-tag word, as the note layer
+/// does (`research/docs/01-isa.md`, "`POSEIDON2` does not pad").
+///
 /// The syscall takes a **word address** in `a0` (`research/docs/01-isa.md`'s `MEM_ADDR`
 /// convention), so this divides the byte pointer by 4. Fixed in M4.2: the doc comment always
 /// said word address but the body passed the byte pointer straight through, so a compiled guest
