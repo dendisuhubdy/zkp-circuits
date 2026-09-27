@@ -85,7 +85,14 @@ where
         b.assert_bool(v(LEN1));
         b.assert_zero((v(LEN) - one.clone()) * v(LEN1_INV) - (one.clone() - v(LEN1)));
         b.assert_zero(v(LEN1) * (v(LEN) - one.clone()));
-        b.assert_zero(is_last.clone() - v(LEN1));
+        // V-OPCODES-1 (the 2026-09-27 zk scan): both row kinds exist only on real rows. `IS_LAST`
+        // was `LEN1` on *every* row, and `LEN = LEN1 = 1` satisfies the gadget on a padding row as
+        // well as on a real one — so a padding row could send the four write-backs, with values of
+        // its choosing, at `16·CLK + 14/15` for a CLK that is only a field element (`clk + 1/16`
+        // lands between any two real timestamps). `IS_FIRST` was a free boolean on padding. Now a
+        // padding row is neither, and every message the chip sends is gated on a real row.
+        b.assert_zero(is_last.clone() - is_real.clone() * v(LEN1));
+        b.assert_zero(is_first.clone() * (one.clone() - is_real.clone()));
 
         // ── the column step: diff = pz − px; t = apow·diff; t2 = t·inv; acc += t2; apow ·= alpha ──
         let (diff0, diff1) = (v(PZ0) - v(PX), v(PZ1));

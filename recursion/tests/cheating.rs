@@ -833,3 +833,76 @@ fn a_reduce_row_reading_at_a_stale_clock_is_rejected() {
         "OPCODES-1: a reduce row reading at a stale clock VERIFIED, publishing 222 against an honest 267"
     );
 }
+
+/// V-OPCODES-1's forged padding row: `IS_LAST = 1` with `LEN = LEN1 = 1` (so the is-one gadget
+/// holds) on the first padding row after the run, `CLK = clk_r + 1/16` — CLK is a field element,
+/// so `16·CLK + 14` is `16·clk_r + 15`, any timestamp at all — and the accumulator column set to
+/// `value`. Its four write-back messages land in the descriptor's acc/apow cells between the real
+/// write-back and the cpu's LOAD; the RAM log carries them (on the HALT event, which is where
+/// `ram_accesses` picks them up). [`padding_writeback_traces`]'s `first` also sets `IS_FIRST`, the
+/// variant that claims a whole one-row run on padding.
+fn forge_padding_writeback(exec: &mut Execution, value: F) {
+    let r = events_of(exec, Op::Reduce)[0];
+    let clk_r = exec.events[r].clk;
+    let base = clk_r * 16;
+    // 205 ← value at 16·clk_r + 15, 206 ← 0 at + 16, 207 ← 0 at + 15, 208 ← 0 at + 16 (APOW = 0 on
+    // the forged row, so the step adds nothing and the power it writes back is zero).
+    let writes = [(205u64, base + 15, value), (206, base + 16, F::ZERO), (207, base + 15, F::ZERO), (208, base + 16, F::ZERO)];
+    let h = events_of(exec, Op::Halt)[0];
+    for (addr, ts, value) in writes {
+        exec.events[h].mem.push(MemAccess { addr, ts, value, is_write: true });
+    }
+}
+
+fn padding_writeback_traces(p: &Program, value: F, first: bool) -> (Execution, Traces) {
+    use reduce_table::col::*;
+    let mut exec = execute(p, &[], 1000).unwrap();
+    forge_padding_writeback(&mut exec, value);
+    forge_accumulator_readback(&mut exec, value);
+    let mut t = build_traces(p, &exec, Tier(8)).unwrap();
+    let clk_r = exec.events[events_of(&exec, Op::Reduce)[0]].clk;
+    let w = WIDTH;
+    let red = t.reduce.as_mut().unwrap();
+    let row = 3; // the first padding row after the three-row run
+    let rv = &mut red.values[row * w..(row + 1) * w];
+    assert_eq!(rv[IS_REAL], F::ZERO, "row 3 is padding");
+    rv[IS_LAST] = F::ONE;
+    rv[LEN] = F::ONE;
+    rv[LEN1] = F::ONE;
+    rv[LEN1_INV] = F::ZERO;
+    rv[CLK] = F::from_u64(clk_r as u64) + F::from_u64(16).inverse();
+    rv[DESCR_PTR] = F::from_u64(200);
+    rv[ACC0] = value;
+    if first {
+        rv[IS_FIRST] = F::ONE;
+    }
+    (exec, t)
+}
+
+/// V-OPCODES-1: `IS_LAST` was the `LEN == 1` gadget's output on every row, padding included, and
+/// `IS_FIRST` was a free boolean there — so a padding row could send the four write-backs (or,
+/// with `IS_FIRST`, a whole phantom run's messages). Here it writes 777 into the accumulator cell
+/// after the real write-back, and the cpu's LOAD reads 777 instead of 267.
+#[test]
+fn a_padding_reduce_row_writing_the_accumulator_is_rejected() {
+    let p = reduce_run_program(false);
+    let m = Machine::new(FriProfile::Test);
+    let (exec, t) = padding_writeback_traces(&p, F::from_u64(777), false);
+    assert_eq!(exec.public[0], F::from_u64(777));
+    assert!(
+        rejects(|| prove_and_verify(&m, &p, &t)),
+        "V-OPCODES-1: a padding reduce row's write-back VERIFIED, publishing 777 against an honest 267"
+    );
+}
+
+/// The `IS_FIRST` variant: the same forged row also claims to start a run. Before the fix this
+/// was already refused — not by any row constraint, but because its `REDUCE` dispatch entry has
+/// no cpu row consuming it (a bus imbalance) — so it is not a red of its own; after the fix the
+/// row itself is refused too (`IS_FIRST·(1 − IS_REAL) = 0`).
+#[test]
+fn a_padding_reduce_row_claiming_a_run_start_is_rejected() {
+    let p = reduce_run_program(false);
+    let m = Machine::new(FriProfile::Test);
+    let (_, t) = padding_writeback_traces(&p, F::from_u64(777), true);
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a padding reduce row claiming a run start VERIFIED");
+}

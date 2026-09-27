@@ -244,3 +244,44 @@ fn every_reduce_run_row_carries_its_addresses_and_clock_from_the_row_before() {
         reduce_table::col::CLK
     );
 }
+
+/// V-OPCODES-1, as a rule: no padding row the chip's constraints admit sends anything. Every
+/// assignment of the row-kind witnesses (`IS_FIRST`, `IS_LAST`, `LEN1`, `LEN` ∈ {0, 1, 2}, the
+/// gadget's inverse solved where it can be) to a padding row followed by ordinary padding is
+/// tried; each one every constraint accepts must have a zero count on every message the chip
+/// sends or provides (`RAM`, `REDUCE`, `RANGE8`).
+#[test]
+fn no_admissible_padding_reduce_row_sends_a_message() {
+    use p3_field::Field;
+    use reduce_table::col::*;
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x0bc0_de02);
+    let (interactions, constraints) = common::symbolic_air(&reduce_table::ReduceAir);
+    let mut next = vec![F::ZERO; WIDTH];
+    next[LEN1_INV] = F::NEG_ONE; // ordinary padding (`reduce_trace`'s own)
+    let mut sends = Vec::new();
+    for first in [false, true] {
+        for last in [false, true] {
+            for len1 in [false, true] {
+                for len in 0u64..3 {
+                    let mut cur: Vec<F> = (0..WIDTH).map(|_| common::random_felt(&mut rng)).collect();
+                    cur[IS_REAL] = F::ZERO;
+                    cur[IS_FIRST] = F::from_bool(first);
+                    cur[IS_LAST] = F::from_bool(last);
+                    cur[LEN1] = F::from_bool(len1);
+                    cur[LEN] = F::from_u64(len);
+                    cur[LEN1_INV] = if len == 1 { F::ZERO } else { (F::ONE - cur[LEN1]) * (cur[LEN] - F::ONE).inverse() };
+                    if constraints.iter().any(|c| common::eval_at(c, &cur, &next) != F::ZERO) {
+                        continue; // not an admissible padding row
+                    }
+                    for i in &interactions {
+                        if common::eval_at(&i.count, &cur, &next) != F::ZERO {
+                            sends.push(format!("IS_FIRST={first} IS_LAST={last} LEN1={len1} LEN={len}: sends on {}", i.bus_name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sends.dedup();
+    assert!(sends.is_empty(), "admissible padding rows of the reduce chip send messages:\n  {}", sends.join("\n  "));
+}
