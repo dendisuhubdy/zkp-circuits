@@ -2823,6 +2823,7 @@ dependencies = [
 name = "rand-zkvm-cuda"
 version = "0.1.0"
 dependencies = [
+ "chacha20",
  "cuda-core",
  "p3-commit",
  "p3-dft",
@@ -2834,6 +2835,7 @@ dependencies = [
  "p3-symmetric",
  "p3-util",
  "rand 0.10.2",
+ "rand_core 0.10.1",
  "serde",
  "thiserror",
 ]
@@ -2896,6 +2898,7 @@ dependencies = [
 name = "rand_zkvm"
 version = "0.1.0"
 dependencies = [
+ "chacha20",
  "chacha20poly1305",
  "evm-core",
  "hex",
@@ -2919,6 +2922,7 @@ dependencies = [
  "postcard",
  "rand 0.10.2",
  "rand-zkvm-cuda",
+ "rand_core 0.10.1",
  "revm",
  "sbpf-core",
  "serde",

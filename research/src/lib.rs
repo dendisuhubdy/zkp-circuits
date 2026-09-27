@@ -4,6 +4,7 @@ pub mod guests;
 pub mod emulator;
 pub mod tables;
 pub mod machine;
+pub mod key_derivation_v2;
 pub mod poseidon2_constants;
 pub mod hash;
 pub mod keccak;

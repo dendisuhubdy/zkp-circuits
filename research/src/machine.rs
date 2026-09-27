@@ -1047,6 +1047,12 @@ impl Proof {
 /// non-reproducible from one build to the next for no benefit. A single fixed constant
 /// (arbitrary, like `machine::PERM_SEED`) is all a program-independent preprocessed
 /// commitment needs.
+///
+/// HCS-1 (2026-09-27 zkVM review): the *seed* is fixed, but the salts are `rand`'s `StdRng` stream
+/// from it, which `rand` does not promise to keep across releases — so the stream is consensus.
+/// Interim guard: `rand`, `rand_core` and `chacha20` are pinned exactly (`Cargo.toml`) and
+/// `tests/verifier_key.rs` pins the resulting keys. The fix, for the next chain cut, is
+/// `key_derivation_v2` (written, tested, not wired in).
 const KEY_SEED: u64 = 0x4b45_595f_4d33_5f34; // "KEY_M3_4"
 
 /// A `Config` whose value-MMCS salts and PCS random codewords are both seeded deterministically

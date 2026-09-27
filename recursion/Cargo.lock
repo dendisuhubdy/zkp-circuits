@@ -1058,6 +1058,7 @@ dependencies = [
 name = "rand-zkvm-cuda"
 version = "0.1.0"
 dependencies = [
+ "chacha20",
  "cuda-core",
  "p3-commit",
  "p3-dft",
@@ -1069,6 +1070,7 @@ dependencies = [
  "p3-symmetric",
  "p3-util",
  "rand",
+ "rand_core",
  "serde",
  "thiserror",
 ]
@@ -1083,6 +1085,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 name = "rand_zkvm"
 version = "0.1.0"
 dependencies = [
+ "chacha20",
  "chacha20poly1305",
  "evm-core",
  "ml-kem",
@@ -1103,6 +1106,7 @@ dependencies = [
  "p3-uni-stark",
  "postcard",
  "rand",
+ "rand_core",
  "sbpf-core",
  "serde",
 ]
@@ -1111,6 +1115,7 @@ dependencies = [
 name = "recursion"
 version = "0.1.0"
 dependencies = [
+ "chacha20",
  "hex",
  "p3-air",
  "p3-batch-stark",
@@ -1130,6 +1135,7 @@ dependencies = [
  "postcard",
  "rand",
  "rand-zkvm-cuda",
+ "rand_core",
  "rand_zkvm",
  "serde",
 ]
