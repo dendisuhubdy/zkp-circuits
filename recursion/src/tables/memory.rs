@@ -91,7 +91,8 @@ where
         }
         // The one sort key is the address itself — research's audit-ZM2 lesson (compute the key
         // exactly as the AIR does) applies unchanged; the delta fits four bytes
-        // (addresses < 2^24 + 32, timestamps < 16·2^22 at the top tier).
+        // (addresses < 2^24 + 32, timestamps < 16·2^23 = 2^27 at the top tier, 23 — ZKQ-6: this
+        // said 16·2^22 before the tier-23 rung; four bytes hold either).
         let msg = [l(ADDR), l(TS), l(VALUE), l(IS_WRITE)];
         let count = Count::bounded(l(IS_REAL), 1);
         if self.register {
