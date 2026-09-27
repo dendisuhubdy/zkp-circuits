@@ -541,11 +541,23 @@ fn memory_trace_unchecked(accesses: &[MemAccess], height: usize, counts: &mut ra
 
 /// Every table, built from the run's events the way `build_traces` builds them, except that the
 /// register and RAM access lists are given explicitly and both memory tables go through
-/// [`memory_trace_unchecked`] — the "honest trace builder bypassed" path. No REDUCE rows (the
-/// programs here have none).
+/// [`memory_trace_unchecked`] — the "honest trace builder bypassed" path. The reduce chip's trace
+/// is given explicitly too (with its declared log-height), or `None` for a program with no
+/// REDUCE rows.
 fn traces_bypassing_host_checks(p: &Program, exec: &Execution, tier: Tier, reg_acc: &[MemAccess], ram_acc: &[MemAccess]) -> Traces {
+    traces_from_parts(p, exec, tier, reg_acc, ram_acc, None)
+}
+
+fn traces_from_parts(
+    p: &Program,
+    exec: &Execution,
+    tier: Tier,
+    reg_acc: &[MemAccess],
+    ram_acc: &[MemAccess],
+    reduce: Option<(p3_matrix::dense::RowMajorMatrix<F>, u8)>,
+) -> Traces {
     use recursion::machine::{program_log_height, MIN_LOG_HEIGHT};
-    assert!(exec.events.iter().all(|e| e.reduce.is_none()));
+    assert!(reduce.is_some() || exec.events.iter().all(|e| e.reduce.is_none()));
     let mut counts = range::RangeCounts::default();
     let cpu_t = cpu::cpu_trace(&exec.events, tier.cpu_height(), &mut counts);
     let reg_lh = pad_height(reg_acc.len() + 1, 1 << MIN_LOG_HEIGHT).trailing_zeros() as u8;
@@ -562,12 +574,12 @@ fn traces_bypassing_host_checks(p: &Program, exec: &Execution, tier: Tier, reg_a
         poseidon2: poseidon2::poseidon2_trace(&perms, 1 << p2),
         public: public_table::public_trace(&exec.public, public_table::HEIGHT),
         range: range::range_trace(&counts),
-        reduce: None,
+        reduce_log_height: reduce.as_ref().map_or(0, |r| r.1),
+        reduce: reduce.map(|r| r.0),
         public_values: exec.public.clone(),
         reg_log_height: reg_lh,
         ram_log_height: ram_lh,
         poseidon2_log_height: p2,
-        reduce_log_height: 0,
     }
 }
 
@@ -710,4 +722,114 @@ fn a_forged_loade_high_lane_is_rejected() {
     forge_high_lane(&mut forged, None, 4, F::from_u64(FORGED));
     assert_eq!(forged.public, [FORGED, 11, 11, 22].map(F::from_u64).to_vec());
     assert_forged_run_is_refused(&m, &p, &forged, Tier(8), "(c), a forged LOADE high lane");
+}
+
+// ── The reduce chip's run rules (the 2026-09-27 zk scan: OPCODES-1/TABLES-1, V-OPCODES-1, ZKR-4) ──
+//
+// One program for the whole tranche: a three-column REDUCE run over hand-stored cells, its
+// accumulator loaded back and published. vals (extension, two cells each) at 100..105 =
+// (10, 0), (20, 0), (30, 0); row at 120..122 = 4, 5, 6; the descriptor at 200..210 =
+// [vals 100, row 120, len 3, inv (1, 0), acc (0, 0), apow (1, 0), alpha (3, 0)] — so the honest
+// accumulator is (10 − 4)·1 + (20 − 5)·3 + (30 − 6)·9 = 267. With `stale_first`, column 1's
+// cells (102, 103, 121) first hold (7, 0) and 7 — a difference of zero — and a filler row marks
+// the clock at which those stale values were live.
+fn reduce_run_program(stale_first: bool) -> Program {
+    let mut v = vec![];
+    let st = |v: &mut Vec<Instr>, addr: u64, val: u64| {
+        v.push(i(Op::Faddi, 1, 0, val));
+        v.push(i(Op::Store, 1, 0, addr));
+    };
+    if stale_first {
+        st(&mut v, 102, 7);
+        st(&mut v, 103, 0);
+        st(&mut v, 121, 7);
+        v.push(i(Op::Faddi, 9, 0, 0)); // the filler row: the stale-read clock
+    }
+    st(&mut v, 100, 10);
+    st(&mut v, 101, 0);
+    st(&mut v, 102, 20);
+    st(&mut v, 103, 0);
+    st(&mut v, 104, 30);
+    st(&mut v, 105, 0);
+    st(&mut v, 120, 4);
+    st(&mut v, 121, 5);
+    st(&mut v, 122, 6);
+    for (k, val) in [100u64, 120, 3, 1, 0, 0, 0, 1, 0, 3, 0].iter().enumerate() {
+        st(&mut v, 200 + k as u64, *val);
+    }
+    v.push(i(Op::Faddi, 2, 0, 200));
+    v.push(i(Op::Reduce, 0, 2, 0));
+    v.push(i(Op::Load, 3, 0, 205));
+    v.push(i(Op::Load, 4, 0, 206));
+    v.push(i(Op::Public, 0, 3, 0));
+    v.push(i(Op::Public, 0, 4, 0));
+    v.push(i(Op::Public, 0, 3, 0));
+    v.push(i(Op::Public, 0, 4, 0));
+    v.push(i(Op::Halt, 0, 0, 0));
+    Program { instrs: v, checkpoints: vec![] }
+}
+
+fn events_of(exec: &Execution, op: Op) -> Vec<usize> {
+    exec.events.iter().enumerate().filter(|(_, e)| e.instr.op == op).map(|(k, _)| k).collect()
+}
+
+/// Rewrite what the cpu reads back from the accumulator cell (205) — the first LOAD and every
+/// PUBLIC of `r3` — to `acc0`, as a forged reduction implies.
+fn forge_accumulator_readback(exec: &mut Execution, acc0: F) {
+    let l = events_of(exec, Op::Load)[0];
+    assert_eq!(exec.events[l].mem[0].addr, 205);
+    exec.events[l].mem[0].value = acc0;
+    exec.events[l].d[0] = acc0;
+    for k in events_of(exec, Op::Public) {
+        if exec.events[k].instr.ra == 3 {
+            exec.events[k].a[0] = acc0;
+        }
+    }
+    exec.public[0] = acc0;
+    exec.public[2] = acc0;
+}
+
+#[test]
+fn the_reduce_run_program_is_honest_and_publishes_267() {
+    let m = Machine::new(FriProfile::Test);
+    for stale in [false, true] {
+        let p = reduce_run_program(stale);
+        let exec = execute(&p, &[], 1000).unwrap();
+        assert_eq!(exec.public[0], F::from_u64(267));
+        let t = build_traces(&p, &exec, Tier(8)).unwrap();
+        prove_and_verify(&m, &p, &t).unwrap();
+    }
+}
+
+/// OPCODES-1 / TABLES-1: a run's rows after the first read at `16·CLK + slot`, and nothing tied
+/// a later row's CLK to the first row's (the one the cpu's dispatch binds). So row 1 could read
+/// its column at a clock of the prover's choosing — here, before column 1's cells were
+/// overwritten — and the reduction used stale values: 222 published against an honest 267.
+#[test]
+fn a_reduce_row_reading_at_a_stale_clock_is_rejected() {
+    let p = reduce_run_program(true);
+    let m = Machine::new(FriProfile::Test);
+    let mut exec = execute(&p, &[], 1000).unwrap();
+    let filler = exec.events.iter().position(|e| e.instr.op == Op::Faddi && e.instr.rd == 9).unwrap() as u32;
+    let r = events_of(&exec, Op::Reduce)[0];
+    {
+        let e = &mut exec.events[r];
+        // The event's log: eleven descriptor reads, three reads per column, four write-backs.
+        let stale = [F::from_u64(7), F::ZERO, F::from_u64(7)];
+        for k in 0..3 {
+            let a = &mut e.mem[11 + 3 + k];
+            a.ts = filler * 16 + a.ts % 16;
+            a.value = stale[k];
+        }
+        // acc = (10 − 4)·1 + (7 − 7)·3 + (30 − 6)·9 = 222; the running power is unchanged.
+        e.mem[11 + 9].value = F::from_u64(222);
+    }
+    forge_accumulator_readback(&mut exec, F::from_u64(222));
+    let mut t = build_traces(&p, &exec, Tier(8)).unwrap();
+    let w = reduce_table::col::WIDTH;
+    t.reduce.as_mut().unwrap().values[w + reduce_table::col::CLK] = F::from_u64(filler as u64);
+    assert!(
+        rejects(|| prove_and_verify(&m, &p, &t)),
+        "OPCODES-1: a reduce row reading at a stale clock VERIFIED, publishing 222 against an honest 267"
+    );
 }

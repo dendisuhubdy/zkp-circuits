@@ -401,3 +401,86 @@ pub fn rejects(f: impl FnOnce() -> Result<(), recursion::machine::VerifyError>) 
         }
     }
 }
+
+// ── Symbolic reads of an AIR (the binding tests: `tests/cpu.rs`, `tests/tables.rs`) ──────────
+// The tests that check a table's soundness *rules* — every written value bound, every run row
+// chained to the one before, no padding row sending anything — do not keep their own list of
+// what a table's `eval` does: they run `eval` through Plonky3's own symbolic interaction builder
+// and evaluate the constraints and messages it really emits at concrete rows. Deleting a
+// constraint or a send changes what they see.
+use p3_air::symbolic::{AirLayout, BaseEntry, BaseLeaf, SymbolicExpr, SymbolicExpression};
+
+/// Every global interaction and base constraint `air.eval` emits.
+#[allow(dead_code)]
+pub fn symbolic_air<A>(air: &A) -> (Vec<p3_lookup::SymbolicInteraction<recursion::isa::F>>, Vec<SymbolicExpression<recursion::isa::F>>)
+where
+    A: p3_air::BaseAir<recursion::isa::F>
+        + p3_air::Air<p3_lookup::InteractionSymbolicBuilder<recursion::isa::F, recursion::isa::EF>>,
+{
+    let mut sb = p3_lookup::InteractionSymbolicBuilder::<recursion::isa::F, recursion::isa::EF>::new(
+        AirLayout::from_air::<recursion::isa::F>(air),
+    );
+    air.eval(&mut sb);
+    (sb.global_interactions().to_vec(), sb.base_constraints())
+}
+
+/// A base-field symbolic expression at one row pair (`cur`, `next`), on a transition row that is
+/// neither the first nor the last — the rows every per-row rule lives on.
+#[allow(dead_code)]
+pub fn eval_at(e: &SymbolicExpression<recursion::isa::F>, cur: &[recursion::isa::F], next: &[recursion::isa::F]) -> recursion::isa::F {
+    use p3_field::PrimeCharacteristicRing;
+    use recursion::isa::F;
+    match e {
+        SymbolicExpr::Leaf(l) => match l {
+            BaseLeaf::Variable(v) => match v.entry {
+                BaseEntry::Main { offset: 0 } => cur[v.index],
+                BaseEntry::Main { offset: 1 } => next[v.index],
+                other => panic!("a main-trace-only AIR read {other:?}"),
+            },
+            BaseLeaf::IsFirstRow | BaseLeaf::IsLastRow => F::ZERO,
+            BaseLeaf::IsTransition => F::ONE,
+            BaseLeaf::Constant(c) => *c,
+        },
+        SymbolicExpr::Add { x, y, .. } => eval_at(x, cur, next) + eval_at(y, cur, next),
+        SymbolicExpr::Sub { x, y, .. } => eval_at(x, cur, next) - eval_at(y, cur, next),
+        SymbolicExpr::Neg { x, .. } => -eval_at(x, cur, next),
+        SymbolicExpr::Mul { x, y, .. } => eval_at(x, cur, next) * eval_at(y, cur, next),
+    }
+}
+
+/// The single current-row main column a message field is, or `None` for anything composite.
+#[allow(dead_code)]
+pub fn as_column(e: &SymbolicExpression<recursion::isa::F>) -> Option<usize> {
+    match e {
+        SymbolicExpr::Leaf(BaseLeaf::Variable(v)) if v.entry == (BaseEntry::Main { offset: 0 }) => Some(v.index),
+        _ => None,
+    }
+}
+
+/// Does `e` depend on column `col` of the current row (`next_row = false`) or of the next row
+/// (`true`) at this row pair? Two random perturbations, so a chance cancellation cannot hide a
+/// dependency.
+#[allow(dead_code)]
+pub fn depends(
+    e: &SymbolicExpression<recursion::isa::F>,
+    cur: &[recursion::isa::F],
+    next: &[recursion::isa::F],
+    col: usize,
+    next_row: bool,
+    rng: &mut impl rand::Rng,
+) -> bool {
+    use p3_field::PrimeCharacteristicRing;
+    let base = eval_at(e, cur, next);
+    (0..2).any(|_| {
+        let delta = random_felt(rng) + recursion::isa::F::ONE;
+        if next_row {
+            let mut moved = next.to_vec();
+            moved[col] += delta;
+            eval_at(e, cur, &moved) != base
+        } else {
+            let mut moved = cur.to_vec();
+            moved[col] += delta;
+            eval_at(e, &moved, next) != base
+        }
+    })
+}

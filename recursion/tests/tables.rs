@@ -194,3 +194,53 @@ fn the_table_widths_and_constraint_degrees_are_pinned() {
     // config's budget ceiling, `log2_ceil(degree - 1) <= log_blowup = 3`).
     assert_eq!(degs, vec![2, 8, 4, 4, 4, 2, 2]);
 }
+
+// ── The reduce chip's run rules, read off `ReduceAir::eval` (the 2026-09-27 zk scan) ──────────
+use recursion::tables::{bus, reduce as reduce_table};
+
+fn reduce_row(real: bool, first: bool, rng: &mut impl rand::Rng) -> Vec<F> {
+    use reduce_table::col::*;
+    let mut r: Vec<F> = (0..WIDTH).map(|_| common::random_felt(rng)).collect();
+    r[IS_REAL] = F::from_bool(real);
+    r[IS_FIRST] = F::from_bool(first);
+    r
+}
+
+/// OPCODES-1 / TABLES-1, as a rule: every column a run row's RAM messages use as an *address* or
+/// a *timestamp* must be carried from the row before by a transition constraint — one that, with
+/// the next row inside the same run, depends on the next row's copy of the column, and with the
+/// next row starting a new run does not (a run's first row is bound by the cpu's dispatch
+/// instead). Only then is a later row's memory traffic at the address and the clock the dispatch
+/// named, rather than wherever the prover put it.
+#[test]
+fn every_reduce_run_row_carries_its_addresses_and_clock_from_the_row_before() {
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x0bc0_de01);
+    let (interactions, constraints) = common::symbolic_air(&reduce_table::ReduceAir);
+    let (cur, next_in_run, next_first) = (reduce_row(true, false, &mut rng), reduce_row(true, false, &mut rng), reduce_row(true, true, &mut rng));
+    // The columns the RAM messages' address and timestamp fields read.
+    let mut used = std::collections::BTreeSet::new();
+    for i in interactions.iter().filter(|i| i.bus_name == bus::RAM.name()) {
+        for field in &i.fields[0..2] {
+            for c in 0..reduce_table::col::WIDTH {
+                if common::depends(field, &cur, &next_in_run, c, false, &mut rng) {
+                    used.insert(c);
+                }
+            }
+        }
+    }
+    assert!(used.contains(&reduce_table::col::CLK) && used.contains(&reduce_table::col::DESCR_PTR), "sanity: {used:?}");
+    let unchained: Vec<usize> = used
+        .iter()
+        .copied()
+        .filter(|&c| {
+            !constraints.iter().any(|k| {
+                common::depends(k, &cur, &next_in_run, c, true, &mut rng) && !common::depends(k, &cur, &next_first, c, true, &mut rng)
+            })
+        })
+        .collect();
+    assert!(
+        unchained.is_empty(),
+        "the reduce chip's RAM messages use columns {unchained:?} (CLK = {}) as an address or timestamp, and nothing carries them from one run row to the next",
+        reduce_table::col::CLK
+    );
+}

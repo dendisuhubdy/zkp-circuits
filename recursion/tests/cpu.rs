@@ -261,10 +261,8 @@ fn contract_program(states: &[[F; 8]]) -> (Program, Vec<F>) {
 // `DECLARED` below is the same statement written out per opcode — the data a reviewer reads —
 // and the test checks it both ways against what `eval` emits: every written column is declared,
 // and every declared binding is one `eval` really has.
-use p3_air::symbolic::{AirLayout, BaseEntry, BaseLeaf, SymbolicExpr, SymbolicExpression};
-use p3_air::Air;
-use p3_lookup::InteractionSymbolicBuilder;
-use recursion::isa::EF;
+use common::{as_column, eval_at};
+use p3_air::symbolic::SymbolicExpression;
 use recursion::tables::{bus, cpu};
 
 /// How a written value column is bound on an opcode's rows.
@@ -322,35 +320,6 @@ fn col_name(c: usize) -> String {
     }
 }
 
-/// A base-field symbolic expression at one row pair (`cur`, `next`), on a transition row that is
-/// neither the first nor the last — the rows every opcode constraint lives on.
-fn eval_at(e: &SymbolicExpression<F>, cur: &[F], next: &[F]) -> F {
-    match e {
-        SymbolicExpr::Leaf(l) => match l {
-            BaseLeaf::Variable(v) => match v.entry {
-                BaseEntry::Main { offset: 0 } => cur[v.index],
-                BaseEntry::Main { offset: 1 } => next[v.index],
-                other => panic!("a main-trace-only AIR read {other:?}"),
-            },
-            BaseLeaf::IsFirstRow | BaseLeaf::IsLastRow => F::ZERO,
-            BaseLeaf::IsTransition => F::ONE,
-            BaseLeaf::Constant(c) => *c,
-        },
-        SymbolicExpr::Add { x, y, .. } => eval_at(x, cur, next) + eval_at(y, cur, next),
-        SymbolicExpr::Sub { x, y, .. } => eval_at(x, cur, next) - eval_at(y, cur, next),
-        SymbolicExpr::Neg { x, .. } => -eval_at(x, cur, next),
-        SymbolicExpr::Mul { x, y, .. } => eval_at(x, cur, next) * eval_at(y, cur, next),
-    }
-}
-
-/// The single main-trace column a message field is, or `None` for anything composite.
-fn as_column(e: &SymbolicExpression<F>) -> Option<usize> {
-    match e {
-        SymbolicExpr::Leaf(BaseLeaf::Variable(v)) if v.entry == (BaseEntry::Main { offset: 0 }) => Some(v.index),
-        _ => None,
-    }
-}
-
 /// One `REG`/`RAM` message as `eval` emits it: the bus, the value column, write or read, and the
 /// count expression.
 struct Message {
@@ -361,11 +330,10 @@ struct Message {
 }
 
 fn cpu_messages_and_constraints() -> (Vec<Message>, Vec<SymbolicExpression<F>>) {
-    let mut sb = InteractionSymbolicBuilder::<F, EF>::new(AirLayout::from_air::<F>(&cpu::CpuAir));
-    cpu::CpuAir.eval(&mut sb);
+    let (interactions, constraints) = common::symbolic_air(&cpu::CpuAir);
     let zeros = vec![F::ZERO; cpu::col::WIDTH];
     let mut msgs = Vec::new();
-    for i in sb.global_interactions() {
+    for i in &interactions {
         let bus = if i.bus_name == bus::REG.name() {
             "REG"
         } else if i.bus_name == bus::RAM.name() {
@@ -379,7 +347,7 @@ fn cpu_messages_and_constraints() -> (Vec<Message>, Vec<SymbolicExpression<F>>) 
         assert!(w == F::ZERO || w == F::ONE, "is_write is a constant flag");
         msgs.push(Message { bus, value, is_write: w == F::ONE, count: i.count.clone() });
     }
-    (msgs, sb.base_constraints())
+    (msgs, constraints)
 }
 
 /// A real row with `op`'s selector hot (all other selectors cold), every other column random,
@@ -396,17 +364,6 @@ fn row(op: Option<Op>, rng: &mut impl rand::Rng) -> Vec<F> {
     r[IS_REAL] = F::ONE;
     r[RD_IS_ZERO] = F::ZERO;
     r
-}
-
-/// Does constraint `c` depend on column `col` at this row pair? Two random perturbations, so a
-/// chance cancellation cannot hide a dependency.
-fn depends(c: &SymbolicExpression<F>, cur: &[F], next: &[F], col: usize, rng: &mut impl rand::Rng) -> bool {
-    let base = eval_at(c, cur, next);
-    (0..2).any(|_| {
-        let mut moved = cur.to_vec();
-        moved[col] += common::random_felt(rng) + F::ONE;
-        eval_at(c, &moved, next) != base
-    })
 }
 
 #[test]
@@ -429,7 +386,7 @@ fn every_value_the_cpu_row_writes_is_bound_on_every_opcode() {
         // gadget and the other ungated row checks (which read `D0` on every row) do not count.
         let alu = |col: usize, rng: &mut rand::rngs::StdRng| -> bool {
             let cold = row(None, rng);
-            constraints.iter().any(|c| depends(c, &cur, &next, col, rng) && !depends(c, &cold, &next, col, rng))
+            constraints.iter().any(|c| common::depends(c, &cur, &next, col, false, rng) && !common::depends(c, &cold, &next, col, false, rng))
         };
         let declared: BTreeMap<usize, Bound> =
             DECLARED.iter().find(|(o, _)| *o == op).map(|(_, b)| b.iter().copied().collect()).unwrap_or_default();

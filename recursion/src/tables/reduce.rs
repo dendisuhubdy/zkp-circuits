@@ -110,6 +110,14 @@ where
         t.assert_zero(in_run_next.clone() * (n(ALPHA0) - v(ALPHA0)));
         t.assert_zero(in_run_next.clone() * (n(ALPHA1) - v(ALPHA1)));
         t.assert_zero(in_run_next.clone() * (n(DESCR_PTR) - v(DESCR_PTR)));
+        // OPCODES-1 / TABLES-1 (the 2026-09-27 zk scan): the run's clock is carried like its
+        // descriptor pointer. Every row's column reads — and the last row's write-back — sit at
+        // `16·CLK + slot`, and only the first row's CLK is bound, by the `REDUCE` dispatch entry
+        // the cpu row consumes. Without this line a later row's CLK was free: its reads could land
+        // at any earlier clock (stale cells, whatever they held then) or a later one, and the
+        // write-back at any time at all — the memory table only asks that each cell's history be
+        // consistent in timestamp order, not that the chip's timestamps be the dispatch's.
+        t.assert_zero(in_run_next.clone() * (n(CLK) - v(CLK)));
         t.assert_zero(in_run_next.clone() * (n(ADDR_V) - v(ADDR_V) - AB::Expr::from_u32(2)));
         t.assert_zero(in_run_next.clone() * (n(ADDR_R) - v(ADDR_R) - one.clone()));
         t.assert_zero(in_run_next.clone() * (n(LEN) - v(LEN) + one.clone()));
