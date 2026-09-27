@@ -835,7 +835,56 @@ pub fn build_traces(program: &Program, inputs: &[u32], public: &[u32], exec: &Ex
     build_traces_salted(program, inputs, public, salt, exec, tier)
 }
 
+/// Prover-side choices that change what a proof *reveals* but not what it proves: every option here
+/// produces a proof the ordinary `Machine::verify` accepts, with no verifier or key change, and the
+/// default is exactly the prover as it always was.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProveOptions {
+    /// HCS-3 (the 2026-09-27 zkVM review): declare the keccak and sha256 tables even when the run
+    /// never calls `KECCAK`/`SHA256`, as all-padding tables at the private-data floor
+    /// (`tables::MIN_PRIVATE_TABLE_LOG_HEIGHT`, 128 rows each).
+    ///
+    /// **What it hides.** A proof's header declares `keccak_log_height` and `sha256_log_height`, and
+    /// `0` means "no such table" — so without this option every proof tells anyone who reads the
+    /// header whether the call hashed with either precompile at all, and (above the floor) roughly
+    /// how often. With it, a call that never hashes declares `7`/`7`, exactly what a call making one
+    /// to four keccak permutations or one or two sha256 compressions declares: presence becomes
+    /// indistinguishable from absence at the floor. Counts above the floor still show to within a
+    /// factor of two (the table doubles), and the memory table's declared height is untouched — a
+    /// hashing call's memory traffic can still lift it where an idle table adds none.
+    ///
+    /// **Why it needs no verifier change.** An idle block is not a new kind of row: every table
+    /// whose permutation count is not a multiple of its block count already ends in idle padding
+    /// blocks, and the COV-2 floor itself pads a one-permutation keccak table with three of them.
+    /// An all-idle table sends nothing on `KECCAK`/`SHA256` (the `MULT` column is zero on every idle
+    /// row) and nothing on `MEMORY`, so the buses balance exactly as they do with no table; the
+    /// declared heights (`7`) sit inside `check_declared_heights`' ranges and the tier bounds at every
+    /// tier, and inside the chain's call caps (fullnode's `verify_call`: keccak ≤ 12, sha256 ≤ 13).
+    /// `tests/privacy_floor.rs::padded_hash_tables_verify_and_hide_presence` proves and verifies one.
+    ///
+    /// **What it costs, and why it is off.** Two extra instances in the batch: 128 rows each of the
+    /// wide keccak and sha256 tables, committed, opened at every query and quotient-checked. Measured
+    /// on a tier-10 call that never hashes (`guests::balance_check`, laptop, one run each): the
+    /// Production proof grows from 1 305 415 to 3 622 604 bytes, proving time 6.3 s → 7.2 s; at the
+    /// Test profile 300 708 → 850 026 bytes. The bytes are the real cost: a chain charges for them,
+    /// and 3.6 MB is over the 2 MiB default `max_proof_bytes` (fullnode's `gas::MAX_PROOF_BYTES`) —
+    /// chain 15's genesis sets 8 MiB, so it fits there, but a chain on the default would refuse
+    /// every padded call. It hides nothing unless the
+    /// calls it hides among use it too (an anonymity set of one is no set), so it is a wallet- or
+    /// chain-wide policy decision, not a per-call one. A verifier also builds one more key shape per
+    /// `(tier, program, input, public)` it sees with the tables declared.
+    ///
+    /// The CPU prover (`prove_with_options`, `build_traces_salted_with`) honours it; the backend
+    /// entry points (`prove_with`) keep the default.
+    pub pad_absent_hash_tables: bool,
+}
+
 pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
+    build_traces_salted_with(program, inputs, public, salt, exec, tier, ProveOptions::default())
+}
+
+/// [`build_traces_salted`] under explicit [`ProveOptions`].
+pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier, opts: ProveOptions) -> Result<Traces, ProveError> {
     // M3.4: digest rows count as cycles too — the digest prefix is part of every proof's cpu
     // table, not just `exec.events`. M4.1: so does the input-digest prefix.
     let input_digest_rows = crate::hash::input_digest_row_count(inputs.len());
@@ -887,7 +936,13 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
     let keccak_events: Vec<KeccakEvent> = exec.events.iter()
         .filter_map(|e| e.keccak_row.as_ref().map(|r| KeccakEvent { clk: clk_offset + e.clk, ptr: r.ptr, input: r.input }))
         .collect();
-    let keccak_log_height = crate::tables::keccak::keccak_log_height(keccak_events.len());
+    // HCS-3: with `pad_absent_hash_tables`, "no permutations" declares an all-idle table at the
+    // private-data floor instead of no table — `ProveOptions`' doc comment has why the verifier
+    // accepts it unchanged. A run that does hash is untouched (its height is already ≥ the floor).
+    let keccak_log_height = match crate::tables::keccak::keccak_log_height(keccak_events.len()) {
+        0 if opts.pad_absent_hash_tables => crate::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT,
+        h => h,
+    };
     // M4.2 (controller ruling 2, tightened by the Task 5 review): two ceilings, both of which
     // `check_declared_heights` re-checks on the verifier's side — the tier's honest-shape bound
     // `klh ≤ t + 5` (`Tier::max_keccak_log_height`) and the flat defensive cap
@@ -909,7 +964,11 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
     let sha256_events: Vec<Sha256Event> = exec.events.iter()
         .filter_map(|e| e.sha256_row.as_ref().map(|r| Sha256Event { clk: clk_offset + e.clk, ptr: r.ptr, block: r.block, h_in: r.h_in }))
         .collect();
-    let sha256_log_height = crate::tables::sha256::sha256_log_height(sha256_events.len());
+    // HCS-3: the same option, the same floor, for the sha256 table.
+    let sha256_log_height = match crate::tables::sha256::sha256_log_height(sha256_events.len()) {
+        0 if opts.pad_absent_hash_tables => crate::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT,
+        h => h,
+    };
     // The prover enforces the same ceiling the verifier does (`Tier::max_sha256_log_height` already
     // folds in the flat `tables::sha256::MAX_LOG_HEIGHT`), so no honest proof is built that
     // `check_declared_heights` would then refuse to look at.
@@ -1310,6 +1369,18 @@ impl Machine {
     /// `verify(hc, proof)` does not take the salt: it never leaves the prover except folded,
     /// non-invertibly, into `pv::IN0..7` (`hash::input_digest`'s doc comment).
     pub fn prove_salted(&self, program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
+        self.prove_salted_with(program, inputs, public, salt, tier, ProveOptions::default())
+    }
+
+    /// `prove` under explicit [`ProveOptions`] (a fresh H_IN salt, as `prove` draws).
+    pub fn prove_with_options(&self, program: &Program, inputs: &[u32], public: &[u32], tier: Option<Tier>, opts: ProveOptions) -> Result<(Proof, Execution), ProveError> {
+        use rand::RngExt;
+        let salt: [u32; 4] = rand::rng().random();
+        self.prove_salted_with(program, inputs, public, salt, tier, opts)
+    }
+
+    /// `prove_salted` under explicit [`ProveOptions`].
+    pub fn prove_salted_with(&self, program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], tier: Option<Tier>, opts: ProveOptions) -> Result<(Proof, Execution), ProveError> {
         // Run up to the largest tier's cycle budget; a program that has not halted by then
         // can never be proved, so `OutOfCycles` and `TooManyCycles` agree on the limit.
         let exec = execute(program, inputs, public, Tier(*TIERS.last().unwrap()).max_cycles()).map_err(ProveError::Exec)?;
@@ -1331,7 +1402,7 @@ impl Machine {
                 Tier::for_workload(cycles, permutations).ok_or(ProveError::NoTier(cycles))?
             }
         };
-        let traces = build_traces_salted(program, inputs, public, salt, &exec, tier)?;
+        let traces = build_traces_salted_with(program, inputs, public, salt, &exec, tier, opts)?;
         Ok((self.prove_traces(program, &traces, tier), exec))
     }
 
