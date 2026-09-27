@@ -470,7 +470,12 @@ caller-supplied `hc`, word for word (`public_values[IN0..IN7]`, `H_IN`, is
 *not* checked here — it has no caller-supplied counterpart to check
 against, unlike `hc`; see "Private inputs are bound to `H_IN`", above);
 `public_values[TIER]` equals
-`proof.tier`; and then — all of it in `machine::check_declared_heights`, which
+`proof.tier`; every output slot `OUT0..OUT7` is at most `u32::MAX`
+(audit ZKA-1, `VerifyError::OutputNotU32` — an output is a register, but
+the circuit does not range-check the input words `SYS_READ` hands a guest,
+so the AIR alone does not guarantee an output below `2^32`; a chain's
+executor refused such outputs already, and these checks together are
+`machine::check_public_values`); and then — all of it in `machine::check_declared_heights`, which
 `verify` calls before it sizes anything, and which is a free function over the
 declared values precisely so these bounds can be tested at tiers no test could
 afford to prove at — `proof.tier` is one of the six values in `TIERS` (an
