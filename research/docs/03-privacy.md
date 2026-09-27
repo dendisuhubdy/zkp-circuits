@@ -227,6 +227,84 @@ first-verify time by roughly 100-130x, independent of `FriProfile` (see the
 caching paragraph below). Proof size drops a little further too: fewer
 preprocessed columns means smaller opening proofs.
 
+## Hiding needs tall tables: the private-data floor (COV-2 / INT-6)
+
+"Every main trace is randomised" (above) is only as strong as the table is
+tall. `HidingFriPcs::commit` (`p3-fri-0.7.0/src/hiding_pcs.rs`) blinds a
+height-`h` trace by interleaving exactly `h` uniform random rows into it, so
+each committed column is a polynomial of degree `< 2h` whose `2h`
+coefficients are `h` secret trace values and `h` random ones. A proof
+evaluates that polynomial at every distinct FRI query point that lands in
+the table's low-degree extension (at most `num_queries` of them) and at the
+two out-of-domain points `ζ` and `ζ·g`: `k ≤ num_queries + 2` linear
+equations. While `k ≤ h` the random rows absorb every one of them; past
+that the verifier learns `k − h` linear relations among the secret values.
+At the production profile `k` is ~82, so every table shorter than 82 rows
+leaked, and the short ones leaked completely — a reviewer's sweep solved an
+input tape by Gaussian elimination, recovered a full 128-byte keccak
+preimage from a 32-row keccak table, and a 64-of-64 boolean column from a
+64-row one by lattice reduction, all from real production proofs.
+
+Which tables that touched, before the fix:
+
+| table | minimal height | private? | leaked |
+| --- | --- | --- | --- |
+| `input` | `pad(n_in + 1)`, at least 4 | the private tape itself | every call with ≤ 30 private words fully (`h ≤ 32`), ≤ 62 by lattice reduction (`h = 64`) |
+| `keccak` | 32 rows per permutation | every permuted state, i.e. the preimage | every call with ≤ 2 permutations |
+| `sha256` | 64 rows per compression | message schedule, chaining state | a single compression (`h = 64`: its boolean/byte columns) |
+| `program` | `pad(len + 1)`, at least 16 | `MULT`, how often each instruction ran — the control flow | programs of ≤ 63 words — **still open, below** |
+| `public` | `pad(n_pub + 1)`, at least 4 | no — the words are published | only `MULT_READ`, how often each public word was read |
+| cpu, alu, memory, poseidon2, range, nibble | ≥ 128 rows at every tier | | nothing: tier 10 is already 1 024 rows and up |
+
+**The fix is prover-side.** `tables::MIN_PRIVATE_TABLE_LOG_HEIGHT = 7`:
+the prover floors the `input`, `keccak` and `sha256` tables at 128 rows
+whenever they exist (`input_log_height`, `keccak_log_height`,
+`sha256_log_height`; a hash table that does not exist still declares `0`
+and costs nothing). 80 production queries plus 2 OOD points is 82 ≤ 128,
+and 64 would not do — 7 is the smallest power of two that clears it
+(`machine.rs` asserts both halves at compile time; the `Test` profile's
+16 queries would need only 32, but a declared height is part of the
+proof's public shape, so it is one number for every profile). **A retune
+of the production query count past 126 needs 8.** No constraint, verifier
+key or verifier range moved: `keccak ∈ [5, t + 5]`, `sha256 ∈ [6, t + 6]`
+and `input ∈ [2, 20]` already admitted 7, and so do a chain's call caps
+(keccak ≤ 12, sha256 ≤ 13, input ≤ `t + 2`, and `t ≥ 10`) — so every
+proof made before the floor still verifies, and no tier ever has to be
+raised to carry it. Measured by `tests/privacy_floor.rs` on a tier-10
+production proof of a four-word, one-permutation, one-compression call,
+distinct main-trace rows opened (+ 2 OOD) against the table's random rows
+(one run each; the query points are random, so the counts move by a few
+from run to run — the red half of the test has seen `input` anywhere from
+52 to 63):
+
+| table | before | after |
+| --- | --- | --- |
+| `input` | 63 + 2 against 8 (log 3) | 80 + 2 against 128 (log 7) |
+| `keccak` | 74 + 2 against 32 (log 5) | 80 + 2 against 128 (log 7) |
+| `sha256` | 75 + 2 against 64 (log 6) | 80 + 2 against 128 (log 7) |
+
+The cost is the padding: a floored keccak table is four 32-row blocks
+where one would do, a floored sha256 table two 64-row blocks. Proof size
+does not move — the tables share one mixed-height Merkle tree whose paths
+are as long as its tallest matrix (the cpu table's LDE), and an opened
+leaf's width is the same at any height: that same tier-10 production proof
+measured 3 619 978 bytes unfloored and 3 615 181 floored, run-to-run noise.
+Prove time moves by the tables' extra rows, lost in the noise here too
+(~10–12 s either way). The live hidden-asset bundle is unaffected — its input table
+is 2 048 rows, it calls neither hash, and its program is large.
+
+**Still open: the program table.** Its `MULT` column is the guest's
+control flow, and a program of ≤ 63 words is a table of ≤ 64 rows — the
+same leak. It is not floored here because its height is not the prover's
+to choose: a chain compares a call proof's `program_log_height` with the
+one the deployed program record fixes (fullnode's executor, a validity
+rule at admission and at block apply), so a floored program table would be
+refused by every validator until the chain's rule changes. That is a
+consensus change and rides the next genesis cut. Until then, a guest whose
+control flow matters and whose program is short can pad its own program
+past 63 words (dead code after the halt is enough). Every production guest
+on the chain today is thousands of words long.
+
 ## Private inputs are bound to `H_IN` (M4.1)
 
 Before M4.1, `READ_INPUT idx` (syscall 2) returned whatever word the
@@ -574,8 +652,8 @@ refused by `build_traces`, not silently truncated.
 | Code hash `hc` | public — an in-circuit digest (M3.4), binding but not hiding: it still identifies the program to anyone who can guess it |
 | Entry point `pc_entry` | public |
 | Gas tier `ℓ` | public per proof (the proof's own size already reveals its trace height, so hiding the tier index buys nothing at the single-proof level; a batch-level histogram, as the whitepaper describes, is a property of the aggregation layer, not of one proof) |
-| `keccak_log_height` (M4.2) | public — an upper bound on the number of `KECCAK` permutations, rounded up to a power of two, exactly as `program_log_height` is for program size: above zero it reveals the count to within a factor of two. `0` is exact and means "this program made no `KECCAK` call" (M4.2, Task 6 — the proof then carries no keccak table at all, which is what makes it ~1.91 MB smaller at the production profile, ~705 KB at the 27 queries M4.2 measured); the same class of structural, program-shaped leak `program_log_height` is |
-| `sha256_log_height` (M4.4) | public — the same thing for `SHA256` compressions (64-row blocks, so `6` covers 1, `7` covers 2, `8` covers 3–4, …). `0` is exact and means "this program made no `SHA256` call", and is what lets the proof drop the 466-column sha256 table: ~92 KB at `FriProfile::Test`, ~400 KB at the production profile. Independent of `keccak_log_height`, so the pair says which of the two hash syscalls the program uses |
+| `keccak_log_height` (M4.2) | public — an upper bound on the number of `KECCAK` permutations, rounded up to a power of two, exactly as `program_log_height` is for program size: above zero it reveals the count to within a factor of two, and since the private-data floor (COV-2 / INT-6, above) `7` covers every count from 1 to 4 alike. `0` is exact and means "this program made no `KECCAK` call" (M4.2, Task 6 — the proof then carries no keccak table at all, which is what makes it ~1.91 MB smaller at the production profile, ~705 KB at the 27 queries M4.2 measured); the same class of structural, program-shaped leak `program_log_height` is |
+| `sha256_log_height` (M4.4) | public — the same thing for `SHA256` compressions (64-row blocks, so `7` covers 1–2 — floored at 128 rows since COV-2 / INT-6, above — `8` covers 3–4, …). `0` is exact and means "this program made no `SHA256` call", and is what lets the proof drop the 466-column sha256 table: ~92 KB at `FriProfile::Test`, ~400 KB at the production profile. Independent of `keccak_log_height`, so the pair says which of the two hash syscalls the program uses |
 | `public_log_height` (CS6) | public — the `public` table's declared height, and the same class of coarse, structural leak `program_log_height`, `keccak_log_height` and `sha256_log_height` already are: it bounds `n_pub` to within a factor of two. It has no exact `0` the way the two hash heights do, because the table is **mandatory** — its minimum, `2`, covers every `n_pub` in `0..=3` alike, so it says "at most three public words", not "no public segment". It is also the least interesting leak in this table: the segment's *words* are published with the transaction anyway, which is the entire point of it |
 | `mem_log_height` (M4.2) | public — the memory table's declared height, floored at the tier's own `2^(ℓ+2)`. Constant, and so uninformative, for every guest whose memory traffic fits what the tier already budgets; above that it bounds the access count to within a factor of two |
 | Eight output words | public |

@@ -58,7 +58,7 @@ pub enum FriProfile {
 }
 
 impl FriProfile {
-    pub fn num_queries(self) -> usize {
+    pub const fn num_queries(self) -> usize {
         match self {
             Self::Test => 16,
             Self::Production => 80,
@@ -250,6 +250,18 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 pub const TIERS: [usize; 6] = [10, 12, 14, 16, 18, 20];
+
+// Audit COV-2 / INT-6: the private-data floor (`tables::MIN_PRIVATE_TABLE_LOG_HEIGHT`) must fit
+// every ceiling a floored table meets at the *smallest* tier, or an honest small call would be
+// refused for a height the prover chose, not one its workload needed. The verifier's own
+// tier-relative ceilings are `keccak ≤ t + 5` and `sha256 ≤ t + 6`; a chain's call rule adds
+// `input ≤ t + 2` (fullnode's `max_input_log_height`) — the tightest, hence `t ≥ 5`. `TIERS[0]`
+// is 10, so no tier ever needs raising and no `ProveError` exists for it; this assertion is what
+// would say so first if a smaller tier were ever added.
+const _: () = assert!(crate::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT as usize <= TIERS[0] + 2);
+// And the floor's own derivation: 80 production queries plus the two out-of-domain points must
+// not outnumber the table's random rows (`tables::MIN_PRIVATE_TABLE_LOG_HEIGHT`'s doc comment).
+const _: () = assert!(1usize << crate::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT >= FriProfile::Production.num_queries() + 2);
 
 /// M4.2 (controller ruling 1): the sanity ceiling on `Proof::mem_log_height`, the analogue of
 /// `tables::program::MAX_LOG_HEIGHT` for a table that has no module of its own to hold one.
