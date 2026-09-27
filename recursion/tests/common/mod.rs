@@ -509,3 +509,73 @@ pub fn eval_at_boundary(
         SymbolicExpr::Mul { x, y, .. } => eval_at_boundary(x, cur, next, is_first, is_last) * eval_at_boundary(y, cur, next, is_first, is_last),
     }
 }
+
+/// The main columns a table range-checks: the single-column fields of its `RANGE8` lookups.
+#[allow(dead_code)]
+pub fn range_checked_columns(interactions: &[p3_lookup::SymbolicInteraction<recursion::isa::F>]) -> Vec<usize> {
+    let mut cols: Vec<usize> = interactions
+        .iter()
+        .filter(|i| i.bus_name == recursion::tables::bus::RANGE8.name() && i.fields.len() == 1)
+        .filter_map(|i| as_column(&i.fields[0]))
+        .collect();
+    cols.sort();
+    cols.dedup();
+    cols
+}
+
+/// Can this row pair be completed into one every constraint accepts by choosing the
+/// range-checked columns (`limbs`) as *bytes*? Every other column is taken as given. The limb
+/// constraints are the decomposition kind — `gate·(subject − Σ 256^j·L_j)`, linear in one group of
+/// limbs — so each is solved directly: its three coefficients must be `a, 256·a, 65536·a`, and the
+/// subject it demands must be below `2^24`. `Err` names the first constraint no choice of bytes
+/// satisfies (or one that fails whatever the limbs are). The address range checks' soundness is
+/// exactly this: a wrapped address has no three-byte decomposition, whatever the prover writes.
+#[allow(dead_code)]
+pub fn admits_byte_limbs(
+    constraints: &[SymbolicExpression<recursion::isa::F>],
+    cur: &[recursion::isa::F],
+    next: &[recursion::isa::F],
+    limbs: &[usize],
+) -> Result<Vec<recursion::isa::F>, String> {
+    use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
+    use recursion::isa::F;
+    let mut row = cur.to_vec();
+    for &l in limbs {
+        row[l] = F::ZERO;
+    }
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x11b5);
+    for (k, c) in constraints.iter().enumerate() {
+        let group: Vec<usize> = limbs.iter().copied().filter(|&l| depends(c, &row, next, l, false, &mut rng)).collect();
+        let c0 = eval_at(c, &row, next);
+        if group.is_empty() {
+            if c0 != F::ZERO {
+                return Err(format!("constraint {k} fails whatever the limbs are"));
+            }
+            continue;
+        }
+        let coeff = |l: usize| {
+            let mut r = row.clone();
+            r[l] = F::ONE;
+            eval_at(c, &r, next) - c0
+        };
+        let mut terms: Vec<(usize, F)> = group.iter().map(|&l| (l, coeff(l))).collect();
+        // Order the group by its weights: the lowest limb's coefficient `a` divides the others.
+        let a = terms.iter().map(|t| t.1).find(|&x| terms.iter().all(|t| (t.1 * x.inverse()).as_canonical_u64() < 1 << 24)).expect("a limb group's weights");
+        terms.sort_by_key(|t| (t.1 * a.inverse()).as_canonical_u64());
+        for (j, t) in terms.iter().enumerate() {
+            assert_eq!(t.1, a * F::from_u64(1 << (8 * j)), "constraint {k}: a three-byte decomposition, weights 1, 256, 65536");
+        }
+        let want = (F::ZERO - c0) * a.inverse();
+        let w = want.as_canonical_u64();
+        if w >= 1 << (8 * terms.len()) {
+            return Err(format!("constraint {k} needs {w:#x} in {} bytes", terms.len()));
+        }
+        for (j, t) in terms.iter().enumerate() {
+            row[t.0] = F::from_u64((w >> (8 * j)) & 0xff);
+        }
+    }
+    match constraints.iter().position(|c| eval_at(c, &row, next) != F::ZERO) {
+        Some(k) => Err(format!("constraint {k} fails after the limbs are solved")),
+        None => Ok(row),
+    }
+}

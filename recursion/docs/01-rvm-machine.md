@@ -20,13 +20,13 @@ Seven instances in every batch, plus the reduce chip when the proof declares it 
 | instance | height rule | width (pinned) | max constraint degree (pinned) | role |
 |---|---|---:|---:|---|
 | `program` | `pad_height(len + 1, 4)` | 3 witness + 4 preprocessed | 2 | the encoded program, committed by the verifier key's preprocessed cap (R1 — no in-circuit `hc`) |
-| `cpu` | `2^tier` | 66 | 8 | fetch (from `program`), 26 one-hot decode selectors, base + extension ALU, the `INV`/`EINV` hint-and-check, control, the `REG`/`RAM`/`POSEIDON2`/`SPONGE`/`REDUCE`/`PUBLIC` sends, the 5-bit register-index and 3-byte address-limb range checks |
+| `cpu` | `2^tier` | 72 | 8 | fetch (from `program`), 26 one-hot decode selectors, base + extension ALU, the `INV`/`EINV` hint-and-check, control, the `REG`/`RAM`/`POSEIDON2`/`SPONGE`/`REDUCE`/`PUBLIC` sends, the 5-bit register-index and 3-byte address-limb range checks — both ends of every multi-cell access since ZKQ-3 (2026-09-27; 66 before) |
 | `reg_memory` | declared, `[4, 26]` | 11 | 4 | the register file as cells `2^24 + k`, `k < 32` (R4) — sorted `(addr, ts)`, read-after-write by transition |
 | `ram_memory` | declared, `[4, 26]` | 11 | 4 | RAM below `2^24`, same AIR on the `RAM` bus |
 | `poseidon2` | declared, `[4, 20]` | 341 | 4 | permutation-per-row, two row kinds (`IS_PERM`, `IS_SPONGE`), round constants baked into `eval` (R9) |
 | `public` | fixed at 8 | 7 | 2 | one row per published word; owns the batch's 4 public values (R5, the interface digest) |
 | `range` | fixed at 256 | 1 witness + 1 preprocessed | 2 | the `RANGE8` provider |
-| `reduce` (optional) | declared, `[4, 20]` | 21 | 3 | the batch-opening reduction, one chip row per column, chained by the descriptor (Task 8) |
+| `reduce` (optional) | declared, `[4, 20]` | 39 | 3 | the batch-opening reduction, one chip row per column, chained by the descriptor and the clock (Task 8; the clock chain, the real-row-only row kinds, the run-end rule and the 18 address-limb columns are the 2026-09-27 zk scan's — 21 wide before) |
 
 **Buses (8, plan R7):** `REG`, `RAM` (both `[addr, ts, value, is_write]`, multiset),
 `POSEIDON2 [clk, ptr]`, `SPONGE [clk, state_ptr, src_ptr]`, `PROGRAM [pc, w0..3]`, `RANGE8`,
@@ -103,6 +103,9 @@ oracle — a factor of 0.89):
 | reduce | 2^18 | 21 | 0.84 GB |
 | public / range | 2^3 / 2^8 | 7 / 1 | ~0 |
 | **total** | | | **48.6 GB** |
+
+(At the 2026-09-27 widths — cpu 72, reduce 39, after ZKQ-3's address range checks — the same
+heights model to 20.40 GB and 1.44 GB for those two rows, 50.8 GB in all; not re-measured.)
 
 Peak estimate: the oracle floor of **48.6 GB**, times the rehearsal's observed 0.89
 (≈ **43 GB best case**) to the conservative 1.25 multiplier (≈ **61 GB**). So:

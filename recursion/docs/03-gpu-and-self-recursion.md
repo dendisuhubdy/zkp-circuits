@@ -42,7 +42,8 @@ Two formulas, verbatim from `rand-zkvm-cuda`:
   (`src/gpu/ntt.rs:26-29`, `src/gpu/hash.rs:16-19`).
 
 The NTT chunk table at the tier's cpu LDE height (2^(t+3), log_blowup 3), columns per pass and
-passes over the cpu table's 66 columns:
+passes over the cpu table's 66 columns (72 since ZKQ-3, 2026-09-27 — the tables below are the
+66-column measurement):
 
 | tier | cpu LDE height | max_columns at 24 GiB | at 40 GiB | at 80 GiB | passes at 80 GiB |
 |---:|---:|---:|---:|---:|---:|

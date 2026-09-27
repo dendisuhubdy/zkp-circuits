@@ -170,7 +170,7 @@ use recursion::tables::{cpu, memory, poseidon2, program as program_table, public
 
 #[test]
 fn the_table_widths_and_constraint_degrees_are_pinned() {
-    assert_eq!(cpu::col::WIDTH, 66, "the cpu's designed width after Tasks 8–9 (26 selectors + the SPONGE group-2 limbs)");
+    assert_eq!(cpu::col::WIDTH, 72, "the cpu's designed width after Tasks 8–9 (26 selectors + the SPONGE group-2 limbs) and ZKQ-3 (the base-address groups 3 and 4)");
     assert_eq!(memory::col::WIDTH, 11);
     assert_eq!(program_table::col::WIDTH, 3);
     assert_eq!(program_table::pre::WIDTH, 4);
@@ -333,4 +333,53 @@ fn a_reduce_run_must_end_on_its_last_row() {
         open.push("a non-last run row as the table's final row");
     }
     assert!(open.is_empty(), "the reduce chip lets a run stop short of its IS_LAST row: {open:?}");
+}
+
+/// ZKQ-3 on the reduce chip: the cpu's REDUCE row range-checks nothing (REDUCE is not among its
+/// subjects), so the chip must: the descriptor's eleven cells and both arrays' first and last
+/// cells. Each case moves one of them below zero on the honest run's first row (and its chained
+/// copies on the next row), with the run's last cell back inside the range, and asks whether any
+/// choice of byte limbs completes the pair.
+#[test]
+fn a_reduce_run_touching_a_cell_outside_the_address_space_is_refused() {
+    use reduce_table::col::*;
+    let p = {
+        let mut v = vec![];
+        for (k, val) in [100u64, 120, 3, 1, 0, 0, 0, 1, 0, 3, 0].iter().enumerate() {
+            v.push(Instr { op: Op::Faddi, rd: 1, ra: 0, b: F::from_u64(*val) });
+            v.push(Instr { op: Op::Store, rd: 1, ra: 0, b: F::from_u64(200 + k as u64) });
+        }
+        v.push(Instr { op: Op::Faddi, rd: 2, ra: 0, b: F::from_u64(200) });
+        v.push(Instr { op: Op::Reduce, rd: 0, ra: 2, b: F::ZERO });
+        for _ in 0..4 {
+            v.push(Instr { op: Op::Public, rd: 0, ra: 0, b: F::ZERO });
+        }
+        v.push(Instr { op: Op::Halt, rd: 0, ra: 0, b: F::ZERO });
+        Program { instrs: v, checkpoints: vec![] }
+    };
+    let exec = recursion::emulator::execute(&p, &[], 1000).unwrap();
+    let t = recursion::machine::build_traces(&p, &exec, Tier(8)).unwrap();
+    let red = t.reduce.unwrap();
+    let row = |k: usize| red.values[k * WIDTH..(k + 1) * WIDTH].to_vec();
+    let (interactions, constraints) = common::symbolic_air(&reduce_table::ReduceAir);
+    let limbs = common::range_checked_columns(&interactions);
+    let minus = |k: u64| F::ZERO - F::from_u64(k);
+    // The run is three columns: vals are cells ADDR_V .. ADDR_V + 5, row cells ADDR_R .. ADDR_R + 2.
+    let cases: [(&str, usize, F); 3] = [
+        ("the descriptor at p − 5 (its last cell, + 10, is 5)", DESCR_PTR, minus(5)),
+        ("the vals array at p − 2 (its last cell, + 5, is 3)", ADDR_V, minus(2)),
+        ("the row array at p − 1 (its last cell, + 2, is 1)", ADDR_R, minus(1)),
+    ];
+    assert!(common::admits_byte_limbs(&constraints, &row(0), &row(1), &limbs).is_ok(), "the honest pair is admitted");
+    let mut admitted = Vec::new();
+    for (what, col, value) in cases {
+        let (mut cur, mut next) = (row(0), row(1));
+        let shift = value - cur[col];
+        cur[col] += shift;
+        next[col] += shift; // the chained copy on the run's next row
+        if common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_ok() {
+            admitted.push(what);
+        }
+    }
+    assert!(admitted.is_empty(), "ZKQ-3: the reduce chip admits runs outside the address space: {admitted:?}");
 }

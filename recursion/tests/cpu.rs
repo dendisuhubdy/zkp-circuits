@@ -424,3 +424,70 @@ fn every_value_the_cpu_row_writes_is_bound_on_every_opcode() {
     }
     assert!(failures.is_empty(), "the cpu table's binding rule is broken:\n  {}", failures.join("\n  "));
 }
+
+// ── ZKQ-3: a multi-cell access is range-checked at both ends ──────────────────────────────────
+//
+// The cpu row range-checks one *subject* address per row kind — for LOADE/STOREE the top cell
+// `A0 + B + 1`, for POSEIDON2/SPONGE `A0 + 7`, for SPONGE's source `B0 + 3` — and before ZKQ-3's
+// fix never the base: an address is a field element, so a base of `p − 1` put the top at 0,
+// inside the range, and the access touched a cell outside the machine's `2^24` address space.
+// The emulator refuses every such address, so no honest trace has one; this checks the AIR
+// refuses it too. Each case takes an honest row of that kind, moves one base to just below
+// zero (the top stays in range), repairs the one gadget the operand feeds (the branch equality
+// gadget reads `A0`), and asks whether *any* choice of byte limbs completes the row.
+
+fn multi_cell_program() -> Program {
+    prog(vec![
+        i(Op::Faddi, 6, 0, 1000),  // 0
+        i(Op::Faddi, 2, 0, 11),    // 1
+        i(Op::Storee, 2, 6, 0),    // 2: mem[1000..1002] = (r2, r3)
+        i(Op::Loade, 4, 6, 0),     // 3
+        i(Op::Faddi, 7, 0, 64),    // 4: a state pointer
+        i(Op::Poseidon2, 0, 7, 0), // 5
+        i(Op::Faddi, 8, 0, 96),    // 6: a source pointer
+        ir(Op::Sponge, 0, 7, 8),   // 7
+        i(Op::Public, 0, 0, 0),
+        i(Op::Public, 0, 0, 0),
+        i(Op::Public, 0, 0, 0),
+        i(Op::Public, 0, 0, 0),
+        i(Op::Halt, 0, 0, 0),
+    ])
+}
+
+#[test]
+fn a_multi_cell_access_whose_base_wraps_below_zero_is_refused() {
+    use cpu::col::*;
+    let p = multi_cell_program();
+    let exec = recursion::emulator::execute(&p, &[], 1000).unwrap();
+    let t = recursion::machine::build_traces(&p, &exec, Tier(8)).unwrap();
+    let (interactions, constraints) = common::symbolic_air(&cpu::CpuAir);
+    let limbs = common::range_checked_columns(&interactions);
+    let row = |k: usize| t.cpu.values[k * WIDTH..(k + 1) * WIDTH].to_vec();
+    let minus = |k: u64| F::ZERO - F::from_u64(k);
+    // (row, what, column, new value): each moves one base below zero with its top still in range.
+    let cases: [(usize, &str, usize, F); 5] = [
+        (2, "STOREE at A0 + B = p − 1 (top cell 0)", A0, minus(1)),
+        (3, "LOADE at A0 + B = p − 1 (top cell 0)", A0, minus(1)),
+        (5, "POSEIDON2 at A0 = p − 4 (top cell 3)", A0, minus(4)),
+        (7, "SPONGE's state at A0 = p − 4 (top cell 3)", A0, minus(4)),
+        (7, "SPONGE's source at B0 = p − 2 (top cell 1)", B0, minus(2)),
+    ];
+    let mut admitted = Vec::new();
+    for (k, what, col, value) in cases {
+        let (mut cur, next) = (row(k), row(k + 1));
+        assert!(common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_ok(), "the honest row {k} is admitted");
+        cur[col] = value;
+        let diff = cur[D0] - cur[A0];
+        (cur[EQ_AUX], cur[EQ_INV]) = if diff == F::ZERO { (F::ONE, F::ZERO) } else { (F::ZERO, diff.inverse()) };
+        if common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_ok() {
+            admitted.push(what);
+        }
+    }
+    assert!(admitted.is_empty(), "ZKQ-3: the cpu table admits multi-cell accesses outside the address space: {admitted:?}");
+    // The harness's control: a top cell at `2^24` (the base in range) was always refused.
+    let (mut cur, next) = (row(3), row(4));
+    cur[A0] = F::from_u64((1 << 24) - 1);
+    let diff = cur[D0] - cur[A0];
+    (cur[EQ_AUX], cur[EQ_INV]) = if diff == F::ZERO { (F::ONE, F::ZERO) } else { (F::ZERO, diff.inverse()) };
+    assert!(common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_err(), "a LOADE whose top cell is 2^24 is refused");
+}

@@ -35,7 +35,8 @@ pub const REGISTER_BASE: u64 = 1 << 24;
 
 /// One AIR, two instances: `register` picks the bus the instance receives on (`REG` or `RAM`).
 /// The table does not constrain its address range itself — the *senders* enforce it (the cpu's
-/// index decompositions and address limbs), and a row planted in the wrong table is an unclaimed
+/// index decompositions and address limbs, both ends of every multi-cell access since ZKQ-3, and
+/// the reduce chip's run-address limbs), and a row planted in the wrong table is an unclaimed
 /// supply on its bus, since each bus balances independently.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemoryAir {

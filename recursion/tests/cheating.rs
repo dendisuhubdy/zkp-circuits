@@ -566,6 +566,16 @@ fn traces_from_parts(
     let ram = memory_trace_unchecked(ram_acc, 1 << ram_lh, &mut counts);
     let perms = cpu::perm_events(&exec.events);
     let p2 = poseidon2::poseidon2_log_height(perms.len());
+    // The reduce chip's own range lookups (ZKQ-3: six three-byte address checks on each run's
+    // first row) go into the same counts, exactly as `build_traces` counts them.
+    if let Some((red, _)) = &reduce {
+        use reduce_table::col::{DESCR_LIMB0, IS_FIRST, WIDTH};
+        for row in red.values.chunks(WIDTH).filter(|r| r[IS_FIRST] == F::ONE) {
+            for &limb in &row[DESCR_LIMB0..DESCR_LIMB0 + 18] {
+                counts.range8(limb.as_canonical_u64() as u32);
+            }
+        }
+    }
     Traces {
         program: program_table::program_trace(p, &exec.events, 1 << program_log_height(p.instrs.len())),
         cpu: cpu_t,
@@ -798,6 +808,11 @@ fn the_reduce_run_program_is_honest_and_publishes_267() {
         assert_eq!(exec.public[0], F::from_u64(267));
         let t = build_traces(&p, &exec, Tier(8)).unwrap();
         prove_and_verify(&m, &p, &t).unwrap();
+        // And through the host-check-free path the forgeries below use, so a refusal there is
+        // the forgery's and not the path's.
+        let (reg, ram) = (cpu::register_accesses(&exec.events), cpu::ram_accesses(&exec.events));
+        let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((t.reduce.unwrap(), t.reduce_log_height)));
+        prove_and_verify(&m, &p, &t).unwrap();
     }
 }
 
@@ -979,4 +994,38 @@ fn public_values_a_program_never_published_are_rejected() {
         rejects(|| prove_and_verify(&m, &p, &t)),
         "OPCODES-4: a proof claiming public values [5, 6, 0xDEAD, 0xBEEF] for a program that published two words VERIFIED"
     );
+}
+
+// ── ZKQ-3: an extension pair never starts at r31 ──────────────────────────────────────────────
+
+/// An extension operand names `(r, r + 1)`, so `r31` as its first register reaches register
+/// cell `2^24 + 32` — a 33rd register the machine does not have. The emulator and
+/// `Machine::check_program` (the prover's entry) refuse such a program, but the AIR decodes
+/// every register index in five bits and never looks at `r + 1`, and `Machine::verify` did not
+/// run the program check: a hand-built trace of `LOADE r31` proved and verified. Here the honest
+/// run of `LOADE r30` is rewritten to `LOADE r31` in the program and the trace alike.
+#[test]
+fn an_extension_pair_starting_at_r31_is_rejected() {
+    let mut p = Program {
+        instrs: vec![
+            i(Op::Faddi, 6, 0, 1000),
+            i(Op::Loade, 30, 6, 0),
+            i(Op::Public, 0, 0, 0),
+            i(Op::Public, 0, 0, 0),
+            i(Op::Public, 0, 0, 0),
+            i(Op::Public, 0, 0, 0),
+            i(Op::Halt, 0, 0, 0),
+        ],
+        checkpoints: vec![],
+    };
+    let m = Machine::new(FriProfile::Test);
+    let mut exec = execute(&p, &[], 1000).unwrap();
+    p.instrs[1].rd = 31;
+    exec.events[1].instr.rd = 31;
+    assert!(Machine::check_program(&p).is_err(), "the prover's program check refuses it");
+    let reg = cpu::register_accesses(&exec.events);
+    assert!(reg.iter().any(|a| a.addr == memory::REGISTER_BASE + 32), "the trace writes register cell 2^24 + 32");
+    let ram = cpu::ram_accesses(&exec.events);
+    let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, None);
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)), "ZKQ-3: a proof of LOADE r31 (a pair reaching register 32) VERIFIED");
 }
