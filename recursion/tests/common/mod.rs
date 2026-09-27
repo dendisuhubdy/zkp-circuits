@@ -484,3 +484,28 @@ pub fn depends(
         }
     })
 }
+
+/// [`eval_at`] on a boundary row: the table's first row (`is_first`) or its last (`is_last`,
+/// where the transition selector is zero and `next` is the wrap-around row).
+#[allow(dead_code)]
+pub fn eval_at_boundary(
+    e: &SymbolicExpression<recursion::isa::F>,
+    cur: &[recursion::isa::F],
+    next: &[recursion::isa::F],
+    is_first: bool,
+    is_last: bool,
+) -> recursion::isa::F {
+    use p3_field::PrimeCharacteristicRing;
+    use recursion::isa::F;
+    let flag = |b: bool| if b { F::ONE } else { F::ZERO };
+    match e {
+        SymbolicExpr::Leaf(BaseLeaf::IsFirstRow) => flag(is_first),
+        SymbolicExpr::Leaf(BaseLeaf::IsLastRow) => flag(is_last),
+        SymbolicExpr::Leaf(BaseLeaf::IsTransition) => flag(!is_last),
+        SymbolicExpr::Leaf(_) => eval_at(e, cur, next),
+        SymbolicExpr::Add { x, y, .. } => eval_at_boundary(x, cur, next, is_first, is_last) + eval_at_boundary(y, cur, next, is_first, is_last),
+        SymbolicExpr::Sub { x, y, .. } => eval_at_boundary(x, cur, next, is_first, is_last) - eval_at_boundary(y, cur, next, is_first, is_last),
+        SymbolicExpr::Neg { x, .. } => -eval_at_boundary(x, cur, next, is_first, is_last),
+        SymbolicExpr::Mul { x, y, .. } => eval_at_boundary(x, cur, next, is_first, is_last) * eval_at_boundary(y, cur, next, is_first, is_last),
+    }
+}

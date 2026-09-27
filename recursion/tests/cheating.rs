@@ -906,3 +906,34 @@ fn a_padding_reduce_row_claiming_a_run_start_is_rejected() {
     let (_, t) = padding_writeback_traces(&p, F::from_u64(777), true);
     assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a padding reduce row claiming a run start VERIFIED");
 }
+
+/// ZKR-4: nothing forced a run to *end* on its `IS_LAST` row. A run whose first row is followed
+/// by padding (rows 1–2 zeroed into ordinary padding, and the RAM log rebuilt without their reads
+/// and without the write-back) was accepted, so the write-back never happened and the cpu read
+/// the accumulator cell's pre-reduction value: 0 published against an honest 267.
+#[test]
+fn a_reduce_run_that_never_reaches_its_last_row_is_rejected() {
+    let p = reduce_run_program(false);
+    let m = Machine::new(FriProfile::Test);
+    let mut exec = execute(&p, &[], 1000).unwrap();
+    let honest = build_traces(&p, &exec, Tier(8)).unwrap();
+    let (mut red, lh) = (honest.reduce.clone().unwrap(), honest.reduce_log_height);
+    let w = reduce_table::col::WIDTH;
+    for row in 1..3 {
+        for c in 0..w {
+            red.values[row * w + c] = F::ZERO;
+        }
+        red.values[row * w + reduce_table::col::LEN1_INV] = F::NEG_ONE;
+    }
+    let r = events_of(&exec, Op::Reduce)[0];
+    // Keep the eleven descriptor reads and column 0's three; drop columns 1–2 and the write-backs.
+    exec.events[r].mem.truncate(14);
+    forge_accumulator_readback(&mut exec, F::ZERO);
+    let reg = cpu::register_accesses(&exec.events);
+    let ram = cpu::ram_accesses(&exec.events);
+    let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
+    assert!(
+        rejects(|| prove_and_verify(&m, &p, &t)),
+        "ZKR-4: a reduce run that never reached its last row VERIFIED, publishing 0 against an honest 267"
+    );
+}

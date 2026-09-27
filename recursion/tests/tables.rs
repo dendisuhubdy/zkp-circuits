@@ -285,3 +285,52 @@ fn no_admissible_padding_reduce_row_sends_a_message() {
     sends.dedup();
     assert!(sends.is_empty(), "admissible padding rows of the reduce chip send messages:\n  {}", sends.join("\n  "));
 }
+
+/// ZKR-4, as a rule: a run ends on its `IS_LAST` row. A real row that is not a last row must be
+/// followed by a row of the same run — so the constraints must refuse it followed by padding, or
+/// by a new run's first row, and must refuse it as the table's final row. Checked on the honest
+/// run's own first row (`reduce_run_program`'s three columns, from `build_traces`), so every
+/// row-local constraint holds and only a run-structure rule can refuse the pair.
+#[test]
+fn a_reduce_run_must_end_on_its_last_row() {
+    use reduce_table::col::*;
+    let p = {
+        let mut v = vec![];
+        let st = |v: &mut Vec<Instr>, addr: u64, val: u64| {
+            v.push(Instr { op: Op::Faddi, rd: 1, ra: 0, b: F::from_u64(val) });
+            v.push(Instr { op: Op::Store, rd: 1, ra: 0, b: F::from_u64(addr) });
+        };
+        for (k, val) in [100u64, 120, 3, 1, 0, 0, 0, 1, 0, 3, 0].iter().enumerate() {
+            st(&mut v, 200 + k as u64, *val);
+        }
+        v.push(Instr { op: Op::Faddi, rd: 2, ra: 0, b: F::from_u64(200) });
+        v.push(Instr { op: Op::Reduce, rd: 0, ra: 2, b: F::ZERO });
+        for _ in 0..4 {
+            v.push(Instr { op: Op::Public, rd: 0, ra: 0, b: F::ZERO });
+        }
+        v.push(Instr { op: Op::Halt, rd: 0, ra: 0, b: F::ZERO });
+        Program { instrs: v, checkpoints: vec![] }
+    };
+    let exec = recursion::emulator::execute(&p, &[], 1000).unwrap();
+    let t = recursion::machine::build_traces(&p, &exec, Tier(8)).unwrap();
+    let red = t.reduce.unwrap();
+    let row = |k: usize| red.values[k * WIDTH..(k + 1) * WIDTH].to_vec();
+    let (first, padding) = (row(0), row(3));
+    assert_eq!((first[IS_REAL], first[IS_FIRST], first[IS_LAST]), (F::ONE, F::ONE, F::ZERO), "row 0 opens a three-row run");
+    assert_eq!(padding[IS_REAL], F::ZERO);
+    let (_, constraints) = common::symbolic_air(&reduce_table::ReduceAir);
+    // The honest pair holds, so the harness is not refusing it for an unrelated reason.
+    assert!(constraints.iter().all(|c| common::eval_at(c, &first, &row(1)) == F::ZERO), "the honest pair holds");
+    let refused = |cur: &[F], next: &[F], last: bool| constraints.iter().any(|c| common::eval_at_boundary(c, cur, next, false, last) != F::ZERO);
+    let mut open = Vec::new();
+    if !refused(&first, &padding, false) {
+        open.push("a non-last run row followed by padding");
+    }
+    if !refused(&first, &first, false) {
+        open.push("a non-last run row followed by a new run's first row");
+    }
+    if !refused(&first, &padding, true) {
+        open.push("a non-last run row as the table's final row");
+    }
+    assert!(open.is_empty(), "the reduce chip lets a run stop short of its IS_LAST row: {open:?}");
+}

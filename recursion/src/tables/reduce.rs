@@ -77,7 +77,17 @@ where
         {
             let mut t = b.when_transition();
             t.assert_zero(is_last.clone() * n(IS_REAL) * (one.clone() - n(IS_FIRST)));
+            // ZKR-4 (the 2026-09-27 zk scan): and the converse — a real row that is not its
+            // run's last is followed by the same run's next row: not by padding, not by a new
+            // run's first row. Before this a run could simply stop: its first row followed by
+            // padding was accepted, the write-back (sent only on `IS_LAST`) never happened, and
+            // the cpu read the accumulator cell's pre-reduction value back as the result.
+            t.assert_zero(is_real.clone() * (one.clone() - is_last.clone()) * (one.clone() - n(IS_REAL)));
+            t.assert_zero(is_real.clone() * (one.clone() - is_last.clone()) * n(IS_FIRST));
         }
+        // The transition rules above never see the table's final row, so no run may be open
+        // there: the final row is padding (`reduce_trace` always leaves at least one).
+        b.when_last_row().assert_zero(is_real.clone());
         // And `IS_LAST` is the gadget's output, not a witness: pinned below.
         // The is-one gadget on `LEN == 1` (the `alu.rs` pattern), and `IS_LAST` pinned to its
         // output: `IS_LAST ⟺ LEN == 1`, so the write-back happens on the run's final column and
