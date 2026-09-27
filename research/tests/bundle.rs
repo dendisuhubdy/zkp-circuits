@@ -434,6 +434,54 @@ fn tampering_the_published_digest_directly_is_a_constraint_violation() {
     assert!(rejects(|| { let p = m.prove_traces(&program, &t, tier); m.verify(&program.digest(), &p) }));
 }
 
+/// HB-4 (the 2026-09-27 zkVM review): the bundle guest's negative tests all refuse a cheat at the
+/// *guest* level — a witness the guest itself rejects — and the one STARK-level test above tampers
+/// only a public value. This one tampers the trace where a cheating prover would: the cpu row of
+/// the `READ_INPUT` that hands the guest output 1's amount now returns 1 000 more than the input
+/// table committed (and the register write carries it on), i.e. a payer claiming to have paid out
+/// more than its private input says, with the guest's own conservation check then computing over
+/// the inflated value. The input table, and so `H_IN` and the `INPUT_READ` supply, still say the
+/// honest word — the read's `(idx, word)` has no provider on `INPUT_READ` (and the guest's next
+/// read of the register disagrees with the memory table's copy too) — and the proof does not
+/// verify. Tier 14 at the Test profile: ~100 s, one proof.
+#[test]
+fn a_bundle_read_of_a_word_the_input_table_never_committed_is_refused() {
+    use p3_field::PrimeCharacteristicRing;
+    use p3_matrix::Matrix;
+    use rand_zkvm::emulator::SLOT_W;
+    use rand_zkvm::machine::build_traces_salted;
+    use rand_zkvm::tables::{cpu, memory, F};
+    let m = Machine::new(FriProfile::Test);
+    let alice = Party::new();
+    let (asset, time) = (0u32, 1_700_000_000u32);
+    let (tree, real) = two_real_inputs(&alice, [1_000, 0], asset, time);
+    let inputs = [real[0], dummy_input(asset, time)];
+    let outputs = [
+        Note::new(alice.vk.pk(), alice.vk.pk(), 1_000, asset, time),
+        Note::new([0; 8], alice.vk.pk(), 0, asset, time),
+    ];
+    let program = guests::bundle();
+    let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, tree.root(), 0, 0, asset, time);
+    let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
+    let tier = Tier(14);
+    let mut t = build_traces_salted(&program, &inputs_vec, &[], [0u32; 4], &e, tier).unwrap();
+    let (wc, wm) = (cpu::col::WIDTH, memory::col::WIDTH);
+    let idx = F::from_u32(notes::bundle_input::OUT1_AMOUNT_LO as u32);
+    let row = (0..t.cpu.height())
+        .find(|r| t.cpu.values[r * wc + cpu::col::SYS_READ] == F::ONE && t.cpu.values[r * wc + cpu::col::B] == idx)
+        .expect("the guest reads output 1's amount");
+    let honest = t.cpu.values[row * wc + cpu::col::C];
+    assert_eq!(honest, F::from_u32(1_000));
+    let forged = honest + F::from_u32(1_000);
+    t.cpu.values[row * wc + cpu::col::C] = forged;
+    let (rd, ts) = (t.cpu.values[row * wc + cpu::col::RD], t.cpu.values[row * wc + cpu::col::CLK] * F::from_u32(4) + F::from_u32(SLOT_W));
+    let w = (0..t.memory.height())
+        .find(|r| t.memory.values[r * wm + memory::col::SPACE] == F::ZERO && t.memory.values[r * wm + memory::col::ADDR] == rd && t.memory.values[r * wm + memory::col::TS] == ts)
+        .expect("the read's register write-back");
+    t.memory.values[w * wm + memory::col::VALUE] = forged;
+    assert!(rejects(|| { let p = m.prove_traces(&program, &t, tier); m.verify(&program.digest(), &p) }));
+}
+
 // ───────────────────────── Task 4: ledger admission and viewing ─────────────────────────
 //
 // Everything below is ledger-level, and every test shares ONE proof: `apply_bundle` rejects
