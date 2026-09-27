@@ -312,6 +312,44 @@ distinct. The remedy for the collision itself, when it matters, is a deeper
 index (the full 256-bit slot hash over a depth-256 tree, or a sparse index with
 64+ bits), which is a tree-shape change, not a protocol one.
 
+**Verdict on the collision itself (the 2026-09-27 zkVM review's evm-core lead).**
+The cost is lower than "about 2^32" for the useless case and exactly that for
+the useful one: *some* colliding pair is a birthday search, ~2^16 slots
+(`tests/evm_storage.rs` finds one among slots `0, 1, 2, …` in milliseconds); a
+slot colliding with one *chosen* victim slot — a known holder's balance entry, a
+claim flag — is a 32-bit second preimage, ~2^32 Keccaks, seconds on a GPU. The
+attacker needs control of a slot key, which for a mapping keyed by address is
+free (the call's `caller` is unbound, above). What it buys is more than the
+per-call refusal above: **while one slot of a pair holds a non-zero value, its
+partner cannot be touched at all, by any call** — the position's leaf is
+`H(STORAGE_LEAF, [holder ‖ value])`, and no witness for the partner, whatever
+value it claims, folds to it, so every read or write of the partner halts
+(`a_ground_colliding_slot_freezes_its_partner_while_it_holds_a_value`). So an
+attacker who grinds a key against a victim's still-zero slot and gets any value
+into its own first can freeze that slot for as long as it keeps the value: the
+victim cannot receive into it, and a contract path that must write it (a
+`claimed[user] = true` before a payout) stops. What it cannot do: forge a
+transition (every successful call's pre- and post-roots are consistent), move or
+destroy value (a call that touches the frozen slot halts before any state
+changes, and a non-zero victim slot freezes the *attacker's* slot instead), or
+touch any slot but the one it ground against. Severity: a targeted, persistent,
+fail-closed denial of one slot — Low for a token, higher for a contract whose
+liveness hangs on one flag.
+
+**Why it is not fixed here.** The remedy is the tree-shape change above (a
+depth-64 index doubles every `SLOAD`/`SSTORE`'s Merkle work; a depth-256 one is
+eight times it), and it changes `evm-core`, so the committed `bin/evm.bin` —
+pinned byte for byte by `rand-guest/tests/build.rs` — and every `evm2rv`
+translation that links `evm-core`'s storage (`evm_sload`/`evm_sstore`) would get
+new digests. The `guests-compiled` provenance process has one pinned image per
+guest, rebuilt and compared, and no way to publish a second storage version
+beside the first, so a fix here would replace the pinned interpreter rather than
+add a version, and every contract deployed against it would move with it. It is
+also moot on chain 15 today: the EVM interpreter (18 009 words) cannot be called
+at the node's tier-14 cap (the review's CPU-1). It belongs with the next
+interpreter version, alongside a deploy-time program version so existing
+contracts keep theirs.
+
 **Known limitation (the output binds no caller).** `caller`, `address` and
 `callvalue` are private inputs, and nothing in the eight public outputs commits
 to them: `out1..out7` digests `(codehash, pre_root, post_root, return_hash,
