@@ -102,13 +102,18 @@ test): two test-profile fixtures, 16 queries each —
 
 | fixture | tier | cpu rows | permutations | mem accesses | program instrs | witness words | phase 5 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| toy (every table, 17 instrs) | 8 | 275 215 | 7 440 | 402 909 | 277 058 | 29 375 | 7 245 |
-| busy (2 048 stores + 64 perms) | 13 | 367 340 | 9 090 | 478 827 | 369 443 | 35 207 | 7 525 |
+| toy (every table, 17 instrs) | 8 | 275 404 | 7 442 | 403 271 | 277 247 | 29 415 | 7 263 |
+| busy (2 048 stores + 64 perms) | 13 | 367 529 | 9 092 | 479 189 | 369 632 | 35 247 | 7 543 |
 
 These include AGG-2's eight binding words (2026-09-25: +80 rows, +2 permutations, +99 memory
-accesses, +80 instructions, +8 witness words at both shapes; see `02-aggregate.md`).
+accesses, +80 instructions, +8 witness words at both shapes; see `02-aggregate.md`) and RVM-1's
+STOREE read of `rd + 1` (2026-09-27: one more cpu-table interaction for the self-verifier to
+evaluate — +189 rows and instructions, +2 permutations, +362 memory accesses, +40 witness words
+and +18 phase-5 rows at both shapes). The aggregate program (`verify_rv32n`) does not move with
+RVM-1: it verifies RV32-machine proofs, and a constraint change in the rVM's own tables emits
+no instruction into it (`the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes`).
 
-Phase 5 is **not** height-independent (7 245 → 7 525): the constraint DAG is per-chip, but the
+Phase 5 is **not** height-independent (7 263 → 7 543): the constraint DAG is per-chip, but the
 emitted selectors and the quotient recomposition square `log(degree_bits)` times per instance,
 so the phase grows with the declared heights. The query phase dominates either way and scales
 with `queries ×` (opened columns `×` per-column cost `+` Merkle levels `×` per-level cost).
