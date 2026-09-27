@@ -45,6 +45,38 @@ value is odd, the next fetch looks up an odd `pc` in the `program` table, the
 `PROGRAM` lookup fails, and the run simply cannot be proved. There is no
 implicit alignment fixup.
 
+### Deliberate deviations from RV32I (ISA-4, ISA-5 — the 2026-09-27 review)
+
+The review recorded two places where this machine accepts or computes something the RV32I spec
+does not, and one where the host tooling silently rewrote what it was given. The first two are
+**kept, deliberately, on the live chain**: each is consistent between the emulator and the
+in-circuit decoder (so no proof ever says something the emulator did not do), neither lets a
+guest reach a state an honest RV32I program could not, and changing either changes what the
+`program` table's in-circuit decoder accepts — a verifier-key change, i.e. the next constraint set
+(`docs/05-roadmap.md`, "The next constraint set", item 5).
+
+1. **`JALR` does not clear bit 0 of its target** (the paragraph above). RV32I computes
+   `(rs1 + imm) & !1`; here an odd target is simply unfetchable, so a program that relies on the
+   masking is unprovable rather than wrong. No compiled guest does: `rustc`/`clang` emit `JALR` to
+   word-aligned targets only (there is no C extension here), and `rand-guest check` refuses
+   anything but 4-byte instructions.
+2. **`JALR` accepts any `funct3`.** RV32I reserves every `funct3 ≠ 0` under opcode `0x67`;
+   `Instr::decode` (and the program table's `JALR` decode flag, which mirrors it case for case)
+   reads the opcode and ignores the field, so eight words decode to the same `JALR`. What that
+   admits is non-canonical *encodings* of an instruction that exists — never a new behaviour — and
+   since `hc` hashes the words, the eight are eight different programs with identical semantics,
+   which only matters to someone comparing programs by digest. `Instr::encode` always writes
+   `funct3 = 0`; a toolchain never emits anything else.
+3. **The assembler helpers no longer truncate (ISA-5, fixed here — host-only).** `asm::ops`
+   masked shift amounts to five bits and `lui`/`auipc` immediates to their upper twenty *before*
+   `Instr::encode` could range-check them (audit ZM3 put the checks at `encode`), so
+   `slli(rd, rs1, 33)` assembled to a shift by 1 and `lui(rd, 0xdead_beef)` to
+   `lui(rd, 0xdead_b000)`. The helpers now pass operands through and `encode` refuses them, and
+   `encode` also refuses a register index above 31 (it used to spill into `funct3`). The
+   assembler is not in the AIR and every in-range operand encodes to the word it always did — the
+   research guests' digests are unchanged — so this is not a consensus change
+   (`tests/asm.rs`, the `…_through_the_helper` and `…_past_31_…` tests).
+
 ## Encoding
 
 Encoding follows the standard RV32I bit layout (`isa.rs::Instr::encode` /
