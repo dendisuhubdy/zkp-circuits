@@ -234,6 +234,10 @@ can be shown today it is pinned by a **failing-by-design** test in `tests/next_c
 and passes when the rule lands.
 
 1. **ZKM-1 / ZKH-2 — input and public words are 32-bit in the AIR** (with ISA-2, ARITH-3, COV-4).
+   **Done on `feat/cs7-range-pad-isa`**: `WL0..3` on both tables as below, and — beyond this rule,
+   at the lead's call — the salt row's four lanes too, for free: they reuse the write-back rows'
+   `HVL0_0..15` limb columns (`IS_HASH_OUT + IS_SALT` gates them), 16 `RANGE8` lookups a proof, no
+   new cpu column, so `H_IN` commits only to a salt that four `u32`s reproduce.
    Today the `input` table provides `(IDX, WORD)` and nothing range-checks `WORD`, and the cpu's
    `SYS_READ` row receives it into `C`, which is range-checked nowhere on that row either: a guest
    can be handed `2^32 + 5` for `5` consistently in every table

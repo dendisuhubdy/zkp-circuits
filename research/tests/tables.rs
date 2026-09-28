@@ -403,14 +403,20 @@ fn input_digest_rows_len(inputs: &[u32]) -> usize { rand_zkvm::hash::input_diges
 #[test]
 fn input_table_shape_and_padding() {
     use rand_zkvm::tables::input::{col, input_trace};
-    let t = input_trace(&[10, 20, 30], &[0, 2, 1], 8);
+    let mut range = RangeCounts::default();
+    let t = input_trace(&[10, 20, 30], &[0, 2, 1], 8, &mut range);
     assert_eq!(t.height(), 8);
+    // ZKM-1/ZKH-2: one `RANGE8` receipt per byte limb of every real word, none for padding.
+    assert_eq!(range.range.iter().sum::<u64>(), 12);
+    assert_eq!((range.range[10], range.range[20], range.range[30], range.range[0]), (1, 1, 1, 9));
     for (i, (word, mult)) in [(10u32, 0u32), (20, 2), (30, 1)].iter().enumerate() {
         let r = i * col::WIDTH;
         assert_eq!(t.values[r + col::IDX], rand_zkvm::tables::F::from_u32(i as u32));
         assert_eq!(t.values[r + col::WORD], rand_zkvm::tables::F::from_u32(*word));
         assert_eq!(t.values[r + col::IS_REAL], rand_zkvm::tables::F::ONE);
         assert_eq!(t.values[r + col::MULT_READ], rand_zkvm::tables::F::from_u32(*mult));
+        assert_eq!(t.values[r + col::WL0], rand_zkvm::tables::F::from_u32(*word));
+        for k in 1..4 { assert_eq!(t.values[r + col::WL0 + k], rand_zkvm::tables::F::ZERO); }
     }
     for i in 3..8 {
         let r = i * col::WIDTH;
@@ -510,8 +516,9 @@ fn cpu_trace_limbs_and_counts_every_load_store_address() {
     // into `dr = program digest rows + idr`) plus its own 32-word `IHVL0..31` canonical
     // encoding on its own last row — a second +32, on top of the program digest's own.
     // Constraint set 6: the public-digest prefix (`pdr` rows, also folded into `dr`) pays the
-    // same 4-per-row rate plus its own 32-word `PHVL0..31` encoding — a third +32.
-    let digest_range8 = 4 * dr + 32 + 32 + 32;
+    // same 4-per-row rate plus its own 32-word `PHVL0..31` encoding — a third +32. The next
+    // constraint set (ZKM-1/ZKH-2): the salt row's four lanes are byte-limbed too — +16.
+    let digest_range8 = 4 * dr + 32 + 32 + 32 + 16;
     assert_eq!(range.range.iter().sum::<u64>() as usize, 8 * mem_rows.len() + 4 * n_stores + digest_range8);
     let nibble_total: u64 = nibble.and.iter().sum();
     assert_eq!(nibble_total as usize, 2 * mem_rows.len());
@@ -1099,7 +1106,9 @@ mod keccak_tests {
 fn public_table_rows_are_committed_words_with_their_read_counts() {
     use rand_zkvm::tables::public;
     let w = public::col::WIDTH;
-    let t = public::public_trace(&[5, 6, 7], &[2, 0, 1], 8);
+    let mut range = RangeCounts::default();
+    let t = public::public_trace(&[5, 6, 7], &[2, 0, 1], 8, &mut range);
+    assert_eq!(range.range.iter().sum::<u64>(), 12);
     assert_eq!(t.height(), 8);
     for i in 0..3 {
         assert_eq!(t.values[i * w + public::col::IDX], F::from_u32(i as u32));

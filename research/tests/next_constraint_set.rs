@@ -17,7 +17,7 @@ use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::emulator::execute;
 use rand_zkvm::isa::REG_A0;
 use rand_zkvm::machine::{build_traces_salted, Tier, Val};
-use rand_zkvm::tables::{bus, cpu, input};
+use rand_zkvm::tables::{bus, cpu, input, public};
 
 /// A field element that is not a 32-bit word, and whose low 32 bits are the honest word — the
 /// shape a cheating prover would give a private input to have one value mean two things.
@@ -35,9 +35,10 @@ const NOT_U32: u64 = (1 << 32) + 5;
 ///
 /// What this checks, symbolically on rows of an honest trace: an `input` row and the cpu's
 /// `SYS_READ` row with the word replaced by `2^32 + 5` still satisfy every constraint of their
-/// tables, and no range bus carries the word. The next set's rule makes the first false.
+/// tables, and no range bus carries the word. The next set's rule makes the first false: the
+/// `input` table's `WL0..3` limbs, `RANGE8`-checked, with `WORD` pinned to their sum on a real row
+/// (and `C` on the `SYS_READ` row is then a word too, since `INPUT_READ` ties it to `WORD`).
 #[test]
-#[ignore = "ZKM-1/ZKH-2: input words are not range-checked in the AIR — closed only by the next constraint set (docs/05-roadmap.md)"]
 fn a_non_u32_input_word_is_refused_by_the_air() {
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x2b_4d31);
     let mut a = Assembler::new(0);
@@ -84,6 +85,72 @@ fn a_non_u32_input_word_is_refused_by_the_air() {
         !(input_holds && !input_ranges_it && cpu_holds && !cpu_ranges_it),
         "a non-u32 input word is accepted: the input table and the SYS_READ row both hold with WORD = C = 2^32 + 5, and no range bus carries it"
     );
+}
+
+/// ZKM-1's public-segment half: the `public` table is `input`'s twin (constraint set 6), and its
+/// `WORD` was just as unchecked — a `SYS_READ_PUBLIC` row could hand a guest `2^32 + 5` for `5`,
+/// and `H_PUB` absorb it. `Machine::verify_public` would catch the forged *digest* against the
+/// words a chain publishes (it recomputes `H_PUB` from `u32`s), but a bare `verify` would not, and
+/// the guest's register would hold a non-word either way. The same four-limb rule closes it.
+#[test]
+fn a_non_u32_public_word_is_refused_by_the_air() {
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x2b_4d32);
+    let mut a = Assembler::new(0);
+    a.extend(read_public(0));
+    a.push(mv(5, REG_A0));
+    a.extend(halt());
+    let p = a.assemble();
+    let e = execute(&p, &[], &[5], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[5], [0; 4], &e, Tier(10)).unwrap();
+
+    let row = |m: &p3_matrix::dense::RowMajorMatrix<Val>, r: usize| m.values[(r % m.height()) * m.width()..(r % m.height()) * m.width() + m.width()].to_vec();
+    let (pub_int, pub_con) = symbolic_air(&public::PublicAir);
+    let mut forged = Rows { cur: row(&t.public, 0), next: row(&t.public, 1), pre_cur: vec![], pre_next: vec![], public: vec![] };
+    assert_eq!(forged.cur[public::col::WORD], Val::from_u32(5));
+    forged.cur[public::col::WORD] = Val::from_u64(NOT_U32);
+    let holds = pub_con.iter().all(|c| eval_boundary(c, &forged, true, false) == Val::ZERO);
+    let ranges_it = pub_int.iter().any(|i| {
+        (i.bus_name == bus::RANGE8.name() || i.bus_name == bus::AND4.name()) && i.fields.iter().any(|f| depends(f, &forged, Slot::Cur, public::col::WORD, &mut rng))
+    });
+    eprintln!("public row with WORD = 2^32 + 5: constraints hold = {holds}, range-checked = {ranges_it}");
+    assert!(!(holds && !ranges_it), "a non-u32 public word is accepted: the public table holds with WORD = 2^32 + 5 and no range bus carries it");
+}
+
+/// The salt row's four lanes (`IS_SALT`, the first indigest row) are free witness words that `H_IN`
+/// absorbs — `hash::input_digest` takes the salt as four `u32`s, but nothing in-circuit held the
+/// row's `HV0..3` to that, so `H_IN` could commit to a salt no `u32` salt reproduces. Closed by the
+/// write-back rows' own byte-limb columns (`HVL0_0..15`), reused on the salt row.
+#[test]
+fn a_non_u32_salt_lane_is_refused_by_the_air() {
+    let mut a = Assembler::new(0);
+    a.extend(read_input(0));
+    a.extend(halt());
+    let p = a.assemble();
+    let e = execute(&p, &[5], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[5], &[], [7, 8, 9, 10], &e, Tier(10)).unwrap();
+
+    let row = |m: &p3_matrix::dense::RowMajorMatrix<Val>, r: usize| m.values[(r % m.height()) * m.width()..(r % m.height()) * m.width() + m.width()].to_vec();
+    let (wc, hc) = (cpu::col::WIDTH, t.cpu.height());
+    let r = (0..hc).find(|r| t.cpu.values[r * wc + cpu::col::IS_SALT] == Val::ONE).expect("every proof has a salt row");
+    let (cpu_int, cpu_con) = symbolic_air(&cpu::CpuAir);
+    let mut held = true;
+    let mut ranged = false;
+    for k in 0..4 {
+        let mut forged = Rows { cur: row(&t.cpu, r), next: row(&t.cpu, r + 1), pre_cur: vec![], pre_next: vec![], public: t.public_values.clone() };
+        let mut before = Rows { cur: row(&t.cpu, r - 1), next: forged.cur.clone(), pre_cur: vec![], pre_next: vec![], public: t.public_values.clone() };
+        assert_eq!(forged.cur[cpu::col::HV0 + k], Val::from_u32(7 + k as u32));
+        forged.cur[cpu::col::HV0 + k] = Val::from_u64(NOT_U32);
+        before.next[cpu::col::HV0 + k] = Val::from_u64(NOT_U32);
+        held &= cpu_con.iter().all(|c| eval_rows(c, &forged) == Val::ZERO && eval_rows(c, &before) == Val::ZERO);
+        let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x2b_4d33 + k as u64);
+        ranged |= cpu_int.iter().any(|i| {
+            eval_rows(&i.count, &forged) != Val::ZERO
+                && (i.bus_name == bus::RANGE8.name() || i.bus_name == bus::AND4.name())
+                && i.fields.iter().any(|f| depends(f, &forged, Slot::Cur, cpu::col::HV0 + k, &mut rng))
+        });
+    }
+    eprintln!("salt row with one lane = 2^32 + 5: constraints hold = {held}, range-checked = {ranged}");
+    assert!(!(held && !ranged), "a non-u32 salt lane is accepted: the salt row holds with a lane = 2^32 + 5 and no range bus carries it");
 }
 
 /// The `POSEIDON2` syscall hashes `n` words as `n` field elements from the all-zero state, with no

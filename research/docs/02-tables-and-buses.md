@@ -99,7 +99,7 @@ keccak chip sends its own traffic, and `memory_trace` records it
 (`CycleEvent::keccak_accesses`) alongside the cpu's own — as it does M4.4's
 `CycleEvent::sha256_accesses`, the sha256 chip's own 32 per compression.
 
-## `input` — main, `col::WIDTH = 4` (M4.1)
+## `input` — main, `col::WIDTH = 8` (M4.1; `WL0..3` since the next constraint set)
 
 One row per committed private-input word: `IDX` (the row's own index, 0 at
 row 0, `+1` every row including through padding — input indices always
@@ -149,6 +149,17 @@ supply — it can't be spread across rows to hide an over-count, and any
 excess is caught by `INPUT_READ`'s own balance against the true
 `SYS_READ` demand regardless of magnitude.
 
+**`WORD` is a 32-bit word in the AIR (ZKM-1/ZKH-2, the next constraint
+set).** Four byte limbs `WL0..3` sit after `MULT_READ`, with
+`IS_REAL · (WORD − (WL0 + 2^8·WL1 + 2^16·WL2 + 2^24·WL3)) = 0` and one
+`RANGE8` lookup per limb counted by `IS_REAL` (the limbs are pinned to 0 on
+padding). Before it nothing bounded `WORD` below `p`: the cpu's `SYS_READ`
+row receives the pair into `C` and writes `C` to `a0`, so a guest could be
+handed `2^32 + 5` for `5` consistently in every table
+(`tests/next_constraint_set.rs`). The salt row's four lanes are held to
+`u32` the same way, through the write-back rows' `HVL0_0..15` limb columns
+(`tables::cpu`), so `H_IN` can only commit to a salt four `u32`s reproduce.
+
 **Padding.** `WORD` and `MULT_READ` are both pinned to 0 wherever
 `IS_REAL = 0` (AGENTS.md invariant 1/2) — a stray nonzero `MULT_READ` on a
 padding row is exactly the "unconstrained column nothing currently reads"
@@ -169,10 +180,11 @@ shared absorb machinery range-checks `HASH_LEFT` via two `RANGE8` limbs on
 every indigest row, bounding it to 16 bits — so the effective cap on
 `n_in` is 65535, well below what `MAX_LOG_HEIGHT` alone would allow.
 
-## `public` — main, `col::WIDTH = 4` (CS6)
+## `public` — main, `col::WIDTH = 8` (CS6; `WL0..3` since the next constraint set)
 
 `input`'s twin, one segment over: one row per committed **public** input
-word, with the same four columns (`IDX`, `WORD`, `IS_REAL`, `MULT_READ`),
+word, with the same columns (`IDX`, `WORD`, `IS_REAL`, `MULT_READ` and, since the
+next constraint set, the four `RANGE8`-checked limbs `WL0..3` of `WORD`),
 the same monotone real/padding prefix, and the same `+1`-per-row `IDX`
 chain through the padding. `src/tables/public.rs` is deliberately a copy of
 `src/tables/input.rs` with the two bus names substituted rather than a
