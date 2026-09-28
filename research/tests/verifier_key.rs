@@ -32,7 +32,12 @@
 //! the `2^7` table floor (INT-2) moved every `common` digest and no `commitment` — the blind adds
 //! columns and a bus to every instance's lookups, the floor raises the smallest shapes' program,
 //! input and public heights to 7 — and HCS-1's switch to `key_derivation_v2` then moved every
-//! `commitment` (and so every `common` again). The constraint-set-6 pins were, in the order below:
+//! `commitment` (and so every `common` again). On the integrated constraint-set-7 tree
+//! (`feat/cs7`), ZKM-1 / ZKH-2's 32-bit range checks on the input, public and salt lanes add
+//! RANGE8 lookups (the input and public tables widen 4 → 8, the salt row sends 16 from the cpu),
+//! so every `common` moved once more and no `commitment` did: `e1d87ffc…`, `911d8e1a…`,
+//! `fcf1f2f7…`, `1184e5ac…` were the blind + HCS-1 values without them, which is still what
+//! `feat/cs7-logup-blind` alone measures. The constraint-set-6 pins were, in the order below:
 //! `743ae428…`/`118596a0…`, `de7f12d3…`/`2fc852ce…`, `e5e6ce86…`/`e157ca30…`,
 //! `b1387046…`/`fb6e0b55…`.
 use p3_batch_stark::CommonData;
@@ -103,7 +108,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "1442e70e1ddc7e9c6eabf1a6e29bd9ea37d1996d81f89768af967b77ddc3fd41",
-                "e1d87ffcab0829461f2a8b23ff1d6b32436f820b3e1ca22b158a6253e9bc0e5e",
+                "fab9945e0707da2f8f5c4f8d15452df34f701cb9911f56ffabad455ba2f24099",
             ),
         },
         Shape {
@@ -116,7 +121,7 @@ fn shapes() -> Vec<Shape> {
             publh: binding_publh,
             want: (
                 "54991bdde2fdf6112181fde865e25cf94fae6084cb31ef33d9f58cb4645a6cc4",
-                "911d8e1ac2f5f4b2019b016c2858eb609a0c92ae8cebf8e54cf8e467e4e0d88e",
+                "c207625a64a343a492793618a15a9aaf00e0d257ecf71b2222c035dc78de07fb",
             ),
         },
         Shape {
@@ -129,7 +134,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "0337aeaecbd7d601ac4b502153c29589ae290f179e277b2f66e1f4c29d3c48cb",
-                "fcf1f2f75f0830e11474ac17f085b1ce805d0f2c75fc2557ac28217bfc7c7c32",
+                "7a3a38e4a87e2257ece7bd524100734b629b5b5bc05871c4d034cdba3a7d53c0",
             ),
         },
         Shape {
@@ -142,7 +147,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "c277ab160af3160092c4a33220724276fabc2cd26e6229c5dae535eb16ba3760",
-                "1184e5ac97649b98d21fe57f7a57634d672df9ba53836ef4adaadb6aae15154c",
+                "8e6cd439b3233209b68f33fa0297e666306dc2b53f8927f8d87589b34613becb",
             ),
         },
     ]

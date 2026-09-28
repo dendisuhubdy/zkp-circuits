@@ -46,23 +46,25 @@ fleet has, pinned by `for_cycles`, not by a proof.
 
 Final, per verified inner proof (one RV32 bundle proof at **constraint set 6**, **9 instances**),
 from the emulator's own event log and pinned in `tests/pins.json` (production digest
-`880fe98c92e36671407af7c54952547de6046355dad209650e7e6a18596e5911`):
+`8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`):
 
 | | `FriProfile::Test` (16 q) | `FriProfile::Production` (80 q) |
 |---|---:|---:|
-| cpu rows | 441 651 | **1 968 627** |
+| cpu rows | 441 643 | **1 968 619** |
 | Poseidon2 permutations | 11 205 | **51 605** |
 | memory accesses (RAM) | 597 021 | 2 705 197 |
 | register accesses | 992 729 | 4 278 681 |
 | reduce-chip rows | 31 232 | 156 160 |
-| program instructions | 443 702 | 1 978 438 |
+| program instructions | 443 686 | 1 978 422 |
 | witness words | 43 344 | 199 760 |
 | **declared heights** | 19, 20, 20, 14, 15, 19 | 21, 23, 22, 16, 18, 21 |
 
-VERIFIER-1 (2026-09-28) re-pinned the cpu rows and instructions (+8 / +16 per proof, one assertion per FRI
-round; were 441 643 / 1 968 619 rows and 443 686 / 1 978 422 instructions) and the digest (was
-`8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`); the register-access and
-reduce rows are the pre-VERIFIER-1 measurement (each assertion's `JEQ` reads one register).
+This is the constraint-set-6 measurement, kept because the register-access, reduce-row and
+declared-height columns were not re-taken. Constraint set 7 with VERIFIER-1 (chain 16, measured on
+the integrated `feat/cs7` tree) is **461 082 / 2 044 506** cpu rows, 11 852 / 54 428 permutations,
+630 292 / 2 845 220 memory accesses, 463 199 / 2 054 639 instructions, 45 758 / 210 174 witness
+words, production digest `8f15919989c3975106b7663722fe892c20e14e9658948e073626662cc999e1e7` — still
+tier 21 at production (`docs/00-recursion-vm.md`, "The measured number", has the breakdown).
 
 (Heights in `chips()` order: cpu, reg, ram, poseidon2, reduce, program; public is fixed at 2^3
 and range at 2^8.)

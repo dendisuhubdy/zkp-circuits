@@ -707,10 +707,11 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
     // walks and injections, and the commit-phase rows and walks — plus phase 8's interface
     // digest (R5): a 39-word seeded sponge, `ceil(39/4)` = 10 permutations. Pinned at the
     // measured Test-profile number (constraint set 7's shape; 11 205 in constraint set 6 — the
-    // LogUp blind's five columns per instance widen every opened leaf the query phase hashes, and
-    // the public table is floored at `2^7` rows); the production one lives in
+    // LogUp blind's five columns per instance and ZKM-1's 32-bit input/public/salt lanes widen
+    // every opened leaf the query phase hashes, and the public table is floored at `2^7` rows;
+    // VERIFIER-1's per-round assertion hashes nothing); the production one lives in
     // `docs/00-recursion-vm.md` and `pins.json`.
-    assert_eq!(exec.permutations(), 11_714, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
+    assert_eq!(exec.permutations(), 11_852, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
 }
 
 /// Every assertion phase 5 makes is a *named* checkpoint, and the names are the interface Task 6's
@@ -769,7 +770,7 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
-        "989752d633964930682549775559b1ffa45919794ebf9ec6f85bd9d60b4c6e98",
+        "aafb158456ff7e7ed742b48197b6fc3eb4925a0b2ae1a7ed3717bfb676cd38ea",
         "the Off replay must reproduce the pre-Task-7 stream byte for byte (plus VERIFIER-1's \
          per-round assertions, and constraint set 7's inner changes)"
     );
@@ -803,14 +804,14 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// VERIFIER-1 (2026-09-28, in the same constraint set) *is* a program change — one
 /// `commit pow witness[r]` assertion per FRI round in the shared pipeline. The claim above still
 /// holds for constraint-only fixes of the rVM's own AIR. Re-registered for constraint set 7 with
-/// VERIFIER-1: `1ec0c545…eeeb` → `@AGG@`.
+/// VERIFIER-1: `1ec0c545…eeeb` → `5e04fba0…2993`.
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "64a00eb77356e3b29834b2cbaa6462c477359645a0d58f64f2d24941d2abde97",
+        "5e04fba0c0b900dcafbf37aa0acae87afb9ba2269f4d1970706ce2320b962993",
         "the aggregate program's digest at the Test fixture shape, as re-registered for constraint set 7"
     );
 }

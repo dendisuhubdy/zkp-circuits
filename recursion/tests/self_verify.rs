@@ -118,10 +118,11 @@ fn the_self_program_digest_is_deterministic_and_distinct() {
     let d1 = self_program_digest(&shape, &key);
     let d2 = self_program_digest(&shape, &key);
     assert_eq!(d1, d2, "rebuilding the self-verifier reproduces its digest");
-    // Pinned at the toy fixture's shape (2026-09-28). VERIFIER-1's per-round assertion moved it:
-    // `c18fa9eadf161ab625fc23048a6bcd4020eea8eaac33720d34e17f7148cd4804` before.
+    // Pinned at the toy fixture's shape (2026-09-28), constraint set 7: VERIFIER-1's per-round
+    // assertion and HCS-1's rVM key salts (the program embeds the key) both moved it —
+    // `c18fa9eadf161ab625fc23048a6bcd4020eea8eaac33720d34e17f7148cd4804` before either.
     let hex: String = d1.iter().map(|w| format!("{:016x}", p3_field::PrimeField64::as_canonical_u64(w))).collect();
-    assert_eq!(hex, "1ebcf3772486f3042f3f7bd29e32a3671c06c4a281135f6230717d73808a90ab",
+    assert_eq!(hex, "6b2f058e60ffdf6a77091b932710513191688e4bdc59b2ecdc65b0dd5039033b",
                "the self-verifier's digest at the toy fixture shape");
 
     // And it is not the single-proof RV32-machine verifier's digest for the same profile: build

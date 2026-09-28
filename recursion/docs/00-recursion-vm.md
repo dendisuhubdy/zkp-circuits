@@ -97,7 +97,7 @@ program now matches it (the next constraint set, chain 16, v0.6.1): `rv32.rs`'s 
 asserts each hinted word zero (`Builder::assert_zero`, one `JEQ` against the zero register per
 round, the trap named `commit pow witness[r]`). The word is still observed by nothing, so the
 transcript — every challenge, every checkpoint — is unchanged; an accepting run pays one cpu row
-per FRI round per proof (+8 at the fixture shape's eight rounds). The same check is made by the
+per FRI round per proof. The same check is made by the
 host replay (`reference::replay` refuses the word as `PowWitness("commit phase")`, keeping it
 `Machine::verify`'s acceptance) and by the rVM's own native verifier
 (`machine::check_commit_pow_witnesses`, `VerifyError::CommitPowWitness`) — the rVM machine grinds
@@ -120,36 +120,38 @@ log:
 
 | | `FriProfile::Test` (16 queries) | `FriProfile::Production` (80 queries) |
 |---|---:|---:|
-| cpu rows | 441 651 | **1 968 627** |
-| Poseidon2 permutations | 11 205 | **51 605** |
-| memory accesses | 597 021 | 2 705 197 |
-| program instructions | 443 702 | 1 978 438 |
-| witness words read | 43 344 | 199 760 |
-| tape words | 43 344 | 199 760 |
+| cpu rows | 461 082 | **2 044 506** |
+| Poseidon2 permutations | 11 852 | **54 428** |
+| memory accesses | 630 292 | 2 845 220 |
+| program instructions | 463 199 | 2 054 639 |
+| witness words read | 45 758 | 210 174 |
+| tape words | 45 758 | 210 174 |
 
 The program is straight-line in the proof's data: every proof of the shape costs the same rows
 (asserted by the exit test on 5 test-profile and 50 production-profile proofs). The production
 row is pinned in `tests/pins.json`; the production program's digest
-(`Checkpoints::Off`, `880fe98c92e36671407af7c54952547de6046355dad209650e7e6a18596e5911`) in
-`src/programs/verify_rv32.digest`. VERIFIER-1 (2026-09-28) moved both: +8 cpu rows and +16
-instructions per proof at either profile (one `JEQ` and its unexecuted trap per FRI round, eight
-rounds), nothing else in the table; the digest was
+(`Checkpoints::Off`, `8f15919989c3975106b7663722fe892c20e14e9658948e073626662cc999e1e7`) in
+`src/programs/verify_rv32.digest`. This is **constraint set 7 with VERIFIER-1**, measured on the
+integrated `feat/cs7` tree (2026-09-28, the 128 GB box); the constraint-set-6 row was 441 643 /
+**1 968 619** cpu rows, 11 205 / 51 605 permutations, 597 021 / 2 705 197 memory accesses,
+443 686 / 1 978 422 instructions, 43 344 / 199 760 witness words, digest
 `8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`.
 
 **Constraint set 7 re-pin (chain 16).** The inner machine gained the LogUp blind (five columns
-and a `BLIND` bus interaction pair on every instance, `research/src/tables/blind.rs`) and a
-`2^7` floor on every declared table height (the fixture's public table goes from `2^2` to `2^7`
-rows), and the rVM's keys moved to `key_derivation_v2` (HCS-1). Re-measured on the same fixture
-shape: production **2 032 673 cpu rows** (+64 054, +3.3 %; still tier 21, with 64 479 rows of
-headroom under `2^21` where there were 128 533), 53 842 permutations, 2 814 777 memory
-accesses, 2 042 797 instructions, 207 990 witness words; test profile 11 714 permutations.
-Production program digest `8901cec9…0bda` → `eb74180fa926f9ac0d23caf57046c3dd9ebc49a153c5a22d2d941a65d1134d92`;
-the aggregate program (`aggregate_program_digest`, the value a chain's genesis registers) at the
+and a `BLIND` bus interaction pair on every instance, `research/src/tables/blind.rs`), a `2^7`
+floor on every declared table height (the fixture's public table goes from `2^2` to `2^7` rows),
+32-bit range checks on the input and public words and the salt lanes (ZKM-1 / ZKH-2: the input and
+public tables widen 4 → 8 columns, wider leaves for every query to hash), and the rVM's keys moved
+to `key_derivation_v2` (HCS-1); VERIFIER-1 adds one `commit pow witness[r]` assertion per FRI round
+(one executed `JEQ` row each; it hashes nothing). Production **2 044 506 cpu rows** (+75 887,
++3.9 %; still tier 21, with 52 646 rows of headroom under `2^21` where there were 128 533).
+The aggregate program (`aggregate_program_digest`, the value a chain's genesis registers) at the
 production bundle shape `e0578970a1981321e044a6bbb947210b79d102daf1083c9b53b752a185709108` →
-`3d3eeaa6abc89ddad372e726e1df4728c1cd11c5ec0cf67a1b3b59d828614e0d`, at the test fixture shape
-`1ec0c545…eeeb` → `64a00eb77356e3b29834b2cbaa6462c477359645a0d58f64f2d24941d2abde97` (both move
-with the inner AIR and with the inner key's salts, which the program embeds). The tables below
-are the constraint-set-6 measurement, kept for the history they explain.
+`66a8094f19f8b1b47177a611e065d88c5ba27e100b5189d485cd28f09345356d`, at the test fixture shape
+`1ec0c545…eeeb` → `5e04fba0c0b900dcafbf37aa0acae87afb9ba2269f4d1970706ce2320b962993` (both move
+with the inner AIR, with the inner key's salts, which the program embeds, and with VERIFIER-1's
+assertions). The tables below are the constraint-set-6 measurement, kept for the history they
+explain.
 
 **M5.2 Task 4 re-pin (2026-09-14, ruling R5).** The table above is the *current* program's
 measurement, re-taken after phase 8 changed from thirty-nine raw `PUBLIC` rows to the

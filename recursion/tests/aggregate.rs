@@ -40,8 +40,8 @@ const LOOP_OVERHEAD: usize = 220;
 /// even one permutes eight — the per-N rows are `pre + Σ body_j + post` with the parity term,
 /// pinned per N rather than modelled. Constraint set 7 with VERIFIER-1 (one `commit pow witness`
 /// assertion per FRI round per proof; `LOOP_OVERHEAD` does not move, the single-proof program paying
-/// the same): 1 324 774 → @N3@ (`tests/pins.json`'s `aggregate_test_n3_cpu_rows`, re-measured).
-const N3_ROWS: usize = 1_372_369;
+/// the same): 1 324 774 → 1 383 100 (`tests/pins.json`'s `aggregate_test_n3_cpu_rows`, re-measured).
+const N3_ROWS: usize = 1_383_100;
 
 fn shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
     let shape = InnerShape::of(
