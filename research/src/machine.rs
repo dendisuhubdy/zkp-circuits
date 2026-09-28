@@ -619,7 +619,7 @@ pub enum ProveError {
     /// wrap, so no honest proof of such a program verifies; refused before any trace is built.
     PcWindow { base_pc: u32, log_height: u8 },
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum VerifyError {
     PublicValues, Tier, Batch(String),
     /// M3.4 (fix): `proof.program_log_height` is outside `[program::MIN_LOG_HEIGHT,
@@ -681,6 +681,10 @@ pub enum VerifyError {
     /// bytes) runs past 2^32 (`tables::program::pc_window_fits`). No honest proof has such a
     /// header; refused with the other cheap checks, before any key is built.
     PcWindow { entry_pc: u64, program_log_height: u8 },
+    /// Constraint set 8: `proof.public_values[pv::GAS]` exceeds `gas::gas_max` for this proof's
+    /// own declared header (`tier`, `keccak_log_height`, `sha256_log_height`) — a larger value
+    /// could only be a mispriced header, refused natively before any key is built.
+    GasLimit,
 }
 
 /// Every check `verify` runs on a proof's public values before any of its batch is touched:
@@ -700,6 +704,11 @@ pub fn check_public_values(hc: &[u32; 8], proof: &Proof) -> Result<(), VerifyErr
         if proof.public_values[pv::HC0 + i] != hc[i] as u64 { return Err(VerifyError::PublicValues); }
     }
     if proof.public_values[pv::TIER] != proof.tier.0 as u64 { return Err(VerifyError::Tier); }
+    // Constraint set 8: the declared gas limit is canonical (checked above) and never past what
+    // the header itself allows — a larger value could only be a mispriced header.
+    if proof.public_values[pv::GAS] > crate::gas::gas_max(proof.tier, proof.keccak_log_height, proof.sha256_log_height) {
+        return Err(VerifyError::GasLimit);
+    }
     // Audit ZKA-1: an output slot is a 32-bit word, and every consumer reads it as one — but the
     // canonical check above admits anything below `p ≈ 2^64`, and the circuit does not close the
     // gap by itself: `SYS_READ` hands the guest the input table's `WORD` column, which no lookup
@@ -1101,7 +1110,9 @@ pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32
         keccak: keccak_t,
         sha256: sha256_t,
         public: public_t,
-        public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc, &hin, &hpub),
+        // Constraint set 8: until Task A4 adds a `ProveOptions` override, every proof declares
+        // its header's own ceiling (`gas::gas_max`) as its limit.
+        public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc, &hin, &hpub, crate::gas::gas_max(tier, keccak_log_height, sha256_log_height)),
         program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height, mem_log_height,
     })
 }

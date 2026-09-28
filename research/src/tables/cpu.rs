@@ -302,7 +302,12 @@ pub mod pv {
     /// *is* checkable by a verifier: `Machine::verify_public` recomputes
     /// `hash::public_digest(words)` from the words the chain publishes and compares.
     pub const PUB0: usize = IN0 + 8;
-    pub const NUM: usize = PUB0 + 8; // 34
+    /// Constraint set 8: the gas limit this proof declares (`gas.rs`'s module doc), the last
+    /// public value. `Machine::verify`'s `check_public_values` refuses a proof whose declared
+    /// limit exceeds what its own header (`tier`, `keccak_log_height`, `sha256_log_height`)
+    /// could possibly need (`gas::gas_max`).
+    pub const GAS: usize = PUB0 + 8;
+    pub const NUM: usize = GAS + 1; // 35
 }
 use col::*;
 
@@ -1482,12 +1487,13 @@ where
     }
 }
 
-pub fn public_values(pc_entry: u32, tier_log2: usize, outputs: &[u32; NUM_OUTPUTS], hc: &[u32; 8], hin: &[u32; 8], hpub: &[u32; 8]) -> Vec<F> {
+pub fn public_values(pc_entry: u32, tier_log2: usize, outputs: &[u32; NUM_OUTPUTS], hc: &[u32; 8], hin: &[u32; 8], hpub: &[u32; 8], gas_limit: u64) -> Vec<F> {
     let mut v = vec![F::from_u32(pc_entry), F::from_u64(tier_log2 as u64)];
     v.extend(outputs.iter().map(|o| F::from_u32(*o)));
     v.extend(hc.iter().map(|o| F::from_u32(*o)));
     v.extend(hin.iter().map(|o| F::from_u32(*o)));
     v.extend(hpub.iter().map(|o| F::from_u32(*o)));
+    v.push(F::from_u64(gas_limit));
     v
 }
 

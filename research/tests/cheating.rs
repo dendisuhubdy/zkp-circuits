@@ -1867,6 +1867,10 @@ fn a_nonzero_keccak_height_below_one_block_is_rejected_before_any_verifier_key_i
     // last.
     let last = proof.batch.degree_bits.len() - 2;
     proof.batch.degree_bits[last] = 3 + 1;
+    // Constraint set 8: lowering `keccak_log_height` also lowers this header's own gas ceiling
+    // (`gas::gas_max`), and the honest proof's declared limit was set for the original height —
+    // `0` isolates the tamper under test from the unrelated `GasLimit` check.
+    proof.public_values[rand_zkvm::tables::cpu::pv::GAS] = 0;
     let verifier = Machine::new(FriProfile::Test);
     assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::KeccakHeight)));
     assert_eq!(verifier.cached_keys(), 0, "the range check must precede the verifier key");
@@ -2233,6 +2237,10 @@ fn a_nonzero_sha256_height_below_one_block_is_rejected() {
     // last.
     let last = proof.batch.degree_bits.len() - 2;
     proof.batch.degree_bits[last] = 5 + 1;
+    // Constraint set 8: lowering `sha256_log_height` also lowers this header's own gas ceiling
+    // (`gas::gas_max`), and the honest proof's declared limit was set for the original height —
+    // `0` isolates the tamper under test from the unrelated `GasLimit` check.
+    proof.public_values[rand_zkvm::tables::cpu::pv::GAS] = 0;
     let verifier = Machine::new(FriProfile::Test);
     assert!(matches!(verifier.verify(&p.digest(), &proof), Err(VerifyError::Sha256Height)));
     assert_eq!(verifier.cached_keys(), 0, "the range check must precede the verifier key");

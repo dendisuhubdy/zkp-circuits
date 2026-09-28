@@ -470,7 +470,10 @@ fn cpu_trace_mirrors_events_and_pads() {
     let last = &t.values[(t.height() - 1) * w..t.height() * w];
     assert_eq!(last[cpu::col::WRITTEN0], F::ONE, "slot 0 was written");
     for k in 1..8 { assert_eq!(last[cpu::col::WRITTEN0 + k], F::ZERO, "slot {k} was not"); }
-    let pv = public_values(0, 10, &e.outputs, &p.digest(), &rand_zkvm::hash::input_digest([0u32; 4], &[]), &rand_zkvm::hash::public_digest(&[]));
+    // Constraint set 8: a real gas limit for tier 10, no hash tables (the tier this hand-built
+    // trace call names).
+    let gas_limit = rand_zkvm::gas::gas_max(rand_zkvm::machine::Tier(10), 0, 0);
+    let pv = public_values(0, 10, &e.outputs, &p.digest(), &rand_zkvm::hash::input_digest([0u32; 4], &[]), &rand_zkvm::hash::public_digest(&[]), gas_limit);
     assert_eq!(pv.len(), cpu::pv::NUM);
     assert_eq!(pv[cpu::pv::OUT0], F::from_u32(2));
 }
