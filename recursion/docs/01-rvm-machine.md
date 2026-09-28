@@ -147,7 +147,7 @@ sponge twin in `tests/precompiles.rs`.
 ## What M5.3 adds
 
 `docs/02-aggregate.md`: the N-generic aggregate program — one counted loop over `N` inner
-proofs of one shape, the interface digest over `[inner_vk_digest ‖ N ‖ B(8) ‖ 34·N]` (B: AGG-2's binding), one registered
+proofs of one shape, the interface digest over `[inner_vk_digest ‖ N ‖ B(8) ‖ 35·N]` (B: AGG-2's binding), one registered
 program digest per shape — with the measured per-N economics (test profile N=1..3 in
 `tests/pins.json`), the chain-facing `aggregate` / `verify_aggregate` API, the two chain-side
 corrections (sealed history carries every covered bundle's declared shape; admission

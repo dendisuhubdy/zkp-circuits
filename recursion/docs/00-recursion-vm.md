@@ -7,7 +7,8 @@ program — the RV32-machine verifier — and measures what that program costs p
 proof. The program is built against **constraint set 6** of the inner machine: the `public`
 table is a mandatory ninth instance of every shape (last in `chips()` order), every proof
 declares a sixth height (`public_log_height`), `pv::NUM` is 34 (`PUB0..7`, the unsalted
-`H_PUB`, joins the inner public values), and `Machine::verifier_key` is a 6-tuple. The bundle
+`H_PUB`, joins the inner public values; constraint set 8 appends `GAS`, the declared gas limit,
+for 35), and `Machine::verifier_key` is a 6-tuple. The bundle
 proofs the chain admits have an **empty** public segment (`verify_public(hc, &[], _)`) — the
 rVM verifies `H_PUB` as ordinary public values (a prover-computed constant of the shape), and
 no public-segment words enter the tape.
@@ -67,7 +68,7 @@ order — and commits to nothing about it (spec §2/§10). Fourteen pinned segme
 | # | segment | contents |
 |---|---|---|
 | 1 | `Header` | `tier`, the **six** declared log-heights (program, input, keccak, sha256, **public**, mem), `num_queries`, one word per FRI round's `log_arity` |
-| 2 | `PublicValues` | the **34** inner public values (`PC_ENTRY`, `TIER`, `OUT0..7`, `HC0..7`, `IN0..7`, `PUB0..7`) |
+| 2 | `PublicValues` | the **35** inner public values (`PC_ENTRY`, `TIER`, `OUT0..7`, `HC0..7`, `IN0..7`, `PUB0..7`, `GAS` — cs8 appended `GAS`; 34 before) |
 | 3 | `Commitments` | `main`, `permutation`, `quotient_chunks`, `random` caps (16 words each) |
 | 4 | `LookupTerminals` | one extension element per instance with lookups |
 | 5 | `OpenedValues` | per instance: `trace_local`, `trace_next`, `preprocessed_local`, `preprocessed_next`, quotient chunks, `random`, `permutation_local`, `permutation_next` |
@@ -137,6 +138,14 @@ integrated `feat/cs7` tree (2026-09-28, the 128 GB box); the constraint-set-6 ro
 443 686 / 1 978 422 instructions, 43 344 / 199 760 witness words, digest
 `8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`.
 
+**Constraint set 8 re-pin (chain 18, 2026-09-29, emulated on the 48 GB laptop).** The inner
+machine's `GAS` column and 35th public value (`pv::GAS`): production **2 047 268 cpu rows**
+(+2 762), 54 515 permutations, 2 851 913 memory accesses, 2 057 401 instructions, 210 763
+witness words — still tier 21, 49 884 rows under `2^21`. Production program digest
+`8f159199…e1e7` → `454592b35ccfd6feefe93b7d2353bc484fca8ff260f74deae4e0865f7da2f2b3`; the test
+profile's single proof costs 11 875 permutations (was 11 852). `docs/02-aggregate.md`,
+"Constraint set 8", has the aggregate program's pins.
+
 **Constraint set 7 re-pin (chain 16).** The inner machine gained the LogUp blind (five columns
 and a `BLIND` bus interaction pair on every instance, `research/src/tables/blind.rs`), a `2^7`
 floor on every declared table height (the fixture's public table goes from `2^2` to `2^7` rows),
@@ -155,7 +164,7 @@ explain.
 
 **M5.2 Task 4 re-pin (2026-09-14, ruling R5).** The table above is the *current* program's
 measurement, re-taken after phase 8 changed from thirty-nine raw `PUBLIC` rows to the
-four-element **interface digest**: the §4.4 list (vk digest, `N`, the 34 inner public values) is
+four-element **interface digest**: the §4.4 list (vk digest, `N`, the inner public values — 34 then, 35 since constraint set 8) is
 stored, sponged with a capacity-seeded header (`RVM_PUB_DOMAIN = 17`, the `Program::digest`
 construction — the proof's batch public values are always exactly those four elements, the cs6
 `H_PUB` pattern; the node recomputes the list from the covered bundles and compares digests).
