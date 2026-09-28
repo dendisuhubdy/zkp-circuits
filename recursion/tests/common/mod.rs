@@ -317,47 +317,50 @@ pub fn random_ext(rng: &mut impl rand::Rng) -> recursion::isa::EF {
 /// `n` distinct honest bundle proofs at `profile`, cached on disk by `(profile, k)`.
 pub fn bundle_proofs(profile: FriProfile, n: usize) -> Vec<BundleProof> {
     let m = Machine::new(profile);
-    (0..n)
-        .map(|k| {
-            if let Some(p) = load_cached(&m, profile, k) {
-                return p;
-            }
-            let (alice, bob, bridge) = (Party::new(), Party::new(), Party::new());
-            let (asset, mint_time) = (0u32, 1_700_000_000u32);
-            let mut ledger = Ledger::new(mint_time);
-            // A different witness per k, and one that still conserves value below.
-            let amounts = [1_000u64 + k as u64, 2_000 + 2 * k as u64];
-            let in_notes: [Note; 2] = amounts.map(|amount| {
-                let n = Note::new(alice.vk.pk(), bridge.vk.pk(), amount, asset, mint_time);
-                let env = Envelope::seal(&bridge.vk, &alice.vk.address(), &n, &TxKey::random());
-                ledger.mint(&n, env).unwrap();
-                n
-            });
-            ledger.advance(60);
-            let (time, anchor) = (ledger.now, ledger.root());
-            let inputs: [(Note, [Word8; DEPTH], u32); 2] = std::array::from_fn(|i| {
-                let (path, index) = ledger.path_for(&in_notes[i].commitment()).unwrap();
-                (in_notes[i], path, index)
-            });
-            let total = amounts[0] + amounts[1];
-            let (fee, burn) = (100u64, 0u64);
-            let outputs = [
-                Note::new(bob.vk.pk(), alice.vk.pk(), total - fee - 500, asset, time),
-                Note::new(alice.vk.pk(), alice.vk.pk(), 500, asset, time),
-            ];
-            let inputs_vec =
-                notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
-            // The public segment is empty for bundle proofs: the chain admits only
-        // `verify_public(hc, &[], _)`, so the fixtures prove with `&[]` — and `H_PUB` is then
-        // the prover-computed digest of the empty segment, carried as ordinary public values.
-        let (proof, _) = m.prove(&ledger.bundle_program, &inputs_vec, &[], None).unwrap();
-            let hc = ledger.bundle_program.digest();
-            m.verify(&hc, &proof).expect("a fixture proof must verify natively");
-            let p = BundleProof { proof, hc };
-            store_cached(profile, k, &p);
-            p
-        })
-        .collect()
+    (0..n).map(|k| bundle_proof_at(&m, profile, k)).collect()
+}
+
+/// Fixture `k` alone — the cached one, or a fresh proof stored to the cache. Separate from
+/// [`bundle_proofs`] so a cache can be generated `k` by `k` in parallel processes
+/// (`tests/fixtures.rs`); the proof is the same one either way, fixture `k`'s witness.
+pub fn bundle_proof_at(m: &Machine, profile: FriProfile, k: usize) -> BundleProof {
+    if let Some(p) = load_cached(m, profile, k) {
+        return p;
+    }
+    let (alice, bob, bridge) = (Party::new(), Party::new(), Party::new());
+    let (asset, mint_time) = (0u32, 1_700_000_000u32);
+    let mut ledger = Ledger::new(mint_time);
+    // A different witness per k, and one that still conserves value below.
+    let amounts = [1_000u64 + k as u64, 2_000 + 2 * k as u64];
+    let in_notes: [Note; 2] = amounts.map(|amount| {
+        let n = Note::new(alice.vk.pk(), bridge.vk.pk(), amount, asset, mint_time);
+        let env = Envelope::seal(&bridge.vk, &alice.vk.address(), &n, &TxKey::random());
+        ledger.mint(&n, env).unwrap();
+        n
+    });
+    ledger.advance(60);
+    let (time, anchor) = (ledger.now, ledger.root());
+    let inputs: [(Note, [Word8; DEPTH], u32); 2] = std::array::from_fn(|i| {
+        let (path, index) = ledger.path_for(&in_notes[i].commitment()).unwrap();
+        (in_notes[i], path, index)
+    });
+    let total = amounts[0] + amounts[1];
+    let (fee, burn) = (100u64, 0u64);
+    let outputs = [
+        Note::new(bob.vk.pk(), alice.vk.pk(), total - fee - 500, asset, time),
+        Note::new(alice.vk.pk(), alice.vk.pk(), 500, asset, time),
+    ];
+    let inputs_vec =
+        notes::bundle_inputs(&alice.sk, &inputs, &outputs, anchor, fee, burn, asset, time);
+    // The public segment is empty for bundle proofs: the chain admits only
+    // `verify_public(hc, &[], _)`, so the fixtures prove with `&[]` — and `H_PUB` is then
+    // the prover-computed digest of the empty segment, carried as ordinary public values.
+    let (proof, _) = m.prove(&ledger.bundle_program, &inputs_vec, &[], None).unwrap();
+    let hc = ledger.bundle_program.digest();
+    m.verify(&hc, &proof).expect("a fixture proof must verify natively");
+    let p = BundleProof { proof, hc };
+    store_cached(profile, k, &p);
+    p
 }
 
 // ── `rejects()`, the cheating-test discipline ────────────────────────────────────────────────

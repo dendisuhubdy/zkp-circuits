@@ -213,6 +213,24 @@ canonical decompositions are ≈ 94 k; the fold rounds themselves are ≈ 100 k.
 
 ## The exit tests and their wall time
 
+**The fixture cache.** Every test proves its fixtures on first use and caches them under
+`$RECURSION_FIXTURES` (default `recursion/target/recursion-fixtures`), re-verifying each cached
+proof on load. The prover is single-threaded per proof, so a full cache (13 `Test-k` + 50
+`Production-k`, what the in-suite and `--ignored` exit/aggregate tests read) is generated in
+parallel by `tests/fixtures.rs`, one disjoint index list per process — on the 128 GB box
+(2026-09-28, cache at `/root/recursion-fixtures`): 7 test processes (~470 s a proof), then 8
+production ones (~260–560 s a proof), ~1 h in all:
+
+```text
+export RECURSION_FIXTURES=/root/recursion-fixtures
+for ks in 0,7 1,8 2,9 3,10 4,11 5,12 6; do
+  FIXTURE_PROFILE=Test FIXTURE_KS=$ks cargo test --release --test fixtures -- --ignored --nocapture &
+done; wait
+for i in 0 1 2 3 4 5 6 7; do
+  FIXTURE_PROFILE=Production FIXTURE_KS=$(seq -s, $i 8 49) cargo test --release --test fixtures -- --ignored --nocapture &
+done; wait
+```
+
 `tests/exit.rs`, against real bundle proofs produced by `Machine::prove` (disk-cached under
 `recursion/target/recursion-fixtures`; the cs6 fixtures were regenerated — the cs5 files were
 **deleted**, and would anyway have failed `load_cached`'s re-verification against the cs6
