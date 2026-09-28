@@ -4,7 +4,7 @@
 //! therefore `GpuProver`, is `Send + Sync`: engines that hold a `GpuProver` behind an
 //! `Arc` require that bound.
 use super::Arg;
-use crate::device::kernels as k;
+use crate::device::kernels::{self as k, Cells};
 use std::sync::Mutex;
 
 pub struct Device;
@@ -68,44 +68,50 @@ impl Device {
         match name {
             "scale_pow" => {
                 let mut d = buf(&a[0]).0.lock().unwrap();
+                let d = Cells::new(&mut d);
                 for t in 0..total {
-                    k::scale_pow(t, &mut d, u(&a[1]), u64_(&a[2]), u64_(&a[3]));
+                    k::scale_pow(t, d, u(&a[1]), u64_(&a[2]), u64_(&a[3]));
                 }
             }
             "bit_reverse" => {
                 let s = buf(&a[0]).0.lock().unwrap();
                 let mut d = buf(&a[1]).0.lock().unwrap();
+                let d = Cells::new(&mut d);
                 for t in 0..total {
-                    k::bit_reverse(t, &s, &mut d, u(&a[2]), u(&a[3]));
+                    k::bit_reverse(t, &s, d, u(&a[2]), u(&a[3]));
                 }
             }
             "zero_extend" => {
                 let s = buf(&a[0]).0.lock().unwrap();
                 let mut d = buf(&a[1]).0.lock().unwrap();
+                let d = Cells::new(&mut d);
                 for t in 0..total {
-                    k::zero_extend(t, &s, &mut d, u(&a[2]), u(&a[3]));
+                    k::zero_extend(t, &s, d, u(&a[2]), u(&a[3]));
                 }
             }
             "to_col_major" => {
                 let s = buf(&a[0]).0.lock().unwrap();
                 let mut d = buf(&a[1]).0.lock().unwrap();
+                let d = Cells::new(&mut d);
                 for t in 0..total {
-                    k::to_col_major(t, &s, &mut d, u(&a[2]), u(&a[3]));
+                    k::to_col_major(t, &s, d, u(&a[2]), u(&a[3]));
                 }
             }
             "to_row_major" => {
                 let s = buf(&a[0]).0.lock().unwrap();
                 let mut d = buf(&a[1]).0.lock().unwrap();
+                let d = Cells::new(&mut d);
                 for t in 0..total {
-                    k::to_row_major(t, &s, &mut d, u(&a[2]), u(&a[3]));
+                    k::to_row_major(t, &s, d, u(&a[2]), u(&a[3]));
                 }
             }
             "dif_stage" => {
                 let mut d = buf(&a[0]).0.lock().unwrap();
                 let lo = buf(&a[4]).0.lock().unwrap();
                 let hi = buf(&a[5]).0.lock().unwrap();
+                let d = Cells::new(&mut d);
                 for t in 0..total {
-                    k::dif_stage(t, &mut d, u(&a[1]), u(&a[2]), u(&a[3]), &lo, &hi);
+                    k::dif_stage(t, d, u(&a[1]), u(&a[2]), u(&a[3]), &lo, &hi);
                 }
             }
             "dif_tiles" => {
@@ -116,7 +122,7 @@ impl Device {
                 let hi = buf(&a[5]).0.lock().unwrap();
                 let tile = 1usize << log_tile;
                 for b in 0..grid as usize {
-                    let chunk = &mut d[b * tile..(b + 1) * tile];
+                    let chunk = Cells::new(&mut d[b * tile..(b + 1) * tile]);
                     for s in (1..=log_tile).rev() {
                         for t in 0..block as usize {
                             k::dif_tile_stage(t, chunk, log_n, s, &lo, &hi);
@@ -127,24 +133,27 @@ impl Device {
             "copy_columns" => {
                 let s = buf(&a[0]).0.lock().unwrap();
                 let mut d = buf(&a[2]).0.lock().unwrap();
+                let d = Cells::new(&mut d);
                 for t in 0..total {
-                    k::copy_columns(t, &s, u(&a[1]), &mut d, u(&a[3]), u(&a[4]));
+                    k::copy_columns(t, &s, u(&a[1]), d, u(&a[3]), u(&a[4]));
                 }
             }
             "poseidon2_rows" => {
                 let r = buf(&a[0]).0.lock().unwrap();
                 let kk = buf(&a[3]).0.lock().unwrap();
                 let mut o = buf(&a[4]).0.lock().unwrap();
+                let o = Cells::new(&mut o);
                 for t in 0..total {
-                    k::poseidon2_rows(t, &r, u(&a[1]), u(&a[2]), &kk, &mut o);
+                    k::poseidon2_rows(t, &r, u(&a[1]), u(&a[2]), &kk, o);
                 }
             }
             "poseidon2_compress" => {
                 let p = buf(&a[0]).0.lock().unwrap();
                 let kk = buf(&a[2]).0.lock().unwrap();
                 let mut o = buf(&a[3]).0.lock().unwrap();
+                let o = Cells::new(&mut o);
                 for t in 0..total {
-                    k::poseidon2_compress(t, &p, u(&a[1]), &kk, &mut o);
+                    k::poseidon2_compress(t, &p, u(&a[1]), &kk, o);
                 }
             }
             "poseidon2_inject" => {
@@ -152,8 +161,9 @@ impl Device {
                 let r = buf(&a[2]).0.lock().unwrap();
                 let kk = buf(&a[5]).0.lock().unwrap();
                 let mut o = buf(&a[6]).0.lock().unwrap();
+                let o = Cells::new(&mut o);
                 for t in 0..total {
-                    k::poseidon2_inject(t, &p, u(&a[1]), &r, u(&a[3]), u(&a[4]), &kk, &mut o);
+                    k::poseidon2_inject(t, &p, u(&a[1]), &r, u(&a[3]), u(&a[4]), &kk, o);
                 }
             }
             other => return Err(format!("unknown kernel {other}")),
