@@ -3,6 +3,7 @@ name = "sbpf2rv"
 version = "0.1.0"
 edition = "2021"
 description = "Translates an sBPF ELF into C that runs natively in the Rand zkVM (scanner + emitter)"
+license = "GPL-3.0-only"
 
 [lib]
 path = "src/lib.rs"

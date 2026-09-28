@@ -3,6 +3,7 @@ name = "rand-zkvm-cuda"
 version = "0.1.0"
 edition = "2021"
 description = "GPU (CUDA) NTT and Poseidon2 Merkle backends for the Rand zkVM, with CPU reference twins"
+license = "GPL-3.0-only"
 
 [lib]
 name = "rand_zkvm_cuda"

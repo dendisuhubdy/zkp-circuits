@@ -3,6 +3,7 @@ name = "zkp2"
 version = "0.1.0"
 edition = "2021"
 description = "zk-SNARK half of the SNARK-vs-STARK pair: Groth16 over BN254 proving an iterated x^3 + K chain"
+license = "GPL-3.0-only"
 
 [dependencies]
 ark-ff = "0.5"
