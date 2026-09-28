@@ -40,6 +40,33 @@ word alone left, and the unconditional final permutation still holds.
 - The program digest changes, so the fullnode re-vendors and re-pins `aggregate_program_digest`.
   **The production proof batch must use this program** (the fullnode's audit-v3 plan, task C4).
 
+## VERIFIER-1: the re-pin (2026-09-28, the chain-16 constraint set, v0.6.1)
+
+The per-proof pipeline (`rv32.rs`'s `emit_proof`, shared by `rv32`, `rv32n` and `rv32r`) now
+asserts each FRI commit-phase proof-of-work word is the honest `0` (`docs/00-recursion-vm.md`,
+"Segment 7's PoW words"). That adds one `JEQ` and one trap per FRI round to the program, so every
+program digest moves; the transcript, the tape and every other cost do not. Cost per verified
+proof: +1 cpu row and +2 instructions per FRI round — +8 / +16 at the bundle shape's eight rounds
+(test and production alike), +5 / +10 and +9 / +18 at the self-verifier's two fixture shapes.
+
+| pin | before | after |
+|---|---|---|
+| `aggregate_program_digest`, production bundle shape (what a chain's aggregation section pins) | `e0578970a1981321e044a6bbb947210b79d102daf1083c9b53b752a185709108` | `3e9668067d10f4ea643f2819a95062a75f9e93b75ac50bb5626b77274106388d` |
+| `aggregate_program_digest`, test fixture shape (`tests/verifier.rs`) | `1ec0c545003179b1ca4215b439d2d69fa33149a5257a04dc8473030fc2deeeeb` | `ed787251efe213a28d410a068f383dcd75c2caa1c68ee71514ba71b16b4147c6` |
+| single-proof program, production (`src/programs/verify_rv32.digest`) | `8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda` | `880fe98c92e36671407af7c54952547de6046355dad209650e7e6a18596e5911` |
+| single-proof program, test shape | `71f2a93d2033c7c80ed4b5bb7311251eb4c7aa1d9729baa51a8f5f670933b8d8` | `4a0517f841cf14efb69c0206532d0cf554b3cab79e78828884f47703bb3dfc4a` |
+| Off replay, production (`tests/verifier.rs`) | `c1c04ac3a9faf266eb8980260dae6c7f12fe9ee4cf3dfa40de8440182258d731` | `bc10a8e1771117d91c8fa30ee11a083404f49280afe4349b816c08c87579fcaf` |
+| self-verifier (`self_program_digest`), toy fixture shape (`tests/self_verify.rs`, newly pinned) | `c18fa9eadf161ab625fc23048a6bcd4020eea8eaac33720d34e17f7148cd4804` | `1ebcf3772486f3042f3f7bd29e32a3671c06c4a281135f6230717d73808a90ab` |
+| self-verifier cost, toy (rows, perms, mem, instrs, witness) | (276555, 7498, 405853, 278398, 29575) | (276560, 7498, 405853, 278408, 29575) |
+| self-verifier cost, busy | (368761, 9132, 481628, 370864, 35407) | (368770, 9132, 481628, 370882, 35407) |
+| `pins.json` production cpu rows / instructions | 1 968 619 / 1 978 422 | 1 968 627 / 1 978 438 |
+| `pins.json` aggregate test N=1/2/3 cpu rows | 441 862 / 883 320 / 1 324 774 | 441 870 / 883 336 / 1 324 798 |
+
+`inner_vk_digest` (the admission stub vector above) does not move: it is the inner machine's
+key, not the program. `LOOP_OVERHEAD` does not move either. The fullnode re-vendors the rVM and
+re-pins `aggregate_program_digest` at the chain-16 cut; no live chain carries an aggregation
+section, so nothing live moves. **The production proof batch must use this program.**
+
 ## The N-economics, measured (test profile)
 
 The shipped program (`Checkpoints::Off`, liveness and precompiles on) over the fixture shape;

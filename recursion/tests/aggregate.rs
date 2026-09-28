@@ -35,8 +35,10 @@ const LOOP_OVERHEAD: usize = 219;
 /// per-proof rows: the staged absorb permutes when the rate fills, and the fill phase advances
 /// by two lanes per proof (34 mod 4), so an odd-numbered iteration permutes nine times where an
 /// even one permutes eight — the per-N rows are `pre + Σ body_j + post` with the parity term,
-/// pinned per N rather than modelled.
-const N3_ROWS: usize = 1_324_774;
+/// pinned per N rather than modelled. VERIFIER-1 (2026-09-28) added one row per FRI round per
+/// proof — eight at this shape, +24 at N=3 (was 1 324 774); `LOOP_OVERHEAD` does not move, the
+/// single-proof program paying the same eight.
+const N3_ROWS: usize = 1_324_798;
 
 fn shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
     let shape = InnerShape::of(
@@ -617,4 +619,42 @@ fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
         r.cpu_rows,
         r.cpu_rows - single_rows
     );
+}
+
+/// VERIFIER-1, the rVM half, through the shipped N-generic program: a commit-phase PoW word
+/// rewritten in *any* proof's region of an N=2 tape is refused at that round's named step, the
+/// loop giving every iteration the single-proof program's check. Before the fix the program
+/// discarded the word and the aggregate accepted a re-encoded inner proof
+/// (`tests/verifier.rs`'s single-proof test has the reasoning and the native refusal).
+#[test]
+fn a_rewritten_commit_phase_pow_word_in_any_proof_is_refused() {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Test, 2).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = shape_and_key(&proofs[0]);
+    let vp = verify_rv32n(&shape, &key, Checkpoints::Off);
+    let honest = WitnessTape::build_n(FriProfile::Test, &shape, &key, &proofs, &common::TEST_BINDING).unwrap();
+    execute(&vp.program, &honest.words, MAX_CYCLES).expect("the honest N=2 tape is accepted");
+    let rounds = shape.log_arities.len();
+    for j in 0..proofs.len() {
+        let r = *honest
+            .segment_refs()
+            .iter()
+            .find(|r| r.proof == j && r.segment == Segment::FriCommits)
+            .unwrap();
+        assert_eq!(r.len, rounds * 17);
+        for round in [0, rounds - 1] {
+            let at = r.start + 17 * round + 16;
+            assert_eq!(honest.words[at], F::ZERO);
+            let mut t = honest.clone();
+            t.words[at] = F::ONE;
+            match execute(&vp.program, &t.words, MAX_CYCLES) {
+                Err(ExecError::InverseOfZero { pc }) => assert_eq!(
+                    vp.program.checkpoint_at(pc),
+                    Some(format!("commit pow witness[{round}]").as_str()),
+                    "proof {j}, round {round}: refused at the wrong step"
+                ),
+                other => panic!("proof {j}, round {round}: expected a refusal, got {:?}", other.map(|e| format!("acceptance, {} cpu rows", e.cpu_rows()))),
+            }
+        }
+    }
 }
