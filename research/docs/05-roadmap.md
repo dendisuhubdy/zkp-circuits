@@ -309,6 +309,60 @@ and passes when the rule lands.
    derives a call's program height from `program_log_height` (floored), and a deploy's pc window
    has to cover the floored table (PCW-FLOOR).
 
+## Constraint set 8: the gas meter
+
+Not a finding from the 2026-09-27 reviews above — a separate driver, the fullnode's gas design
+(spec 2026-09-28, "Phase 0/1" of chain 18's plan: pay per instruction in RAND on a declared,
+in-circuit-proven bound). Branch `feat/cs8-gas`, four commits (`4d448ec`, `f0dc825`, `13dc769`,
+`6ec5a5b`). What it carries:
+
+- **`pv::GAS`** (`tables::cpu::pv`), a 35th public value (`PUB0 + 8`, `pv::NUM` 34 → 35) — the
+  header's declared gas ceiling. `gas::gas_max(tier, keccak_log_height, sha256_log_height)` is the
+  ceiling no run under that header can exceed: the tier's cycle budget plus the weight of every
+  permutation and compression block its declared keccak/sha256 heights could hold. `Machine::verify`
+  refuses `pv::GAS > gas_max(...)` natively (`VerifyError::GasLimit`), before any verifier key is
+  built — the same cheap-before-expensive placement as the tier and height checks beside it.
+- **`gas::gas_of`**, the native meter over an execution (`Program`, inputs, public words, the
+  `CycleEvent` trace): the digest-prefix rows (program, input, public — each counted once, never
+  per cycle) plus `row_gas` per cycle — 1 gas for an ordinary row, `KECCAK_GAS = 192` for a
+  `KECCAK` row, `SHA256_GAS = 64` for a `SHA256` row, `POSEIDON2_ABSORB_GAS = 3` for a `POSEIDON2`/
+  `POSEIDON2_LEN` absorb row (a row is never charged more than one of these). `gas_of` is what the
+  prover's own run costs; `gas_max` is the most a header could ever cost. Used only off-circuit
+  (fee computation, `ProveOptions.gas_limit`'s own floor) — the circuit charges gas independently,
+  below.
+- **The cpu table's `GAS` column and its four `GD0..3` halt-row limbs** (`col::WIDTH` 277 → 282):
+  `GAS = 1` on row 0 (a digest row); on every transition into a real row, `GAS` grows by exactly
+  `gas_of`'s weights (degree 2); on the one `HALT` row, `pv::GAS − GAS` is published, byte-limbed
+  across `GD0..3` and range-checked (`RANGE8`, `Count::bounded(SYS_HALT, 1)`), so the declared
+  ceiling is provably at or above the run's own gas without the run's gas itself ever appearing as
+  a public value; the limbs are pinned to zero on every other row, padding included. Four limbs
+  are enough because the native check above already bounds `pv::GAS` under `2^32`.
+  `docs/02-tables-and-buses.md`, "Constraint set 8: the gas meter", has the constraints in full;
+  `docs/01-isa.md`'s syscall table gains a gas column built from these same weights.
+- **`ProveOptions.gas_limit: Option<u64>`** — a prover may declare any ceiling from its own run's
+  gas up to the header's `gas_max` (refused outside that range, `GasLimitBelowRun` /
+  `GasLimitAboveHeader`, before any trace is built); `None` (the default, unchanged behaviour)
+  declares the header's own ceiling. `docs/03-privacy.md`, "What a proof leaks", has the leakage
+  argument: the default leaks nothing beyond the tier and hash heights already do, and a coarser
+  declared bucket leaks `log2(bucket)` fewer bits than the exact count would.
+
+**Measured proof-size deltas** (`FriProfile::Production`, `measure_production_profile_at_tier_10_and_12`,
+two runs each side, run-to-run noise ≈ ±6 KB — four `RANGE8` lookups and one column added to every
+instance's packed lookups, no new preprocessed table):
+
+| Shape | Before cs8 | After cs8 | Change |
+|---|---|---|---|
+| tier 10, no hash chip | 1 368 874 / 1 363 178 B | 1 367 083 / 1 368 939 B (re-measured: 1 370 443 / 1 367 371 B) | ≈ +2 KB, +0.15 % |
+| tier 12, no hash chip | 1 419 308 / 1 426 027 B | 1 428 781 / 1 432 365 B (re-measured: 1 431 181 / 1 431 981 B) | ≈ +8 KB, +0.56 % |
+| tier 10, one keccak block | 3 280 413 / 3 269 053 B | 3 284 155 / 3 284 413 B (re-measured: 3 286 141 / 3 286 941 B) | ≈ +10 KB, +0.29 % |
+
+The re-measured pairs are this task's own run, reconciling within the ±6 KB noise band against the
+pair the column landed with (`13dc769`'s commit body). All four verifier keys' `common` digest
+moved (the four new `RANGE8` lookups); no `commitment` digest moved (no new preprocessed periodic
+table) — `tests/verifier_key.rs` re-pinned, in the same shape as constraint set 7's own RANGE8
+widening. **Every verifier key changed; ships only with a chain cut** — chain 18 in the fullnode's
+plan, alongside Phase 1's per-instruction fee schedule.
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency
