@@ -110,3 +110,83 @@ mod gas_of_tests {
         assert_eq!(gas_of(&p, &[], &[], &e.events), expected);
     }
 }
+
+// ─────────────────────── Task A3: the `GAS` column, in the circuit ───────────────────────
+
+mod gas_column_tests {
+    use super::common;
+    use rand_zkvm::emulator::execute;
+    use rand_zkvm::gas::{gas_max, gas_of};
+    use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, ProveError, Tier};
+    use rand_zkvm::tables::cpu::pv;
+    use rand_zkvm::tables::F;
+    use p3_field::PrimeCharacteristicRing;
+
+    /// A real proof's `GAS_LIMIT` is the header ceiling by default, and verifies — the `HALT`
+    /// row's limbs carry the whole slack `gas_max − gas`.
+    #[test]
+    fn a_default_proof_declares_the_ceiling_and_verifies() {
+        let (p, proof) = common::fib_proof_tier_10();
+        assert_eq!(proof.public_values[pv::GAS], gas_max(Tier(10), proof.keccak_log_height, proof.sha256_log_height));
+        let m = Machine::new(FriProfile::Test);
+        assert!(m.verify(&p.digest(), &proof).is_ok());
+    }
+
+    /// Review focus 1: the honest boundary `GAS == GAS_LIMIT` verifies (zero slack, all four
+    /// limbs zero); the prover refuses one below and one past the header before building a trace;
+    /// and a limit one below the run, forced into the public values under the honest trace, is
+    /// refused by the AIR — the `HALT` row's limbs cannot represent `−1`.
+    ///
+    /// (Task A4 adds `ProveOptions.gas_limit` and the `prove_with_options` spelling of this test;
+    /// here the limit goes through `build_traces_salted` and `prove_traces`.)
+    #[test]
+    fn a_limit_one_below_the_run_is_refused() {
+        let m = Machine::new(FriProfile::Test);
+        let p = rand_zkvm::guests::fib(20);
+        let e = execute(&p, &[], &[], 10_000).unwrap();
+        let gas = gas_of(&p, &[], &[], &e.events);
+        let max = gas_max(Tier(10), 0, 0);
+        assert!(gas < max);
+
+        let t = build_traces_salted(&p, &[], &[], [0; 4], &e, Tier(10), gas).unwrap();
+        let exact = m.prove_traces(&p, &t, Tier(10));
+        assert_eq!(exact.public_values[pv::GAS], gas);
+        assert!(m.verify(&p.digest(), &exact).is_ok(), "GAS == GAS_LIMIT is honest");
+
+        assert!(matches!(
+            build_traces_salted(&p, &[], &[], [0; 4], &e, Tier(10), gas - 1),
+            Err(ProveError::GasLimitBelowRun { gas: g, limit }) if g == gas && limit == gas - 1
+        ));
+        assert!(matches!(
+            build_traces_salted(&p, &[], &[], [0; 4], &e, Tier(10), max + 1),
+            Err(ProveError::GasLimitAboveHeader { limit, max: m }) if limit == max + 1 && m == max
+        ));
+
+        // A cheating prover past the refusal: the honest trace, the public value lowered by one.
+        let mut forged = build_traces_salted(&p, &[], &[], [0; 4], &e, Tier(10), gas).unwrap();
+        forged.public_values[pv::GAS] = F::from_u64(gas - 1);
+        assert!(common::rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &forged, Tier(10)))));
+        // And one that also satisfies the halt-row equation by writing `−1` into limb 0: only the
+        // `RANGE8` lookup on the limbs stands between it and a verifying proof.
+        let w = rand_zkvm::tables::cpu::col::WIDTH;
+        let halt = (0..forged.cpu.values.len() / w).find(|&r| forged.cpu.values[r * w + rand_zkvm::tables::cpu::col::SYS_HALT] == F::ONE).unwrap();
+        forged.cpu.values[halt * w + rand_zkvm::tables::cpu::col::GD0] = -F::ONE;
+        assert!(common::rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &forged, Tier(10)))));
+    }
+
+    /// The `HALT` row's four byte limbs hold `gas_max − gas` at every header the verifier admits:
+    /// the largest ceiling (tier 20, both hash tables at their flat cap of `2^20` rows) is under
+    /// `2^32`.
+    #[test]
+    fn every_admissible_ceiling_fits_the_four_gas_limbs() {
+        assert!(gas_max(Tier(20), 20, 20) < 1 << 32);
+    }
+
+    /// Task A1's deferred clamp: `gas_max` clamps an untrusted height at 40 (no shift overflow),
+    /// and an absurd `u8` height does not panic.
+    #[test]
+    fn gas_max_clamps_an_absurd_height() {
+        assert_eq!(gas_max(Tier(10), 41, 0), gas_max(Tier(10), 40, 0));
+        let _ = gas_max(Tier(10), 255, 255);
+    }
+}

@@ -202,6 +202,10 @@ fn padded_hash_tables_verify_and_hide_presence() {
         for i in 0..8 {
             v[rand_zkvm::tables::cpu::pv::IN0 + i] = padded.public_values[rand_zkvm::tables::cpu::pv::IN0 + i];
         }
+        // Constraint set 8: and the declared gas limit, which by default is the header's own
+        // ceiling (`gas::gas_max`) — the padded header declares both hash tables, so its ceiling
+        // is higher. It says nothing the header's heights do not already say.
+        v[rand_zkvm::tables::cpu::pv::GAS] = rand_zkvm::gas::gas_max(Tier(10), MIN_PRIVATE_TABLE_LOG_HEIGHT, MIN_PRIVATE_TABLE_LOG_HEIGHT);
         v
     });
     // The header a real one-permutation, one-compression call declares — the same two heights.

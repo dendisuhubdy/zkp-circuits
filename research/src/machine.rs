@@ -618,6 +618,14 @@ pub enum ProveError {
     /// (`tables::program::pc_window_fits`). The circuit's PCs are field sums and the emulator's
     /// wrap, so no honest proof of such a program verifies; refused before any trace is built.
     PcWindow { base_pc: u32, log_height: u8 },
+    /// Constraint set 8: the requested gas limit is below what this run spends (`gas::gas_of`) —
+    /// the `HALT` row's `GD0..3` limbs cannot represent a negative slack, so no trace built with
+    /// it could verify. Refused before any trace is built.
+    GasLimitBelowRun { gas: u64, limit: u64 },
+    /// Constraint set 8: the requested gas limit is above this proof's own header ceiling
+    /// (`gas::gas_max(tier, keccak_log_height, sha256_log_height)`), which `check_public_values`
+    /// refuses. Refused before any trace is built.
+    GasLimitAboveHeader { limit: u64, max: u64 },
 }
 #[derive(Debug, PartialEq)]
 pub enum VerifyError {
@@ -873,10 +881,13 @@ pub fn check_declared_heights(
 /// split (review round 1, M6). Most callers (`main.rs`'s demo sections included) don't need a
 /// *particular* salt, just a fresh one; use `build_traces_salted` where a fixed, reproducible
 /// H_IN is specifically needed (e.g. two traces that must be compared).
+///
+/// Constraint set 8: declares the header's own ceiling (`gas::gas_max`) as the gas limit, as
+/// `Machine::prove` does.
 pub fn build_traces(program: &Program, inputs: &[u32], public: &[u32], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
     use rand::RngExt;
     let salt: [u32; 4] = rand::rng().random();
-    build_traces_salted(program, inputs, public, salt, exec, tier)
+    build_traces_salted_with(program, inputs, public, salt, exec, tier, ProveOptions::default())
 }
 
 /// Prover-side choices that change what a proof *reveals* but not what it proves: every option here
@@ -923,12 +934,24 @@ pub struct ProveOptions {
     pub pad_absent_hash_tables: bool,
 }
 
-pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier) -> Result<Traces, ProveError> {
-    build_traces_salted_with(program, inputs, public, salt, exec, tier, ProveOptions::default())
+/// Constraint set 8: `gas_limit` is the proof's declared `pv::GAS`, and must lie in
+/// `[gas::gas_of(run), gas::gas_max(header)]` — `ProveError::GasLimitBelowRun` /
+/// `GasLimitAboveHeader` otherwise, before any trace is built. A caller with no better value
+/// passes the header's ceiling; [`build_traces_salted_with`] does exactly that.
+pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier, gas_limit: u64) -> Result<Traces, ProveError> {
+    build_traces_inner(program, inputs, public, salt, exec, tier, ProveOptions::default(), Some(gas_limit))
 }
 
-/// [`build_traces_salted`] under explicit [`ProveOptions`].
+/// [`build_traces_salted`] under explicit [`ProveOptions`], declaring the header's own gas ceiling
+/// (`gas::gas_max`) as the limit — what every `Machine::prove*` entry point declares.
 pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier, opts: ProveOptions) -> Result<Traces, ProveError> {
+    build_traces_inner(program, inputs, public, salt, exec, tier, opts, None)
+}
+
+/// The one trace builder. `gas_limit: None` = the header's ceiling, resolved once the declared
+/// keccak/sha256 heights are known.
+#[allow(clippy::too_many_arguments)]
+fn build_traces_inner(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier, opts: ProveOptions, gas_limit: Option<u64>) -> Result<Traces, ProveError> {
     // M3.4: digest rows count as cycles too — the digest prefix is part of every proof's cpu
     // table, not just `exec.events`. M4.1: so does the input-digest prefix.
     let input_digest_rows = crate::hash::input_digest_row_count(inputs.len());
@@ -1028,7 +1051,16 @@ pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32
     // No compressions, no table: `sha256_log_height == 0` and `sha256 == None` are set here
     // together and travel together from this point on.
     let sha256_t = (sha256_log_height != 0).then(|| sha256_trace(&sha256_events, sha256_log_height));
-    let cpu = cpu_trace(program, inputs, public, salt, &exec.events, tier.cpu_height(), &mut range, &mut nibble);
+    // Constraint set 8: the declared gas limit sits between what this run spends and what its
+    // header could ever need — refused here, before the cpu trace (whose `HALT` row encodes the
+    // difference in four byte limbs) is built. `gas_max` < 2^32 at every admissible header
+    // (`tests/gas.rs` pins the largest), so the slack always fits the limbs.
+    let gas = crate::gas::gas_of(program, inputs, public, &exec.events);
+    let max = crate::gas::gas_max(tier, keccak_log_height, sha256_log_height);
+    let gas_limit = gas_limit.unwrap_or(max);
+    if gas_limit < gas { return Err(ProveError::GasLimitBelowRun { gas, limit: gas_limit }); }
+    if gas_limit > max { return Err(ProveError::GasLimitAboveHeader { limit: gas_limit, max }); }
+    let cpu = cpu_trace(program, inputs, public, salt, &exec.events, tier.cpu_height(), gas_limit, &mut range, &mut nibble);
     // M4.2 (controller ruling 1): the memory table's height is declared, not derived. Count the
     // rows `memory_trace` will actually hold — one per `accesses` entry and one per
     // `keccak_accesses` entry, which is every row it pushes (read it: the two chained iterators
@@ -1110,9 +1142,10 @@ pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32
         keccak: keccak_t,
         sha256: sha256_t,
         public: public_t,
-        // Constraint set 8: until Task A4 adds a `ProveOptions` override, every proof declares
-        // its header's own ceiling (`gas::gas_max`) as its limit.
-        public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc, &hin, &hpub, crate::gas::gas_max(tier, keccak_log_height, sha256_log_height)),
+        // Constraint set 8: the limit checked above, the same one the cpu trace's `HALT` row
+        // encodes (the `Machine::prove*` paths pass the header's own ceiling until Task A4 adds
+        // a `ProveOptions` override).
+        public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc, &hin, &hpub, gas_limit),
         program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height, mem_log_height,
     })
 }
@@ -1636,7 +1669,7 @@ impl Machine {
                 Tier::for_workload(cycles, permutations).ok_or(ProveError::NoTier(cycles))?
             }
         };
-        let traces = build_traces_salted(program, inputs, public, salt, &exec, tier)?;
+        let traces = build_traces_salted_with(program, inputs, public, salt, &exec, tier, ProveOptions::default())?;
         let airs = chips(tier, traces.keccak_log_height, traces.sha256_log_height);
         // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
         // traces, so the two must agree — a mismatch would `zip` short and silently prove a

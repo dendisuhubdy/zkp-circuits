@@ -429,7 +429,7 @@ fn tampering_the_published_digest_directly_is_a_constraint_violation() {
     // both bundle shapes) so the salted trace is built at the same height `prove_traces`
     // expects.
     let tier = Tier(14);
-    let mut t = build_traces_salted(&program, &inputs_vec, &[], [0u32; 4], &e, tier).unwrap();
+    let mut t = build_traces_salted(&program, &inputs_vec, &[], [0u32; 4], &e, tier, rand_zkvm::gas::gas_max(tier, 0, 0)).unwrap();
     t.public_values[cpu::pv::OUT0] += F::ONE;
     assert!(rejects(|| { let p = m.prove_traces(&program, &t, tier); m.verify(&program.digest(), &p) }));
 }
@@ -464,7 +464,7 @@ fn a_bundle_read_of_a_word_the_input_table_never_committed_is_refused() {
     let inputs_vec = notes::bundle_inputs(&alice.sk, &inputs, &outputs, tree.root(), 0, 0, asset, time);
     let e = execute(&program, &inputs_vec, &[], 1 << 22).unwrap();
     let tier = Tier(14);
-    let mut t = build_traces_salted(&program, &inputs_vec, &[], [0u32; 4], &e, tier).unwrap();
+    let mut t = build_traces_salted(&program, &inputs_vec, &[], [0u32; 4], &e, tier, rand_zkvm::gas::gas_max(tier, 0, 0)).unwrap();
     let (wc, wm) = (cpu::col::WIDTH, memory::col::WIDTH);
     let idx = F::from_u32(notes::bundle_input::OUT1_AMOUNT_LO as u32);
     let row = (0..t.cpu.height())

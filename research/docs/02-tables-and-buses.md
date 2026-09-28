@@ -387,7 +387,7 @@ separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 exactly one traversal of the whole program for `hc`, regardless of how the
 program actually ran.
 
-## `cpu` — main, `col::WIDTH = 277` (275 through constraint set 6)
+## `cpu` — main, `col::WIDTH = 282` (275 through constraint set 6, 277 through set 7)
 
 (The heading read `222` from M4.1 until M4.4 corrected it: M4.2's `SYS_KECCAK`
 column took the table to 223 without the heading following, and M4.4's
@@ -398,7 +398,8 @@ them are appended at the end of the column list so no pre-existing index
 moves — see the `SYS_KECCAK`/`SYS_SHA256`/`SYS_READ_PUB` doc comments
 in `src/tables/cpu.rs` for why that matters to the vendoring node. The next
 constraint set appends two more, `SYS_HASH_LEN` (HCS-4, below) and `JALR_B0`
-(ISA-4, below), for 277.)
+(ISA-4, below), for 277. Constraint set 8 appends five — `GAS` and its
+slack limbs `GD0..3` (the gas meter, below) — for 282.)
 
 Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
 recomputed — `is_load`/`is_store` are *expressions* the AIR computes from
@@ -1105,6 +1106,25 @@ leaves `ALU_OUT − JALR_B0` odd (or `p − 1`), which no program row answers �
 the argument that already made an odd branch or `JAL` target unprovable.
 `tests/next_constraint_set.rs::a_jalr_to_an_odd_target_clears_bit_0` proves a
 run that lands on an odd target.
+
+### Constraint set 8: the gas meter (`GAS`, `GD0..3`)
+
+fullnode spec 2026-09-28 §4.2. `GAS` is the gas accumulated *through* each
+row, with exactly `gas::gas_of`'s weights: `GAS = 1` on row 0 (a digest row),
+and on every transition into a real row
+`n(GAS) = GAS + 1 + 2·n(IS_HASH) + 191·n(SYS_KECCAK) + 63·n(SYS_SHA256)` —
+the constants are `gas.rs`'s (`POSEIDON2_ABSORB_GAS − 1`, `KECCAK_GAS − 1`,
+`SHA256_GAS − 1`), and the rule is degree 2 (`n(IS_REAL)` times a form linear
+in next-row selectors). On the one `HALT` row, `pv::GAS − GAS = Σ 2^(8k)·GD_k`
+with each `GD_k` on `RANGE8` (`Count::bounded(SYS_HALT, 1)`), so the declared
+limit is at or above the run's gas without the run's gas being published;
+`(1 − SYS_HALT)·GD_k = 0` pins the limbs to zero everywhere else, padding
+included. The slack fits four bytes because `check_public_values` refuses a
+`pv::GAS` above `gas::gas_max(header)`, and the largest admissible ceiling
+(tier 20, both hash tables at `2^20` rows) is under `2^32`. `GAS` is free on
+padding rows (the fill carries the halt row's value forward). The prover
+refuses a limit below the run (`ProveError::GasLimitBelowRun`) or above the
+header (`GasLimitAboveHeader`) before building any trace.
 
 ## `memory` — main, `col::WIDTH = 12`
 
