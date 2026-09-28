@@ -28,15 +28,19 @@ const MAX_CYCLES: usize = 1 << 24;
 /// cursor, the per-proof 34-word staged absorb (with its eight rate-fill permutations), the
 /// final partial-block permutation, and the loop scaffolding — against the single-proof phase
 /// 8's list build and one-shot `sponge_seeded` it replaces — plus AGG-2's eight binding words
-/// (their hints, stores, and two rate-fill absorbs: 80 rows, the same at every N).
-const LOOP_OVERHEAD: usize = 219;
+/// (their hints, stores, and two rate-fill absorbs: 80 rows, the same at every N). Constraint
+/// set 7 moved it by one row (219 → 220) — measured, not traced to an instruction; the looped
+/// body is compiled over the wider inner shape (the LogUp blind's columns, the floored public
+/// table).
+const LOOP_OVERHEAD: usize = 220;
 
 /// The N=3 total, measured on this tree. The per-N total is *not* a clean multiple of the
 /// per-proof rows: the staged absorb permutes when the rate fills, and the fill phase advances
 /// by two lanes per proof (34 mod 4), so an odd-numbered iteration permutes nine times where an
 /// even one permutes eight — the per-N rows are `pre + Σ body_j + post` with the parity term,
-/// pinned per N rather than modelled.
-const N3_ROWS: usize = 1_324_774;
+/// pinned per N rather than modelled. Constraint set 7: 1 324 774 → 1 372 369 (`tests/pins.json`'s
+/// `aggregate_test_n3_cpu_rows`, re-measured).
+const N3_ROWS: usize = 1_372_369;
 
 fn shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
     let shape = InnerShape::of(

@@ -387,7 +387,14 @@ equals either candidate's prediction, the differences sum to zero over the
 batch (the prediction is otherwise exact), and a re-proof of the same
 witness is shifted differently at every instance. Cost: five columns per
 table (55 at the batch's eleven instances), two interactions each, no
-change to any table's constraint degree or quotient chunk count.
+change to any table's constraint degree or quotient chunk count. Measured
+on `fib(10)` at tier 10, Test profile (`tests/e2e.rs`'
+`a_keccak_free_proof_carries_no_keccak_table`, one run each): 297 191 bytes
+before constraint set 7, 309 799 with the blind and the floor (+4.2 %: the
+wider opened leaves and the floored program and public tables), prove time
+unchanged within noise. The recursion VM pays for the wider openings too:
+the production single-proof verifier program went from 1 968 619 to
+2 032 673 rows (+3.3 %, still tier 21 — `recursion/docs/00-recursion-vm.md`).
 
 ## Private inputs are bound to `H_IN` (M4.1)
 
