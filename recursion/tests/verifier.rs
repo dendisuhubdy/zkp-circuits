@@ -770,7 +770,8 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
         "989752d633964930682549775559b1ffa45919794ebf9ec6f85bd9d60b4c6e98",
-        "the Off replay must reproduce the pre-Task-7 stream byte for byte"
+        "the Off replay must reproduce the pre-Task-7 stream byte for byte (plus VERIFIER-1's \
+         per-round assertions, and constraint set 7's inner changes)"
     );
 
     let on = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::On, recursion::programs::Precompiles::On);
@@ -799,7 +800,10 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// blind on every RV32 instance, the `2^7` floor on the public table's declared height — the
 /// fixture's `public_log_height` goes 2 → 7) changes the instructions phase 5 and the opening phase
 /// emit — and the constraint-set-7 key derivation (HCS-1) moves the inner key the program embeds.
-/// Re-registered: `1ec0c545…eeeb` → `64a00eb7…de97`.
+/// VERIFIER-1 (2026-09-28, in the same constraint set) *is* a program change — one
+/// `commit pow witness[r]` assertion per FRI round in the shared pipeline. The claim above still
+/// holds for constraint-only fixes of the rVM's own AIR. Re-registered for constraint set 7 with
+/// VERIFIER-1: `1ec0c545…eeeb` → `@AGG@`.
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
@@ -809,4 +813,60 @@ fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
         "64a00eb77356e3b29834b2cbaa6462c477359645a0d58f64f2d24941d2abde97",
         "the aggregate program's digest at the Test fixture shape, as re-registered for constraint set 7"
     );
+}
+
+/// VERIFIER-1 (the 2026-09-27 reviews), the rVM half: a commit-phase proof-of-work word other
+/// than the honest `0` is refused by the verifier program, at that round's named step — exactly
+/// where `Machine::verify` (`check_commit_pow_witnesses`) refuses the same rewritten proof. At
+/// zero commit-phase grinding bits p3 neither checks nor observes the word, so before this the
+/// program read it and dropped it and a re-encoded inner proof verified inside an aggregate.
+///
+/// The rewritten proof is built for real (the word changed in `commit_pow_witnesses`, the proof
+/// re-decoded), refused natively and by the host replay; its tape — which a prover hands the
+/// program as untrusted hints — is the honest tape with that one word rewritten, since the word
+/// is observed by nothing and moves no other tape word.
+#[test]
+fn a_rewritten_commit_phase_pow_word_is_refused_at_its_round() {
+    let (p, shape, key) = one_test_proof();
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let honest = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let (_, start, len) = *honest
+        .segments
+        .iter()
+        .find(|(s, _, _)| *s == recursion::witness::Segment::FriCommits)
+        .unwrap();
+    let rounds = shape.log_arities.len();
+    assert_eq!(len, rounds * 17, "per round: a 16-word cap, then its PoW word");
+    let m = Machine::new(FriProfile::Test);
+    for r in 0..rounds {
+        let at = start + 17 * r + 16;
+        assert_eq!(honest.words[at], F::ZERO, "an honest prover's grind(0) writes zero");
+        for w in [F::ONE, F::from_u64(0xdead_beef), F::NEG_ONE] {
+            // The rewritten proof, for real: refused natively and by the replay.
+            let mut bad: rand_zkvm::machine::Proof = postcard::from_bytes(&p.proof.to_bytes()).unwrap();
+            bad.batch.opening_proof.1.commit_pow_witnesses[r] = w;
+            assert!(
+                matches!(m.verify(&p.hc, &bad), Err(rand_zkvm::machine::VerifyError::CommitPowWitness { round }) if round == r),
+                "round {r}: Machine::verify refuses the rewritten word"
+            );
+            assert_eq!(
+                replay(FriProfile::Test, &shape, &key, &bad).err(),
+                Some(recursion::reference::ReplayError::PowWitness("commit phase")),
+                "round {r}: the host replay refuses it too"
+            );
+            // Its tape, and the program's verdict on it.
+            let mut t = honest.clone();
+            t.words[at] = w;
+            match execute(&vp.program, &t.words, 100_000_000) {
+                Err(ExecError::InverseOfZero { pc }) => assert_eq!(
+                    vp.program.checkpoint_at(pc),
+                    Some(format!("commit pow witness[{r}]").as_str()),
+                    "round {r}: refused at the wrong step"
+                ),
+                other => panic!("round {r}, word {w:?}: expected a refusal, got {:?}", other.map(|e| format!("acceptance, {} cpu rows", e.cpu_rows()))),
+            }
+        }
+    }
+    // And the honest tape still runs to acceptance.
+    execute(&vp.program, &honest.words, 100_000_000).expect("the honest tape is accepted");
 }

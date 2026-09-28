@@ -72,7 +72,7 @@ order — and commits to nothing about it (spec §2/§10). Fourteen pinned segme
 | 4 | `LookupTerminals` | one extension element per instance with lookups |
 | 5 | `OpenedValues` | per instance: `trace_local`, `trace_next`, `preprocessed_local`, `preprocessed_next`, quotient chunks, `random`, `permutation_local`, `permutation_next` |
 | 6 | `RandomOpenings` | the hiding wrapper's 4 hidden values per round / matrix / point (none for `preprocessed`) |
-| 7 | `FriCommits` | per FRI round: the commit cap (16) and the commit-phase PoW witness (1, discarded — 0 bits) |
+| 7 | `FriCommits` | per FRI round: the commit cap (16) and the commit-phase PoW witness (1, asserted `0` — 0 bits; VERIFIER-1) |
 | 8 | `FinalPoly` | one extension coefficient (`log_final_poly_len = 0`) |
 | 9 | `QueryPow` | the query grinding witness (1) |
 | 10 | `QueryBits` | per sampled element: 64 bit words + 1 canonicality hint — the PoW sample first, then one per query |
@@ -90,17 +90,26 @@ The public instance's openings flow through these segments exactly like every ot
 one more matrix in the `random`, `main`, `quotient_chunks` and `permutation` rounds.
 
 **Segment 7's PoW words (VERIFIER-1, the 2026-09-27 reviews).** At zero commit-phase grinding bits
-p3 neither checks nor observes these words, and the program reads each one and drops it. Since
-2026-09-28 the RV32 verifier (`research`'s `Machine::verify`, `check_commit_pow_witnesses`) refuses
-any word other than the honest `0`, so a proof can no longer be re-encoded there. The program is
-**not** changed to match: an in-program `assert_zero` on the word adds instructions to the
-aggregate program, which changes its digest — and that digest is what a chain's aggregation
-section pins. It is recorded here for the next aggregate program version: `rv32.rs`'s FRI-commits
-loop should constrain each hinted word to zero (`Builder::assert_eq` against a zero constant, once per
-FRI round). Until then nothing is lost: every bundle an aggregate covers was admitted by the
-chain through `Machine::verify` first, so a rewritten word never reaches an aggregate from the
-chain's own queue, and the aggregate's statement (the inner proof verifies) does not depend on the
-word either way.
+p3 neither checks nor observes these words, so any value verified and one proof had as many byte
+encodings as there are field elements per round. Since 2026-09-28 the RV32 verifier (`research`'s
+`Machine::verify`, `check_commit_pow_witnesses`) refuses any word other than the honest `0`. The
+program now matches it (the next constraint set, chain 16, v0.6.1): `rv32.rs`'s FRI-commits loop
+asserts each hinted word zero (`Builder::assert_zero`, one `JEQ` against the zero register per
+round, the trap named `commit pow witness[r]`). The word is still observed by nothing, so the
+transcript — every challenge, every checkpoint — is unchanged; an accepting run pays one cpu row
+per FRI round per proof (+8 at the fixture shape's eight rounds). The same check is made by the
+host replay (`reference::replay` refuses the word as `PowWitness("commit phase")`, keeping it
+`Machine::verify`'s acceptance) and by the rVM's own native verifier
+(`machine::check_commit_pow_witnesses`, `VerifyError::CommitPowWitness`) — the rVM machine grinds
+zero commit-phase bits too, and the self-verifier (`rv32r`) inherits the in-program assertion
+through the shared `emit_proof`. Before this an inner proof with a rewritten word verified inside
+an aggregate (a chain admits every covered bundle through `Machine::verify` first, so its own
+queue never carried one, but the aggregate's acceptance was wider than the native verifier's).
+Pinned by `tests/verifier.rs::a_rewritten_commit_phase_pow_word_is_refused_at_its_round`,
+`tests/aggregate.rs::a_rewritten_commit_phase_pow_word_in_any_proof_is_refused` and
+`tests/self_verify.rs::a_rewritten_commit_phase_pow_word_in_an_rvm_proof_is_refused`. The program
+changed, so `aggregate_program_digest` and every program pin moved (the record is in
+`docs/02-aggregate.md`, "VERIFIER-1: the re-pin").
 
 ## The measured number
 
@@ -111,18 +120,21 @@ log:
 
 | | `FriProfile::Test` (16 queries) | `FriProfile::Production` (80 queries) |
 |---|---:|---:|
-| cpu rows | 441 643 | **1 968 619** |
+| cpu rows | 441 651 | **1 968 627** |
 | Poseidon2 permutations | 11 205 | **51 605** |
 | memory accesses | 597 021 | 2 705 197 |
-| program instructions | 443 686 | 1 978 422 |
+| program instructions | 443 702 | 1 978 438 |
 | witness words read | 43 344 | 199 760 |
 | tape words | 43 344 | 199 760 |
 
 The program is straight-line in the proof's data: every proof of the shape costs the same rows
 (asserted by the exit test on 5 test-profile and 50 production-profile proofs). The production
 row is pinned in `tests/pins.json`; the production program's digest
-(`Checkpoints::Off`, `8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`) in
-`src/programs/verify_rv32.digest`.
+(`Checkpoints::Off`, `880fe98c92e36671407af7c54952547de6046355dad209650e7e6a18596e5911`) in
+`src/programs/verify_rv32.digest`. VERIFIER-1 (2026-09-28) moved both: +8 cpu rows and +16
+instructions per proof at either profile (one `JEQ` and its unexecuted trap per FRI round, eight
+rounds), nothing else in the table; the digest was
+`8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`.
 
 **Constraint set 7 re-pin (chain 16).** The inner machine gained the LogUp blind (five columns
 and a `BLIND` bus interaction pair on every instance, `research/src/tables/blind.rs`) and a
@@ -193,7 +205,7 @@ traps, so these are also the cpu rows per phase), and the executed opcode histog
 |---|---:|---:|
 | 0–4: header, transcript, commitments, terminal sum | 2 525 | 2 525 |
 | 5: constraint evaluation at `zeta` | 38 983 | 38 983 |
-| 6 preamble: claimed evals, betas, final poly, PoW, indices | 67 738 | 140 794 |
+| 6 preamble: claimed evals, betas, final poly, PoW, indices | 67 754 | 140 810 |
 | query segments: tape reads | 79 936 | 399 680 |
 | queries: Merkle walks, reduction, folds | 1 021 836 | 5 109 772 |
 | 8: §4.4 public values | 895 | 895 |

@@ -244,6 +244,25 @@ pub enum VerifyError {
     Poseidon2Height,    ReduceHeight,
     /// A program word the emulator could never execute (`Machine::check_program`): ZKQ-3.
     Program(DecodeError),
+    /// VERIFIER-1: FRI's commit-phase proof-of-work word for folding round `round` is not the
+    /// honest `0` (`check_commit_pow_witnesses`).
+    CommitPowWitness { round: usize },
+}
+
+/// VERIFIER-1 (the 2026-09-27 reviews), the rVM's copy of research's
+/// `machine::check_commit_pow_witnesses`: every FRI commit-phase proof-of-work word must be the
+/// honest `0`. This machine grinds `commit_proof_of_work_bits: 0` too, and at zero bits p3's
+/// `check_witness` returns `true` before observing the word, so it was bound to nothing — any
+/// value verified, and one proof had as many byte encodings as there are field elements per round.
+/// The honest prover's `grind(0)` writes `F::ZERO`, so no honestly produced proof is refused. The
+/// self-verifier (`programs::verify_rv32r`, through the shared pipeline) asserts the same words
+/// in-program, which is what keeps it differential with this `verify`.
+pub fn check_commit_pow_witnesses(proof: &Proof) -> Result<(), VerifyError> {
+    let fri = &proof.batch.opening_proof.1;
+    match fri.commit_pow_witnesses.iter().position(|w| *w != Val::ZERO) {
+        Some(round) => Err(VerifyError::CommitPowWitness { round }),
+        None => Ok(()),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -585,6 +604,9 @@ impl Machine {
         Self::check_program(program).map_err(VerifyError::Program)?;
         // Every range check on the proof's declared shape, before anything is sized from it.
         check_declared_heights(proof.tier, proof.reg_log_height, proof.ram_log_height, proof.poseidon2_log_height, proof.reduce_log_height)?;
+        // VERIFIER-1: the commit-phase PoW words, unobserved at zero bits, must be the honest
+        // zero — a comparison per round, with the other cheap checks, before any key is built.
+        check_commit_pow_witnesses(proof)?;
         // A `Vec` comparison: simultaneously the batch's instance-count check and every declared
         // height's.
         if proof.batch.degree_bits != log_ext_degrees(program, proof.tier, proof.reg_log_height, proof.ram_log_height, proof.poseidon2_log_height, proof.reduce_log_height) { return Err(VerifyError::Tier); }
