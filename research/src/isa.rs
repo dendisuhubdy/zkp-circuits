@@ -274,7 +274,8 @@ impl Instr {
             OP_LUI => Instr::Lui { rd, imm: w & 0xffff_f000 },
             OP_AUIPC => Instr::Auipc { rd, imm: w & 0xffff_f000 },
             OP_JAL => { let imm = bits(w, 31, 31) << 20 | bits(w, 19, 12) << 12 | bits(w, 20, 20) << 11 | bits(w, 30, 21) << 1; Instr::Jal { rd, imm: sext(imm, 21) } }
-            OP_JALR => Instr::Jalr { rd, rs1, imm: imm_i },
+            // ISA-4 (the next constraint set): RV32I reserves every `funct3 != 0` under this opcode.
+            OP_JALR => { if f3 != 0 { return Err(DecodeError::Funct(f3)); } Instr::Jalr { rd, rs1, imm: imm_i } }
             OP_BRANCH => { let imm = bits(w, 31, 31) << 12 | bits(w, 7, 7) << 11 | bits(w, 30, 25) << 5 | bits(w, 11, 8) << 1; Instr::Branch { cond: BranchCond::from_funct3(f3).ok_or(DecodeError::Funct(f3))?, rs1, rs2, imm: sext(imm, 13) } }
             OP_LOAD => {
                 let (width, signed) = match f3 {

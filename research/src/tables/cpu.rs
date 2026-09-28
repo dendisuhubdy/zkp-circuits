@@ -259,7 +259,11 @@ pub mod col {
     /// to the write-back rows — so the digest is always a permutation output. Appended at the end of
     /// the column list, like every column since M4.2.
     pub const SYS_HASH_LEN: usize = PINV0 + 4;
-    pub const WIDTH: usize = SYS_HASH_LEN + 1;
+    /// ISA-4 (the next constraint set): bit 0 of a `JALR` row's `ALU_OUT` (`rs1 + imm`), the bit
+    /// RV32I's `(rs1 + imm) & !1` drops — so `NEXT_PC = ALU_OUT - JALR_B0`. Boolean, and zero on
+    /// every row that is not a `JALR`. Appended at the end of the column list.
+    pub const JALR_B0: usize = SYS_HASH_LEN + 1;
+    pub const WIDTH: usize = JALR_B0 + 1;
     /// Columns that must be zero on padding rows.
     pub const SELECTORS: [usize; 31] = [
         IS_ALU, IS_IMM, IS_BRANCH, IS_LB, IS_LH, IS_LW, IS_SB, IS_SH, IS_SW, SIGNED,
@@ -536,7 +540,19 @@ where
         let fallthrough = v(PC) + four.clone();
         b.assert_zero(v(IS_BRANCH) * (v(NEXT_PC) - fallthrough.clone() - taken * (v(TGT) - fallthrough.clone())));
         b.assert_zero(v(IS_JAL) * (v(NEXT_PC) - v(TGT)));
-        b.assert_zero(v(IS_JALR) * (v(NEXT_PC) - v(ALU_OUT)));
+        // ISA-4 (the next constraint set): RV32I's `JALR` target is `(rs1 + imm) & !1`, so
+        // `NEXT_PC = ALU_OUT - JALR_B0` with `JALR_B0` boolean. What makes `JALR_B0` *the* bit 0 of
+        // `ALU_OUT` (a 32-bit value, the ALU table's limbs) rather than a free bit is the next
+        // row's fetch: a `JALR` is never the last real row (that is a `HALT`), the row after it is
+        // an ordinary instruction row (hash rows need a `SYS_HASH*` row before them, the digest
+        // regions are a prefix), and its `PC = NEXT_PC` must be found in the program table, whose
+        // pcs are `base_pc + 4j` — all even, since `hc` binds `base_pc` and every program a
+        // verifier holds an `hc` for has `base_pc % 4 == 0` (`Program::new`, `from_flat_binary`).
+        // A wrong bit makes `ALU_OUT - JALR_B0` odd (or `p - 1`), which no program row answers.
+        // The same argument that already made an odd branch/`JAL` target unprovable.
+        b.assert_bool(v(JALR_B0));
+        b.assert_zero((one.clone() - v(IS_JALR)) * v(JALR_B0));
+        b.assert_zero(v(IS_JALR) * (v(NEXT_PC) - v(ALU_OUT) + v(JALR_B0)));
         // A hash row-group's PC stands still until its very last row (`continues = 0` only
         // there); every other row's `NEXT_PC = PC`.
         b.assert_zero(continues.clone() * (v(NEXT_PC) - v(PC)));
@@ -1698,6 +1714,8 @@ pub fn cpu_trace(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 
         for (k, f) in e.dec.to_fields().iter().enumerate() { r[DEC0 + k] = F::from_u32(*f); }
         r[A] = F::from_u32(e.a); r[B] = F::from_u32(e.b); r[C] = F::from_u32(e.c);
         r[ALU_OUT] = F::from_u32(e.alu_out); r[TGT] = F::from_u32(e.tgt);
+        // ISA-4: the bit a `JALR` target drops (`emulator::execute`'s `alu_out & !1`).
+        if e.dec.is_jalr == 1 { r[JALR_B0] = F::from_u32(e.alu_out & 1); }
         r[MEM_ADDR] = F::from_u32(e.mem_addr); r[MEM_VAL] = F::from_u32(e.mem_val);
         let is_load = e.dec.is_lb == 1 || e.dec.is_lh == 1 || e.dec.is_lw == 1;
         let is_store = e.dec.is_sb == 1 || e.dec.is_sh == 1 || e.dec.is_sw == 1;

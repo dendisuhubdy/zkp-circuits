@@ -139,7 +139,7 @@ pub mod flags {
     pub const LUI: usize = 0;
     pub const AUIPC: usize = 1;
     pub const JAL: usize = 2;
-    pub const JALR: usize = 3;
+    pub const JALR: usize = 3; // f3 == 0 (ISA-4, the next constraint set)
     // BranchCond order: Eq, Ne, Lt, Ge, Ltu, Geu (funct3 0,1,4,5,6,7) — `isa::BranchCond::from_funct3`.
     pub const BR_EQ: usize = 4;
     pub const BR_NE: usize = 5;
@@ -318,7 +318,10 @@ where
         pin_op(b, flags::LUI, OP_LUI);
         pin_op(b, flags::AUIPC, OP_AUIPC);
         pin_op(b, flags::JAL, OP_JAL);
-        pin_op(b, flags::JALR, OP_JALR); // no funct3 requirement, matches `Instr::decode`'s literal `OP_JALR => ..` arm
+        // ISA-4 (the next constraint set): `funct3 = 0`, as `Instr::decode`'s `OP_JALR` arm now
+        // requires — RV32I reserves the other seven, which used to decode to the same `JALR`.
+        pin_op(b, flags::JALR, OP_JALR);
+        pin_f3(b, flags::JALR, 0);
 
         for (i, code) in [(flags::BR_EQ, 0u32), (flags::BR_NE, 1), (flags::BR_LT, 4), (flags::BR_GE, 5), (flags::BR_LTU, 6), (flags::BR_GEU, 7)] {
             pin_op(b, i, OP_BRANCH);

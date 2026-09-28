@@ -191,7 +191,9 @@ pub fn execute(program: &Program, inputs: &[u32], public: &[u32], max_cycles: us
             Instr::Lui { imm, .. } => c = imm,
             Instr::Auipc { .. } => c = tgt,
             Instr::Jal { .. } => { c = pc.wrapping_add(4); next_pc = tgt; }
-            Instr::Jalr { .. } => { c = pc.wrapping_add(4); next_pc = alu_out; }
+            // ISA-4 (the next constraint set): RV32I's `(rs1 + imm) & !1` — bit 0 of the target is
+            // cleared, not left to make the fetch fail (`tables::cpu`'s `JALR_B0`).
+            Instr::Jalr { .. } => { c = pc.wrapping_add(4); next_pc = alu_out & !1; }
             Instr::Branch { .. } => { let taken = (alu_out == 1) != (dec.br_neg == 1); if taken { next_pc = tgt; } }
             Instr::Load { width, signed, .. } => {
                 let off = alu_out & 3;
