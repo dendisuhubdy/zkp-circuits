@@ -268,7 +268,12 @@ and passes when the rule lands.
 4. **HCS-1 — stable verifier-key salts.** Switch every key config from `StdRng::seed_from_u64(
    KEY_SEED)` to `key_derivation_v2` (research and recursion; the module comment is the recipe),
    re-pin `tests/verifier_key.rs` in both crates, and the three exact `rand` pins can go back to
-   carets.
+   carets. *Landed as constraint set 7 (branch `feat/cs7-logup-blind`)*: one salt type,
+   `key_derivation_v2::SaltRng`, with a key source (the v2 stream, from `research`'s labels or the
+   rVM's own `rvm/key/*`) and a proving source (`StdRng` from OS entropy — proving blinding, where
+   `rand` belongs); `SeedableRng::from_seed` is always the v2 stream, so p3's clone-by-reseed never
+   routes a key through `StdRng`. `rand-zkvm-cuda`'s `HidingMmcs` is generic over the generator so
+   the backends salt identically. The exact pins were kept (they now decide only proving's salts).
 5. **ISA-4 / ISA-5 — the decoder's two tolerances** (`docs/01-isa.md`, "Deliberate deviations"):
    `JALR` clears bit 0 of its target and requires `funct3 = 0`. Each changes what the in-circuit
    decoder accepts, so it is a program-table change and rides the cut.

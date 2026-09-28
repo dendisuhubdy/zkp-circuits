@@ -1872,6 +1872,9 @@ the cached hit at under 40% of the first, uncached recomputation.
 need to be seeded from the program either — they are seeded from a fixed
 constant (`machine::KEY_SEED`, documented alongside `PERM_SEED`), since the
 preprocessed trace they salt no longer varies by program, only by tier.
+(Constraint set 7, HCS-1: not a `StdRng` seed any more — the salts are
+`key_derivation_v2`'s Poseidon2 stream from two fixed labels, so no `rand`
+release can move a key.)
 Every actual `prove_batch` call still runs against `make_config`'s
 fresh-entropy config for the main-trace, quotient, and permutation
 commitments — that is what keeps zero knowledge intact, and is why two
