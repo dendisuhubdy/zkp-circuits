@@ -731,12 +731,14 @@ pub fn check_public_values(hc: &[u32; 8], proof: &Proof) -> Result<(), VerifyErr
 /// what is there. The query-phase word needs nothing of the kind: it is observed before the query
 /// indices are drawn, so another passing witness moves every query and the openings stop matching.
 ///
-/// The rVM's in-circuit verifier (`recursion/src/programs/rv32.rs`, the `FriCommits` tape segment
-/// `witness.rs` writes) reads these words and drops them the same way. It is deliberately *not*
-/// tightened here: an in-program check changes the aggregate program and therefore its digest. A
-/// covered bundle is admitted by the chain through this `verify` first, so a rewritten word never
-/// reaches an aggregate from the chain's own queue; the rVM-side check belongs with the next
-/// aggregate program version (`recursion/docs/`, VERIFIER-1).
+/// The rVM's in-circuit verifier makes the same check (constraint set 7, the chain-16 cut):
+/// `recursion/src/programs/rv32.rs`'s FRI-commits loop asserts each hinted word of the `FriCommits`
+/// tape segment zero, the trap named `commit pow witness[r]`, and the host replay
+/// (`recursion::reference::replay`) refuses it as `PowWitness("commit phase")` — so an aggregate
+/// accepts exactly the inner proofs this `verify` accepts on these words. The rVM's own native
+/// verifier carries a copy of this function for its own proofs (`recursion::machine::
+/// check_commit_pow_witnesses`). The in-program assertion moved every aggregate program digest
+/// (`recursion/docs/02-aggregate.md`, VERIFIER-1).
 pub fn check_commit_pow_witnesses(proof: &Proof) -> Result<(), VerifyError> {
     let fri = &proof.batch.opening_proof.1;
     match fri.commit_pow_witnesses.iter().position(|w| *w != Val::ZERO) {

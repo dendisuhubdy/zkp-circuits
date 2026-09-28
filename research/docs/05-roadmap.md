@@ -274,7 +274,10 @@ and passes when the rule lands.
    reads each word and drops it (`recursion/docs/00-recursion-vm.md`, segment 7). The next
    aggregate program version constrains each to zero (one `assert_eq` against a zero constant per
    FRI round, in `programs/rv32.rs`'s FRI-commits loop) — a new aggregate program digest, which
-   is why it waits for the version bump rather than riding a same-chain release.
+   is why it waits for the version bump rather than riding a same-chain release. *Landed in
+   constraint set 7 (`feat/cs7-rvm-pow`, integrated on `feat/cs7`)*: the FRI-commits loop asserts
+   each word zero (trap `commit pow witness[r]`), the host replay and the rVM's own native
+   verifier refuse it too, and every program pin was re-measured on the integrated tree.
 4. **HCS-1 — stable verifier-key salts.** Switch every key config from `StdRng::seed_from_u64(
    KEY_SEED)` to `key_derivation_v2` (research and recursion; the module comment is the recipe),
    re-pin `tests/verifier_key.rs` in both crates, and the three exact `rand` pins can go back to
