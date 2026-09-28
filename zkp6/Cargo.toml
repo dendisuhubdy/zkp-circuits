@@ -3,6 +3,7 @@ name = "zkp6"
 version = "0.1.0"
 edition = "2021"
 description = "Tornado Cash mixer simulation: Groth16 withdraw proof over a MiMC Merkle tree, with a simulated contract holding account balances"
+license = "GPL-3.0-only"
 
 [dependencies]
 ark-ff = "0.5"

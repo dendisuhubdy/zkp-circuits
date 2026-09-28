@@ -3,6 +3,7 @@ name = "rand_zkvm"
 version = "0.1.0"
 edition = "2021"
 description = "Rand Protocol reference zkVM: RV32I under a zero-knowledge batch STARK (Plonky3, Goldilocks)"
+license = "GPL-3.0-only"
 
 [lib]
 path = "src/lib.rs"

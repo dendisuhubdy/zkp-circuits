@@ -3,6 +3,7 @@ name = "zkp5"
 version = "0.1.0"
 edition = "2021"
 description = "Monero-style private transactions: stealth addresses, Pedersen commitments, CLSAG ring signatures, Bulletproofs range proofs, key images"
+license = "GPL-3.0-only"
 
 [dependencies]
 curve25519-dalek = { version = "4.1", features = ["digest", "rand_core"] }

@@ -3,6 +3,7 @@ name = "zkp1"
 version = "0.1.0"
 edition = "2021"
 description = "Educational zk-SNARK (Groth16 over BN254, via arkworks): write a circuit, run a trusted setup, prove, verify"
+license = "GPL-3.0-only"
 
 [dependencies]
 # arkworks: the standard pure-Rust zk-SNARK toolkit

@@ -3,6 +3,7 @@ name = "evm2rv"
 version = "0.1.0"
 edition = "2021"
 description = "Translates EVM bytecode (solc's runtime bytecode) into C over evm-rt/, for rand-guest to build into a zkVM image"
+license = "GPL-3.0-only"
 
 [lib]
 path = "src/lib.rs"

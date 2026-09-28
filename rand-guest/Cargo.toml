@@ -3,6 +3,7 @@ name = "rand-guest"
 version = "0.1.0"
 edition = "2021"
 description = "The Rand zkVM toolchain: build a Rust or C guest into the image the chain deploys, check it against the machine, run it"
+license = "GPL-3.0-only"
 
 [lib]
 path = "src/lib.rs"

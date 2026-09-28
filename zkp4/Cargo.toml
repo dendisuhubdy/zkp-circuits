@@ -3,6 +3,7 @@ name = "zkp4"
 version = "0.1.0"
 edition = "2021"
 description = "Zcash-style shielded pool simulation: notes, spend keys, nullifiers, in-circuit value balance and range checks (Groth16)"
+license = "GPL-3.0-only"
 
 [dependencies]
 ark-ff = "0.5"
