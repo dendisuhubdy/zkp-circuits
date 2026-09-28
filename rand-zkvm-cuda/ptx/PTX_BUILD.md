@@ -11,16 +11,13 @@ To build: on a Linux box with an R580+ driver, CUDA 13, LLVM 21 and the pinned n
 - built on: (unfilled)
 and run `cargo test -p rand-zkvm-cuda --features cuda-hw`.
 
-## Unverified details
+## Compile-only check (2026-09-28, no GPU)
 
-Nothing below has been run. In particular:
-
-- The `cargo oxide build --arch sm_80` flag spelling in `gpu-kernels/Justfile` is a guess at
-  `cargo-oxide`'s CLI and may need adjusting (a different flag name, or `--target`-style
-  spelling).
-- The output filename the `Justfile` copies, `rand-zkvm-kernels.ptx`, is likewise a guess: it
-  assumes the emitted PTX is named after the `[[bin]]` target and lands in the crate root.
-  Check what `cargo oxide build` actually writes and fix the `cp` line.
+`cargo oxide build --arch sm_80` at the pinned cuda-oxide rev, run on a GPU-less Ubuntu 24.04
+box without the CUDA toolkit (cargo-oxide uses the Rust toolchain's `llc`), builds the
+kernels. The flag spelling is right, and the output is `rand_zkvm_kernels.ptx` in
+`gpu-kernels/` (the `Justfile`'s `cp` line now uses that name). The PTX was not committed:
+this file's toolkit and "built on" lines are for the real build. Nothing has run on hardware.
 
 ## First hardware run
 
