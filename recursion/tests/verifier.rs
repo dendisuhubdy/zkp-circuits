@@ -706,9 +706,11 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
     // is the query phase — the FRI transcript's duplexes, the five input rounds' leaf sponges,
     // walks and injections, and the commit-phase rows and walks — plus phase 8's interface
     // digest (R5): a 39-word seeded sponge, `ceil(39/4)` = 10 permutations. Pinned at the
-    // measured Test-profile number (constraint set 6's shape); the production one lives in
+    // measured Test-profile number (constraint set 7's shape; 11 205 in constraint set 6 — the
+    // LogUp blind's five columns per instance widen every opened leaf the query phase hashes, and
+    // the public table is floored at `2^7` rows); the production one lives in
     // `docs/00-recursion-vm.md` and `pins.json`.
-    assert_eq!(exec.permutations(), 11_205, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
+    assert_eq!(exec.permutations(), 11_714, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
 }
 
 /// Every assertion phase 5 makes is a *named* checkpoint, and the names are the interface Task 6's
@@ -748,7 +750,10 @@ fn phase_5s_assertions_are_all_named() {
 /// for byte, and the two builds accept the same proofs with the same public values. The
 /// hardcoded digest is the production shape's pre-Task-7 program digest (the value committed
 /// before the liveness rework — after this task re-records, `src/programs/verify_rv32.digest`
-/// carries the On build's own, different, digest).
+/// carries the On build's own, different, digest). Constraint set 7 re-recorded it (the Off
+/// replay compiles the inner AIR, which gained the LogUp blind's columns and bus on every
+/// instance and a public table floored at `2^7`, and embeds the inner key, whose salts HCS-1
+/// moved): `c1c04ac3…d731` → `989752d6…6e98`.
 #[test]
 fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     use recursion::dsl::Liveness;
@@ -764,7 +769,7 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
-        "c1c04ac3a9faf266eb8980260dae6c7f12fe9ee4cf3dfa40de8440182258d731",
+        "989752d633964930682549775559b1ffa45919794ebf9ec6f85bd9d60b4c6e98",
         "the Off replay must reproduce the pre-Task-7 stream byte for byte"
     );
 
@@ -789,13 +794,19 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// the Test fixture's shape, recorded on circuits `224960c` (before the fix) and asserted after
 /// it; the self-verifier (`verify_rv32r`), which compiles the rVM's own tables into its program,
 /// is the one whose digest and costs do move (`tests/self_verify.rs`).
+///
+/// An *inner* constraint change does move it, by the same reasoning: constraint set 7 (the LogUp
+/// blind on every RV32 instance, the `2^7` floor on the public table's declared height — the
+/// fixture's `public_log_height` goes 2 → 7) changes the instructions phase 5 and the opening phase
+/// emit — and the constraint-set-7 key derivation (HCS-1) moves the inner key the program embeds.
+/// Re-registered: `1ec0c545…eeeb` → `64a00eb7…de97`.
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "1ec0c545003179b1ca4215b439d2d69fa33149a5257a04dc8473030fc2deeeeb",
-        "the aggregate program's digest at the Test fixture shape, as registered before RVM-1"
+        "64a00eb77356e3b29834b2cbaa6462c477359645a0d58f64f2d24941d2abde97",
+        "the aggregate program's digest at the Test fixture shape, as re-registered for constraint set 7"
     );
 }

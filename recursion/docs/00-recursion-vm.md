@@ -124,6 +124,21 @@ row is pinned in `tests/pins.json`; the production program's digest
 (`Checkpoints::Off`, `8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`) in
 `src/programs/verify_rv32.digest`.
 
+**Constraint set 7 re-pin (chain 16).** The inner machine gained the LogUp blind (five columns
+and a `BLIND` bus interaction pair on every instance, `research/src/tables/blind.rs`) and a
+`2^7` floor on every declared table height (the fixture's public table goes from `2^2` to `2^7`
+rows), and the rVM's keys moved to `key_derivation_v2` (HCS-1). Re-measured on the same fixture
+shape: production **2 032 673 cpu rows** (+64 054, +3.3 %; still tier 21, with 64 479 rows of
+headroom under `2^21` where there were 128 533), 53 842 permutations, 2 814 777 memory
+accesses, 2 042 797 instructions, 207 990 witness words; test profile 11 714 permutations.
+Production program digest `8901cec9…0bda` → `eb74180fa926f9ac0d23caf57046c3dd9ebc49a153c5a22d2d941a65d1134d92`;
+the aggregate program (`aggregate_program_digest`, the value a chain's genesis registers) at the
+production bundle shape `e0578970a1981321e044a6bbb947210b79d102daf1083c9b53b752a185709108` →
+`3d3eeaa6abc89ddad372e726e1df4728c1cd11c5ec0cf67a1b3b59d828614e0d`, at the test fixture shape
+`1ec0c545…eeeb` → `64a00eb77356e3b29834b2cbaa6462c477359645a0d58f64f2d24941d2abde97` (both move
+with the inner AIR and with the inner key's salts, which the program embeds). The tables below
+are the constraint-set-6 measurement, kept for the history they explain.
+
 **M5.2 Task 4 re-pin (2026-09-14, ruling R5).** The table above is the *current* program's
 measurement, re-taken after phase 8 changed from thirty-nine raw `PUBLIC` rows to the
 four-element **interface digest**: the §4.4 list (vk digest, `N`, the 34 inner public values) is

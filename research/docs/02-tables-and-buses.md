@@ -99,6 +99,16 @@ keccak chip sends its own traffic, and `memory_trace` records it
 (`CycleEvent::keccak_accesses`) alongside the cpu's own — as it does M4.4's
 `CycleEvent::sha256_accesses`, the sha256 chip's own 32 per compression.
 
+**Constraint set 7 adds a seventeenth, `BLIND`** — a `PermutationCheckBus`
+that every instance both sends and receives on, on its first row only,
+through five columns `machine::Chip` appends after each table's own
+(`OUT0, OUT1, IN0, IN1, FIRST`; `tables/blind.rs`). It carries no machine
+semantics at all: the honest prover cycles fresh random values through the
+batch so that every table's published LogUp terminal is shifted by a
+uniform element while their sum stays zero — `docs/03-privacy.md`, "LogUp
+terminals are blinded". The per-table `col::WIDTH`s in the headings below
+are the tables' own; each committed trace is five columns wider.
+
 ## `input` — main, `col::WIDTH = 8` (M4.1; `WL0..3` since the next constraint set)
 
 One row per committed private-input word: `IDX` (the row's own index, 0 at

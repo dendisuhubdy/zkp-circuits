@@ -2,20 +2,21 @@
 //!
 //! Every verifier key's preprocessed commitment — the range, nibble, Poseidon2 round-constant and
 //! (when declared) keccak/sha256 periodic tables, committed through the *hiding* MMCS — is salted
-//! from `StdRng::seed_from_u64(KEY_SEED)` (`machine::key_config`). The salts are not secret and need
-//! not be: what matters is that every verifier draws the *same* ones, because the commitment is the
-//! first thing the Fiat–Shamir transcript absorbs, and a verifier that recomputes a different cap
-//! refuses every honest proof. `rand` documents `StdRng`'s output stream as free to change between
-//! releases, so the stream is an unwritten part of the chain's consensus rules. `Cargo.toml` now pins
-//! `rand`, `rand_core` and `chacha20` exactly; this file is the tripwire behind the pin — if any of
-//! the three, or p3's salt draw, or the preprocessed tables, or the chip set, ever changes what a key
-//! is, one of the digests below changes and CI goes red *before* a node is built with it.
+//! from a deterministic stream (`machine::key_config`). The salts are not secret and need not be:
+//! what matters is that every verifier draws the *same* ones, because the commitment is the first
+//! thing the Fiat–Shamir transcript absorbs, and a verifier that recomputes a different cap refuses
+//! every honest proof. Through constraint set 6 that stream was `StdRng::seed_from_u64(KEY_SEED)`,
+//! which `rand` documents as free to change between releases; since constraint set 7 it is
+//! `key_derivation_v2`'s Poseidon2 stream over this repository's own constants, so no dependency
+//! update can move a key. This file stays the tripwire: if p3's salt draw, the preprocessed tables,
+//! the chip set or the derivation ever changes what a key is, one of the digests below changes and
+//! CI goes red *before* a node is built with it.
 //!
 //! What is pinned, per shape and profile, is two SHA-256 digests (SHA-256 because it is an oracle this
 //! crate's tests already carry and the thing hashed must not be hashed by the machine under test):
 //!
 //! - `commitment`: the postcard bytes of the global preprocessed commitment's Merkle cap — the part
-//!   the `rand` stream decides;
+//!   the salt stream decides;
 //! - `common`: the cap plus every instance's preprocessed placement (matrix index, width, degree bits)
 //!   and every instance's packed lookups — the whole of `CommonData`, i.e. everything a verifier
 //!   derives from the header before it reads a byte of STARK data.
@@ -25,7 +26,15 @@
 //! segment (keccak and sha256 absent, exactly as fullnode's `decode_and_check` pins a bundle header),
 //! and a tier-10 call declaring one keccak block — plus one sha256 shape, since that chip's periodic
 //! columns are committed too. **A red here is a consensus event, not a flaky test**: re-pinning it
-//! means every node's keys change, i.e. a chain cut (`key_derivation_v2`'s module comment).
+//! means every node's keys change, i.e. a chain cut.
+//!
+//! Re-pinned for constraint set 7 (chain 16), in two steps measured separately: the LogUp blind and
+//! the `2^7` table floor (INT-2) moved every `common` digest and no `commitment` — the blind adds
+//! columns and a bus to every instance's lookups, the floor raises the smallest shapes' program,
+//! input and public heights to 7 — and HCS-1's switch to `key_derivation_v2` then moved every
+//! `commitment` (and so every `common` again). The constraint-set-6 pins were, in the order below:
+//! `743ae428…`/`118596a0…`, `de7f12d3…`/`2fc852ce…`, `e5e6ce86…`/`e157ca30…`,
+//! `b1387046…`/`fb6e0b55…`.
 use p3_batch_stark::CommonData;
 use rand_zkvm::machine::{Config, FriProfile, Machine, Tier};
 use rand_zkvm::tables::{input, keccak, program, public, sha256};
@@ -93,8 +102,8 @@ fn shapes() -> Vec<Shape> {
             slh: 0,
             publh: public::MIN_LOG_HEIGHT,
             want: (
-                "743ae4284ab17fe155dd272fe6717f8290524b99a4b200e7132021b1dd1bfc02",
-                "28add3c6bc2dcd6facd09b132ecfd4736a2e965e9463125eacafff21435494d9",
+                "1442e70e1ddc7e9c6eabf1a6e29bd9ea37d1996d81f89768af967b77ddc3fd41",
+                "e1d87ffcab0829461f2a8b23ff1d6b32436f820b3e1ca22b158a6253e9bc0e5e",
             ),
         },
         Shape {
@@ -106,8 +115,8 @@ fn shapes() -> Vec<Shape> {
             slh: 0,
             publh: binding_publh,
             want: (
-                "de7f12d33cf24cb0088924d6c8141470c3dd4bf1d929a9ebeca4d6da5996d930",
-                "fa3189686dadc444952416bb3b883df416a0e3ec481171487bc2ebe10d6d69a7",
+                "54991bdde2fdf6112181fde865e25cf94fae6084cb31ef33d9f58cb4645a6cc4",
+                "911d8e1ac2f5f4b2019b016c2858eb609a0c92ae8cebf8e54cf8e467e4e0d88e",
             ),
         },
         Shape {
@@ -119,8 +128,8 @@ fn shapes() -> Vec<Shape> {
             slh: 0,
             publh: public::MIN_LOG_HEIGHT,
             want: (
-                "e5e6ce86bbbb8f8e8c53e8599c88e962d2e90c0a516845c1dffc3ae4fdc4b9b6",
-                "e388b81d8e2cb9434667eb1be78ef6600427abed855add04a0a8cb619aa9b173",
+                "0337aeaecbd7d601ac4b502153c29589ae290f179e277b2f66e1f4c29d3c48cb",
+                "fcf1f2f75f0830e11474ac17f085b1ce805d0f2c75fc2557ac28217bfc7c7c32",
             ),
         },
         Shape {
@@ -132,8 +141,8 @@ fn shapes() -> Vec<Shape> {
             slh: sha256::sha256_log_height(1),
             publh: public::MIN_LOG_HEIGHT,
             want: (
-                "b1387046ebc166cff216550539f7ec0bff6421555b28d9500ba7a89af256d5cb",
-                "afce87a9784c402dfd360b397f3b13ca281731bb0b028fe7678af0e3b17675a4",
+                "c277ab160af3160092c4a33220724276fabc2cd26e6229c5dae535eb16ba3760",
+                "1184e5ac97649b98d21fe57f7a57634d672df9ba53836ef4adaadb6aae15154c",
             ),
         },
     ]
