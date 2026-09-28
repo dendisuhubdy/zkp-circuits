@@ -117,7 +117,7 @@ mod gas_column_tests {
     use super::common;
     use rand_zkvm::emulator::execute;
     use rand_zkvm::gas::{gas_max, gas_of};
-    use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, ProveError, Tier};
+    use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, ProveError, ProveOptions, Tier};
     use rand_zkvm::tables::cpu::pv;
     use rand_zkvm::tables::F;
     use p3_field::PrimeCharacteristicRing;
@@ -172,6 +172,26 @@ mod gas_column_tests {
         let halt = (0..forged.cpu.values.len() / w).find(|&r| forged.cpu.values[r * w + rand_zkvm::tables::cpu::col::SYS_HALT] == F::ONE).unwrap();
         forged.cpu.values[halt * w + rand_zkvm::tables::cpu::col::GD0] = -F::ONE;
         assert!(common::rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &forged, Tier(10)))));
+    }
+
+    /// Task A4: `ProveOptions.gas_limit` is the `Machine::prove_with_options` spelling of the same
+    /// rule — `None` (the default) declares the header's ceiling, `Some(g)` overrides it, and the
+    /// same two refusals fire before any key is built.
+    #[test]
+    fn the_default_limit_is_the_ceiling_and_the_option_can_go_below() {
+        let m = Machine::new(FriProfile::Test);
+        let p = rand_zkvm::guests::fib(20);
+        let e = execute(&p, &[], &[], 10_000).unwrap();
+        let gas = gas_of(&p, &[], &[], &e.events);
+        let dflt = m.prove_with_options(&p, &[], &[], Some(Tier(10)), ProveOptions::default()).unwrap().0;
+        assert_eq!(dflt.public_values[pv::GAS], gas_max(Tier(10), dflt.keccak_log_height, dflt.sha256_log_height));
+        let tight = m.prove_with_options(&p, &[], &[], Some(Tier(10)), ProveOptions { gas_limit: Some(gas + 5), ..Default::default() }).unwrap().0;
+        assert_eq!(tight.public_values[pv::GAS], gas + 5);
+        assert!(m.verify(&p.digest(), &tight).is_ok());
+        assert!(matches!(
+            m.prove_with_options(&p, &[], &[], Some(Tier(10)), ProveOptions { gas_limit: Some(u64::MAX), ..Default::default() }),
+            Err(ProveError::GasLimitAboveHeader { .. })
+        ));
     }
 
     /// The `HALT` row's four byte limbs hold `gas_max − gas` at every header the verifier admits:

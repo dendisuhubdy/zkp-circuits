@@ -932,6 +932,23 @@ pub struct ProveOptions {
     /// The CPU prover (`prove_with_options`, `build_traces_salted_with`) honours it; the backend
     /// entry points (`prove_with`) keep the default.
     pub pad_absent_hash_tables: bool,
+
+    /// cs8: the `GAS_LIMIT` to declare; `None` = `gas::gas_max(header)` (spec §5: leaks nothing
+    /// new — every verifier already learns the tier and both hash-table heights from the header,
+    /// and the default limit is a pure function of those). Must lie in `[gas::gas_of(run),
+    /// gas::gas_max(header)]` or `build_traces_inner` refuses before any trace is built
+    /// (`ProveError::GasLimitBelowRun`/`GasLimitAboveHeader`).
+    ///
+    /// HCS-3's `pad_absent_hash_tables` above changes what the *default* limit is, not just what
+    /// it hides: declaring the keccak/sha256 tables at the private-data floor
+    /// (`MIN_PRIVATE_TABLE_LOG_HEIGHT`, 128 rows each) when a call never hashes raises `gas_max` by
+    /// `4·191 + 2·63` — the floor's four idle keccak blocks and two idle sha256 blocks, each priced
+    /// at `KECCAK_GAS - 1` / `SHA256_GAS - 1` — so a call that pads its hash tables *and* leaves
+    /// `gas_limit` at `None` declares a higher ceiling than the same call without padding, even
+    /// though it spends the same gas either way. A caller that wants the proof to price its actual
+    /// work, not the header's ceiling, passes the exact `gas` (`gas::gas_of`) rather than relying
+    /// on the default.
+    pub gas_limit: Option<u64>,
 }
 
 /// Constraint set 8: `gas_limit` is the proof's declared `pv::GAS`, and must lie in
@@ -942,10 +959,12 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
     build_traces_inner(program, inputs, public, salt, exec, tier, ProveOptions::default(), Some(gas_limit))
 }
 
-/// [`build_traces_salted`] under explicit [`ProveOptions`], declaring the header's own gas ceiling
-/// (`gas::gas_max`) as the limit — what every `Machine::prove*` entry point declares.
+/// [`build_traces_salted`] under explicit [`ProveOptions`]: `opts.gas_limit` is the declared
+/// limit, `None` meaning the header's own ceiling (`gas::gas_max`) — what every `Machine::prove*`
+/// entry point declares by default.
 pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier, opts: ProveOptions) -> Result<Traces, ProveError> {
-    build_traces_inner(program, inputs, public, salt, exec, tier, opts, None)
+    let gas_limit = opts.gas_limit;
+    build_traces_inner(program, inputs, public, salt, exec, tier, opts, gas_limit)
 }
 
 /// The one trace builder. `gas_limit: None` = the header's ceiling, resolved once the declared
@@ -1143,8 +1162,8 @@ fn build_traces_inner(program: &Program, inputs: &[u32], public: &[u32], salt: [
         sha256: sha256_t,
         public: public_t,
         // Constraint set 8: the limit checked above, the same one the cpu trace's `HALT` row
-        // encodes (the `Machine::prove*` paths pass the header's own ceiling until Task A4 adds
-        // a `ProveOptions` override).
+        // encodes (the `Machine::prove*` paths pass the header's own ceiling by default;
+        // `ProveOptions::gas_limit` overrides it).
         public_values: public_values(program.base_pc, tier.0, &exec.outputs, &hc, &hin, &hpub, gas_limit),
         program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height, mem_log_height,
     })

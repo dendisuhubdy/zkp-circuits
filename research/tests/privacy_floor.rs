@@ -182,7 +182,7 @@ fn padded_hash_tables_verify_and_hide_presence() {
     let (plain, _) = m.prove(&p, &inputs, &[], Some(Tier(10))).unwrap();
     let t_plain = t0.elapsed();
     let t0 = std::time::Instant::now();
-    let opts = ProveOptions { pad_absent_hash_tables: true };
+    let opts = ProveOptions { pad_absent_hash_tables: true, ..Default::default() };
     let (padded, exec) = m.prove_with_options(&p, &inputs, &[], Some(Tier(10)), opts).unwrap();
     let t_padded = t0.elapsed();
     eprintln!("default: {} bytes, {t_plain:?}; padded: {} bytes, {t_padded:?}", plain.size(), padded.size());
