@@ -249,7 +249,7 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use p3_uni_stark::StarkGenericConfig;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub const TIERS: [usize; 6] = [10, 12, 14, 16, 18, 20];
@@ -1236,13 +1236,17 @@ fn panic_message(p: Box<dyn std::any::Any + Send>) -> String {
     "backend panicked".to_string()
 }
 
-/// Bound on the number of `(program digest, tier)` verifier keys `Machine::verifier_key`
-/// keeps in memory at once. Past this, the oldest entry is evicted (FIFO) to make room for the
-/// new one — a preprocessed commitment is cheap enough to recompute that a fancier (e.g. LRU)
-/// policy is not worth the complexity here.
+/// Bound on the number of verifier keys `Machine::verifier_key` keeps in memory at once. Past
+/// this, the least recently used key is evicted to make room for the new one (CPUV-1 residual,
+/// randprotocol/fullnode#54: it was FIFO, so a burst of distinct shapes evicted a key in constant
+/// use — a node's bundle key — however hot it was, and a rebuild costs seconds and hundreds of MB
+/// at a node's call-shape cap). The bound is on entries, not bytes: an entry is a verifier's
+/// `CommonData` (a Merkle cap and the packed lookups), whose size is a function of the shape.
 const KEY_CACHE_CAPACITY: usize = 64;
 
-/// A bounded, FIFO-evicted cache of `Machine::verifier_key` results, keyed by `(tier.0,
+/// A bounded, least-recently-used cache of `Machine::verifier_key` results with single-flight
+/// builds (#54: each entry is a `OnceLock` slot, so concurrent first callers of one shape wait for
+/// one build instead of each running the preprocessing pass), keyed by `(tier.0,
 /// program_log_height, input_log_height, keccak_log_height)` (M3.4 fix: the program table's height is
 /// proof-declared, not tier-derived — `tables::program::program_log_height`'s doc comment —
 /// so `CommonData`'s per-instance degree-bit bookkeeping depends on it too, even though the
@@ -1260,35 +1264,77 @@ const KEY_CACHE_CAPACITY: usize = 64;
 /// tier 20, the `+ 2` counting M4.2 Task 6's `klh = 0`, "no keccak table", as its own value)` distinct
 /// keys in the worst case —
 /// comfortably able to exceed `KEY_CACHE_CAPACITY` if a caller proves at many different
-/// program/input sizes, unlike the tier-only cache this replaces, so the FIFO eviction here is
+/// program/input sizes, unlike the tier-only cache this replaces, so the eviction here is
 /// a real policy again, not just defense in depth.
-#[derive(Default)]
+type KeyShape = (usize, u8, u8, u8, u8, u8);
+type KeySlot = Arc<std::sync::OnceLock<Arc<CommonData<Config>>>>;
+
 struct KeyCache {
-    map: HashMap<(usize, u8, u8, u8, u8, u8), Arc<CommonData<Config>>>,
-    order: VecDeque<(usize, u8, u8, u8, u8, u8)>,
+    /// Each shape's slot and the tick of its last use.
+    map: HashMap<KeyShape, (KeySlot, u64)>,
+    tick: u64,
+    capacity: usize,
+}
+impl Default for KeyCache {
+    fn default() -> Self { Self { map: HashMap::new(), tick: 0, capacity: KEY_CACHE_CAPACITY } }
 }
 impl KeyCache {
-    fn get(&self, key: &(usize, u8, u8, u8, u8, u8)) -> Option<Arc<CommonData<Config>>> {
-        self.map.get(key).cloned()
-    }
-    fn insert(&mut self, key: (usize, u8, u8, u8, u8, u8), value: Arc<CommonData<Config>>) {
-        if self.map.contains_key(&key) {
-            return;
+    /// The slot for `key`, marked used now — an existing one (built, or being built by another
+    /// caller) or a fresh, empty one, making room first by evicting the least recently used
+    /// entries. An evicted slot that is still being built is only dropped from the map: its
+    /// builder holds its own handle and returns the key it builds.
+    fn slot(&mut self, key: KeyShape) -> KeySlot {
+        self.tick += 1;
+        let now = self.tick;
+        if let Some((slot, used)) = self.map.get_mut(&key) {
+            *used = now;
+            return slot.clone();
         }
-        if self.map.len() >= KEY_CACHE_CAPACITY {
-            if let Some(oldest) = self.order.pop_front() {
-                self.map.remove(&oldest);
-            }
+        while self.map.len() >= self.capacity {
+            let lru = *self.map.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k).expect("capacity > 0");
+            self.map.remove(&lru);
         }
-        self.order.push_back(key);
-        self.map.insert(key, value);
+        let slot = KeySlot::default();
+        self.map.insert(key, (slot.clone(), now));
+        slot
     }
+    /// Whether `key`'s slot is present and built (a lookup, not a use).
+    fn is_built(&self, key: &KeyShape) -> bool {
+        self.map.get(key).is_some_and(|(slot, _)| slot.get().is_some())
+    }
+    /// The number of built keys held.
+    fn built(&self) -> usize { self.map.values().filter(|(slot, _)| slot.get().is_some()).count() }
 }
 
-pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<KeyCache> }
+pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<KeyCache>, key_builds: std::sync::atomic::AtomicUsize }
 
 impl Machine {
-    pub fn new(profile: FriProfile) -> Self { Self { config: make_config(profile), profile, keys: Mutex::new(KeyCache::default()) } }
+    pub fn new(profile: FriProfile) -> Self { Self::with_key_cache_capacity(profile, KEY_CACHE_CAPACITY) }
+
+    /// A test instrument (`tests/key_cache.rs`): a machine whose verifier-key cache holds
+    /// `capacity` keys instead of `KEY_CACHE_CAPACITY`, so eviction is observable in a few builds.
+    #[doc(hidden)]
+    pub fn with_key_cache_capacity(profile: FriProfile, capacity: usize) -> Self {
+        assert!(capacity > 0, "a key cache holds at least one key");
+        Self {
+            config: make_config(profile),
+            profile,
+            keys: Mutex::new(KeyCache { capacity, ..KeyCache::default() }),
+            key_builds: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// A test instrument: how many verifier keys this machine has built (cache misses that ran
+    /// the preprocessing pass), since construction.
+    #[doc(hidden)]
+    pub fn key_builds(&self) -> usize { self.key_builds.load(std::sync::atomic::Ordering::SeqCst) }
+
+    /// A test instrument: whether the key for this shape is cached right now (a lookup that does
+    /// not count as a use).
+    #[doc(hidden)]
+    pub fn has_cached_key(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, public_log_height: u8) -> bool {
+        self.keys.lock().unwrap().is_built(&(tier.0, program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height))
+    }
 
     /// Each instance's extended trace degree bits, in `chips()` order — a pure function of the
     /// tier and the declared heights, which is why it can be `pub`: the free function
@@ -1371,22 +1417,25 @@ impl Machine {
     /// input_log_height)`.
     pub fn verifier_key(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, public_log_height: u8) -> Arc<CommonData<Config>> {
         let key = (tier.0, program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height);
-        if let Some(hit) = self.keys.lock().unwrap().get(&key) {
-            return hit;
-        }
-        // Any valid `mem_log_height` gives the same `CommonData` (see above); the tier's floor is
-        // the canonical one, and using it makes this function's result independent of which
-        // proof happened to miss the cache first.
-        let mem_log_height = tier.min_mem_log_height();
-        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier, keccak_log_height, sha256_log_height), &self.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height, mem_log_height)).common);
-        self.keys.lock().unwrap().insert(key, common.clone());
-        common
+        // The cache lock is held only to find or make the slot; the build runs outside it, and
+        // `OnceLock::get_or_init` makes every concurrent caller of this shape wait for the one
+        // build (#54's single flight) — a caller of another shape is never held up by it.
+        let slot = self.keys.lock().unwrap().slot(key);
+        slot.get_or_init(|| {
+            // Any valid `mem_log_height` gives the same `CommonData` (see above); the tier's
+            // floor is the canonical one, and using it makes this function's result independent
+            // of which proof happened to miss the cache first.
+            let mem_log_height = tier.min_mem_log_height();
+            self.key_builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips(tier, keccak_log_height, sha256_log_height), &self.log_ext_degrees(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height, public_log_height, mem_log_height)).common)
+        })
+        .clone()
     }
 
     /// Number of `(tier, program_log_height, input_log_height, keccak_log_height,
     /// sha256_log_height, public_log_height)` verifier keys
     /// currently cached.
-    pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().map.len() }
+    pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().built() }
 
     /// Draws a fresh per-proof salt from OS entropy and delegates to [`Self::prove_salted`] —
     /// see that method's doc comment (controller ruling: H_IN, `pv::IN0..7`, must be salted or
