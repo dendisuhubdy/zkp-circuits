@@ -613,6 +613,11 @@ pub enum ProveError {
     /// builds, a masked shift plus an abort-scale allocation in release). The prove-side mirror
     /// of `check_declared_heights`' own `TIERS.contains` guard on the untrusted-proof side.
     BadTier(usize),
+    /// ISA-1 residual (randprotocol/fullnode#53): the program's declared table — `2^log_height`
+    /// rows from `base_pc`, floored at `2^7` — crosses the u32 pc wrap
+    /// (`tables::program::pc_window_fits`). The circuit's PCs are field sums and the emulator's
+    /// wrap, so no honest proof of such a program verifies; refused before any trace is built.
+    PcWindow { base_pc: u32, log_height: u8 },
 }
 #[derive(Debug)]
 pub enum VerifyError {
@@ -671,6 +676,11 @@ pub enum VerifyError {
     /// even observes the word — it was free, and rewriting it re-encoded a valid proof (a second
     /// transaction id for one bundle). `check_commit_pow_witnesses` has the reasoning.
     CommitPowWitness { round: usize },
+    /// ISA-1 residual (randprotocol/fullnode#53): the proof's claimed entry pc (`pv::PC_ENTRY`,
+    /// the program's `base_pc`) plus its declared program table (`4 · 2^program_log_height`
+    /// bytes) runs past 2^32 (`tables::program::pc_window_fits`). No honest proof has such a
+    /// header; refused with the other cheap checks, before any key is built.
+    PcWindow { entry_pc: u64, program_log_height: u8 },
 }
 
 /// Every check `verify` runs on a proof's public values before any of its batch is touched:
@@ -940,6 +950,12 @@ pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32
     let program_log_height = program::program_log_height(program.len());
     if program_log_height > program::MAX_LOG_HEIGHT {
         return Err(ProveError::ProgramTooLarge { len: program.len(), log_height: program_log_height });
+    }
+    // ISA-1 residual (randprotocol/fullnode#53): the declared, floored table must sit below the
+    // u32 pc wrap, or its padding rows carry field PCs no execution produces and the proof built
+    // here could never verify (`tables::program::pc_window_fits`).
+    if !program::pc_window_fits(program.base_pc as u64, program_log_height) {
+        return Err(ProveError::PcWindow { base_pc: program.base_pc, log_height: program_log_height });
     }
     // M4.1: the input table's height is proof-declared the same way.
     let input_log_height = crate::tables::input::input_log_height(inputs.len());
@@ -1615,6 +1631,15 @@ impl Machine {
             proof.public_log_height,
             proof.mem_log_height,
         )?;
+        // ISA-1 residual (randprotocol/fullnode#53): the claimed entry pc plus the declared (and,
+        // above, range-checked) program table must end at or below 2^32 — the prover's own
+        // `PcWindow` refusal, made again on the untrusted header. `PC_ENTRY` is bound in-circuit to
+        // the first cpu row's `PC`, and `hc` absorbs `base_pc`, so this reads the program's own
+        // `base_pc`; no honest proof trips it.
+        let entry_pc = proof.public_values[crate::tables::cpu::pv::PC_ENTRY];
+        if !crate::tables::program::pc_window_fits(entry_pc, proof.program_log_height) {
+            return Err(VerifyError::PcWindow { entry_pc, program_log_height: proof.program_log_height });
+        }
         // Audit VERIFIER-1: the commit-phase proof-of-work words, unobserved at zero bits, must be
         // the honest zero — one encoding per proof (`check_commit_pow_witnesses`). A comparison per
         // round, so it goes with the other cheap checks, before the key is built.

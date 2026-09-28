@@ -71,6 +71,17 @@ change) and are **fixed by the next constraint set** (`docs/05-roadmap.md`, item
    assembler is not in the AIR and every in-range operand encodes to the word it always did — the
    research guests' digests are unchanged — so this is not a consensus change
    (`tests/asm.rs`, the `…_through_the_helper` and `…_past_31_…` tests).
+4. **The pc window (ISA-1's residual, randprotocol/fullnode#53, fixed here).** The circuit does
+   its PC arithmetic in the field — the program table's PC chain, the cpu's fall-through `PC + 4`,
+   the `JAL`/`JALR` link — while the emulator wraps mod `2^32`, so a program whose *declared*
+   program table (`2^program_log_height` rows from `base_pc`, floored at `2^7`) runs past `2^32`
+   has padding rows whose field PCs no execution produces, and no honest proof of it verifies.
+   `tables::program::pc_window_fits` is the rule, `base_pc + 4 · 2^program_log_height ≤ 2^32`;
+   `Machine::prove*` refuses such a program (`ProveError::PcWindow`) and `Machine::verify` a proof
+   whose `pv::PC_ENTRY` and declared height break it (`VerifyError::PcWindow`), with the other
+   cheap header checks, before any key is built. A verifier-side refusal of a proof no honest
+   prover makes; every program at `base_pc` 0 below `2^30` words is untouched (`tests/pc_window.rs`).
+   The node's deploy-side mirror is fullnode's `randprotocol_core::program::pc_window_fits`.
 
 ## Encoding
 

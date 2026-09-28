@@ -250,6 +250,27 @@ pub fn program_log_height(len: usize) -> u8 {
     (super::pad_height(len + 1, MIN_HEIGHT).trailing_zeros() as u8).max(super::MIN_PRIVATE_TABLE_LOG_HEIGHT)
 }
 
+/// ISA-1 residual (randprotocol/fullnode#53): does a program table of `2^log_height` rows starting
+/// at `base_pc` end at or below the u32 pc wrap — `base_pc + 4 · 2^log_height ≤ 2^32`?
+///
+/// The circuit does its PC arithmetic in the field (this table's PC chain, the cpu's fall-through
+/// `PC + 4`, the JAL/JALR link) while the emulator wraps mod 2^32, so a table whose padding rows
+/// run past 2^32 carries field PCs no execution produces: no honest proof of such a program
+/// verifies, and nothing a verifier does with one is worth the key it would build. The rows
+/// measured are the *declared* table's — `program_log_height(len)`, floored at 2^7 — not the
+/// program's own words, which is the gap ZH4's word-only bound left (fib's 15 words at
+/// `0xffffffc0` end at 2^32 and pad to 128 rows that do not). `Machine::prove*` refuses such a
+/// program (`ProveError::PcWindow`) and `Machine::verify` such a proof, from its `pv::PC_ENTRY`
+/// and declared `program_log_height` (`VerifyError::PcWindow`). fullnode's
+/// `randprotocol_core::program::pc_window_fits` is the deploy-side mirror of this predicate over
+/// `program_log_height(len)`. `base_pc` is a `u64` because the verifier reads it from a public
+/// value, which is any canonical field element.
+pub fn pc_window_fits(base_pc: u64, log_height: u8) -> bool {
+    // `4 · 2^30` alone is 2^32, so nothing taller fits; the guard also keeps the shift in range.
+    if log_height > 30 { return false; }
+    base_pc.checked_add(4u64 << log_height).is_some_and(|end| end <= 1 << 32)
+}
+
 use col::*;
 
 #[derive(Clone, Copy, Debug, Default)]
