@@ -453,10 +453,12 @@ struct Syscalls;
 
 impl Host for Syscalls {
     fn keccak_f(&mut self, state: &mut [u32; 50]) {
-        keccak(state.as_mut_ptr());
+        keccak(state);
     }
     fn poseidon2(&mut self, words: &mut [u32], n: usize) {
-        poseidon2(words.as_mut_ptr(), n);
+        // SAFETY: `evm_core` calls this with `n <= words.len()` and `words.len() >= 8`, and `words`
+        // is a live, exclusive `&mut` for the call — `guest_sdk::poseidon2`'s `# Safety` contract.
+        unsafe { poseidon2(words.as_mut_ptr(), n) };
     }
 }
 
@@ -533,7 +535,9 @@ fn is_the_translated_code(code: &[u8]) -> bool {
     let whole = len / 4;
     let aligned = ptr as usize % 4 == 0;
     // SAFETY: every write is below `CHUNK` (`fill < CHUNK` before each); every read is inside
-    // `code`; `HASH_BUF` is reached only through `buf`, on one thread.
+    // `code`; `HASH_BUF` is reached only through `buf`, on one thread — so each `poseidon2` call
+    // hashes `fill <= CHUNK` words of `HASH_BUF` (never fewer than 8 long) in place, its `# Safety`
+    // contract.
     unsafe {
         buf.write(len as u32);
         let mut fill = 1;

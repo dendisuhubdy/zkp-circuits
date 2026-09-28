@@ -439,11 +439,13 @@ struct Syscalls;
 
 impl sbpf_core::Host for Syscalls {
     fn sha256_compress(&mut self, words: &mut [u32; 24]) {
-        guest_sdk::sha256_compress(words.as_mut_ptr());
+        guest_sdk::sha256_compress(words);
     }
 
     fn poseidon2(&mut self, words: &mut [u32], n: usize) {
-        guest_sdk::poseidon2(words.as_mut_ptr(), n);
+        // SAFETY: `sbpf_core` calls this with `n <= words.len()` and `words.len() >= 8`, and `words`
+        // is a live, exclusive `&mut` for the call — `guest_sdk::poseidon2`'s `# Safety` contract.
+        unsafe { guest_sdk::poseidon2(words.as_mut_ptr(), n) };
     }
 }
 
@@ -523,7 +525,8 @@ impl Stream {
     #[inline(always)]
     fn room(&mut self) -> usize {
         if self.fill == CHUNK {
-            guest_sdk::poseidon2(self.buf, CHUNK);
+            // SAFETY: `buf` is `HASH_BUF`, `CHUNK` words, reached only through `self.buf`.
+            unsafe { guest_sdk::poseidon2(self.buf, CHUNK) };
             self.fill = 8;
             self.hashed = true;
         }
@@ -577,7 +580,9 @@ impl Stream {
     /// The digest: the last call over what is left (unless the last full buffer was the end).
     fn finish(mut self) -> *const u32 {
         if !self.hashed || self.fill > 8 {
-            guest_sdk::poseidon2(self.buf, self.fill);
+            // SAFETY: `fill <= CHUNK` words of `HASH_BUF` (`CHUNK >= 8` long), reached only
+            // through `self.buf`.
+            unsafe { guest_sdk::poseidon2(self.buf, self.fill) };
         }
         self.fill = 0;
         self.buf
