@@ -373,7 +373,7 @@ separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 exactly one traversal of the whole program for `hc`, regardless of how the
 program actually ran.
 
-## `cpu` — main, `col::WIDTH = 275`
+## `cpu` — main, `col::WIDTH = 276` (275 through constraint set 6)
 
 (The heading read `222` from M4.1 until M4.4 corrected it: M4.2's `SYS_KECCAK`
 column took the table to 223 without the heading following, and M4.4's
@@ -1044,6 +1044,34 @@ same choice for the same reason.
 
 And, as for `KECCAK`: none of the 24 words read or the 8 written back appear
 here. They are the `sha256` table's own `MEMORY` sends.
+
+### The next constraint set (HCS-4): the `POSEIDON2_LEN` ecall row
+
+`SYS_HASH_LEN` (appended after `PINV0..3`) is `SYS_HASH`'s twin: syscall 7, the
+same `a0 = ptr`/`a1 = n` arguments, the same `HASH_PTR` bound (`hp_gate`), the
+same `continues` carry and the same absorb/write-back row group — every rule
+the two ecall rows share is gated on `sys_hash_any = SYS_HASH + SYS_HASH_LEN`,
+and both open a group in the CRITICAL 5 entry whitelists. Three rules differ:
+
+- **The seed.** The row after a `SYS_HASH_LEN` row enters
+  `[0, 0, 0, 0, HASH_N, 0, 0, 0]` (`SYS_HASH_LEN · n(HS0 + i) = 0` for
+  `i ≠ 4`, `SYS_HASH_LEN · (n(HS0 + 4) − HASH_N) = 0`) where a `SYS_HASH`
+  group enters the zero state — `hash::sponge_hash_len`'s length in capacity
+  lane 4, which absorption never overwrites.
+- **The empty block.** `SYS_HASH_LEN · (1 − n(IS_HASH)) = 0`: the row after
+  is always an absorb row, so `n = 0` absorbs one block with every lane
+  inactive and the digest is `perm(seed)`, not the seed's zero rate lanes.
+  The blanket "lane 0 is active on an absorb row" rule becomes
+  `IS_HASH · (1 − ACT0) · HASH_IDX = 0` — every absorb row but a group's first
+  — and an empty first row is sound only at `n = 0` (it drains nothing, so
+  being the last absorb row forces `HASH_LEFT = n = 0`, and not being the last
+  forces a full block).
+- **Its converse on `POSEIDON2`.** `SYS_HASH · n(IS_HASH) · (1 − n(ACT0)) = 0`
+  keeps a plain group's first absorb row non-empty, so `POSEIDON2([])` still
+  routes straight to its write-back rows and has exactly one digest, zero.
+
+`tests/next_constraint_set.rs::the_poseidon2_len_group_rules_refuse_their_forgeries`
+pins each of the three (each goes red with its rule removed).
 
 ## `memory` — main, `col::WIDTH = 12`
 

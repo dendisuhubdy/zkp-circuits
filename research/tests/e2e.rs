@@ -77,6 +77,24 @@ fn every_guest_proves_and_verifies() {
     }
 }
 
+/// HCS-4: `POSEIDON2_LEN` end to end — the length-seeded group start, the `n = 0` empty block, a
+/// partial block and a two-block message — each proved, verified, and publishing
+/// `hash::sponge_hash_len`'s digest.
+#[test]
+fn poseidon2_len_demo_proves_and_verifies() {
+    let m = Machine::new(FriProfile::Test);
+    for n in [0usize, 1, 4, 5] {
+        let msg: Vec<u32> = (0..n as u32).map(|k| 0x0dea_0000 + k).collect();
+        let p = guests::poseidon2_len_demo(&msg);
+        let (proof, exec) = m.prove_salted(&p, &[], &[], [1, 2, 3, 4], Some(Tier(10))).unwrap_or_else(|e| panic!("n={n}: {e:?}"));
+        m.verify(&p.digest(), &proof).unwrap_or_else(|e| panic!("n={n}: {e:?}"));
+        let want = rand_zkvm::hash::sponge_hash_len(&msg);
+        assert_eq!(&exec.outputs[..], &want[..], "n={n}");
+        use rand_zkvm::tables::cpu::pv;
+        for k in 0..8 { assert_eq!(proof.public_values[pv::OUT0 + k], want[k] as u64, "n={n}: output {k}"); }
+    }
+}
+
 /// M4.2: the end-to-end anchor for the whole `KECCAK` path — guest sponge, `SYS_KECCAK` cpu
 /// row, the keccak chip's 24 rounds and its own `MEMORY` traffic, the proof-declared keccak
 /// height — checked against the host `keccak::keccak256` for the same message.

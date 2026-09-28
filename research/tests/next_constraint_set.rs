@@ -156,21 +156,23 @@ fn a_non_u32_salt_lane_is_refused_by_the_air() {
 /// The `POSEIDON2` syscall hashes `n` words as `n` field elements from the all-zero state, with no
 /// length anywhere, so within the first rate block `[a]` and `[a, 0]` — and `[]`, whose digest is
 /// the zero state unpermuted — are not told apart (HCS-4; ZKH-3 documented it and warned the guest
-/// SDK). Every in-repo caller encodes its length itself, so nothing live is broken; but a guest
-/// written against "hash these words" is. Checked here end to end on the emulator, i.e. the
-/// semantics the chip proves: the two digests the guest gets back are equal.
+/// SDK). `POSEIDON2` stays exactly that — every note commitment, nullifier, Merkle root and `hc` is
+/// built on it — and the next constraint set adds `POSEIDON2_LEN` (7) beside it, whose sponge
+/// starts with the length in capacity lane 4 and always permutes at least once. Checked here end
+/// to end on the emulator, i.e. the semantics the chip proves, for the new syscall: the digests of
+/// `[a]` and `[a, 0]` differ, the empty message's is not zero, and each is `hash::sponge_hash_len`.
+/// The old syscall's collision is kept as a pin (`POSEIDON2` must not change).
 #[test]
-#[ignore = "HCS-4: POSEIDON2 does not bind the message length — closed only by a new syscall or the next constraint set (docs/05-roadmap.md)"]
 fn poseidon2_binds_the_message_length() {
     const AT: i32 = 0x1000;
-    let digest_of = |msg: &[u32]| -> Vec<u32> {
+    let digest_of = |msg: &[u32], len_bound: bool| -> Vec<u32> {
         let mut a = Assembler::new(0);
         a.extend(li(8, AT));
         for (k, w) in msg.iter().enumerate() {
             a.extend(li(5, *w as i32));
             a.push(sw(8, 5, 4 * k as i32));
         }
-        a.extend(call_poseidon2(AT / 4, msg.len()));
+        a.extend(if len_bound { call_poseidon2_len(AT / 4, msg.len()) } else { call_poseidon2(AT / 4, msg.len()) });
         for k in 0..8 {
             a.push(lw(5, 8, 4 * k));
             a.extend(write_output(k as u32, 5));
@@ -179,8 +181,79 @@ fn poseidon2_binds_the_message_length() {
         execute(&a.assemble(), &[], &[], 100_000).unwrap().outputs.to_vec()
     };
     let a = 0x0dea_dbee;
-    let (one, padded, empty) = (digest_of(&[a]), digest_of(&[a, 0]), digest_of(&[]));
-    eprintln!("POSEIDON2([a]) = {one:08x?}\nPOSEIDON2([a, 0]) = {padded:08x?}\nPOSEIDON2([]) = {empty:08x?}");
+    // `POSEIDON2` itself is unchanged: the collision is its specified behaviour.
+    assert_eq!(digest_of(&[a], false), digest_of(&[a, 0], false));
+    assert_eq!(digest_of(&[], false), vec![0; 8]);
+    let (one, padded, empty) = (digest_of(&[a], true), digest_of(&[a, 0], true), digest_of(&[], true));
+    eprintln!("POSEIDON2_LEN([a]) = {one:08x?}\nPOSEIDON2_LEN([a, 0]) = {padded:08x?}\nPOSEIDON2_LEN([]) = {empty:08x?}");
     assert_ne!(one, padded, "[a] and [a, 0] hash to the same digest");
     assert_ne!(empty, vec![0; 8], "the empty message hashes to the zero digest");
+    for msg in [&[a][..], &[a, 0], &[], &[1, 2, 3, 4], &[1, 2, 3, 4, 5]] {
+        assert_eq!(digest_of(msg, true), rand_zkvm::hash::sponge_hash_len(msg).to_vec(), "{msg:?}");
+    }
+}
+
+/// The cpu rows of `guests::poseidon2_demo`/`poseidon2_len_demo(msg)` at tier 10, and the index of
+/// the hash group's ecall row.
+fn hash_group(msg: &[u32], len_bound: bool) -> (p3_matrix::dense::RowMajorMatrix<Val>, Vec<Val>, usize) {
+    let p = if len_bound { rand_zkvm::guests::poseidon2_len_demo(msg) } else { rand_zkvm::guests::poseidon2_demo(msg) };
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &e, Tier(10)).unwrap();
+    let sel = if len_bound { cpu::col::SYS_HASH_LEN } else { cpu::col::SYS_HASH };
+    let w = cpu::col::WIDTH;
+    let r = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + sel] == Val::ONE).expect("the hash call's ecall row");
+    (t.cpu, t.public_values, r)
+}
+
+fn cpu_row(m: &p3_matrix::dense::RowMajorMatrix<Val>, r: usize) -> Vec<Val> { m.values[r * m.width()..(r + 1) * m.width()].to_vec() }
+
+/// Does every cpu constraint hold on the row pair `(cur, next)`?
+fn cpu_pair_holds(cur: Vec<Val>, next: Vec<Val>, public: &[Val]) -> bool {
+    let (_, con) = symbolic_air(&cpu::CpuAir);
+    let rows = Rows { cur, next, pre_cur: vec![], pre_next: vec![], public: public.to_vec() };
+    con.iter().all(|c| eval_rows(c, &rows) == Val::ZERO)
+}
+
+/// HCS-4, the AIR side: the honest `POSEIDON2_LEN` group's transitions hold, and each of its three
+/// new rules refuses its forgery — the length seed (a first absorb row entering the zero state, as
+/// a `POSEIDON2` group would), the mandatory empty block (an `n = 0` call routed straight to its
+/// write-back rows, publishing the zero digest), and its converse on the old syscall (an `n = 0`
+/// `POSEIDON2` call given an empty absorb row, which would publish `perm(0)` for the zero digest).
+#[test]
+fn the_poseidon2_len_group_rules_refuse_their_forgeries() {
+    // Honest: every transition from the ecall row through the second write-back row holds.
+    for n in [0usize, 1, 5] {
+        let msg: Vec<u32> = (1..=n as u32).collect();
+        let (cpu_t, pv, r) = hash_group(&msg, true);
+        let rows = 1 + n.div_ceil(4).max(1) + 2;
+        for k in r..r + rows { assert!(cpu_pair_holds(cpu_row(&cpu_t, k), cpu_row(&cpu_t, k + 1), &pv), "n={n}: honest row {k}"); }
+        assert_eq!(cpu_row(&cpu_t, r + 1)[cpu::col::HS0 + 4], Val::from_u32(n as u32), "n={n}: the seed is the length");
+    }
+
+    // The seed: the first absorb row of `POSEIDON2_LEN([1..5])` entering with lane 4 = 0.
+    let (cpu_t, pv, r) = hash_group(&[1, 2, 3, 4, 5], true);
+    let mut next = cpu_row(&cpu_t, r + 1);
+    next[cpu::col::HS0 + 4] = Val::ZERO;
+    assert!(!cpu_pair_holds(cpu_row(&cpu_t, r), next, &pv), "a POSEIDON2_LEN group entered the unseeded state");
+
+    // The empty block: `POSEIDON2_LEN([])` with its absorb row cut out, the ecall row followed
+    // directly by the first write-back row (whose `HS` is then the unpermuted zero state).
+    let (cpu_t, pv, r) = hash_group(&[], true);
+    assert_eq!(cpu_row(&cpu_t, r + 1)[cpu::col::IS_HASH], Val::ONE);
+    let mut next = cpu_row(&cpu_t, r + 2);
+    for i in 0..8 { next[cpu::col::HS0 + i] = Val::ZERO; }
+    next[cpu::col::CLK] = cpu_row(&cpu_t, r + 1)[cpu::col::CLK];
+    assert!(!cpu_pair_holds(cpu_row(&cpu_t, r), next, &pv), "a POSEIDON2_LEN([]) call skipped its empty block");
+
+    // The converse: `POSEIDON2([])`'s ecall row followed by an empty absorb row — the one
+    // `POSEIDON2_LEN([])` has, identical at `n = 0` since the seed is then 0 too.
+    let (len_t, _, lr) = hash_group(&[], true);
+    let (cpu_t, pv, r) = hash_group(&[], false);
+    assert_eq!(cpu_row(&cpu_t, r + 1)[cpu::col::IS_HASH_OUT], Val::ONE, "POSEIDON2([]) has no absorb row");
+    let mut next = cpu_row(&len_t, lr + 1);
+    next[cpu::col::CLK] = cpu_row(&cpu_t, r + 1)[cpu::col::CLK];
+    next[cpu::col::PC] = cpu_row(&cpu_t, r + 1)[cpu::col::PC];
+    next[cpu::col::NEXT_PC] = cpu_row(&cpu_t, r + 1)[cpu::col::PC];
+    next[cpu::col::HASH_PTR] = cpu_row(&cpu_t, r)[cpu::col::HASH_PTR];
+    assert!(!cpu_pair_holds(cpu_row(&cpu_t, r), next, &pv), "a POSEIDON2([]) call absorbed an empty block");
 }
