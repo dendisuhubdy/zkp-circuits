@@ -17,7 +17,7 @@ differential and the tamper table in the same file, the stub vectors in
 
 ## AGG-2: the aggregate binding (audit v3, amended 2026-09-25)
 
-Before this amendment the interface was `[vk ‖ N ‖ 35·N]` and said nothing about who made the
+Before this amendment the interface was `[vk ‖ N ‖ 34·N]` and said nothing about who made the
 proof: a registered aggregator could take another's valid aggregate, re-sign the transaction
 under its own identity and nonce, and be paid for it. The program now hints eight binding words
 straight after `N` and absorbs them into the interface sponge between `N` and the public values,
@@ -112,7 +112,16 @@ used to happen.
 | production N=1 aggregate, cpu rows (tier) | 2 044 726 (21; pin + overhead) | 2 047 542 (21; 49 610 rows under `2^21`) |
 
 The self-verifier's digests and costs (`tests/self_verify.rs`) do not move: its fixtures are the
-rVM's own. The fullnode re-vendors and re-pins `aggregate_program_digest` at the chain-18 cut;
+rVM's own.
+
+**The final review's `gas_max` fix** (the absorb rows' `2^(t−2)` term) moves only the inner
+proofs' *value* of `GAS` — a fixture proof's default limit goes `16383 → 20479` — never the inner
+shape, key or AIR. Re-run on a regenerated cache, nothing in the table above moves: both
+`aggregate_program_digest`s (production `1831f036…ddd7`, test `9eba7380…193d`), the committed
+single-proof digest, the Off replay, the `inner_vk_digest`, every `pins.json` row count and
+`LOOP_OVERHEAD` all reproduced unchanged. What moves is what rides on the values: the stub
+vector's interface list (GAS words `0x3fff → 0x4fff`; the notes are random per cache anyway) and
+its digest (`36b414c0…f5dd → 5e3d7fb2…1ed6`). The fullnode re-vendors and re-pins `aggregate_program_digest` at the chain-18 cut;
 no live chain carries an aggregation section. **The production proof batch must use this
 program**, and every number above is an emulation measured on the 48 GB laptop (2026-09-29); the rVM
 *proofs* — the tier-19 round trip (`two_test_profile`), the one-proof round trip, the N=3 twin and
@@ -319,21 +328,24 @@ A new, small fullnode-side function; no rVM vendoring in M5.3. Exactly:
   transaction's `H("rand-aggregate-bind-1", chain_id ‖ aggregator ‖ nonce)`:
   `00000000a662000000000000a662000100000000a662000200000000a662000300000000a662000400000000a662000500000000a662000600000000a6620007`
 - the interface list, 118 words: `[vk(4) ‖ 3 ‖ B(8) ‖ 35·3]`. The fixture notes are random per
-  cache (this is the constraint-set-8 cache, generated 2026-09-29 on the 48 GB laptop — 13
-  test-profile proofs at ~105–115 s each, four processes, ~2 GB each), so the list rides on
+  cache (this is the constraint-set-8 cache as regenerated for the final review's `gas_max`,
+  2026-09-29 on the 48 GB laptop — 13 test-profile proofs at ~105–135 s each, four processes,
+  ~2 GB each; the first cs8 cache's list digested to
+  `36b414c0205da8dc6653f2e12f34596ece718d4ef22c1b947012582e55dcf5dd`), so the list rides on
   this checkout's fixtures; its *shape* is pinned — word 4 is `3` (the count), words 5–12 are
   the binding, words 13, 48, 83 are `0` (each proof's `PC_ENTRY`), words 14, 49, 84 are `14`
-  (every proof's `TIER`), words 47, 82, 117 are `16383` (each proof's `GAS`, cs8's 35th value —
-  the default declared limit, `gas::gas_max` of the header), each proof's `HC0..7` run repeats
+  (every proof's `TIER`), words 47, 82, 117 are `20479` (each proof's `GAS`, cs8's 35th value —
+  the default declared limit, `gas::gas_max` of the tier-14 hash-free header,
+  `(2^14 − 1) + 2^12`; `16383` before the final review added the absorb rows' term), each proof's `HC0..7` run repeats
   across the three (same bundle program) while its `IN0..7` run differs (different inputs), and
   its `PUB0..7` run repeats (the empty public segment's `H_PUB`, a constant of the shape). As
   measured on this checkout:
 
   ```
-  346ee1841980e46a3501f5b04cdf40dd3208e5b1c67360285353cf7a0b735fb9000000000000000300000000a662000000000000a662000100000000a662000200000000a662000300000000a662000400000000a662000500000000a662000600000000a66200070000000000000000000000000000000e00000000f2eacadf00000000154e27ee000000009495530b00000000eb1a4314000000008d8f3c970000000007226b1e000000004adab5a300000000c2ee9aae000000006f35274a000000000371953700000000a8a42560000000004b291c6600000000b7c2de0e00000000d6bf7fcf00000000182b470b00000000fb4abd6c0000000094c64fd500000000990ca6c20000000003fd4b4f000000006f1a722f000000001d066fdd000000008093b44c0000000058fbb79100000000494dd5aa00000000934a275900000000d5389ac8000000002e612784000000008639ed090000000085f58a21000000004448d889000000006bb9c915000000000671dc2c0000000000003fff0000000000000000000000000000000e000000009571a6ab000000009d741bb400000000f9159e5a000000008776086700000000049bbfde0000000026a23ed40000000053f0e25e0000000028e469d0000000006f35274a000000000371953700000000a8a42560000000004b291c6600000000b7c2de0e00000000d6bf7fcf00000000182b470b00000000fb4abd6c00000000977abd0e00000000c1d64b9b000000004eedc30e00000000dcadaf0f000000007ab2ba9d000000006d69f3fd000000008ca7c70f000000002d458a3c00000000934a275900000000d5389ac8000000002e612784000000008639ed090000000085f58a21000000004448d889000000006bb9c915000000000671dc2c0000000000003fff0000000000000000000000000000000e00000000920f4477000000000dd3c1d5000000003983076200000000e83ccc8e0000000038fca13500000000e1670fd900000000c906a4c100000000d7bd0cb9000000006f35274a000000000371953700000000a8a42560000000004b291c6600000000b7c2de0e00000000d6bf7fcf00000000182b470b00000000fb4abd6c00000000556e70dd00000000e800bcf600000000ac814bde000000000383bb650000000047ca6436000000006da3029100000000d27f25170000000028f4776800000000934a275900000000d5389ac8000000002e612784000000008639ed090000000085f58a21000000004448d889000000006bb9c915000000000671dc2c0000000000003fff
+  346ee1841980e46a3501f5b04cdf40dd3208e5b1c67360285353cf7a0b735fb9000000000000000300000000a662000000000000a662000100000000a662000200000000a662000300000000a662000400000000a662000500000000a662000600000000a66200070000000000000000000000000000000e00000000fcf4c2ca00000000a634a055000000009279293b00000000ee8d851600000000c5717852000000006d0561ed000000008dd81da70000000018e0b601000000006f35274a000000000371953700000000a8a42560000000004b291c6600000000b7c2de0e00000000d6bf7fcf00000000182b470b00000000fb4abd6c000000007bbf5012000000006c808b59000000006aea0597000000002d75974e00000000b566bfb900000000aba9b10300000000c8df477b00000000bf85ec8f00000000934a275900000000d5389ac8000000002e612784000000008639ed090000000085f58a21000000004448d889000000006bb9c915000000000671dc2c0000000000004fff0000000000000000000000000000000e00000000436464ca00000000167c06a600000000528b45b200000000474c4ebf00000000aba47cca00000000d89d7ea300000000e4cf09c4000000006dbb25fc000000006f35274a000000000371953700000000a8a42560000000004b291c6600000000b7c2de0e00000000d6bf7fcf00000000182b470b00000000fb4abd6c000000007d2198900000000032ef87b1000000005cbf60c5000000005369151400000000f796dfdc000000006d341cea00000000ee65f7c10000000083ad87a500000000934a275900000000d5389ac8000000002e612784000000008639ed090000000085f58a21000000004448d889000000006bb9c915000000000671dc2c0000000000004fff0000000000000000000000000000000e00000000d5e68c3200000000b1bfa0e60000000054a9fa70000000006db05c83000000008c8a8cfc000000007d9a619100000000834acb6300000000b4292759000000006f35274a000000000371953700000000a8a42560000000004b291c6600000000b7c2de0e00000000d6bf7fcf00000000182b470b00000000fb4abd6c0000000073dc4e1e00000000bf53608900000000ccde09690000000022e6fe7a00000000ac6bcac10000000078ea8c8c0000000018e98906000000005840b1cf00000000934a275900000000d5389ac8000000002e612784000000008639ed090000000085f58a21000000004448d889000000006bb9c915000000000671dc2c0000000000004fff
   ```
 - the interface digest for the list above:
-  `36b414c0205da8dc6653f2e12f34596ece718d4ef22c1b947012582e55dcf5dd`
+  `5e3d7fb2bd1f5342e49577650a281996b656d1fa4e8f3eff7ee82adefe9d1ed6`
 
 The fullnode session's stub must reproduce all three byte-for-byte before it is trusted with
 admission: the vk digest against the pinned constant, the list and digest against the recursion
