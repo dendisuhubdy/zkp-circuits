@@ -420,35 +420,12 @@ fn a_reduce_run_touching_a_cell_outside_the_address_space_is_refused() {
 // message the chip sends or provides may have a non-zero count. The range table is skipped: every
 // row of it is a table entry whose count is a provided multiplicity, balanced by the global sum.
 
-/// A program that reaches every chip: registers and RAM (`STORE`, `LOAD`), a `POSEIDON2`
-/// dispatch, a three-row `REDUCE` run over a hand-written descriptor, the four `PUBLIC`s, `HALT`.
-fn every_chip_program() -> Program {
-    let mut v = vec![];
-    let st = |v: &mut Vec<Instr>, addr: u64, val: u64| {
-        v.push(Instr { op: Op::Faddi, rd: 1, ra: 0, b: F::from_u64(val) });
-        v.push(Instr { op: Op::Store, rd: 1, ra: 0, b: F::from_u64(addr) });
-    };
-    for (k, val) in [100u64, 120, 3, 1, 0, 0, 0, 1, 0, 3, 0].iter().enumerate() {
-        st(&mut v, 200 + k as u64, *val);
-    }
-    v.push(Instr { op: Op::Load, rd: 3, ra: 0, b: F::from_u64(201) });
-    v.push(Instr { op: Op::Faddi, rd: 2, ra: 0, b: F::from_u64(200) });
-    v.push(Instr { op: Op::Reduce, rd: 0, ra: 2, b: F::ZERO });
-    v.push(Instr { op: Op::Faddi, rd: 7, ra: 0, b: F::from_u64(64) });
-    v.push(Instr { op: Op::Poseidon2, rd: 0, ra: 7, b: F::ZERO });
-    for _ in 0..4 {
-        v.push(Instr { op: Op::Public, rd: 0, ra: 0, b: F::ZERO });
-    }
-    v.push(Instr { op: Op::Halt, rd: 0, ra: 0, b: F::ZERO });
-    Program { instrs: v, checkpoints: vec![] }
-}
-
 #[test]
 fn no_admissible_padding_row_of_any_chip_sends_a_message() {
     use p3_air::BaseAir;
     use recursion::machine::Chip;
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x0bc0_de03);
-    let p = every_chip_program();
+    let p = common::every_chip_program();
     let exec = recursion::emulator::execute(&p, &[], 1000).unwrap();
     let t = recursion::machine::build_traces(&p, &exec, Tier(8)).unwrap();
     assert!(t.reduce.is_some(), "the program dispatches REDUCE, so the batch declares the chip");

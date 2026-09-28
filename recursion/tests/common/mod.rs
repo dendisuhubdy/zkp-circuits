@@ -513,6 +513,62 @@ pub fn eval_at_boundary(
     }
 }
 
+/// [`eval_full`] on any row pair of a table, boundaries included: `is_first` for the pair that
+/// starts at row 0, `is_last` for the one that starts at the last row (whose `next` is the
+/// wrap-around row 0, and where the transition selector is zero).
+#[allow(dead_code)]
+pub fn eval_row(
+    e: &SymbolicExpression<recursion::isa::F>,
+    cur: &[recursion::isa::F],
+    next: &[recursion::isa::F],
+    pre: (&[recursion::isa::F], &[recursion::isa::F]),
+    public: &[recursion::isa::F],
+    is_first: bool,
+    is_last: bool,
+) -> recursion::isa::F {
+    use p3_field::PrimeCharacteristicRing;
+    use recursion::isa::F;
+    let flag = |b: bool| if b { F::ONE } else { F::ZERO };
+    let go = |x: &SymbolicExpression<F>| eval_row(x, cur, next, pre, public, is_first, is_last);
+    match e {
+        SymbolicExpr::Leaf(BaseLeaf::IsFirstRow) => flag(is_first),
+        SymbolicExpr::Leaf(BaseLeaf::IsLastRow) => flag(is_last),
+        SymbolicExpr::Leaf(BaseLeaf::IsTransition) => flag(!is_last),
+        SymbolicExpr::Leaf(_) => eval_full(e, cur, next, pre, public),
+        SymbolicExpr::Add { x, y, .. } => go(x) + go(y),
+        SymbolicExpr::Sub { x, y, .. } => go(x) - go(y),
+        SymbolicExpr::Neg { x, .. } => -go(x),
+        SymbolicExpr::Mul { x, y, .. } => go(x) * go(y),
+    }
+}
+
+/// A program that reaches every chip: registers and RAM (`STORE`, `LOAD`), a `POSEIDON2`
+/// dispatch, a three-row `REDUCE` run over a hand-written descriptor, the four `PUBLIC`s, `HALT`.
+/// (`tests/tables.rs`' padding-row rule and `tests/binding.rs`' binding rule both run over it.)
+#[allow(dead_code)]
+pub fn every_chip_program() -> recursion::isa::Program {
+    use p3_field::PrimeCharacteristicRing;
+    use recursion::isa::{Instr, Op, Program, F};
+    let mut v = vec![];
+    let st = |v: &mut Vec<Instr>, addr: u64, val: u64| {
+        v.push(Instr { op: Op::Faddi, rd: 1, ra: 0, b: F::from_u64(val) });
+        v.push(Instr { op: Op::Store, rd: 1, ra: 0, b: F::from_u64(addr) });
+    };
+    for (k, val) in [100u64, 120, 3, 1, 0, 0, 0, 1, 0, 3, 0].iter().enumerate() {
+        st(&mut v, 200 + k as u64, *val);
+    }
+    v.push(Instr { op: Op::Load, rd: 3, ra: 0, b: F::from_u64(201) });
+    v.push(Instr { op: Op::Faddi, rd: 2, ra: 0, b: F::from_u64(200) });
+    v.push(Instr { op: Op::Reduce, rd: 0, ra: 2, b: F::ZERO });
+    v.push(Instr { op: Op::Faddi, rd: 7, ra: 0, b: F::from_u64(64) });
+    v.push(Instr { op: Op::Poseidon2, rd: 0, ra: 7, b: F::ZERO });
+    for _ in 0..4 {
+        v.push(Instr { op: Op::Public, rd: 0, ra: 0, b: F::ZERO });
+    }
+    v.push(Instr { op: Op::Halt, rd: 0, ra: 0, b: F::ZERO });
+    Program { instrs: v, checkpoints: vec![] }
+}
+
 /// The main columns a table range-checks: the single-column fields of its `RANGE8` lookups.
 #[allow(dead_code)]
 pub fn range_checked_columns(interactions: &[p3_lookup::SymbolicInteraction<recursion::isa::F>]) -> Vec<usize> {
