@@ -179,8 +179,8 @@ pub fn poseidon2_rows(t: usize, rows: &[u64], width: usize, n: usize, k: &[u64],
 /// out[t] = compress(prev[2t], prev[2t+1]) for t < next_len (digests are 4 u64 each)
 pub fn poseidon2_compress(t: usize, prev: &[u64], next_len: usize, k: &[u64], out: Cells<'_>) {
     if t >= next_len { return; }
-    let a: [u64; 4] = prev[8 * t..8 * t + 4].try_into().unwrap();
-    let b: [u64; 4] = prev[8 * t + 4..8 * t + 8].try_into().unwrap();
+    let a: [u64; 4] = [prev[8 * t], prev[8 * t + 1], prev[8 * t + 2], prev[8 * t + 3]];
+    let b: [u64; 4] = [prev[8 * t + 4], prev[8 * t + 5], prev[8 * t + 6], prev[8 * t + 7]];
     out.set4(4 * t, &compress(&a, &b, k));
 }
 
@@ -188,8 +188,8 @@ pub fn poseidon2_compress(t: usize, prev: &[u64], next_len: usize, k: &[u64], ou
 /// r = hash(row t) if t < n_rows else zero digest; out[t] = compress(d, r).
 pub fn poseidon2_inject(t: usize, prev: &[u64], raw_next: usize, rows: &[u64], width: usize, n_rows: usize, k: &[u64], out: Cells<'_>) {
     if t >= raw_next { return; }
-    let a: [u64; 4] = prev[8 * t..8 * t + 4].try_into().unwrap();
-    let b: [u64; 4] = prev[8 * t + 4..8 * t + 8].try_into().unwrap();
+    let a: [u64; 4] = [prev[8 * t], prev[8 * t + 1], prev[8 * t + 2], prev[8 * t + 3]];
+    let b: [u64; 4] = [prev[8 * t + 4], prev[8 * t + 5], prev[8 * t + 6], prev[8 * t + 7]];
     let d = compress(&a, &b, k);
     let r = if t < n_rows { hash_row(&rows[t * width..(t + 1) * width], k) } else { [0u64; 4] };
     out.set4(4 * t, &compress(&d, &r, k));
