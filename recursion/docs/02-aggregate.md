@@ -67,6 +67,41 @@ key, not the program. `LOOP_OVERHEAD` does not move either. The fullnode re-vend
 re-pins `aggregate_program_digest` at the chain-16 cut; no live chain carries an aggregation
 section, so nothing live moves. **The production proof batch must use this program.**
 
+## ZKQ-5: the self-verifier's binding against the inner aggregate's (decided 2026-09-28)
+
+The finding: `rv32r` hints its own eight binding words `B_out` and absorbs them into
+`[rvm_vk ‖ 1 ‖ B_out ‖ 4]`, but nothing in the program ties `B_out` to the binding `B_in` the
+inner aggregate absorbed. Asked: must the program assert `B_out == B_in`?
+
+**Decision: no in-program equality; the tie is the verifier's recompute, and that is a rule.**
+
+- The program *cannot* see `B_in`. The inner proof's four public values are its interface digest
+  `D_in = H(vk_in ‖ N ‖ B_in ‖ 34·N)`; `B_in` exists inside the self-verifier only as a
+  preimage word of a Poseidon2 digest. Asserting equality means hinting the whole inner preimage
+  (`13 + 34·N` words), re-sponging it to `D_in` in-program and comparing — a variable-length
+  interface for what is today a fixed four-word one, and a second copy of the `rv32n` phase-8
+  schedule inside `rv32r`. Not small, and not needed:
+- The chain never takes `D_in` on a prover's word. `verify_aggregate`'s pattern (binding check,
+  then digest recompute, then `Machine::verify`) applied to a tree recomputes every level from
+  the covered bundles' public values and the chain's *one* `B` (the transaction's
+  `H("rand-aggregate-bind-1", chain_id ‖ aggregator ‖ nonce)`): `D_in' = H(vk_in ‖ N ‖ B ‖ pvs)`,
+  then `D_out' = H(rvm_vk ‖ 1 ‖ B ‖ D_in')`, compared with the outer proof's public values.
+  Poseidon2's collision resistance then forces `B_out = B` and `B_in = B` — so `B_out = B_in` —
+  exactly as the one-level `BindingMismatch`/`DigestMismatch` pair forces it for `rv32n`. A
+  re-wrapped victim aggregate (inner proved under the victim's `B_v`, outer under the thief's `B`)
+  fails at `D_in' ≠ D_in`.
+- A verifier that accepted `D_in` as opaque would be broken with or without the equality: it
+  would accept an outer proof over *any* inner statement. So the load-bearing rule is the
+  recompute, and the in-program equality would add nothing a correct verifier does not have.
+
+**The rule for whoever registers a tree** (no chain does today — the self-verifier ships as the
+single-proof form, no fullnode code verifies an `rv32r` proof, and no genesis pins its digest):
+a tree aggregate is verified by recomputing each level's interface digest bottom-up from the
+covered bundles and the chain's own binding, the same `B` at every level; never by comparing
+only the root's words. If a future design needs an outer proof whose inner digest the chain
+cannot recompute (an inner proof over data the chain does not hold), revisit this: that design
+must open `D_in` in-program and assert `B_in == B_out`.
+
 ## The N-economics, measured (test profile)
 
 The shipped program (`Checkpoints::Off`, liveness and precompiles on) over the fixture shape;
