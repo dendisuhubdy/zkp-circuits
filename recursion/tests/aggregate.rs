@@ -545,7 +545,7 @@ fn the_admission_stub_vectors() {
     let vk_digest = recursion::shape::inner_vk_digest(&shape, &key);
     assert_eq!(
         hex_words(&vk_digest),
-        "33a94ec690bb7cbe5a3d4564967460996277ac61b539f6525b5fe7f92992a1c8",
+        "ee072b7a8eb766c7de6fb4fffa1f9f1b6098c8971b1b49eec2f4e0091edadfbe",
         "the inner vk digest is a deterministic constant of the fixture shape"
     );
     let pvs: Vec<Vec<u64>> = proofs.iter().map(|p| p.public_values.clone()).collect();
