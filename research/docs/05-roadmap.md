@@ -272,6 +272,20 @@ and passes when the rule lands.
 5. **ISA-4 / ISA-5 — the decoder's two tolerances** (`docs/01-isa.md`, "Deliberate deviations"):
    `JALR` clears bit 0 of its target and requires `funct3 = 0`. Each changes what the in-circuit
    decoder accepts, so it is a program-table change and rides the cut.
+6. **INT-2 / GV-1 — blind every LogUp terminal; floor every table at `2^7`.** *Landed as
+   constraint set 7 (branch `feat/cs7-logup-blind`).* Each table's published LogUp terminal was a
+   checkable function of its trace (a call's private words, a bundle's dummy slots —
+   `tests/logup_blind.rs` replays the challenges and predicts them exactly on the old tree). Every
+   instance now carries five columns after its own (`tables::blind`, appended by `machine::Chip`):
+   a two-coordinate value sent and one received on a new `BLIND` bus, first row only (a `FIRST`
+   selector column is the multiplicity), the honest
+   prover cycling fresh values through the batch so each terminal moves by a uniform element of
+   `F_{p²}` while their sum stays zero. The verifier's floor on every declared table height is now
+   `MIN_PRIVATE_TABLE_LOG_HEIGHT` (program, input and public `MIN_LOG_HEIGHT` 7; keccak and sha256
+   at least 7 when present), because a table's running-sum columns are opened like its main
+   columns. `docs/03-privacy.md`, "LogUp terminals are blinded", has the argument; the chain side
+   derives a call's program height from `program_log_height` (floored), and a deploy's pc window
+   has to cover the floored table (PCW-FLOOR).
 
 ## Relationship to `../../fullnode`
 

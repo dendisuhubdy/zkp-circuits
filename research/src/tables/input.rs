@@ -56,7 +56,10 @@ pub mod col {
 use col::*;
 
 pub const MIN_HEIGHT: usize = 4;
-pub const MIN_LOG_HEIGHT: u8 = 2; // 1 << 2 == MIN_HEIGHT
+/// The smallest input-table log-height a proof may declare — constraint set 7 (audit INT-2):
+/// `super::MIN_PRIVATE_TABLE_LOG_HEIGHT`, the prover's floor since COV-2 made the verifier's too
+/// (`machine::check_declared_heights`). Was `2` (`1 << 2 == MIN_HEIGHT`) through constraint set 6.
+pub const MIN_LOG_HEIGHT: u8 = super::MIN_PRIVATE_TABLE_LOG_HEIGHT;
 /// Ceiling on the declared (proof-carried) input-table log-height — 2^20 rows is a million
 /// private-input words, comfortably past any guest this crate runs; mirrors
 /// `tables::program::MAX_LOG_HEIGHT`'s role exactly, one size smaller since private inputs
@@ -71,8 +74,9 @@ pub const MAX_LOG_HEIGHT: u8 = 20;
 /// the private tape, and below `num_queries + 2` rows the hiding PCS's interleaved random rows
 /// are outnumbered by the points a proof opens the table at, which hands the verifier the words
 /// themselves (audit COV-2 / INT-6 — every call with at most 30 private words was fully
-/// solvable, at most 62 by lattice reduction). `MIN_LOG_HEIGHT` stays 2: it is the *verifier's*
-/// floor, and a proof made before this floor declared 3 and must keep verifying.
+/// solvable, at most 62 by lattice reduction). `MIN_LOG_HEIGHT` stayed 2 through constraint set 6
+/// so a proof made before the floor (declaring 3) kept verifying; constraint set 7 is a new chain
+/// and raises it to this floor.
 ///
 /// Every chain-pinned input height is untouched: the hidden-asset bundle's 1 204 words already
 /// declare 11, far above the floor.

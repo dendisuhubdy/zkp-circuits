@@ -756,7 +756,11 @@ fn alu_max_constraint_degree_is_pinned() {
             rand_zkvm::tables::public::MIN_LOG_HEIGHT,
         );
         assert_eq!(common.lookups.len(), 11);
-        assert_eq!(common.lookups[9].len(), 7, "sha256 packed lookup groups");
+        // Constraint set 7: the LogUp blind's `BLIND` send/receive pair is one more group (a bus
+        // of its own, so it folds with nothing else) — 20 interactions, 8 groups (was 18, 7). The
+        // degrees above did not move: the blind's count is a degree-1 column and its messages are
+        // degree 1, so its fraction pin is degree 2, under every table's own maximum.
+        assert_eq!(common.lookups[9].len(), 8, "sha256 packed lookup groups");
     }
 }
 
@@ -1112,9 +1116,13 @@ fn public_table_rows_are_committed_words_with_their_read_counts() {
     assert_eq!(t.values[3 * w + public::col::IS_REAL], F::ZERO);
     assert_eq!(t.values[3 * w + public::col::WORD], F::ZERO);
     assert_eq!(t.values[3 * w + public::col::MULT_READ], F::ZERO);
-    // Height rule: declare n+1, floor at MIN_HEIGHT — tables::input's rule exactly.
+    // Height rule: declare n+1, floor at MIN_HEIGHT — tables::input's rule exactly — and then,
+    // constraint set 7, at the private-data floor (128 rows): every segment up to 127 words
+    // declares 7 (was 2 for 0..=3, 3 for 4..=7, …).
     assert_eq!(public::public_log_height(0), public::MIN_LOG_HEIGHT);
-    assert_eq!(public::public_log_height(3), 2);
-    assert_eq!(public::public_log_height(4), 3);
+    assert_eq!(public::MIN_LOG_HEIGHT, rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT);
+    assert_eq!(public::public_log_height(3), 7);
+    assert_eq!(public::public_log_height(127), 7);
+    assert_eq!(public::public_log_height(128), 8);
     assert_eq!(public::public_log_height(1000), 10);
 }

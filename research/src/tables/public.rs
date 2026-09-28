@@ -60,7 +60,10 @@ pub mod col {
 use col::*;
 
 pub const MIN_HEIGHT: usize = 4;
-pub const MIN_LOG_HEIGHT: u8 = 2; // 1 << 2 == MIN_HEIGHT
+/// The smallest public-table log-height a proof may declare — constraint set 7 (audit INT-2):
+/// `super::MIN_PRIVATE_TABLE_LOG_HEIGHT` (`public_log_height` floors at it). Was `2`
+/// (`1 << 2 == MIN_HEIGHT`) through constraint set 6.
+pub const MIN_LOG_HEIGHT: u8 = super::MIN_PRIVATE_TABLE_LOG_HEIGHT;
 /// Ceiling on the declared (proof-carried) public-table log-height — `tables::input::
 /// MAX_LOG_HEIGHT`'s role exactly, at the same size. This is only the table-shape ceiling, not
 /// the effective cap on `n_pub`: `cpu`'s shared absorb machinery range-checks `HASH_LEFT` (the
@@ -70,9 +73,12 @@ pub const MIN_LOG_HEIGHT: u8 = 2; // 1 << 2 == MIN_HEIGHT
 /// constant itself).
 pub const MAX_LOG_HEIGHT: u8 = 20;
 
-/// Same "+1 padding row, floor at MIN_HEIGHT" rule as `tables::input::input_log_height`.
+/// Same "+1 padding row, floor at MIN_HEIGHT" rule as `tables::input::input_log_height` — and,
+/// constraint set 7, the same `super::MIN_PRIVATE_TABLE_LOG_HEIGHT` floor after it, which
+/// `machine::check_declared_heights` requires of every declared table (the words are public, but
+/// `MULT_READ` — how often the guest read each — is not, nor is the table's LogUp running sum).
 pub fn public_log_height(n: usize) -> u8 {
-    super::pad_height(n + 1, MIN_HEIGHT).trailing_zeros() as u8
+    (super::pad_height(n + 1, MIN_HEIGHT).trailing_zeros() as u8).max(super::MIN_PRIVATE_TABLE_LOG_HEIGHT)
 }
 
 #[derive(Clone, Copy, Debug, Default)]

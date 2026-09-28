@@ -293,17 +293,101 @@ Prove time moves by the tables' extra rows, lost in the noise here too
 (~10–12 s either way). The live hidden-asset bundle is unaffected — its input table
 is 2 048 rows, it calls neither hash, and its program is large.
 
-**Still open: the program table.** Its `MULT` column is the guest's
-control flow, and a program of ≤ 63 words is a table of ≤ 64 rows — the
-same leak. It is not floored here because its height is not the prover's
-to choose: a chain compares a call proof's `program_log_height` with the
-one the deployed program record fixes (fullnode's executor, a validity
-rule at admission and at block apply), so a floored program table would be
-refused by every validator until the chain's rule changes. That is a
-consensus change and rides the next genesis cut. Until then, a guest whose
-control flow matters and whose program is short can pad its own program
-past 63 words (dead code after the halt is enough). Every production guest
-on the chain today is thousands of words long.
+**Closed in constraint set 7: the program table, and a verifier floor.**
+Through constraint set 6 the program table stayed unfloored: its `MULT`
+column is the guest's control flow, a program of ≤ 63 words is a table of
+≤ 64 rows, and its height was not the prover's to choose (a chain compares
+a call's `program_log_height` with the deployed record's), so flooring it
+had to wait for a genesis cut. Constraint set 7 is that cut, and it goes
+further: `tables::MIN_PRIVATE_TABLE_LOG_HEIGHT` is now the *verifier's*
+floor on every declared table — `program`, `input`, `public` and, when
+present, `keccak` and `sha256` (`check_declared_heights`; the three
+unconditional tables' `MIN_LOG_HEIGHT` constants are 7 now) — and the
+prover floors the program and public tables too (`program_log_height`,
+`public_log_height`). The reason for making it a verifier rule rather than
+a prover courtesy is the LogUp blind below: a table's permutation
+(running-sum) columns are opened exactly like its main columns, so a short
+table would hand back the per-row fractions whose sum the blind hides. A
+chain that pins a call's program height follows by deriving it from
+`program_log_height` (fullnode's `hardening_v6` already takes
+`max(record, 7)`). One consequence for the chain side: a program's padding
+rows carry `pc = last_pc + 4k` up to row 127, so a deploy's pc window must
+be measured over the floored table (the review's PCW-FLOOR).
+
+## LogUp terminals are blinded (constraint set 7, INT-2 / GV-1)
+
+A batch proof publishes one LogUp terminal per table
+(`BatchProof::lookup_terminals`): the sum, over the table's rows, of every
+bus message's `multiplicity / (bus_prefix − fingerprint)`. The verifier
+only checks that the terminals sum to zero, but it — and everyone else —
+can do more: the lookup challenges are Fiat–Shamir draws from public data,
+so an observer can replay them, build the trace a *candidate* witness
+would produce and compute the terminals it would publish. Through
+constraint set 6 the true witness's prediction matched the published
+terminals exactly. That made each terminal an unsalted, checkable
+commitment to its table: the input table's to a call's private words
+(whatever `H_IN`'s salt hides — low-entropy inputs fall to enumeration),
+the program table's to how often each instruction ran (on a bundle, which
+input slots are dummies: the guest skips a dummy's Merkle walk), every
+other table's to its value histogram. `tests/logup_blind.rs` is that
+observer, written with `p3-batch-stark`'s own `BatchTranscript` and
+`p3-lookup`'s own `LogUpGadget`; on the constraint-set-6 tree it reads:
+
+```
+balance_check: 9 terminals; equal to the true witness's prediction at instances [0, 1, 2, 3, 4, 5, 6, 7, 8],
+  to the other candidate's at [0, 5, 8]; the two candidates' predictions differ at [1, 2, 3, 4, 6, 7]
+bundle, two real inputs vs one real and a dummy: 9 terminals; equal to the true witness's prediction at
+  instances [0, 1, 2, 3, 4, 5, 6, 7, 8], to the other candidate's at [8]; the two candidates' predictions
+  differ at [0, 1, 2, 3, 4, 5, 6, 7]
+```
+
+— two calls of `balance_check` with private inputs `[400, 250, 300, 75]`
+and `[1000, 0, 0, 0]` (same output, same shape, indistinguishable in the
+public values: `tests/zk.rs`) told apart by six of nine terminals, and a
+2-in/2-out bundle with two real inputs told apart from one with a dummy
+by eight, the program table's first among them.
+
+**The blind** (`tables::blind`). Every instance carries five more columns
+after its own — two base-field coordinates of a value it *sends* on a
+dedicated `BLIND` bus, two of a value it *receives*, and `FIRST`, the
+multiplicity: `1` on the first row, `0` below, so both messages exist on
+the first row only; every other row is pinned to zero. (`FIRST` is a
+column, not the builder's `is_first_row` selector, because `p3-batch-stark`
+0.7 builds proofs its own verifier refuses with that selector as an
+interaction count — `OodEvaluationMismatch` on every honest proof.) The
+honest prover orders the batch's instances in a cycle (`chips()` order),
+draws a fresh `r_i` per instance from OS entropy, and has instance `i`
+send `r_i` and receive `r_{i−1}`. Each terminal shifts by
+`s_i − s_{i−1}` with `s_i = 1/(P − u(r_i))` (`P` the bus prefix,
+`u(r) = r₀·β + r₁` the message's fingerprint), and the shifts cancel around
+the cycle, so the checked sum is unchanged.
+
+- *Soundness* is unchanged: `BLIND` is one more global bus with its own
+  prefix, its values are main-trace columns committed before `(α, β)` are
+  drawn, so an unbalanced blind is refused like any unbalanced bus
+  (`tests/cheating.rs::mismatched_blinds_are_refused`). Balancing it some
+  other way than the cycle is allowed and only forgoes the prover's own
+  privacy (`any_balanced_blinds_verify`).
+- *Hiding*: `u(r_i)` is uniform on `F_{p²}` when `(r₀, r₁)` is uniform on
+  `F_p²` and `β ∉ F_p`, so each `s_i` is uniform and the vector of shifts
+  is uniform on the sum-zero hyperplane; the published terminals are then
+  uniform on that hyperplane whatever the witness was. **The blind spans
+  the challenge field on purpose**: a single base-field coordinate (~2^64
+  values) would confine `s_i` to a `p`-element curve in `F_{p²}`, and an
+  observer testing a candidate would get one `F_p`-equation per instance
+  in a single unknown — enough to reject every false candidate at nine or
+  more instances. `tables::blind`'s module comment has both arguments.
+- *The rest of the proof*: the blind covers the terminals; the running-sum
+  columns that lead up to them are hiding-PCS commitments, opened at no
+  more points than a `2^7`-row table has random rows — hence the verifier
+  floor above.
+
+After the blind the same observer finds nothing: no published terminal
+equals either candidate's prediction, the differences sum to zero over the
+batch (the prediction is otherwise exact), and a re-proof of the same
+witness is shifted differently at every instance. Cost: five columns per
+table (55 at the batch's eleven instances), two interactions each, no
+change to any table's constraint degree or quotient chunk count.
 
 ## Private inputs are bound to `H_IN` (M4.1)
 
@@ -660,8 +744,9 @@ refused by `build_traces`, not silently truncated.
 | `keccak_log_height` (M4.2) | public — an upper bound on the number of `KECCAK` permutations, rounded up to a power of two, exactly as `program_log_height` is for program size: above zero it reveals the count to within a factor of two, and since the private-data floor (COV-2 / INT-6, above) `7` covers every count from 1 to 4 alike. `0` is exact and means "this program made no `KECCAK` call" (M4.2, Task 6 — the proof then carries no keccak table at all, which is what makes it ~1.91 MB smaller at the production profile, ~705 KB at the 27 queries M4.2 measured); the same class of structural, program-shaped leak `program_log_height` is |
 | `sha256_log_height` (M4.4) | public — the same thing for `SHA256` compressions (64-row blocks, so `7` covers 1–2 — floored at 128 rows since COV-2 / INT-6, above — `8` covers 3–4, …). `0` is exact and means "this program made no `SHA256` call", and is what lets the proof drop the 466-column sha256 table: ~92 KB at `FriProfile::Test`, ~400 KB at the production profile. Independent of `keccak_log_height`, so the pair says which of the two hash syscalls the program uses |
 | Whether a call hashed at all (HCS-3, the 2026-09-27 review) | **public by default** — the `0` rows above: a header declaring `keccak_log_height = 0` or `sha256_log_height = 0` says the call never used that precompile, and any non-zero value says it did. A prover can opt out with `ProveOptions::pad_absent_hash_tables` (`machine.rs`; default **off**): an absent table is then declared all-padding at the floor, `7`, which is exactly what a call making 1–4 permutations or 1–2 compressions declares, and the unchanged verifier accepts it (idle blocks send nothing on any bus; `tests/privacy_floor.rs::padded_hash_tables_verify_and_hide_presence`). It hides presence at the floor only — larger counts still show to within a factor of two, and so can `mem_log_height` — and only among provers who all use it. The price is proof bytes: 1.31 MB → 3.62 MB at the production profile for a tier-10 call (proving 6.3 s → 7.2 s), which fits chain 15's `max_proof_bytes` (8 MiB) but not the 2 MiB default. Pinning or bucketing the heights for every proof is a verifier rule, so it belongs to a chain cut, not to this option |
-| `public_log_height` (CS6) | public — the `public` table's declared height, and the same class of coarse, structural leak `program_log_height`, `keccak_log_height` and `sha256_log_height` already are: it bounds `n_pub` to within a factor of two. It has no exact `0` the way the two hash heights do, because the table is **mandatory** — its minimum, `2`, covers every `n_pub` in `0..=3` alike, so it says "at most three public words", not "no public segment". It is also the least interesting leak in this table: the segment's *words* are published with the transaction anyway, which is the entire point of it |
+| `public_log_height` (CS6) | public — the `public` table's declared height, and the same class of coarse, structural leak `program_log_height`, `keccak_log_height` and `sha256_log_height` already are: it bounds `n_pub` to within a factor of two. It has no exact `0` the way the two hash heights do, because the table is **mandatory** — its minimum (`7` since constraint set 7, `2` before) covers every `n_pub` in `0..=126` alike, so it says "at most 126 public words", not "no public segment". It is also the least interesting leak in this table: the segment's *words* are published with the transaction anyway, which is the entire point of it |
 | `mem_log_height` (M4.2) | public — the memory table's declared height, floored at the tier's own `2^(ℓ+2)`. Constant, and so uninformative, for every guest whose memory traffic fits what the tier already budgets; above that it bounds the access count to within a factor of two |
+| Per-table LogUp terminals (`lookup_terminals`, INT-2 / GV-1) | **hidden since constraint set 7** — each is shifted by a fresh uniform element of the challenge field (the LogUp blind, above), so only their sum, which is zero, is public. Through constraint set 6 each was a checkable, unsalted function of its table: the input words, the per-instruction fetch counts (a bundle's dummy slots), every value histogram |
 | Eight output words | public |
 | Private inputs (`READ_INPUT` values) | hidden — witness only; bound (M4.1) to a salted, hiding commitment `H_IN = pv::IN0..IN7` so repeated reads of the same index agree and out-of-range reads are unsatisfiable, but `H_IN` itself opens nothing without the salt (never published) |
 | Public inputs (`READ_PUBLIC` values, CS6) | **published by construction — that is their purpose.** The segment is bound to `H_PUB = pv::PUB0..7`, which is *unsalted*, so a verifier holding the words recomputes it natively and compares (`Machine::verify_public`). That checkability is exactly what a salt would destroy, so there is no version of this that both binds publicly and hides. A guest that wants a value hidden keeps it in the private input as before; the two spaces are independent and a guest may use either, both, or neither |

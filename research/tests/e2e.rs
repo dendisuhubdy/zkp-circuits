@@ -336,8 +336,9 @@ fn a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile()
     let free = m.prove_traces(&p, &t, Tier(10));
     m.verify(&p.digest(), &free).unwrap();
 
-    t.sha256 = Some(sha256::sha256_trace(&[], sha256::MIN_LOG_HEIGHT));
-    t.sha256_log_height = sha256::MIN_LOG_HEIGHT;
+    // Constraint set 7: a declared table is at least the private-data floor, two 64-row blocks.
+    t.sha256 = Some(sha256::sha256_trace(&[], rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT));
+    t.sha256_log_height = rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT;
     let carried = m.prove_traces(&p, &t, Tier(10));
     m.verify(&p.digest(), &carried).unwrap();
 
@@ -367,8 +368,9 @@ fn measure_the_sha256_table_cost_at_the_production_profile() {
     let free = m.prove_traces(&p, &t, Tier(10));
     let free_prove = t0.elapsed();
     m.verify(&p.digest(), &free).unwrap();
-    t.sha256 = Some(sha256::sha256_trace(&[], sha256::MIN_LOG_HEIGHT));
-    t.sha256_log_height = sha256::MIN_LOG_HEIGHT;
+    // Constraint set 7: a declared table is at least the private-data floor, two 64-row blocks.
+    t.sha256 = Some(sha256::sha256_trace(&[], rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT));
+    t.sha256_log_height = rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT;
     let t1 = std::time::Instant::now();
     let carried = m.prove_traces(&p, &t, Tier(10));
     let carried_prove = t1.elapsed();

@@ -384,10 +384,20 @@ impl Tier {
 #[derive(Clone)]
 pub enum Chip { Program(ProgramAir), Cpu(CpuAir), Memory(MemoryAir), Alu(AluAir), Range(RangeAir), Nibble(NibbleAir), Poseidon2(Poseidon2Air, usize), Input(crate::tables::input::InputAir), Keccak(KeccakAir, usize), Sha256(Sha256Air, usize), Public(crate::tables::public::PublicAir) }
 
-impl BaseAir<Val> for Chip {
-    fn width(&self) -> usize {
+impl Chip {
+    /// The table's own width — its `col::WIDTH` — without constraint set 7's blind columns. What a
+    /// `Traces` matrix is; `BaseAir::width` (and so the committed trace) is this plus
+    /// `tables::blind::col::WIDTH`.
+    pub fn table_width(&self) -> usize {
         match self { Chip::Program(a) => BaseAir::<Val>::width(a), Chip::Cpu(a) => BaseAir::<Val>::width(a), Chip::Memory(a) => BaseAir::<Val>::width(a), Chip::Alu(a) => BaseAir::<Val>::width(a), Chip::Range(a) => BaseAir::<Val>::width(a), Chip::Nibble(a) => BaseAir::<Val>::width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::width(a), Chip::Input(a) => BaseAir::<Val>::width(a), Chip::Keccak(a, _) => BaseAir::<Val>::width(a), Chip::Sha256(a, _) => BaseAir::<Val>::width(a), Chip::Public(a) => BaseAir::<Val>::width(a) }
     }
+}
+
+impl BaseAir<Val> for Chip {
+    /// Constraint set 7: every table carries the LogUp blind's five columns after its own
+    /// (`tables::blind`). They are added here, once, rather than in each table's `col` list, so no
+    /// table's layout moves and the blind is one piece of code for all eleven.
+    fn width(&self) -> usize { self.table_width() + crate::tables::blind::col::WIDTH }
     fn preprocessed_width(&self) -> usize {
         match self { Chip::Program(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Range(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Nibble(a) => BaseAir::<Val>::preprocessed_width(a), Chip::Poseidon2(a, _) => BaseAir::<Val>::preprocessed_width(a), Chip::Keccak(a, _) => BaseAir::<Val>::preprocessed_width(a), Chip::Sha256(a, _) => BaseAir::<Val>::preprocessed_width(a), _ => 0 }
     }
@@ -418,6 +428,8 @@ where
 {
     fn eval(&self, b: &mut AB) {
         match self { Chip::Program(a) => a.eval(b), Chip::Cpu(a) => a.eval(b), Chip::Memory(a) => a.eval(b), Chip::Alu(a) => a.eval(b), Chip::Range(a) => a.eval(b), Chip::Nibble(a) => a.eval(b), Chip::Poseidon2(a, _) => a.eval(b), Chip::Input(a) => a.eval(b), Chip::Keccak(a, _) => a.eval(b), Chip::Sha256(a, _) => a.eval(b), Chip::Public(a) => a.eval(b) }
+        // Constraint set 7: the blind, on the columns after the table's own.
+        crate::tables::blind::eval(b, self.table_width());
     }
 }
 
@@ -759,14 +771,22 @@ pub fn check_declared_heights(
     // `log_ext_degrees` after them — calls `Tier::cpu_height`/`alu_height`/`min_mem_log_height`,
     // which shift by `self.0` and panic in debug builds for a large enough tier (`1usize << 99`).
     if !TIERS.contains(&tier.0) { return Err(VerifyError::Tier); }
+    // Constraint set 7 (audit INT-2): every declared table is at least `2^7` rows —
+    // `tables::MIN_PRIVATE_TABLE_LOG_HEIGHT`, raised from a prover-side floor on three tables to
+    // the verifier's floor on all five. Below it a table's committed columns — its permutation
+    // (running-sum) columns included, which carry the terminal the LogUp blind hides — are opened at
+    // more points than the hiding PCS has random rows (`tables::blind`'s module comment). Each
+    // range check below starts at `max(table floor, floor)`, so a short table earns its own
+    // table's variant, exactly as a too-tall one does.
+    let floor = crate::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT;
     // M3.4 (fix): `program_log_height` is untrusted the same way — reject anything outside the
     // sane range before it sizes a table (`1usize << log_height` inside
     // `log_ext_degrees`/`verifier_key`) and panics on an absurd shift.
-    if !(program::MIN_LOG_HEIGHT..=program::MAX_LOG_HEIGHT).contains(&program_log_height) {
+    if !(program::MIN_LOG_HEIGHT.max(floor)..=program::MAX_LOG_HEIGHT).contains(&program_log_height) {
         return Err(VerifyError::ProgramHeight);
     }
     // M4.1: the input table's height, same treatment.
-    if !(crate::tables::input::MIN_LOG_HEIGHT..=crate::tables::input::MAX_LOG_HEIGHT).contains(&input_log_height) {
+    if !(crate::tables::input::MIN_LOG_HEIGHT.max(floor)..=crate::tables::input::MAX_LOG_HEIGHT).contains(&input_log_height) {
         return Err(VerifyError::InputHeight);
     }
     // M4.2 (Task 6): `keccak_log_height == 0` declares *no* keccak table — the batch has eight
@@ -782,7 +802,7 @@ pub fn check_declared_heights(
         // is the cap that keeps a declared `u8` from sizing a preprocessed trace the verifier
         // would spend minutes building, which the tier bound below does *not* do on its own (at
         // tier 20 it admits `klh = 25`, a 2^25-row, 99-column preprocessed keccak trace).
-        if !(crate::tables::keccak::MIN_LOG_HEIGHT..=crate::tables::keccak::MAX_LOG_HEIGHT).contains(&keccak_log_height) {
+        if !(crate::tables::keccak::MIN_LOG_HEIGHT.max(floor)..=crate::tables::keccak::MAX_LOG_HEIGHT).contains(&keccak_log_height) {
             return Err(VerifyError::KeccakHeight);
         }
         // M4.2 (controller ruling 2): and then the tier, which is already known good —
@@ -799,7 +819,7 @@ pub fn check_declared_heights(
     // sha256_row_without_a_sha256_table_is_rejected`), any other value gets both ceilings in the
     // same order.
     if sha256_log_height != 0 {
-        if !(crate::tables::sha256::MIN_LOG_HEIGHT..=crate::tables::sha256::MAX_LOG_HEIGHT).contains(&sha256_log_height) {
+        if !(crate::tables::sha256::MIN_LOG_HEIGHT.max(floor)..=crate::tables::sha256::MAX_LOG_HEIGHT).contains(&sha256_log_height) {
             return Err(VerifyError::Sha256Height);
         }
         // `Tier::max_sha256_log_height` is `min(t + 6, MAX_LOG_HEIGHT)` — it folds the flat cap in,
@@ -811,7 +831,7 @@ pub fn check_declared_heights(
     }
     // The public table is mandatory — unlike the two hash chips there is no "0 means absent"
     // value — so this is a plain range check, `tables::input`'s exactly.
-    if !(crate::tables::public::MIN_LOG_HEIGHT..=crate::tables::public::MAX_LOG_HEIGHT).contains(&public_log_height) {
+    if !(crate::tables::public::MIN_LOG_HEIGHT.max(floor)..=crate::tables::public::MAX_LOG_HEIGHT).contains(&public_log_height) {
         return Err(VerifyError::PublicHeight);
     }
     // M4.2 (controller ruling 1): `mem_log_height` is untrusted the same way. The floor is the
@@ -1416,13 +1436,30 @@ impl Machine {
     /// and `traces` already carries everything the witness needs, `hc` included via
     /// `public_values`) — kept in the signature for symmetry with `prove`/`prove_on`, which
     /// still need the program to execute it and build `traces` in the first place.
-    pub fn prove_traces(&self, _program: &Program, traces: &Traces, tier: Tier) -> Proof {
+    ///
+    /// Constraint set 7: draws fresh LogUp blinds (`tables::blind::fresh`) and appends them to the
+    /// traces — `Traces` holds each table at its own width, the committed trace is five columns
+    /// wider (`Chip`'s `BaseAir::width`). The widening copies each trace once; that is a sixteenth
+    /// of the low-degree extension `prove_batch` then builds from it, so it is not worth an owning
+    /// variant.
+    pub fn prove_traces(&self, program: &Program, traces: &Traces, tier: Tier) -> Proof {
+        let blinds = crate::tables::blind::fresh(traces.as_slice().len());
+        self.prove_traces_with_blinds(program, traces, tier, &blinds)
+    }
+
+    /// [`Self::prove_traces`] with the blinds given instead of drawn — one per instance, in
+    /// `chips()` order. A test hook: an honest caller wants [`Self::prove_traces`]' fresh ones, and
+    /// blinds that do not balance (`tests/cheating.rs`) are refused like any other unbalanced bus.
+    #[doc(hidden)]
+    pub fn prove_traces_with_blinds(&self, _program: &Program, traces: &Traces, tier: Tier, blinds: &[crate::tables::blind::Blind]) -> Proof {
         let airs = chips(tier, traces.keccak_log_height, traces.sha256_log_height);
-        let mats = traces.as_slice();
         // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
         // traces, so the two must agree — a mismatch would `zip` short and silently prove a
         // different batch than the degree bits describe.
-        assert_eq!(airs.len(), mats.len(), "one trace per chip: the declared keccak/sha256 heights and Traces::keccak/sha256 disagree");
+        assert_eq!(airs.len(), traces.as_slice().len(), "one trace per chip: the declared keccak/sha256 heights and Traces::keccak/sha256 disagree");
+        assert_eq!(airs.len(), blinds.len(), "one blind per instance");
+        let wide: Vec<RowMajorMatrix<Val>> = traces.as_slice().iter().zip(blinds).map(|(m, b)| crate::tables::blind::widen(m, b)).collect();
+        let mats: Vec<&RowMajorMatrix<Val>> = wide.iter().collect();
         let instances: Vec<StarkInstance<'_, Config, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
         }).collect();
@@ -1527,11 +1564,14 @@ impl Machine {
         };
         let traces = build_traces_salted(program, inputs, public, salt, &exec, tier)?;
         let airs = chips(tier, traces.keccak_log_height, traces.sha256_log_height);
-        let mats = traces.as_slice();
         // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
         // traces, so the two must agree — a mismatch would `zip` short and silently prove a
         // different batch than the degree bits describe.
-        assert_eq!(airs.len(), mats.len(), "one trace per chip: the declared keccak/sha256 heights and Traces::keccak/sha256 disagree");
+        assert_eq!(airs.len(), traces.as_slice().len(), "one trace per chip: the declared keccak/sha256 heights and Traces::keccak/sha256 disagree");
+        // Constraint set 7: fresh blinds, appended — `prove_traces`' step, duplicated with it.
+        let blinds = crate::tables::blind::fresh(airs.len());
+        let wide: Vec<RowMajorMatrix<Val>> = traces.as_slice().iter().zip(&blinds).map(|(m, b)| crate::tables::blind::widen(m, b)).collect();
+        let mats: Vec<&RowMajorMatrix<Val>> = wide.iter().collect();
         let instances: Vec<StarkInstance<'_, SC, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
         }).collect();

@@ -201,7 +201,11 @@ pub const MESSAGE_LEN: usize = 1 + Decoded::NUM_FIELDS;
 /// The smallest program-table height ever built, regardless of how short the program is —
 /// matches the pre-M3.4 preprocessed builder's own floor.
 pub const MIN_HEIGHT: usize = 16;
-pub const MIN_LOG_HEIGHT: u8 = 4; // 1 << 4 == MIN_HEIGHT
+/// The smallest program-table log-height a proof may declare — constraint set 7 (audit INT-1 /
+/// INT-2): `super::MIN_PRIVATE_TABLE_LOG_HEIGHT`, 128 rows, above `MIN_HEIGHT`'s 16 (which stays the
+/// padding rule's own floor, `program_log_height` flooring again at this). Was `4` through
+/// constraint set 6.
+pub const MIN_LOG_HEIGHT: u8 = super::MIN_PRIVATE_TABLE_LOG_HEIGHT;
 /// Ceiling on the *declared* (proof-carried) program-table log-height (`Proof::
 /// program_log_height`) — `2^22` rows is a program of up to ~4M words, comfortably past
 /// anything this crate's guests or any conceivable RV32 program compiled for it need; a
@@ -236,8 +240,14 @@ pub const MAX_LOG_HEIGHT: u8 = 22;
 /// verifier's degree-bits check — the declared height *sizes* the table, it never lets a
 /// prover shrink, pad, or silently extend past the program the digest itself is bound to. See
 /// `docs/03-privacy.md`.
+///
+/// Constraint set 7 (audit INT-1 / INT-2): floored at `super::MIN_PRIVATE_TABLE_LOG_HEIGHT` (128
+/// rows), which `machine::check_declared_heights` now requires of every declared table. The
+/// program table's `MULT` column is how often each instruction ran — the guest's control flow — and
+/// at 16 to 64 rows the proof's openings recover it; the extra rows are ordinary padding. A chain
+/// that pins a call's program height derives it from this function, so it follows.
 pub fn program_log_height(len: usize) -> u8 {
-    super::pad_height(len + 1, MIN_HEIGHT).trailing_zeros() as u8
+    (super::pad_height(len + 1, MIN_HEIGHT).trailing_zeros() as u8).max(super::MIN_PRIVATE_TABLE_LOG_HEIGHT)
 }
 
 use col::*;
