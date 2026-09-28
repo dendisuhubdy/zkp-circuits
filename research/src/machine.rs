@@ -9,8 +9,7 @@ use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
 use p3_merkle_tree::MerkleTreeHidingMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_uni_stark::StarkConfig;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
+pub use crate::key_derivation_v2::SaltRng;
 
 pub type Val = Goldilocks;
 pub type Challenge = BinomialExtensionField<Val, 2>;
@@ -26,18 +25,22 @@ pub type Hash = PaddingFreeSponge<Perm, 8, 4, 4>;
 #[doc(hidden)]
 pub type Compress = TruncatedPermutation<Perm, 2, 4, 8>;
 type Packing = <Val as Field>::Packing;
-pub type ValMmcs = MerkleTreeHidingMmcs<Packing, Packing, Hash, Compress, StdRng, 2, 4, 4>;
+/// HCS-1 (constraint set 7): salted through [`SaltRng`] — `key_derivation_v2`'s stream for a verifier
+/// key, OS entropy for a proof.
+pub type ValMmcs = MerkleTreeHidingMmcs<Packing, Packing, Hash, Compress, SaltRng, 2, 4, 4>;
 type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
 pub type Challenger = DuplexChallenger<Val, Perm, 8, 4>;
 type Dft = Radix2DitParallel<Val>;
-pub type Pcs = HidingFriPcs<Val, Dft, ValMmcs, ChallengeMmcs, StdRng>;
+pub type Pcs = HidingFriPcs<Val, Dft, ValMmcs, ChallengeMmcs, SaltRng>;
 pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
 
 /// The seed the Poseidon2 round constants were once drawn from. The constants themselves are a
 /// committed table now (`poseidon2_constants`, audit finding ZKV-2 — a seeded `StdRng` is not
 /// stable across `rand` releases); this name remains the key `rand-zkvm-cuda`'s engines take
-/// (`constants::permutation(PERM_SEED)` reads the same table) and the salt seed of
-/// `val_mmcs_for_tests`.
+/// (`constants::permutation(PERM_SEED)` reads the same table). (It was also `val_mmcs_for_tests`'
+/// salt seed until HCS-1 took `StdRng` out of every deterministic salt stream; that accessor reads
+/// a `key_derivation_v2` label now.)
+#[cfg_attr(not(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda")), allow(dead_code))]
 pub(crate) const PERM_SEED: u64 = crate::poseidon2_constants::PERM_SEED; // "RandZK"
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +92,7 @@ pub fn permutation() -> Perm {
 #[doc(hidden)]
 pub fn val_mmcs_for_tests() -> ValMmcs {
     let perm = permutation();
-    ValMmcs::new(Hash::new(perm.clone()), Compress::new(perm), 2, StdRng::seed_from_u64(PERM_SEED))
+    ValMmcs::new(Hash::new(perm.clone()), Compress::new(perm), 2, SaltRng::key(b"tests/val-mmcs"))
 }
 
 /// One full Merkle authentication path per query, restored from a pruned multiproof — a test
@@ -144,7 +147,7 @@ pub fn restore_paths_for_tests(
 /// random codewords/quotient blinding. Kept private: callers pick a seeding strategy through
 /// `make_config` (fresh OS entropy, for proving) or `key_config` (deterministic, for a
 /// preprocessed commitment any verifier can recompute).
-fn build_config(profile: FriProfile, mmcs_rng: StdRng, pcs_rng: StdRng) -> Config {
+fn build_config(profile: FriProfile, mmcs_rng: SaltRng, pcs_rng: SaltRng) -> Config {
     let perm = permutation();
     let hash = Hash::new(perm.clone());
     let compress = Compress::new(perm);
@@ -160,8 +163,8 @@ fn generic_config<D, M>(
     profile: FriProfile,
     dft: D,
     val_mmcs: M,
-    pcs_rng: StdRng,
-) -> StarkConfig<HidingFriPcs<Val, D, M, ExtensionMmcs<Val, Challenge, M>, StdRng>, Challenge, Challenger>
+    pcs_rng: SaltRng,
+) -> StarkConfig<HidingFriPcs<Val, D, M, ExtensionMmcs<Val, Challenge, M>, SaltRng>, Challenge, Challenger>
 where
     D: p3_dft::TwoAdicSubgroupDft<Val>,
     M: p3_commit::Mmcs<Val, MultiProof: Sync, Error: Sync> + Clone,
@@ -186,11 +189,11 @@ where
 #[cfg(feature = "reference-backend")]
 mod reference_cfg {
     use super::*;
-    pub type Mmcs = rand_zkvm_cuda::merkle::mmcs::HidingMmcs<rand_zkvm_cuda::merkle::cpu::CpuHashEngine>;
+    pub type Mmcs = rand_zkvm_cuda::merkle::mmcs::HidingMmcs<rand_zkvm_cuda::merkle::cpu::CpuHashEngine, SaltRng>;
     pub type Dft = rand_zkvm_cuda::dft::Dft<rand_zkvm_cuda::ntt::cpu::CpuNttEngine>;
-    pub type Pcs = HidingFriPcs<Val, Dft, Mmcs, ExtensionMmcs<Val, Challenge, Mmcs>, StdRng>;
+    pub type Pcs = HidingFriPcs<Val, Dft, Mmcs, ExtensionMmcs<Val, Challenge, Mmcs>, SaltRng>;
     pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
-    pub fn config(profile: FriProfile, mmcs_rng: StdRng, pcs_rng: StdRng) -> Config {
+    pub fn config(profile: FriProfile, mmcs_rng: SaltRng, pcs_rng: SaltRng) -> Config {
         let engine = std::sync::Arc::new(rand_zkvm_cuda::merkle::cpu::CpuHashEngine::new(PERM_SEED));
         let mmcs = Mmcs::new(engine, PERM_SEED, 2, mmcs_rng);
         super::generic_config(profile, Dft::default(), mmcs, pcs_rng)
@@ -202,15 +205,15 @@ mod reference_cfg {
 #[cfg(any(feature = "cuda", feature = "mock-cuda"))]
 mod cuda_cfg {
     use super::*;
-    pub type Mmcs = rand_zkvm_cuda::merkle::mmcs::HidingMmcs<rand_zkvm_cuda::gpu::hash::CudaHashEngine>;
+    pub type Mmcs = rand_zkvm_cuda::merkle::mmcs::HidingMmcs<rand_zkvm_cuda::gpu::hash::CudaHashEngine, SaltRng>;
     pub type Dft = rand_zkvm_cuda::dft::Dft<rand_zkvm_cuda::gpu::ntt::CudaNttEngine>;
-    pub type Pcs = HidingFriPcs<Val, Dft, Mmcs, ExtensionMmcs<Val, Challenge, Mmcs>, StdRng>;
+    pub type Pcs = HidingFriPcs<Val, Dft, Mmcs, ExtensionMmcs<Val, Challenge, Mmcs>, SaltRng>;
     pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
     pub fn config(
         profile: FriProfile,
         gpu: std::sync::Arc<rand_zkvm_cuda::gpu::GpuProver>,
-        mmcs_rng: StdRng,
-        pcs_rng: StdRng,
+        mmcs_rng: SaltRng,
+        pcs_rng: SaltRng,
     ) -> Config {
         let engine = std::sync::Arc::new(rand_zkvm_cuda::gpu::hash::CudaHashEngine { gpu: gpu.clone() });
         let mmcs = Mmcs::new(engine, PERM_SEED, 2, mmcs_rng);
@@ -224,7 +227,7 @@ mod cuda_cfg {
 pub fn make_config(profile: FriProfile) -> Config {
     // Fresh entropy per proof, taken from the OS: this is the config actually used to prove,
     // so main-trace and quotient commitments stay hiding.
-    build_config(profile, StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()))
+    build_config(profile, SaltRng::fresh(), SaltRng::fresh())
 }
 
 use crate::emulator::{execute, ExecError, Execution};
@@ -1162,27 +1165,17 @@ impl Proof {
     pub fn size(&self) -> usize { self.to_bytes().len() }
 }
 
-/// M3.4: the fixed seed behind `key_config`'s RNGs. Before M3.4 this was derived from the
-/// program (`program_digest`, an FNV-1a-style fold over `base_pc` and every word) — but the
-/// preprocessed columns are now the range/nibble tables and the Poseidon2 round-constant
-/// table alone (`Machine::verifier_key`'s doc comment), none of which depend on any specific
-/// program, so seeding from the program would only make the same `(tier)` verifier key
-/// non-reproducible from one build to the next for no benefit. A single fixed constant
-/// (arbitrary, like `machine::PERM_SEED`) is all a program-independent preprocessed
-/// commitment needs.
-///
-/// HCS-1 (2026-09-27 zkVM review): the *seed* is fixed, but the salts are `rand`'s `StdRng` stream
-/// from it, which `rand` does not promise to keep across releases — so the stream is consensus.
-/// Interim guard: `rand`, `rand_core` and `chacha20` are pinned exactly (`Cargo.toml`) and
-/// `tests/verifier_key.rs` pins the resulting keys. The fix, for the next chain cut, is
-/// `key_derivation_v2` (written, tested, not wired in).
-const KEY_SEED: u64 = 0x4b45_595f_4d33_5f34; // "KEY_M3_4"
-
 /// A `Config` whose value-MMCS salts and PCS random codewords are both seeded deterministically
-/// from `KEY_SEED` (M3.4: no longer the program — see that constant's doc comment) instead of
-/// OS entropy, so that the resulting preprocessed commitment (`Machine::verifier_key`) is a
-/// pure function of the tier: any verifier can recompute it standalone, without having
-/// witnessed the proving session or holding the program.
+/// instead of from OS entropy, so that the resulting preprocessed commitment
+/// (`Machine::verifier_key`) is a pure function of the declared shape: any verifier can recompute
+/// it standalone, without having witnessed the proving session or holding the program.
+///
+/// M3.4 seeded it from a fixed `KEY_SEED` rather than the program (the preprocessed columns — the
+/// range/nibble tables, the Poseidon2 round constants, the hash chips' periodic columns — depend on
+/// no program). HCS-1, constraint set 7: the seed was fixed, but the salts were `rand`'s `StdRng`
+/// stream from it, which `rand` does not promise to keep across releases — the stream was
+/// consensus. They are `key_derivation_v2`'s now, a Poseidon2 sponge over this repository's own
+/// constants and two labels (`key_rngs` below), so no dependency update can move a key.
 ///
 /// Never used for the actual `prove_batch` call, whose main-trace/quotient/permutation
 /// commitments must keep fresh entropy (see `make_config`) or two proofs of the same run
@@ -1195,9 +1188,10 @@ fn key_config(profile: FriProfile) -> Config {
 /// The deterministic `(mmcs_rng, pcs_rng)` pair behind `key_config`, factored out so every
 /// backend seeds its own key config identically and therefore produces a preprocessed
 /// commitment byte-identical to the one `verifier_key` recomputes on the CPU.
-fn key_rngs() -> (StdRng, StdRng) {
-    // XOR with an arbitrary odd constant so the two RNG streams don't start identically.
-    (StdRng::seed_from_u64(KEY_SEED), StdRng::seed_from_u64(KEY_SEED ^ 0x9E37_79B9_7F4A_7C15))
+fn key_rngs() -> (SaltRng, SaltRng) {
+    // Two labels, so the two streams do not start identically (`key_derivation_v2::key_rngs`).
+    let (mmcs, pcs) = crate::key_derivation_v2::key_rngs();
+    (SaltRng::Key(mmcs), SaltRng::Key(pcs))
 }
 
 /// Which prover implementation `Machine::prove_with` runs the batch STARK on. Every variant
@@ -1498,7 +1492,7 @@ impl Machine {
             Backend::Reference => {
                 // Fresh entropy for the proving config (hiding), deterministic for the key
                 // config — the same split `make_config`/`key_config` make on the CPU.
-                let cfg = reference_cfg::config(self.profile, StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()));
+                let cfg = reference_cfg::config(self.profile, SaltRng::fresh(), SaltRng::fresh());
                 let (mmcs_rng, pcs_rng) = key_rngs();
                 let key = reference_cfg::config(self.profile, mmcs_rng, pcs_rng);
                 self.prove_on(&cfg, &key, program, inputs, public, tier)
@@ -1506,7 +1500,7 @@ impl Machine {
             #[cfg(any(feature = "cuda", feature = "mock-cuda"))]
             Backend::Cuda => {
                 let gpu = rand_zkvm_cuda::gpu::GpuProver::probe(PERM_SEED).map_err(|e| ProveError::Backend(e.to_string()))?;
-                let cfg = cuda_cfg::config(self.profile, gpu.clone(), StdRng::from_rng(&mut rand::rng()), StdRng::from_rng(&mut rand::rng()));
+                let cfg = cuda_cfg::config(self.profile, gpu.clone(), SaltRng::fresh(), SaltRng::fresh());
                 let (mmcs_rng, pcs_rng) = key_rngs();
                 let key = cuda_cfg::config(self.profile, gpu, mmcs_rng, pcs_rng);
                 self.prove_on(&cfg, &key, program, inputs, public, tier)

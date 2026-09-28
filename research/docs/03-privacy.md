@@ -540,7 +540,8 @@ The preprocessed tables that remain (`range`, `nibble`, the Poseidon2
 round-constant table) are the ones M3.4's "no salt to hide" argument now
 actually applies to cleanly: they are fixed, program-independent data, so
 `Machine::verifier_key`'s deterministic salt (`machine::KEY_SEED`, replacing
-the old program-derived one) hides nothing because there is nothing
+the old program-derived one; since constraint set 7 `key_derivation_v2`'s
+labelled Poseidon2 stream, HCS-1) hides nothing because there is nothing
 program-specific left in what it salts.
 
 ## What `verify` actually checks

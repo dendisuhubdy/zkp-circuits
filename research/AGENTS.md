@@ -325,7 +325,9 @@ it (`rand-guest/src/build.rs`'s `flags`), not written in the guest.
   published `GOLDILOCKS_POSEIDON2_RC_8_*` constants — swapping them is a
   config change, not a rewrite); `machine::KEY_SEED` similarly (M3.4: the
   verifier-key config's fixed seed, replacing the old program-derived one
-  now that the preprocessed trace no longer depends on the program);
+  now that the preprocessed trace no longer depends on the program —
+  constraint set 7 replaced the seed itself with `key_derivation_v2`'s
+  labels, HCS-1: the keys no longer depend on `rand`'s `StdRng` stream);
   statistical (not perfect) ZK from Plonky3 0.7's hiding PCS; `hc`
   binding-but-not-hiding (M3.4: still true — `hc` is now an in-circuit
   digest, not a verifier-side commitment, but it still has no hiding salt
