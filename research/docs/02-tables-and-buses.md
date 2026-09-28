@@ -291,6 +291,10 @@ through the `OP_ALU, funct7 = 1` flags — no `OP_ALUI` flag ever maps to
 one, mirroring `isa::Instr::decode`'s own `funct7 = 1` gate exactly (an
 `OP_ALUI` word can never be legally read as an M op, regardless of its
 `funct7` bits, which are just part of its sign-extended immediate there).
+Since the next constraint set (ISA-4) the `JALR` flag is pinned to
+`funct3 = 0` as well as its opcode, mirroring `Instr::decode`, which now
+refuses the seven reserved `funct3` values RV32I leaves under `0x67` (before,
+both ignored the field and eight words decoded to one `JALR`).
 Every constraint here is at most degree 2 in the columns (a flag times a
 linear bit-sum, or a flag times a fixed constant).
 
@@ -373,7 +377,7 @@ separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 exactly one traversal of the whole program for `hc`, regardless of how the
 program actually ran.
 
-## `cpu` — main, `col::WIDTH = 276` (275 through constraint set 6)
+## `cpu` — main, `col::WIDTH = 277` (275 through constraint set 6)
 
 (The heading read `222` from M4.1 until M4.4 corrected it: M4.2's `SYS_KECCAK`
 column took the table to 223 without the heading following, and M4.4's
@@ -382,7 +386,9 @@ column took the table to 223 without the heading following, and M4.4's
 final-encoding block `PHVL0..31`/`PHIMAX0..3`/`PINV0..3` — for 275. All of
 them are appended at the end of the column list so no pre-existing index
 moves — see the `SYS_KECCAK`/`SYS_SHA256`/`SYS_READ_PUB` doc comments
-in `src/tables/cpu.rs` for why that matters to the vendoring node.)
+in `src/tables/cpu.rs` for why that matters to the vendoring node. The next
+constraint set appends two more, `SYS_HASH_LEN` (HCS-4, below) and `JALR_B0`
+(ISA-4, below), for 277.)
 
 Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
 recomputed — `is_load`/`is_store` are *expressions* the AIR computes from
@@ -1072,6 +1078,23 @@ and both open a group in the CRITICAL 5 entry whitelists. Three rules differ:
 
 `tests/next_constraint_set.rs::the_poseidon2_len_group_rules_refuse_their_forgeries`
 pins each of the three (each goes red with its rule removed).
+
+### The next constraint set (ISA-4): `JALR` clears bit 0 of its target
+
+RV32I's `JALR` jumps to `(rs1 + imm) & !1`; this machine used `rs1 + imm` as
+computed, so an odd target was an unfetchable `pc`. `JALR_B0` (appended last)
+is boolean, zero off `JALR` rows, and
+`IS_JALR · (NEXT_PC − ALU_OUT + JALR_B0) = 0`. It is *the* low bit of
+`ALU_OUT` (32-bit, from the ALU table) because of the next row's fetch: a
+`JALR` is never the last real row, the row after it is an ordinary
+instruction row (hash rows need a `SYS_HASH`/`SYS_HASH_LEN` row before them,
+the digest regions are a prefix), and its `PC = NEXT_PC` must be a program
+row's, all of which are `base_pc + 4j` — even, since `hc` binds `base_pc` and
+every program a verifier holds an `hc` for has `base_pc % 4 == 0`. A wrong bit
+leaves `ALU_OUT − JALR_B0` odd (or `p − 1`), which no program row answers —
+the argument that already made an odd branch or `JAL` target unprovable.
+`tests/next_constraint_set.rs::a_jalr_to_an_odd_target_clears_bit_0` proves a
+run that lands on an odd target.
 
 ## `memory` — main, `col::WIDTH = 12`
 

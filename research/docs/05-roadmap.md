@@ -281,7 +281,11 @@ and passes when the rule lands.
    carets.
 5. **ISA-4 / ISA-5 — the decoder's two tolerances** (`docs/01-isa.md`, "Deliberate deviations"):
    `JALR` clears bit 0 of its target and requires `funct3 = 0`. Each changes what the in-circuit
-   decoder accepts, so it is a program-table change and rides the cut.
+   decoder accepts, so it is a program-table change and rides the cut. **Done on
+   `feat/cs7-range-pad-isa`**: `Instr::decode` and the program table's `JALR` flag require
+   `funct3 = 0`; the emulator jumps to `(rs1 + imm) & !1` and the cpu's `JALR_B0` column is the
+   dropped bit (`NEXT_PC = ALU_OUT − JALR_B0`, sound by the next row's fetch). No in-tree
+   program's words or digest change.
 
 ## Relationship to `../../fullnode`
 

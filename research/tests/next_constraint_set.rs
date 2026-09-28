@@ -1,13 +1,10 @@
-//! Failing by design: the gaps the next constraint set closes, written as the tests it will have to
-//! pass. Every test here is `#[ignore]`d with the reason, and every one *fails* on this constraint
-//! set when run with `--ignored` — that failure is the finding, pinned. Closing a gap is a change to
-//! the AIR (so to every verifier key) or to a syscall's semantics (so to every digest a guest
-//! computes with it): a chain cut, never a same-chain release. `docs/05-roadmap.md`, "The next
-//! constraint set", has the exact constraint each one needs.
-//!
-//! When the next set lands, the test that pins its gap loses its `#[ignore]` and passes; the
-//! "today" assertions inside each (which document how the gap looks now) flip with it and are
-//! deleted.
+//! The gaps the next constraint set (the chain-16 cut) closes, written as the tests it has to pass.
+//! Each began failing by design — `#[ignore]`d with the reason, failing under `--ignored`, the
+//! finding pinned — and lost its `#[ignore]` in the commit that closed it (ZKM-1/ZKH-2, HCS-4,
+//! ISA-4 on `feat/cs7-range-pad-isa`; each commit quotes the red). Closing a gap is a change to the
+//! AIR (so to every verifier key) or to a syscall's semantics (so to every digest a guest computes
+//! with it): a chain cut, never a same-chain release. `docs/05-roadmap.md`, "The next constraint
+//! set", has the exact constraint each one needed.
 mod common;
 use common::*;
 
@@ -256,4 +253,61 @@ fn the_poseidon2_len_group_rules_refuse_their_forgeries() {
     next[cpu::col::NEXT_PC] = cpu_row(&cpu_t, r + 1)[cpu::col::PC];
     next[cpu::col::HASH_PTR] = cpu_row(&cpu_t, r)[cpu::col::HASH_PTR];
     assert!(!cpu_pair_holds(cpu_row(&cpu_t, r), next, &pv), "a POSEIDON2([]) call absorbed an empty block");
+}
+
+/// ISA-4, half one: `JALR` clears bit 0 of its target, as RV32I says — `(rs1 + imm) & !1`. The
+/// machine used `rs1 + imm` as computed, so an odd target was an unfetchable `pc` (the emulator's
+/// `BadPc`, the AIR's failed `PROGRAM` lookup) where an RV32I core jumps to the even address below
+/// it. Checked on the emulator (the reference semantics) and then proved: the cpu's `JALR_B0`
+/// column is the bit the target drops.
+#[test]
+fn a_jalr_to_an_odd_target_clears_bit_0() {
+    let mut a = Assembler::new(0);
+    // 0: t0 = 13 (the odd address one past the `li t1, 7` at 12); 4: jalr ra, t0, 0; 8: t1 = 1;
+    // 12: t1 = 7 — RV32I lands at 12, so the output is 7, and `ra` holds 8.
+    a.push(addi(5, 0, 13));
+    a.push(jalr(1, 5, 0));
+    a.push(addi(6, 0, 1));
+    a.push(addi(6, 0, 7));
+    a.extend(write_output(0, 6));
+    a.extend(write_output(1, 1));
+    a.extend(halt());
+    let p = a.assemble();
+    let e = execute(&p, &[], &[], 10_000).expect("an odd JALR target is RV32I's even one, not a bad pc");
+    assert_eq!((e.outputs[0], e.outputs[1]), (7, 8));
+    let m = rand_zkvm::machine::Machine::new(rand_zkvm::machine::FriProfile::Test);
+    let (proof, _) = m.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).expect("it proves");
+    m.verify(&p.digest(), &proof).expect("and verifies");
+}
+
+/// ISA-4, half two: `JALR` is `funct3 = 0` only. RV32I reserves every other `funct3` under opcode
+/// `0x67`; the decoder read the opcode and ignored the field, so eight words decoded to the same
+/// `JALR`. Now both decoders refuse them — `Instr::decode` with `DecodeError::Funct`, and the
+/// program table's in-circuit decoder by pinning the `JALR` flag to `funct3 = 0`: a row claiming
+/// `VALID = 1` under that flag for a `funct3 = 1` word fails its constraints.
+#[test]
+fn a_jalr_with_a_nonzero_funct3_is_refused() {
+    use rand_zkvm::isa::{DecodeError, Instr};
+    use rand_zkvm::tables::program;
+    let word = Instr::Jalr { rd: 1, rs1: 5, imm: 0 }.encode();
+    assert!(Instr::decode(word).is_ok());
+    for f3 in 1..8u32 {
+        let odd = word | f3 << 12;
+        assert_eq!(Instr::decode(odd), Err(DecodeError::Funct(f3)), "funct3 = {f3}");
+    }
+    // The in-circuit decoder: the honest `funct3 = 0` row, with bit 12 of the word flipped and every
+    // decoded field left as a `JALR`'s.
+    let (_, con) = symbolic_air(&program::ProgramAir);
+    let w = program::col::WIDTH;
+    let mut cur = vec![Val::ZERO; w];
+    program::fill_word_row(&mut cur, 0, word);
+    // `program_trace`'s own bookkeeping on a real row: every valid word is digested once.
+    cur[program::col::MULT_WORD] = Val::ONE;
+    let mut next = vec![Val::ZERO; w];
+    program::fill_word_row(&mut next, 4, 0);
+    let holds = |cur: &Vec<Val>| con.iter().all(|c| eval_rows(c, &Rows { cur: cur.clone(), next: next.clone(), pre_cur: vec![], pre_next: vec![], public: vec![] }) == Val::ZERO);
+    assert!(holds(&cur), "the honest JALR row holds");
+    cur[program::col::WORD] += Val::from_u32(1 << 12);
+    cur[program::col::BIT0 + 12] = Val::ONE;
+    assert!(!holds(&cur), "a funct3 = 1 JALR decodes as VALID in-circuit");
 }
