@@ -999,15 +999,17 @@ pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32
     }
     let memory = memory_trace(&exec.events, clk_offset, 1usize << mem_log_height, &mut range);
     let alu = alu_trace(&exec.events, tier.alu_height(), &mut range, &mut nibble);
-    let range_t = range_trace(&range);
-    let nibble_t = nibble_trace(&nibble);
-    let program_t = program_trace(program, &exec.events, 1usize << program_log_height);
     let read_counts = crate::tables::input::read_counts(inputs.len(), &exec.events);
-    let input_t = crate::tables::input::input_trace(inputs, &read_counts, 1usize << input_log_height);
+    // ZKM-1/ZKH-2 (next constraint set): the input and public tables' word limbs are `RANGE8`
+    // lookups too, so both are built before the range table is.
+    let input_t = crate::tables::input::input_trace(inputs, &read_counts, 1usize << input_log_height, &mut range);
     // Constraint set 6: the public table, `input`'s twin — `MULT_READ` counted off the
     // `SYS_READ_PUBLIC` events the same way.
     let public_read_counts = crate::tables::public::read_counts(public.len(), &exec.events);
-    let public_t = crate::tables::public::public_trace(public, &public_read_counts, 1usize << public_log_height);
+    let public_t = crate::tables::public::public_trace(public, &public_read_counts, 1usize << public_log_height, &mut range);
+    let range_t = range_trace(&range);
+    let nibble_t = nibble_trace(&nibble);
+    let program_t = program_trace(program, &exec.events, 1usize << program_log_height);
     // M3.4: the digest prefix's own permutations, in the same row order `tables::cpu`'s
     // `IS_DIGEST` rows issue them (`fill_digest_rows`) — these come *first*, since the digest
     // rows precede every ordinary cycle in the cpu table.

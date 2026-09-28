@@ -1353,10 +1353,19 @@ where
         // honest `u32` decomposition (`HVL0..15`, RANGE8-checked) of two `HS` lanes — lanes
         // 0/1 on the first write-back row, 2/3 on the second (`hs_lane_j` below), i.e. exactly
         // the digest field elements the last absorb's `POSEIDON2` lookup established.
+        //
+        // ZKM-1/ZKH-2 (next constraint set): the salt row (`IS_SALT`) reuses the same sixteen limb
+        // columns for its four absorbed lanes. `hash::input_digest` takes the salt as four `u32`s,
+        // and without this the row's `HV0..3` were free field elements, so `H_IN` could commit to a
+        // salt no `u32` salt reproduces. The two selectors never meet on one row (`IS_SALT` implies
+        // `IS_INDIGEST`, exclusive with `IS_HASH_OUT`), so the shared count stays ≤ 1 and each row
+        // sees exactly one meaning of `HVL0_0..15`; the salt still only has to hide, and four
+        // uniform `u32`s hide as well as they did.
+        let hv_words = is_hash_out.clone() + v(IS_SALT);
         for k in 0..4 {
-            for j in 0..4 { bus::RANGE8.lookup_key(b, [v(HVL0_0 + 4 * k + j)], Count::bounded(is_hash_out.clone(), 1)); }
+            for j in 0..4 { bus::RANGE8.lookup_key(b, [v(HVL0_0 + 4 * k + j)], Count::bounded(hv_words.clone(), 1)); }
             let byte_sum: AB::Expr = (0..4).map(|j| v(HVL0_0 + 4 * k + j) * AB::Expr::from_u32(1 << (8 * j))).sum();
-            b.assert_zero(is_hash_out.clone() * (v(HV0 + k) - byte_sum));
+            b.assert_zero(hv_words.clone() * (v(HV0 + k) - byte_sum));
         }
         let two32 = AB::Expr::from_u64(1u64 << 32);
         // CRITICAL 3 (fix): `hv_lo + hv_hi·2^32 = hs_lane` alone is only a *field* identity —
@@ -1486,7 +1495,16 @@ fn fill_input_digest_rows(v: &mut [F], offset: usize, base_pc: u32, salt: [u32; 
         // `INPUT_DIGEST` consumption (review round 1, C1: it draws from `INPUT_DIGEST` now,
         // not the retired single `INPUT_WORD` bus) and excludes its `active_sum` from the
         // `HASH_LEFT` drain.
-        if blk.idx == 0 { r[IS_SALT] = F::ONE; }
+        if blk.idx == 0 {
+            r[IS_SALT] = F::ONE;
+            // ZKM-1/ZKH-2: the salt lanes' byte limbs, in the write-back rows' `HVL0_0..15` (the AIR
+            // gates those on `IS_HASH_OUT + IS_SALT`). The salt block is always full, so every lane
+            // is a genuine salt word.
+            for k in 0..4 {
+                let bl = limbs(salt[k]);
+                for j in 0..4 { r[HVL0_0 + 4 * k + j] = bl[j]; range.range8((salt[k] >> (8 * j)) & 0xff); }
+            }
+        }
         // DEVIATION from the brief (found via self-review against an honest trace, see the
         // three matching AIR-side deviation comments in `eval` — the drain-rule split, the
         // PC-holds-still rule, and the fallthrough-rule exclusion): this row is a genuine

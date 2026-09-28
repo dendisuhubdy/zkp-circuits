@@ -30,11 +30,11 @@
 //! absorbed words must equal this table's `WORD` values exactly. `INPUT_READ` then separately,
 //! and independently, ties `MULT_READ` to the true `SYS_READ` count per index, with no way for
 //! either bus to borrow slack from the other.
-use super::{bus, F};
+use super::{bus, limbs, range::RangeCounts, F};
 use crate::emulator::{CycleEvent, Syscall};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
-use p3_lookup::InteractionBuilder;
+use p3_lookup::{Count, InteractionBuilder};
 use p3_matrix::dense::RowMajorMatrix;
 
 pub mod col {
@@ -51,7 +51,14 @@ pub mod col {
     /// `INPUT_READ`'s own balance against the true `SYS_READ` demand regardless of how big the
     /// claimed value is.
     pub const MULT_READ: usize = 3;
-    pub const WIDTH: usize = 4;
+    /// 4 (next constraint set, ZKM-1/ZKH-2): the little-endian byte limbs of `WORD`, each
+    /// `RANGE8`-checked on a real row and pinned to zero on padding, so `WORD` is a 32-bit word in
+    /// the AIR and not merely a field element. Without them nothing bound `WORD` below `p`: the
+    /// row's two buses carry it as it is, and the consuming cpu row writes it straight into a
+    /// register (`tests/next_constraint_set.rs`). Appended after `MULT_READ` so every earlier
+    /// index keeps its place.
+    pub const WL0: usize = 4;
+    pub const WIDTH: usize = WL0 + 4;
 }
 use col::*;
 
@@ -120,6 +127,16 @@ where
 
         // Split per review round 1 (C1): the digest's mandatory copy and a SYS_READ's copy
         // are now on separate buses, so neither can borrow the other's budget.
+        // ZKM-1/ZKH-2 (next constraint set): `WORD` is four `RANGE8`-checked byte limbs on a real row
+        // — a 32-bit word, as `SYS_READ*` hands it to a register and the digest absorbs it. The limbs
+        // are pinned to zero on padding (invariant 1) and their lookups counted by `IS_REAL`, so a
+        // padding row asks nothing of the range table.
+        let word: AB::Expr = (0..4).map(|k| v(WL0 + k) * AB::Expr::from_u32(1 << (8 * k))).sum();
+        b.assert_zero(v(IS_REAL) * (v(WORD) - word));
+        for k in 0..4 {
+            b.assert_zero((one.clone() - v(IS_REAL)) * v(WL0 + k));
+            bus::RANGE8.lookup_key(b, [v(WL0 + k)], Count::bounded(v(IS_REAL), 1));
+        }
         bus::INPUT_DIGEST.table_entry(b, [v(IDX), v(WORD)], v(IS_REAL));
         bus::INPUT_READ.table_entry(b, [v(IDX), v(WORD)], v(IS_REAL) * v(MULT_READ));
     }
@@ -139,7 +156,9 @@ pub fn read_counts(n: usize, events: &[CycleEvent]) -> Vec<u32> {
     counts
 }
 
-pub fn input_trace(inputs: &[u32], read_counts: &[u32], height: usize) -> RowMajorMatrix<F> {
+/// `range` receives the four `RANGE8` lookups each real row's `WL0..3` declare, in lock-step with
+/// the AIR (padding rows declare none).
+pub fn input_trace(inputs: &[u32], read_counts: &[u32], height: usize, range: &mut RangeCounts) -> RowMajorMatrix<F> {
     assert!(inputs.len() <= height, "input table needs {} rows, height {height}", inputs.len());
     assert_eq!(inputs.len(), read_counts.len());
     let mut v = F::zero_vec(height * WIDTH);
@@ -149,6 +168,8 @@ pub fn input_trace(inputs: &[u32], read_counts: &[u32], height: usize) -> RowMaj
         r[WORD] = F::from_u32(w);
         r[IS_REAL] = F::ONE;
         r[MULT_READ] = F::from_u32(rc);
+        let wl = limbs(w);
+        for k in 0..4 { r[WL0 + k] = wl[k]; range.range8((w >> (8 * k)) & 0xff); }
     }
     for i in inputs.len()..height {
         v[i * WIDTH + IDX] = F::from_u32(i as u32);

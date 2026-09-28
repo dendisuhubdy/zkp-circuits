@@ -94,7 +94,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "743ae4284ab17fe155dd272fe6717f8290524b99a4b200e7132021b1dd1bfc02",
-                "118596a0be5acbcf70872378f382e7f05ef8863b8695d4beb82c4f874abfb932",
+                "c0080290d9e950ec75c74c48ad3e299150c42b1564e22c7dcc4b459456bf5f53",
             ),
         },
         Shape {
@@ -107,7 +107,7 @@ fn shapes() -> Vec<Shape> {
             publh: binding_publh,
             want: (
                 "de7f12d33cf24cb0088924d6c8141470c3dd4bf1d929a9ebeca4d6da5996d930",
-                "2fc852ce01b8b97c8dd2add9aba20e0f634ed4dd7cc72e3659b0f236dc491148",
+                "52ef04ae60c7391eb838b27d21eb2af4a73219df0b1fbd48320078615815f289",
             ),
         },
         Shape {
@@ -120,7 +120,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "e5e6ce86bbbb8f8e8c53e8599c88e962d2e90c0a516845c1dffc3ae4fdc4b9b6",
-                "e157ca301d4f16a614a29eb74c5580c7daaa88164ed98a9502a412c11a496542",
+                "ce2d637fe22d4797b838ce8a353ceb0e87569b3e5be1f491ba1f77c8eef9b210",
             ),
         },
         Shape {
@@ -133,7 +133,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "b1387046ebc166cff216550539f7ec0bff6421555b28d9500ba7a89af256d5cb",
-                "fb6e0b55f6c76af47a739a7392edfb2fcca008142482e2050fad6b521fd232da",
+                "072e845f1b511e19c50c6aa8cf939000ed4a6637e09b4e6df03181e47daad758",
             ),
         },
     ]
