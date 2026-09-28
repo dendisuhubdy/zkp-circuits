@@ -1120,11 +1120,14 @@ with each `GD_k` on `RANGE8` (`Count::bounded(SYS_HALT, 1)`), so the declared
 limit is at or above the run's gas without the run's gas being published;
 `(1 − SYS_HALT)·GD_k = 0` pins the limbs to zero everywhere else, padding
 included. The slack fits four bytes because `check_public_values` refuses a
-`pv::GAS` above `gas::gas_max(header)`, and the largest admissible ceiling
-(tier 20, both hash tables at `2^20` rows) is under `2^32`. `GAS` is free on
-padding rows (the fill carries the halt row's value forward). The prover
-refuses a limit below the run (`ProveError::GasLimitBelowRun`) or above the
-header (`GasLimitAboveHeader`) before building any trace.
+`pv::GAS` above `gas::gas_max(header)` =
+`(2^t − 1) + 2^(t−2) + 191·(2^klh/32) + 63·(2^slh/64)` (the `2^(t−2)`: at most
+`2^(t−3)` absorb rows, one per poseidon2 permutation slot, `+2` each), and the
+largest admissible ceiling (tier 20, both hash tables at `2^20` rows,
+8 601 599) is under `2^32`. `GAS` is free on padding rows (the fill carries the
+halt row's value forward). The prover refuses a limit below the run
+(`ProveError::GasLimitBelowRun`) or above the header (`GasLimitAboveHeader`)
+before building the cpu trace.
 
 ## `memory` — main, `col::WIDTH = 12`
 

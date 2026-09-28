@@ -215,6 +215,9 @@ rows, so the ecall and write-out rows alone cost 3). `POSEIDON2_LEN` is the one 
 formula does not fold in: its `n = 0` still absorbs the one length-seeded empty block described
 above, so its true minimum is `3 + 3·1 = 6`, not the `⌈0/4⌉ = 0` the bare formula would give — the
 `max(⌈n/4⌉, 1)` above is exact for every `n`, and coincides with `⌈n/4⌉` for every `n ≥ 1`.
+A proof header's gas ceiling is `gas::gas_max = (2^t − 1) + 2^(t−2) + 191·(2^klh/32) +
+63·(2^slh/64)` — the absorb rows' `+2` is bounded by the poseidon2 table's `2^(t−3)` permutation
+slots, so a hash-free tier-10 header's ceiling is 1 279 and a tier-14 one's 20 479.
 
 **`POSEIDON2` does not pad (audit ZKH-3).** The sponge starts from the all-zero
 state and *overwrites* the first `min(4, remaining)` lanes with each chunk, so

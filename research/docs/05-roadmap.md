@@ -313,13 +313,20 @@ and passes when the rule lands.
 
 Not a finding from the 2026-09-27 reviews above — a separate driver, the fullnode's gas design
 (spec 2026-09-28, "Phase 0/1" of chain 18's plan: pay per instruction in RAND on a declared,
-in-circuit-proven bound). Branch `feat/cs8-gas`, four commits (`4d448ec`, `f0dc825`, `13dc769`,
-`6ec5a5b`). What it carries:
+in-circuit-proven bound). Branch `feat/cs8-gas`, seven commits (`4d448ec`, `f0dc825`, `13dc769`,
+`6ec5a5b`, `6ad7d74`, `f95a1ce`, `6d4f124`) plus the final review's fix wave. What it carries:
 
 - **`pv::GAS`** (`tables::cpu::pv`), a 35th public value (`PUB0 + 8`, `pv::NUM` 34 → 35) — the
-  header's declared gas ceiling. `gas::gas_max(tier, keccak_log_height, sha256_log_height)` is the
-  ceiling no run under that header can exceed: the tier's cycle budget plus the weight of every
-  permutation and compression block its declared keccak/sha256 heights could hold. `Machine::verify`
+  header's declared gas ceiling. `gas::gas_max(tier, keccak_log_height, sha256_log_height)` is
+  `(2^t − 1) + 2^(t−2) + 191·(2^klh/32) + 63·(2^slh/64)`: the tier's cycle budget, plus `+2` for
+  each of the at most `2^(t−3)` `POSEIDON2` absorb rows the poseidon2 table's `2^(t+2)` rows can
+  hold (one 32-row permutation each), plus the weight of every permutation and compression block
+  the declared keccak/sha256 heights could hold. It is the header's ceiling because each term is
+  the most its row kind can spend under that header, so no run the header admits costs more. (The
+  first cut omitted the absorb term, and a tier-10 run of 30 absorbs and 1 016 rows spent 1 078
+  gas against a 1 023 ceiling — refused `GasLimitBelowRun` with no limit that made it provable;
+  the final review's fix added the term.) The tier is clamped to `[10, 20]` before any shift, and
+  `check_public_values` refuses a tier outside `TIERS`. `Machine::verify`
   refuses `pv::GAS > gas_max(...)` natively (`VerifyError::GasLimit`), before any verifier key is
   built — the same cheap-before-expensive placement as the tier and height checks beside it.
 - **`gas::gas_of`**, the native meter over an execution (`Program`, inputs, public words, the
@@ -332,8 +339,9 @@ in-circuit-proven bound). Branch `feat/cs8-gas`, four commits (`4d448ec`, `f0dc8
   below.
 - **The cpu table's `GAS` column and its four `GD0..3` halt-row limbs** (`col::WIDTH` 277 → 282):
   `GAS = 1` on row 0 (a digest row); on every transition into a real row, `GAS` grows by exactly
-  `gas_of`'s weights (degree 2); on the one `HALT` row, `pv::GAS − GAS` is published, byte-limbed
-  across `GD0..3` and range-checked (`RANGE8`, `Count::bounded(SYS_HALT, 1)`), so the declared
+  `gas_of`'s weights (degree 2); on the one `HALT` row, the slack `pv::GAS − GAS` is held,
+  byte-limbed, in the witness-only columns `GD0..3` and range-checked (`RANGE8`,
+  `Count::bounded(SYS_HALT, 1)`) — never published, only proven non-negative — so the declared
   ceiling is provably at or above the run's own gas without the run's gas itself ever appearing as
   a public value; the limbs are pinned to zero on every other row, padding included. Four limbs
   are enough because the native check above already bounds `pv::GAS` under `2^32`.
@@ -348,8 +356,8 @@ in-circuit-proven bound). Branch `feat/cs8-gas`, four commits (`4d448ec`, `f0dc8
   declared bucket leaks `log2(bucket)` fewer bits than the exact count would.
 
 **Measured proof-size deltas** (`FriProfile::Production`, `measure_production_profile_at_tier_10_and_12`,
-two runs each side, run-to-run noise ≈ ±6 KB — four `RANGE8` lookups and one column added to every
-instance's packed lookups, no new preprocessed table):
+two runs each side, run-to-run noise ≈ ±6 KB — five cpu columns (`GAS`, `GD0..3`) and four
+`RANGE8` lookups added, no new preprocessed table):
 
 | Shape | Before cs8 | After cs8 | Change |
 |---|---|---|---|
