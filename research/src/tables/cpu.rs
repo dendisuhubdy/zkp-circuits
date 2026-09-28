@@ -2,7 +2,7 @@
 //! delegates arithmetic to ALU. The only table with public values.
 use super::{bus, limbs, nibble::NibbleCounts, program::MESSAGE_LEN, range::RangeCounts, F};
 use crate::emulator::{CycleEvent, HashRow, Syscall, ECALL_MEM_REG, SLOT_MEM, SLOT_R1, SLOT_R2, SLOT_W, SPACE_RAM};
-use crate::isa::{Program, NUM_OUTPUTS, SYS_HALT as SYS_NUM_HALT, SYS_POSEIDON2, SYS_READ_INPUT, SYS_READ_PUBLIC, SYS_WRITE_OUTPUT};
+use crate::isa::{Program, NUM_OUTPUTS, SYS_HALT as SYS_NUM_HALT, SYS_POSEIDON2, SYS_POSEIDON2_LEN, SYS_READ_INPUT, SYS_READ_PUBLIC, SYS_WRITE_OUTPUT};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_lookup::{Count, InteractionBuilder};
@@ -251,15 +251,25 @@ pub mod col {
     pub const PHVL0: usize = IPOUT0 + 8;
     pub const PHIMAX0: usize = PHVL0 + 32;
     pub const PINV0: usize = PHIMAX0 + 4;
-    pub const WIDTH: usize = PINV0 + 4;
+    /// HCS-4 (the next constraint set): the `POSEIDON2_LEN` ecall row — `SYS_HASH`'s twin, opening
+    /// the same row group (`IS_HASH` absorb rows, two `IS_HASH_OUT` write-back rows) with two
+    /// differences, both at the group's start: the first absorb row enters the state
+    /// `[0, 0, 0, 0, HASH_N, 0, 0, 0]` (the length in capacity lane 4) instead of all zero, and there
+    /// always *is* a first absorb row — `n = 0` absorbs one empty block rather than routing straight
+    /// to the write-back rows — so the digest is always a permutation output. Appended at the end of
+    /// the column list, like every column since M4.2.
+    pub const SYS_HASH_LEN: usize = PINV0 + 4;
+    pub const WIDTH: usize = SYS_HASH_LEN + 1;
     /// Columns that must be zero on padding rows.
-    pub const SELECTORS: [usize; 30] = [
+    pub const SELECTORS: [usize; 31] = [
         IS_ALU, IS_IMM, IS_BRANCH, IS_LB, IS_LH, IS_LW, IS_SB, IS_SH, IS_SW, SIGNED,
         IS_JAL, IS_JALR, IS_LUI, IS_AUIPC, IS_ECALL, WRITES_RD, SYS_HALT, SYS_WRITE, SYS_READ, BR_NEG,
         SYS_HASH, IS_HASH, IS_HASH_OUT, HASH_FIN, IS_DIGEST, IS_INDIGEST, SYS_KECCAK, SYS_SHA256,
         // Constraint set 6. `PUBDIGEST_LAST` is deliberately *not* here, mirroring
         // `INDIGEST_LAST`/`DIGEST_LAST`: it is pinned to zero off its own region instead.
         SYS_READ_PUB, IS_PUBDIGEST,
+        // The next constraint set (HCS-4).
+        SYS_HASH_LEN,
     ];
 }
 pub mod pv {
@@ -447,7 +457,12 @@ where
         // below to (a) carry `HASH_PTR`/`HASH_N` forward across the whole group and (b) pin
         // `NEXT_PC = PC` on every row but the last (PC only advances once the whole
         // instruction — all its rows — has retired).
-        let continues = v(SYS_HASH) + is_hash.clone() + is_hash_out.clone() - v(HASH_FIN);
+        //
+        // HCS-4: a `POSEIDON2_LEN` group is the same shape, so its ecall row (`SYS_HASH_LEN`)
+        // continues exactly as a `SYS_HASH` row does. `sys_hash_any` is every rule the two ecall
+        // rows share; the few that differ are stated per selector below.
+        let sys_hash_any = v(SYS_HASH) + v(SYS_HASH_LEN);
+        let continues = sys_hash_any.clone() + is_hash.clone() + is_hash_out.clone() - v(HASH_FIN);
         // CRITICAL 4 (fix, audit ZC2 2026-09-12): `HASH_FIN` is meaningful only on a write-back
         // row — it marks the *second* one. Left unpinned everywhere else, setting it on the
         // ecall row (or on an absorb row) drives `continues` to 0 on that row, so the rest of
@@ -694,7 +709,7 @@ where
         bus::MEMORY.send(b, [slot_w_space, slot_w_addr, ts(SLOT_W), slot_w_val, slot_w_is_write], Count::bounded(count3, 1));
 
         // syscalls: a = number, b = arg0, mem_val = arg1
-        let sys_sum = v(SYS_HALT) + v(SYS_WRITE) + v(SYS_READ) + v(SYS_HASH) + v(SYS_KECCAK) + v(SYS_SHA256) + v(SYS_READ_PUB);
+        let sys_sum = v(SYS_HALT) + v(SYS_WRITE) + v(SYS_READ) + v(SYS_HASH) + v(SYS_KECCAK) + v(SYS_SHA256) + v(SYS_READ_PUB) + v(SYS_HASH_LEN);
         b.assert_zero(v(IS_ECALL) * (sys_sum.clone() - one.clone()));
         b.assert_zero((one.clone() - v(IS_ECALL)) * sys_sum);
         b.assert_zero(v(SYS_HALT) * (v(A) - AB::Expr::from_u32(SYS_NUM_HALT)));
@@ -718,12 +733,15 @@ where
         // word pointer; `a1` (read through `MEM_VAL`, the memory slot, exactly like every other
         // ecall's second argument) is the word count. The group starts with the whole count
         // still to absorb, at block 0, sponge state all-zero.
+        // HCS-4: the `POSEIDON2_LEN` ecall row (`SYS_HASH_LEN`) takes the same two arguments and
+        // starts the same bookkeeping; only its syscall number differs on this row.
         b.assert_zero(v(SYS_HASH) * (v(A) - AB::Expr::from_u32(SYS_POSEIDON2)));
-        b.assert_zero(v(SYS_HASH) * (v(HASH_PTR) - v(B)));
-        b.assert_zero(v(SYS_HASH) * (v(HASH_N) - v(MEM_VAL)));
-        b.assert_zero(v(SYS_HASH) * (v(HASH_LEFT) - v(HASH_N)));
-        b.assert_zero(v(SYS_HASH) * v(HASH_IDX));
-        for i in 0..8 { b.assert_zero(v(SYS_HASH) * v(HS0 + i)); }
+        b.assert_zero(v(SYS_HASH_LEN) * (v(A) - AB::Expr::from_u32(SYS_POSEIDON2_LEN)));
+        b.assert_zero(sys_hash_any.clone() * (v(HASH_PTR) - v(B)));
+        b.assert_zero(sys_hash_any.clone() * (v(HASH_N) - v(MEM_VAL)));
+        b.assert_zero(sys_hash_any.clone() * (v(HASH_LEFT) - v(HASH_N)));
+        b.assert_zero(sys_hash_any.clone() * v(HASH_IDX));
+        for i in 0..8 { b.assert_zero(sys_hash_any.clone() * v(HS0 + i)); }
         // CRITICAL 1 (fix): `HASH_PTR` is otherwise just the raw `a0` register value — an
         // unbounded field element on the `MEMORY` bus. `MEMORY`'s own consistency check only
         // range-checks the *delta* between consecutive sorted `(space, addr)` keys (via
@@ -749,7 +767,9 @@ where
         // `PTR .. PTR + 23` by plain field addition and bounds nothing itself. All three
         // selectors are pairwise exclusive under the same one-hot rule, so the count is still ≤ 1
         // and the shared limb columns still carry one well-defined pointer per row.
-        let hp_gate = v(SYS_HASH) + v(SYS_KECCAK) + v(SYS_SHA256);
+        //
+        // HCS-4: and `SYS_HASH_LEN`, whose group addresses memory exactly as a `SYS_HASH` group does.
+        let hp_gate = v(SYS_HASH) + v(SYS_KECCAK) + v(SYS_SHA256) + v(SYS_HASH_LEN);
         {
             let mut hp = AB::Expr::ZERO;
             for i in 0..4 { hp += v(HP0 + i) * AB::Expr::from_u32(1 << (8 * i)); }
@@ -843,8 +863,14 @@ where
             // (its own `HASH_LEFT`/`HASH_IDX`, which an absorb row's own update formula below
             // then chains from).
             for i in 0..8 { t.assert_zero(v(SYS_HASH) * n(HS0 + i)); }
-            t.assert_zero(v(SYS_HASH) * (n(HASH_LEFT) - v(HASH_LEFT)));
-            t.assert_zero(v(SYS_HASH) * (n(HASH_IDX) - v(HASH_IDX)));
+            // HCS-4, the rule itself: a `POSEIDON2_LEN` group's first absorb row enters with the
+            // length in capacity lane 4 and zero everywhere else — `hash::sponge_hash_len`'s seed.
+            // Lane 4 is never overwritten by absorption (rate 4), so it reaches the first
+            // permutation as it stands.
+            for i in [0usize, 1, 2, 3, 5, 6, 7] { t.assert_zero(v(SYS_HASH_LEN) * n(HS0 + i)); }
+            t.assert_zero(v(SYS_HASH_LEN) * (n(HS0 + 4) - v(HASH_N)));
+            t.assert_zero(sys_hash_any.clone() * (n(HASH_LEFT) - v(HASH_LEFT)));
+            t.assert_zero(sys_hash_any.clone() * (n(HASH_IDX) - v(HASH_IDX)));
             // CRITICAL 2 (fix): without a rule tying the ecall row's routing to `HASH_N`, a
             // witness could go straight from the ecall row to a write-back row (skipping every
             // absorb row) for *any* `HASH_N`, publishing the empty-input digest for a nonzero
@@ -864,6 +890,18 @@ where
             // the honest zeros — a valid proof of a non-honest execution. The row right after
             // the ecall row, if it is a write-back row, must be the *first* one.
             t.assert_zero(v(SYS_HASH) * n(IS_HASH_OUT) * n(HASH_FIN));
+            // HCS-4: a `POSEIDON2_LEN` group never routes straight to a write-back row — even at
+            // `n = 0` the row after its ecall row is an absorb row (the one empty block), so its
+            // digest is always a permutation output and never the seeded state's zero rate lanes.
+            // That also covers CRITICAL 2/2b for this selector: no write-back row, first or
+            // second, can follow the ecall row directly.
+            t.assert_zero(v(SYS_HASH_LEN) * (one.clone() - n(IS_HASH)));
+            // And the converse for a plain `POSEIDON2` group: its first absorb row (if any) is
+            // never empty — an `n = 0` call goes straight to the write-back rows, so an empty
+            // absorb row after a `SYS_HASH` row would be a second, different digest of the same
+            // call. This is the `IS_HASH` half of the old blanket "lane 0 is always active" rule
+            // (below), restated where it can tell the two groups apart.
+            t.assert_zero(v(SYS_HASH) * n(IS_HASH) * (one.clone() - n(ACT0)));
             // The second write-back row needs the same `HS0..7` (specifically lanes 2/3, the
             // digest's third/fourth field elements) the first row established from the last
             // absorb's `POSEIDON2` lookup — nothing else propagates it there.
@@ -900,8 +938,11 @@ where
             //
             // All three are products of two degree-1 selectors: degree 2, well under this
             // table's pinned degree 8 (`tests/tables.rs`'s degree pin).
-            t.assert_zero((one.clone() - v(SYS_HASH) - is_hash.clone()) * n(IS_HASH));
-            t.assert_zero((one.clone() - v(SYS_HASH) - is_hash.clone() - is_hash_out.clone()) * n(IS_HASH_OUT));
+            //
+            // HCS-4: `SYS_HASH_LEN` opens a row group too, so it joins both whitelists (it is
+            // exclusive with `SYS_HASH` under the one-hot ecall rule, so each factor stays 0/1).
+            t.assert_zero((one.clone() - sys_hash_any.clone() - is_hash.clone()) * n(IS_HASH));
+            t.assert_zero((one.clone() - sys_hash_any.clone() - is_hash.clone() - is_hash_out.clone()) * n(IS_HASH_OUT));
             t.assert_zero(v(HASH_FIN) * n(IS_HASH_OUT));
         }
 
@@ -914,7 +955,9 @@ where
         // `is_hash`/`is_digest` rows are never legitimately empty (a `POSEIDON2` syscall with
         // `n = 0` emits *zero* absorb rows at all — the emulator's absorb loop never runs — and
         // a program always has at least one word), so "lane 0 always active" is a sound
-        // blanket requirement for them. `is_indigest` is deliberately left out of this same
+        // blanket requirement for them — until HCS-4's `POSEIDON2_LEN`, whose `n = 0` call
+        // absorbs one empty block, which is why the `is_hash` half now reads `HASH_IDX` (see the
+        // rule itself). `is_indigest` is deliberately left out of this same
         // blanket rule and instead governed by two separate, more precise rules of its own:
         // the salt row's own `IS_SALT * (1 - ACT3) = 0` (forcing it to absorb a full, genuine
         // 4-word block — which cascades to `ACT0 = 1` there too, via the contiguous-prefix
@@ -925,7 +968,17 @@ where
         // a full block" invariant and the real rows' "always non-empty" invariant visibly
         // distinct, matching how `fill_input_digest_rows` fills them for two structurally
         // different reasons.
-        b.assert_zero((is_hash.clone() + is_digest.clone()) * (one.clone() - v(ACT0)));
+        //
+        // HCS-4: for `is_hash` the rule is now "lane 0 is active on every absorb row but a group's
+        // first" (`HASH_IDX = 0` exactly there — the ecall row pins it, and it increments by one
+        // per absorb row, bounded below 1024 by `IDX0..1`, so it never returns to 0). The first
+        // row is governed by its ecall row instead: after `SYS_HASH` it must be non-empty (the
+        // transition rule above), after `SYS_HASH_LEN` it may be the one empty block of an `n = 0`
+        // call — and only then, since an empty row drains nothing, so being the last absorb row
+        // (`HASH_LEFT` must reach 0) forces `n = 0`, and not being the last forces a full block.
+        // Degree 3, under the table's ceiling.
+        b.assert_zero(is_digest.clone() * (one.clone() - v(ACT0)));
+        b.assert_zero(is_hash.clone() * (one.clone() - v(ACT0)) * v(HASH_IDX));
         // Review round 1 (I2): the precise version of the same requirement for `is_indigest`
         // is unconditional on *real* indigest rows — `is_real_indigest * (1 - ACT0) = 0`, not
         // gated by `HASH_LEFT` at all. Post-salt, `hash::input_digest_rows` emits a real block
@@ -1703,6 +1756,8 @@ pub fn cpu_trace(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 
             Some(Syscall::ReadInput { .. }) => r[SYS_READ] = F::ONE,
             Some(Syscall::ReadPublic { .. }) => r[SYS_READ_PUB] = F::ONE,
             Some(Syscall::Poseidon2 { .. }) => r[SYS_HASH] = F::ONE,
+            // HCS-4: the same row group; `HashRow::Ecall` below fills the shared columns.
+            Some(Syscall::Poseidon2Len { .. }) => r[SYS_HASH_LEN] = F::ONE,
             // M4.2: one row, and the pointer's own bounded byte decomposition — the same
             // `HP0..3`/`HP3_HI` columns (and the same `RANGE8`/`AND4` receipts) a `SYS_HASH`
             // ecall row fills, since the AIR's "CRITICAL 1" bound is gated on both selectors.

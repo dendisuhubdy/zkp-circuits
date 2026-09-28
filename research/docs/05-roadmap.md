@@ -262,7 +262,13 @@ and passes when the rule lands.
    and `SYS_HASH_LEN · (n(HS0 + 4) − n(HASH_N)) = 0` — the length in capacity lane 4, the rest of
    the group unchanged (the `POSEIDON2` bus and chip permute whatever state they are given).
    `hash::sponge_hash_len`, the emulator and `guest_sdk::poseidon2_len` follow; the test above
-   then targets the new syscall.
+   then targets the new syscall. **Done on `feat/cs7-range-pad-isa`**, with one addition the test
+   forced: seeding lane 4 alone leaves `POSEIDON2_LEN([])` the zero digest (no block, no
+   permutation, and the digest is rate lanes 0..3), so an `n = 0` call absorbs **one empty block**
+   — `SYS_HASH_LEN · (1 − n(IS_HASH)) = 0` (never straight to write-back) — and the blanket
+   "lane 0 is active on every absorb row" becomes "on every absorb row but a group's first"
+   (`IS_HASH · (1 − ACT0) · HASH_IDX = 0`), with `SYS_HASH · n(IS_HASH) · (1 − n(ACT0)) = 0`
+   keeping a plain `POSEIDON2` group's first block non-empty.
 3. **VERIFIER-1, the rVM half.** `research`'s `Machine::verify` refuses a non-zero commit-phase
    proof-of-work word since this branch (`check_commit_pow_witnesses`); the aggregate program still
    reads each word and drops it (`recursion/docs/00-recursion-vm.md`, segment 7). The next

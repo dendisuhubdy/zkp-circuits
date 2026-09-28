@@ -54,6 +54,14 @@ const _: () = assert!(SHA256_WORDS as usize == crate::sha256::WORDS);
 /// (`pv::PUB0..7`), which a verifier holding them recomputes — so a value read here is bound to
 /// something the chain can check, unlike a private input under the hiding `H_IN`.
 pub const SYS_READ_PUBLIC: u32 = 6;
+/// HCS-4 (the next constraint set): `POSEIDON2` with the message length bound. Same ABI (`a0 =
+/// ptr`, a word address; `a1 = n`, `0 <= n <= POSEIDON2_MAX_WORDS`), same in-place 8-word digest,
+/// same cpu row group — but the sponge starts from `[0, 0, 0, 0, n, 0, 0, 0]` (the length in
+/// capacity lane 4) instead of the zero state, and always permutes at least once (`n = 0` absorbs
+/// one empty block). So `[a]` and `[a, 0]` differ, and the empty message is not the zero digest
+/// (`hash::sponge_hash_len`). A new number rather than a change to `POSEIDON2`, whose digests every
+/// note commitment, nullifier, Merkle root and program digest `hc` a chain holds are built on.
+pub const SYS_POSEIDON2_LEN: u32 = 7;
 pub const NUM_OUTPUTS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
