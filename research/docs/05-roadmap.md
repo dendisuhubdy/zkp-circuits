@@ -341,7 +341,8 @@ in-circuit-proven bound). Branch `feat/cs8-gas`, four commits (`4d448ec`, `f0dc8
   `docs/01-isa.md`'s syscall table gains a gas column built from these same weights.
 - **`ProveOptions.gas_limit: Option<u64>`** — a prover may declare any ceiling from its own run's
   gas up to the header's `gas_max` (refused outside that range, `GasLimitBelowRun` /
-  `GasLimitAboveHeader`, before any trace is built); `None` (the default, unchanged behaviour)
+  `GasLimitAboveHeader`, before the cpu trace is built — `keccak_trace`/`sha256_trace` are built
+  first, since the limit needs their declared heights); `None` (the default, unchanged behaviour)
   declares the header's own ceiling. `docs/03-privacy.md`, "What a proof leaks", has the leakage
   argument: the default leaks nothing beyond the tier and hash heights already do, and a coarser
   declared bucket leaks `log2(bucket)` fewer bits than the exact count would.
