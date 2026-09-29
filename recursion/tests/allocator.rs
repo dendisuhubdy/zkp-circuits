@@ -72,3 +72,54 @@ fn a_loop_mem_back_edge_eviction_is_refused_or_correct() {
         assert_eq!(publics(&p), want, "a spill in the loop's back edge re-ran from a reused register");
     }
 }
+
+/// R62-DSL-2: a fresh handle inside an `if_eq` body evicted a live handle — a spill `STORE`
+/// inside the body — and the code after the body reloads it from that cell. When the branch is
+/// not taken the `STORE` never runs and the reload reads a stale cell. Was `… 125, 0`.
+#[test]
+fn an_if_eq_body_spill_is_refused_or_correct_on_the_not_taken_path() {
+    let mut want: Vec<F> = (1..=25u64).map(|k| F::from_u64(100 + k)).collect();
+    want.push(F::from_u64(2));
+    let p = built_or_refused("if_eq: the body moved handle", || {
+        let mut b = Builder::new(Checkpoints::Off);
+        // 25 live handles fill every allocatable register.
+        let vals: Vec<_> = (1..=25u64).map(|k| b.constant(F::from_u64(100 + k))).collect();
+        let zero = b.zero();
+        let two = b.constant(F::from_u64(2));
+        b.if_eq(zero, two, |b| {
+            let c = b.constant(F::from_u64(999));
+            b.public(c);
+        });
+        for v in &vals {
+            b.public(*v);
+        }
+        b.public(two);
+        b.finish()
+    });
+    if let Some(p) = p {
+        assert_eq!(publics(&p), want, "a skipped if_eq body left a stale spill cell");
+    }
+}
+
+/// The shapes `if_eq` does support still compile and run on both paths: a body that reads
+/// pre-branch handles, uses its own temporaries, and writes its result through memory.
+#[test]
+fn an_if_eq_body_without_spills_runs_on_both_paths() {
+    for (a, taken) in [(5u64, true), (6, false)] {
+        let mut b = Builder::new(Checkpoints::Off);
+        let x = b.constant(F::from_u64(a));
+        let five = b.constant(F::from_u64(5));
+        let out = b.alloc_absolute(1);
+        let init = b.constant(F::from_u64(11));
+        b.store(out, 0, init);
+        b.if_eq(x, five, |b| {
+            let t = b.add(x, five);
+            b.store(out, 0, t);
+        });
+        let r = b.load(out, 0);
+        b.public(r);
+        b.public(x);
+        let want = if taken { 10 } else { 11 };
+        assert_eq!(publics(&b.finish()), vec![F::from_u64(want), F::from_u64(a)]);
+    }
+}
