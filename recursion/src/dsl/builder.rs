@@ -804,8 +804,15 @@ impl Builder {
         let top = self.ops.len() as u32;
         self.ops.push(Op2::LoopTop { id: loop_id });
         body(self);
-        self.ops.push(Op2::LoopEnd { id: loop_id });
 
+        // The back edge — the counter's reload, decrement and store, and the `JNE` — runs every
+        // iteration, so it sits *inside* the loop markers (issue #63, R62-DSL-1). With `LoopEnd`
+        // before it, a pre-loop handle the body reads had its last use clamped to that marker
+        // and its register freed there, and the back edge's `t`/`dec` claimed it: from the
+        // second iteration the body read the counter. And a back-edge claim that evicted a
+        // pre-loop handle put a spill `STORE` inside the loop that re-ran from a reused register,
+        // unseen by the invariant check at the marker. Inside the markers, the first is live
+        // across the back edge and the second is the invariant's refusal.
         let t = self.load(cell, 0);
         let dec = self.add_const(t, F::NEG_ONE);
         self.store(cell, 0, dec);
@@ -813,6 +820,7 @@ impl Builder {
         let r = self.materialise(dec.0);
         self.emit(Op::Jne, r, RRef::Raw(0), BRef::Imm(F::ZERO));
         self.set_target(top + 1);
+        self.ops.push(Op2::LoopEnd { id: loop_id });
     }
 
     // ---------------------------------------------------------------- output
@@ -1252,7 +1260,9 @@ impl Builder {
                             home[h] == was_home[h] && cells[h] == was_cells[h],
                             "counted_loop: the body moved handle {h} from ({:?}, {:?}) to ({:?}, {:?}). A loop body is \
                              emitted once and run many times, so it must leave the allocation of every handle \
-                             that existed before it untouched — pass values in and out through memory.",
+                             that existed before it untouched — pass values in and out through memory. (For \
+                             counted_loop_mem the back edge's counter reload counts as body: it too may not \
+                             evict a pre-loop handle, so leave it a free register.)",
                             was_home[h], was_cells[h], home[h], cells[h]
                         );
                     }
