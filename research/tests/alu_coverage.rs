@@ -38,7 +38,7 @@ use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::emulator::{execute, AluEvent, Execution};
 use rand_zkvm::guests;
 use rand_zkvm::isa::{AluOp, BranchCond, Instr, Program};
-use rand_zkvm::machine::{build_traces_salted, chips, Chip, FriProfile, Machine, Tier, Traces, Val};
+use rand_zkvm::machine::{build_traces_salted, build_traces_salted_with, chips, Chip, FriProfile, Machine, Tier, Traces, Val};
 use rand_zkvm::ledger::CommitmentTree;
 use rand_zkvm::notes::{self, Note, SpendKey, Word8, DEPTH};
 use rand_zkvm::tables::{alu, blind, bus, nibble, range};
@@ -637,7 +637,7 @@ fn a_single_cell_tamper_of_an_alu_or_cpu_row_is_caught_by_the_batch_check() {
     let p = alu_tour();
     let build = || {
         let e = execute(&p, &[], &[], 10_000).unwrap();
-        build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap()
+        build_traces_salted_with(&p, &[], &[], [0u32; 4], &e, Tier(10), Default::default()).unwrap()
     };
     let t = build();
     let mut honest = build();
@@ -647,7 +647,7 @@ fn a_single_cell_tamper_of_an_alu_or_cpu_row_is_caught_by_the_batch_check() {
 
     // A bundle: the guest the chain proves most, at tier 14 (traces only — no proof).
     let (bp, words, be) = bundle_execution();
-    let bt = build_traces_salted(&bp, &words, &[], [0u32; 4], &be, Tier(14)).unwrap();
+    let bt = build_traces_salted_with(&bp, &words, &[], [0u32; 4], &be, Tier(14), Default::default()).unwrap();
     fuzz_batch("bundle", &bt, Tier(14), 96, 64, &mut rng);
 
     // Replay a sample of the call's verdicts through the real prover: its debug build runs

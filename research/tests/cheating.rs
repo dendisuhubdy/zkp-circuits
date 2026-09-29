@@ -10,7 +10,7 @@ use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::emulator::{execute, CycleEvent, HashRow, MemAccess, Syscall, SLOT_W, SPACE_RAM};
 use rand_zkvm::guests;
 use rand_zkvm::isa::{AluOp, Decoded, Instr, Program, REG_A0, REG_A1, REG_A2, REG_A7, SYS_POSEIDON2};
-use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, Tier, Traces, Val};
+use rand_zkvm::machine::{build_traces_salted, build_traces_salted_with, FriProfile, Machine, Tier, Traces, Val};
 use rand_zkvm::tables::{alu, cpu, keccak, limbs, memory, nibble, poseidon2, program, range, F};
 
 /// `rejects()`, and the two constraint-panic prefixes it matches (`CONSTRAINT_PANIC` and
@@ -686,7 +686,7 @@ fn one_op(op: fn(u32, u32, u32) -> Instr, a: u32, b: u32) -> Program {
 /// The honest tier-10 traces of `p` and the machine to prove them with.
 fn one_op_traces(p: &Program) -> (Machine, Traces) {
     let e = execute(p, &[], &[], 10_000).unwrap();
-    (Machine::new(FriProfile::Test), build_traces_salted(p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap())
+    (Machine::new(FriProfile::Test), build_traces_salted_with(p, &[], &[], [0u32; 4], &e, Tier(10), Default::default()).unwrap())
 }
 
 /// The ALU row that provides `(op, a, b, ·)` with a nonzero multiplicity.
