@@ -301,7 +301,7 @@ fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_ver
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 461_082, "the twin proves the post-cut program as measured (constraint set 7 with VERIFIER-1; was 441 643 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 461_988, "the twin proves the post-cut program as measured (constraint set 8: the N=1 aggregate pin 462 262 less the 274-row loop overhead; 461 082 in constraint set 7 with VERIFIER-1, 441 643 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(19));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();
@@ -342,7 +342,7 @@ fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 2_044_506, "the exit proves the post-cut program as measured (constraint set 7 with VERIFIER-1; was 1 968 619 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 2_047_268, "the exit proves the post-cut program as measured (constraint set 8, `tests/pins.json`; 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(21));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();
