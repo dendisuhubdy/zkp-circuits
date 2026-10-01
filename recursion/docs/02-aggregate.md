@@ -139,7 +139,7 @@ wall, 63 processes at once, ~232 s of CPU each, 5.7 GB per process.
 
 | run | tier | cpu rows | prove | verify | proof size | peak RSS |
 |---|---:|---:|---:|---:|---:|---:|
-| N=1 test aggregate round trip, in suite (`a_one_proof_aggregate_round_trips…`) | 19 | 462 262 | 2 034.6 s for the test binary (prove + verify + five tampered variants) | — | see below | **94.5 GB** |
+| N=1 test aggregate round trip, in suite (`a_one_proof_aggregate_round_trips…`) | 19 | 462 262 | 2 034.6 s for the test binary (prove + verify + five tampered variants) | — | 334 778 B | **94.5 GB** |
 | exit twin: the single-proof program over one test proof | 19 | 461 988 | 2 001.8 s | 24.71 s | 335 003 B | 94.2 GB |
 | N=2 test aggregate (`two_test_profile`) | 20 | 924 115 | 3 983.5 s for the test binary | — | 355 577 B | **183.7 GB** |
 | N=3 test twin (`twin`) | 21 | 1 385 968 | 4 807.8 s | 24.75 s | 347 800 B | **221.0 GB** |
@@ -189,13 +189,17 @@ register-allocator spill (STOREE event 963) is rewritten to `0xC0FFEE` the way R
 and the rVM proof is built two ways past every host check — with the pre-fix register table (no
 read of `rd + 1`) and with the fixed table carrying the forged read; both are refused by
 `Machine::verify` at tier 19 (`a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused`,
-58:46 for the two proves, 95.5 GB). What the exercise settles: at the aggregate verifier's scale
-every stored high lane is either bound by the REG read RVM-1's fix added or read back through RAM
-into the verifier's own arithmetic, where a propagated forgery meets the arithmetic and
-transcript constraints; the cleanly isolated shape — a stored lane that surfaces to a published
-word unconsumed — is the toy program of `a_forged_storee_high_lane_is_rejected`, which the
-committed vectors refuse. The exercise was run only against the fixed verifier; a run with the
-fix removed (the standing red-first rule) is still owed.
+58:46 for the two proves, 95.5 GB). **The red-first run, RVM-1's fix alone reverted** (in a scratch copy, `EXT_READ_RD` emptied, never
+committed): the toy vectors go red — the forged run *verifies*, publishing
+`[12648430, 11, 11, 22]` — so the committed refusals have teeth. The aggregate-scale test stays
+green on the reverted rVM, and its teeth are the RAM table's read-after-write, not RVM-1 (the
+forge rewrites the stored lane but the spill's reload still reads the honest value). Letting the
+program carry the forged lane forward instead, at 41 of the run's 14 788 STOREE rows, traps every
+time in the verifier's own checks (`commit phase root[*]` 32 times, `quotient identity[*]` 5,
+`sample_bits decomposition` 3, `lookup terminal sum` 2). A random lane is caught by the arithmetic
+that consumes it; a lane *chosen* to cancel a failing check — the recursion-VM report's §6 path —
+was not constructed, so nothing here claims the unfixed rVM was unforgeable at this scale. That
+choice is what the fix removes, and the toy vectors are its red.
 
 ## ZKQ-5: the self-verifier's binding against the inner aggregate's (decided 2026-09-28)
 

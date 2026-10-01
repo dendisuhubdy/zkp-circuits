@@ -1045,14 +1045,23 @@ fn an_extension_pair_starting_at_r31_is_rejected() {
 //     lane the way RVM-1 describes and show the *fixed* rVM refuses the aggregate proof. This is a
 //     tier-19 rVM prove, so it is `#[ignore]`d for the >=64 GB machine.
 //
-// What the exercise found, stated honestly (docs/02-aggregate.md, "the forged-aggregate exercise"):
-// at the aggregate verifier's scale RVM-1 is *defense in depth*. Every stored high lane is either
-// read back through RAM into the verifier's own arithmetic (a propagated forgery then fails an
-// arithmetic/transcript constraint) or bound by the REG read the fix adds (an un-propagated one
-// fails the REG or RAM bus balance). The cleanly-isolated exploit — a stored lane that surfaces to
-// a published value unconsumed — is exactly the toy shape above, which the committed suite already
-// refuses. The reverted-fix red is shown on those toy vectors (they are built to isolate); this
-// test shows the aggregate itself refusing the forgery.
+// What the red-first run found (the 512 GB box, 2026-10-01, `EXT_READ_RD` emptied in a scratch copy
+// — RVM-1's fix alone reverted, never committed):
+//
+//  - the toy vectors above go red: "the forged run VERIFIED ... publishing [12648430, 11, 11, 22]"
+//    (and the spill twin's [1378, 2678, 11, 12648430]) — the forgery is accepted;
+//  - leg 2 below stays green on the reverted rVM. Its teeth are the RAM table's read-after-write,
+//    not RVM-1: the forged lane is written but the spill's reload (a LOADE 493 rows later) still
+//    reads the honest value, so the RAM log disagrees with itself ("read does not match last write
+//    at addr 0x3"). It is kept as the fixed rVM's refusal of the un-propagated forgery and does
+//    not by itself test RVM-1;
+//  - letting the program carry the forged lane forward (the emulator's STOREE storing 0xC0FFEE at
+//    one clock — the fully propagated forgery) at 41 of the run's 14 788 STOREE rows traps every
+//    time in the verifier's own checks: `commit phase root[*]`, `quotient identity[*]`,
+//    `sample_bits decomposition`, `lookup terminal sum`. A random lane value is caught by the
+//    arithmetic that consumes it; a lane value *chosen* to cancel a failing check (the report's
+//    §6 path) was not constructed, so that the reverted rVM cannot be forged at this scale is not
+//    claimed — what RVM-1's fix removes is exactly that choice, and the toy vectors are its red.
 
 use recursion::programs::verify_rv32n;
 use recursion::shape::{InnerKey as ZkInnerKey, InnerShape as ZkInnerShape};
@@ -1115,10 +1124,11 @@ fn forge_a_stored_spill(exec: &mut Execution) -> usize {
     idx
 }
 
-/// Leg 2: the forged stored lane inside the real aggregate verifier, refused by the fixed rVM two
-/// ways — the unfixed register table (no `rd + 1` read: the cpu's REG send has no receiver, a bus
-/// imbalance) and the fixed register table carrying the forged read (the register memory table's
-/// read-after-write refuses it). A tier-19 rVM prove per variant, so `#[ignore]`d.
+/// Leg 2: the forged stored lane inside the real aggregate verifier, refused by the fixed rVM with
+/// the unfixed builder's register table (no `rd + 1` read) and with the fixed table carrying the
+/// forged read. A tier-19 rVM prove per variant, so `#[ignore]`d. On the fixed rVM the REG read the
+/// fix adds is unmatched; the un-propagated reload also breaks the RAM table's read-after-write,
+/// which is why this test stays green with RVM-1 reverted (the block comment above).
 #[test]
 #[ignore = "issue45 B1: the forged-aggregate exercise, tier 19 rVM prove (>=64 GB, ~30 min/variant). Run: \
             cargo test --release -p recursion --test cheating a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused -- --ignored --nocapture"]
