@@ -144,8 +144,8 @@ wall, 63 processes at once, ~232 s of CPU each, 5.7 GB per process.
 | N=2 test aggregate (`two_test_profile`) | 20 | 924 115 | 3 983.5 s for the test binary | — | 355 577 B | **183.7 GB** |
 | N=3 test twin (`twin`) | 21 | 1 385 968 | 4 807.8 s | 24.75 s | 347 800 B | **221.0 GB** |
 | M5.2 production exit: the single-proof program over one production proof | 21 | 2 047 268 | 8 164.8 s | 99.31 s | 1 566 619 B | **376.9 GB** |
-| production N=1 aggregate (`production_n1_aggregate_proves_and_verifies`) | 21 | 2 047 542 | PROD_N1_PROVE | PROD_N1_VERIFY | PROD_N1_SIZE | PROD_N1_RSS |
-| production N=2 aggregate (tier 22) | 22 | 4 094 675 | PROD_N2_ROW |
+| production N=1 aggregate (`production_n1_aggregate_proves_and_verifies`) | 21 | 2 047 542 | 8 131.3 s | 99.36 s | 1 563 226 B | 376.9 GB |
+| production N=2 aggregate (tier 22) | 22 | 4 094 675 | not attempted: the production tier-21 peak (376.9 GB, twice) scales to ~750 GB at tier 22 (every table one height taller), above the 503 GB box |
 | production N=3 aggregate (tier 23) | 23 | 6 141 808 | not attempted: the tier-22 run above already exceeds the box |
 
 **The memory finding.** Every measured peak is a multiple of what this document and `docs/01`
