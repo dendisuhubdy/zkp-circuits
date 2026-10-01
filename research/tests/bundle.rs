@@ -823,6 +823,32 @@ fn a_bundles_time_must_be_inside_the_time_window() {
     assert!(matches!(l.apply_bundle(&m, &proof, &b), Err(LedgerError::Time { .. })), "a bundle cannot claim a future time");
 }
 
+/// Audit v6, CS6-2 (fullnode issue #97): the proof is verified with `Machine::verify_public` over
+/// the EMPTY public segment, which is what a chain does (`fullnode`'s `ZkExecutor` called
+/// `verify_public(hc, &[], proof)` for every bundle before the transaction binding, and the
+/// binding is a non-empty segment this simulated ledger does not model). Plain `verify` leaves
+/// `pv::PUB0..7` pinned only to whatever segment the prover chose to supply: this bundle, proved
+/// over a one-word segment, verifies — and `apply_bundle` admitted it. It is refused as
+/// `Proof(PublicValues)` at step 8, after every plaintext check has passed, and nothing is applied.
+#[test]
+fn a_bundle_proved_over_a_non_empty_public_segment_is_refused() {
+    let f = fixture();
+    let m = Machine::new(FriProfile::Test);
+    let mut l = fresh_ledger(f);
+    let inputs: [(Note, [Word8; DEPTH], u32); 2] = std::array::from_fn(|i| {
+        let (path, index) = l.path_for(&f.in_notes[i].commitment()).unwrap();
+        (f.in_notes[i], path, index)
+    });
+    let inputs_vec = notes::bundle_inputs(&f.alice.sk, &inputs, &f.outputs, f.anchor, f.fee, f.burn, f.asset, f.time);
+    let (proof, _) = m.prove(&l.bundle_program, &inputs_vec, &[1], None).unwrap();
+    m.verify(&l.bundle_program.digest(), &proof).expect("`verify` alone accepts it: the segment is bound in-circuit, to the one word supplied");
+    let digest = cpu::pv::OUT0..cpu::pv::OUT0 + 8;
+    assert_eq!(proof.public_values[digest.clone()], shared_proof(f).public_values[digest], "same plaintext, same published digest: only the public segment differs");
+    assert!(matches!(l.apply_bundle(&m, &proof, &honest_bundle(f)), Err(LedgerError::Proof(VerifyError::PublicValues))));
+    assert!(l.bundles.is_empty(), "nothing was applied");
+    l.apply_bundle(&m, &shared_proof(f), &honest_bundle(f)).expect("the fixture's proof, over the empty segment, is the admitted one");
+}
+
 /// The two shape checks that run before anything else — a proof carrying the wrong number of
 /// public values is a *proof* error (not a misleading digest mismatch), and a digest word
 /// outside 32 bits, which no honest trace can produce since an output is a register word, is
