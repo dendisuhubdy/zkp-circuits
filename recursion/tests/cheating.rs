@@ -375,6 +375,62 @@ fn a_sponge_row_claiming_the_plain_poseidon2_kind_is_rejected() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 
+// ── Cut B: HINTN, eight tape words into eight cells in one cpu row ────────────────────────────
+
+fn hintn_setup() -> (Machine, Program, Traces) {
+    let p = Program { instrs: vec![
+        i(Op::Faddi, 1, 0, 100),
+        i(Op::Hintn, 0, 1, 0),
+        i(Op::Load, 2, 1, 7),
+        // R5's four published words: the eighth tape word, then three zeros.
+        i(Op::Public, 0, 2, 0),
+        i(Op::Public, 0, 0, 0),
+        i(Op::Public, 0, 0, 0),
+        i(Op::Public, 0, 0, 0),
+        i(Op::Halt, 0, 0, 0),
+    ], checkpoints: vec![] };
+    let tape: Vec<F> = (1..=8).map(F::from_u64).collect();
+    let m = Machine::new(FriProfile::Test);
+    let exec = execute(&p, &tape, 100).unwrap();
+    let t = build_traces(&p, &exec, Tier(8)).unwrap();
+    (m, p, t)
+}
+
+#[test]
+fn honest_hintn_traces_pass() {
+    let (m, p, t) = hintn_setup();
+    prove_and_verify(&m, &p, &t).unwrap();
+}
+
+/// The HINTN row's base moved to `p − 1` (so `A0 + B + 7 = 6`, in range by the top alone) with the
+/// group-3 base limbs forged to spell 0: the RANGE8 lookups on the forged limbs, or the
+/// `base3 − limbs3` identity, refuse it — the ZKQ-3 property, on the new row kind.
+#[test]
+fn a_hintn_base_just_below_zero_with_forged_limbs_is_rejected() {
+    let (m, p, mut t) = hintn_setup();
+    let w = cpu::col::WIDTH;
+    let row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::SEL0 + Op::Hintn as usize] == F::ONE).unwrap();
+    t.cpu.values[row * w + cpu::col::A0] = -F::ONE; // p − 1, with B = 0
+    for c in [cpu::col::G3LIMB0, cpu::col::G3LIMB1, cpu::col::G3LIMB2] {
+        t.cpu.values[row * w + c] = F::ZERO;
+    }
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// The top cell at `2^24`: base `2^24 − 7` with the group-1 limbs forged to spell `2^24 − 1`.
+#[test]
+fn a_hintn_run_ending_at_two_to_the_twentyfour_with_forged_limbs_is_rejected() {
+    let (m, p, mut t) = hintn_setup();
+    let w = cpu::col::WIDTH;
+    let row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::SEL0 + Op::Hintn as usize] == F::ONE).unwrap();
+    t.cpu.values[row * w + cpu::col::A0] = F::from_u64((1 << 24) - 7);
+    let top = (1u64 << 24) - 1;
+    for (k, c) in [cpu::col::LIMB0, cpu::col::LIMB1, cpu::col::LIMB2].iter().enumerate() {
+        t.cpu.values[row * w + c] = F::from_u64((top >> (8 * k)) & 0xff);
+    }
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
 // ── Task 10: the full-suite pass — the remaining per-table tamper vectors ─────────────────────
 
 #[test]

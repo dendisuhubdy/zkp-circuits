@@ -255,7 +255,7 @@ fn contract_program(states: &[[F; 8]]) -> (Program, Vec<F>) {
 // column into state, so each written column must be bound, on that opcode's rows, by at least
 // one of: a `REG` read carrying the same column, a `RAM` read carrying it, or an ALU identity —
 // a base constraint gated by the opcode's own selector that depends on the column. The only
-// opcodes allowed a free written value are HINT/HINTE, whose value *is* the witness tape by
+// opcodes allowed a free written value are HINT/HINTE/HINTN, whose value *is* the witness tape by
 // design (spec §3: the rVM's nondeterminism is the tape and nothing else).
 //
 // `DECLARED` below is the same statement written out per opcode — the data a reviewer reads —
@@ -274,7 +274,7 @@ enum Bound {
     RamRead,
     /// A base constraint gated by the opcode's selector depends on the column.
     Alu,
-    /// The column is the program's witness tape by design (HINT/HINTE only).
+    /// The column is the program's witness tape by design (HINT/HINTE/HINTN only).
     Witness,
 }
 
@@ -282,7 +282,7 @@ enum Bound {
 /// Opcodes that write nothing (JMP, JEQ, JNE, PUBLIC, POSEIDON2, HALT, REDUCE, SPONGE — the
 /// dispatched chips' own RAM traffic is theirs, not the cpu row's) have no entry.
 const DECLARED: &[(Op, &[(usize, Bound)])] = {
-    use cpu::col::{D0, D1};
+    use cpu::col::{D0, D1, W0};
     use Bound::*;
     &[
         (Op::Fadd, &[(D0, Alu)]),
@@ -304,6 +304,20 @@ const DECLARED: &[(Op, &[(usize, Bound)])] = {
         (Op::Storee, &[(D0, RegRead), (D1, RegRead)]),
         (Op::Hint, &[(D0, Witness)]),
         (Op::Hinte, &[(D0, Witness), (D1, Witness)]),
+        // Cut B: eight RAM writes of the row's own word columns, the tape by design.
+        (
+            Op::Hintn,
+            &[
+                (W0, Witness),
+                (W0 + 1, Witness),
+                (W0 + 2, Witness),
+                (W0 + 3, Witness),
+                (W0 + 4, Witness),
+                (W0 + 5, Witness),
+                (W0 + 6, Witness),
+                (W0 + 7, Witness),
+            ],
+        ),
     ]
 };
 
@@ -316,6 +330,7 @@ fn col_name(c: usize) -> String {
         B1 => "B1".into(),
         D0 => "D0".into(),
         D1 => "D1".into(),
+        c if (W0..W0 + 8).contains(&c) => format!("W{}", c - W0),
         other => format!("col {other}"),
     }
 }
@@ -396,7 +411,7 @@ fn every_value_the_cpu_row_writes_is_bound_on_every_opcode() {
                 (reg_reads.contains(&col), Bound::RegRead),
                 (ram_reads.contains(&col), Bound::RamRead),
                 (alu(col, &mut rng), Bound::Alu),
-                (matches!(op, Op::Hint | Op::Hinte), Bound::Witness),
+                (matches!(op, Op::Hint | Op::Hinte | Op::Hintn), Bound::Witness),
             ]
             .into_iter()
             .filter_map(|(yes, b)| yes.then_some(b))
@@ -428,7 +443,8 @@ fn every_value_the_cpu_row_writes_is_bound_on_every_opcode() {
 // ── ZKQ-3: a multi-cell access is range-checked at both ends ──────────────────────────────────
 //
 // The cpu row range-checks one *subject* address per row kind — for LOADE/STOREE the top cell
-// `A0 + B + 1`, for POSEIDON2/SPONGE `A0 + 7`, for SPONGE's source `B0 + 3` — and before ZKQ-3's
+// `A0 + B + 1`, for POSEIDON2/SPONGE `A0 + 7`, for SPONGE's source `B0 + 3`, for HINTN (Cut B)
+// `A0 + B + 7` — and before ZKQ-3's
 // fix never the base: an address is a field element, so a base of `p − 1` put the top at 0,
 // inside the range, and the access touched a cell outside the machine's `2^24` address space.
 // The emulator refuses every such address, so no honest trace has one; this checks the AIR
@@ -446,6 +462,7 @@ fn multi_cell_program() -> Program {
         i(Op::Poseidon2, 0, 7, 0), // 5
         i(Op::Faddi, 8, 0, 96),    // 6: a source pointer
         ir(Op::Sponge, 0, 7, 8),   // 7
+        i(Op::Hintn, 0, 8, 0),     // 8: mem[96..104] = the eight tape words (Cut B)
         i(Op::Public, 0, 0, 0),
         i(Op::Public, 0, 0, 0),
         i(Op::Public, 0, 0, 0),
@@ -458,19 +475,21 @@ fn multi_cell_program() -> Program {
 fn a_multi_cell_access_whose_base_wraps_below_zero_is_refused() {
     use cpu::col::*;
     let p = multi_cell_program();
-    let exec = recursion::emulator::execute(&p, &[], 1000).unwrap();
+    let tape: Vec<F> = (1..=8).map(F::from_u64).collect();
+    let exec = recursion::emulator::execute(&p, &tape, 1000).unwrap();
     let t = recursion::machine::build_traces(&p, &exec, Tier(8)).unwrap();
     let (interactions, constraints) = common::symbolic_air(&cpu::CpuAir);
     let limbs = common::range_checked_columns(&interactions);
     let row = |k: usize| t.cpu.values[k * WIDTH..(k + 1) * WIDTH].to_vec();
     let minus = |k: u64| F::ZERO - F::from_u64(k);
     // (row, what, column, new value): each moves one base below zero with its top still in range.
-    let cases: [(usize, &str, usize, F); 5] = [
+    let cases: [(usize, &str, usize, F); 6] = [
         (2, "STOREE at A0 + B = p − 1 (top cell 0)", A0, minus(1)),
         (3, "LOADE at A0 + B = p − 1 (top cell 0)", A0, minus(1)),
         (5, "POSEIDON2 at A0 = p − 4 (top cell 3)", A0, minus(4)),
         (7, "SPONGE's state at A0 = p − 4 (top cell 3)", A0, minus(4)),
         (7, "SPONGE's source at B0 = p − 2 (top cell 1)", B0, minus(2)),
+        (8, "HINTN at A0 + B = p − 1 (top cell 6)", A0, minus(1)),
     ];
     let mut admitted = Vec::new();
     for (k, what, col, value) in cases {
@@ -490,4 +509,10 @@ fn a_multi_cell_access_whose_base_wraps_below_zero_is_refused() {
     let diff = cur[D0] - cur[A0];
     (cur[EQ_AUX], cur[EQ_INV]) = if diff == F::ZERO { (F::ONE, F::ZERO) } else { (F::ZERO, diff.inverse()) };
     assert!(common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_err(), "a LOADE whose top cell is 2^24 is refused");
+    // And HINTN's top end (group 1's `A0 + B + 7`): base `2^24 − 7`, in range, top cell `2^24`.
+    let (mut cur, next) = (row(8), row(9));
+    cur[A0] = F::from_u64((1 << 24) - 7);
+    let diff = cur[D0] - cur[A0];
+    (cur[EQ_AUX], cur[EQ_INV]) = if diff == F::ZERO { (F::ONE, F::ZERO) } else { (F::ZERO, diff.inverse()) };
+    assert!(common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_err(), "a HINTN whose top cell is 2^24 is refused");
 }

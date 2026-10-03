@@ -227,3 +227,45 @@ fn the_event_log_records_every_memory_access_in_timestamp_order() {
     assert_eq!(e.mem_accesses(), 2);
     assert_eq!(e.histogram()[Op::Faddi as usize], 2);
 }
+
+#[test]
+fn hintn_writes_eight_witness_words_at_ra_plus_imm() {
+    let p = Program { instrs: vec![
+        i(Op::Faddi, 1, 0, 100),            // r1 = 100
+        i(Op::Hintn, 0, 1, 4),              // mem[104..112] = w[0..8]
+        i(Op::Load, 2, 1, 4),               // r2 = mem[104]
+        i(Op::Load, 3, 1, 11),              // r3 = mem[111]
+        i(Op::Public, 0, 2, 0), i(Op::Public, 0, 3, 0), i(Op::Halt, 0, 0, 0),
+    ], checkpoints: vec![] };
+    let tape: Vec<F> = (1..=8).map(F::from_u64).collect();
+    let exec = execute(&p, &tape, 100).unwrap();
+    assert_eq!(exec.public, vec![F::from_u64(1), F::from_u64(8)]);
+    assert_eq!(exec.hints_read, 8);
+    let hintn = &exec.events[1];
+    assert_eq!(hintn.mem.len(), 8, "eight RAM writes");
+    assert!(hintn.mem.iter().all(|m| m.is_write));
+    assert_eq!(hintn.mem[0].addr, 104);
+    assert_eq!(hintn.mem[7].addr, 111);
+    assert_eq!(hintn.mem[7].value, F::from_u64(8));
+    // The cpu AIR's `ts(k)` for the k-th write: slot k of row clk = 1.
+    for (k, m) in hintn.mem.iter().enumerate() {
+        assert_eq!(m.ts, 16 + k as u32, "write {k} at slot {k}");
+    }
+}
+
+#[test]
+fn hintn_with_seven_words_left_is_hint_exhausted() {
+    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 100), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![] };
+    let tape: Vec<F> = (1..=7).map(F::from_u64).collect();
+    assert_eq!(execute(&p, &tape, 100), Err(ExecError::HintExhausted { pc: 1 }));
+}
+
+#[test]
+fn hintn_whose_top_cell_is_at_two_to_the_twentyfour_is_refused() {
+    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, (1 << 24) - 7), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![] };
+    let tape: Vec<F> = (1..=8).map(F::from_u64).collect();
+    assert_eq!(execute(&p, &tape, 100), Err(ExecError::AddressOutOfRange { pc: 1, addr: 1 << 24 }));
+    // One lower is the last legal base.
+    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, (1 << 24) - 8), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![] };
+    assert!(execute(&p, &tape, 100).is_ok());
+}

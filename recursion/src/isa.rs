@@ -29,7 +29,9 @@ pub const MEM_LIMIT: u64 = 1 << 24;
 /// (`SBPF_OUT`) and both digests share one permutation, so this must not collide with it.
 pub const RVM_PROGRAM_DOMAIN: u64 = 15;
 
-/// The twenty-four opcodes, in the spec table's reading order.
+/// The twenty-seven opcodes: the spec table's twenty-four in its reading order, then the
+/// appended ones (`REDUCE`, `SPONGE`, `HINTN`), each at the next free number so no earlier
+/// opcode — and so no earlier program's digest — ever moves.
 ///
 /// Deliberately absent: `FRIFOLD`, `EXPBITS`, `MERKLE` precompiles — the verifier's fold and
 /// Merkle-path steps are compiled sequences of these, and a precompile is added only if the
@@ -97,10 +99,14 @@ pub enum Op {
     /// poseidon2 chip's second row kind; one cpu row per block. M5.2 Task 9, appended —
     /// opcode 25.
     Sponge,
+    /// `mem[ra + imm .. ra + imm + 8] = the next eight witness words` — eight `HINT; STORE` pairs
+    /// in one row (Cut B, 2026-10-03). The words ride on the cpu row's `W0..W7`, free witness
+    /// exactly as `HINT`'s `D0` is; `rd` is unused. Opcode 26, appended; 0–25 never move.
+    Hintn,
 }
 
 impl Op {
-    pub const COUNT: usize = 26;
+    pub const COUNT: usize = 27;
 
     /// Every opcode, at the index of its own discriminant (pinned by `tests/isa.rs`).
     pub const ALL: [Op; Self::COUNT] = [
@@ -130,6 +136,7 @@ impl Op {
         Op::Halt,
         Op::Reduce,
         Op::Sponge,
+        Op::Hintn,
     ];
 
     pub fn from_u8(x: u8) -> Option<Self> {
@@ -164,6 +171,7 @@ impl Op {
             Op::Halt => "HALT",
             Op::Reduce => "REDUCE",
             Op::Sponge => "SPONGE",
+            Op::Hintn => "HINTN",
         }
     }
 

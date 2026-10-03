@@ -170,7 +170,7 @@ use recursion::tables::{cpu, memory, poseidon2, program as program_table, public
 
 #[test]
 fn the_table_widths_and_constraint_degrees_are_pinned() {
-    assert_eq!(cpu::col::WIDTH, 72, "the cpu's designed width after Tasks 8–9 (26 selectors + the SPONGE group-2 limbs) and ZKQ-3 (the base-address groups 3 and 4)");
+    assert_eq!(cpu::col::WIDTH, 81, "72 + the HINTN selector + its eight word columns (Cut B)");
     assert_eq!(memory::col::WIDTH, 11);
     assert_eq!(program_table::col::WIDTH, 3);
     assert_eq!(program_table::pre::WIDTH, 4);

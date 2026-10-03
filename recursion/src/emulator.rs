@@ -386,6 +386,23 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
                 }
                 perm = Some(PermEvent { ptr, input, output, src: Some(src) });
             }
+            Op::Hintn => {
+                a[0] = regs[ra];
+                let base = (a[0] + instr.b).as_canonical_u64();
+                // The top cell bounds the whole run: `base` is canonical (below `p < 2^64 − 7`),
+                // so `base + 7` cannot wrap, and `base + 7 < 2^24` puts every cell below it too.
+                bounded(pc, base + 7)?;
+                if run.hints_read + 8 > witness.len() {
+                    return Err(ExecError::HintExhausted { pc });
+                }
+                // `write` takes its slot from the position in `mems`, empty until now: the eight
+                // writes land at slots 0..7, which is what the cpu AIR's `ts(k)` sends.
+                for k in 0..8u64 {
+                    let w = witness[run.hints_read + k as usize];
+                    write(&mut mem, &mut mems, clk, base + k, w);
+                }
+                run.hints_read += 8;
+            }
             Op::Halt => next_pc = pc,
         }
 
