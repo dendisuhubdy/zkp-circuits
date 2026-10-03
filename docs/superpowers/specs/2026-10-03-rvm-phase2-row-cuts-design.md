@@ -192,7 +192,7 @@ September tier-19 proof that "completed on 48 GB" did so through ~50 GB of compr
 Linux `/usr/bin/time -v` figures are the honest ones.
 
 **The live model, from this run** (tier 19, declared heights cpu 2^19, reg 2^21, ram 2^20,
-poseidon2 2^14, reduce 2^15, program 2^19; `log_blowup 3`, hiding):
+poseidon2 2^14, reduce 2^16, program 2^19 (reduce corrected 2026-10-04 from the base tree's `build_traces`: 34 624 rows); `log_blowup 3`, hiding):
 
 | term | GB | share of the 94 GB Linux peak |
 |---|---:|---:|
@@ -212,8 +212,11 @@ everything before opening anything.
   "committed oracle" requirement in `docs/01` is withdrawn (Task 4 rewrites it). RSS measured on
   macOS is never again a memory number in these docs.
 - **The §2 cuts halve it directly**: every table one height shorter (tier 21 → 20) halves every
-  term above, so the production N=1 aggregate lands near **≈ 190 GB** (a 256 GB host) and the
-  tier-19 twin near 47 GB. Still not `compute-optimization.md` §4.4's ≤ 64 GB; the rest is
+  term above — *measured correction (docs/04, 2026-10-04): not every table drops a height; the
+  poseidon2 and reduce tables keep theirs (their rows are unchanged) and the production RAM table
+  stays at 2^22 (2 213 181 accesses, 116 029 over 2^21), so the cell-weighted projection is
+  **≈ 240 GB** for the production N=1 aggregate (190 GB if every table had halved) — a 256 GB
+  host either way, and the tier-18 twin ≈ 50 GB. Still not `compute-optimization.md` §4.4's ≤ 64 GB; the rest is
   structural and is the next phase's measured decision, candidates in order of leverage:
   1. the **quotient's share (32 %)** — probed to its cause (below): the hiding MMCS salts every
      quotient chunk separately, tripling the term; committing one instance's chunks as one matrix
