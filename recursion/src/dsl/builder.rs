@@ -652,6 +652,20 @@ impl Builder {
         self.stats.perms += 1;
     }
 
+    /// One `COMPRESS` instruction (Cut C): the four-cell digest at `state` and the four-cell
+    /// sibling at `sib`, ordered by `bit`, permuted by the poseidon2 chip, lanes 0–3 written back
+    /// over `state`. `bit` must be boolean — the emulator refuses anything else as a build error.
+    /// `bit` rides in the `rd` slot as a read, exactly as `STORE`'s value does: the handle's home
+    /// register, or a reload into scratch if it was spilled (`r0` for [`Builder::zero`]).
+    pub fn compress_step(&mut self, state: Ptr, sib: Ptr, bit: Felt) {
+        self.begin();
+        let ra = self.ptr_reg(state);
+        let rb = self.ptr_reg(sib);
+        let rd = self.materialise(bit.0);
+        self.emit(Op::Compress, rd, ra, bref_of(rb));
+        self.stats.perms += 1;
+    }
+
     /// The register a `Ptr`'s address lives in, folding any compile-time delta in first. An
     /// absolute pointer has no holder: the address is a constant, materialised into scratch.
     fn ptr_reg(&mut self, p: Ptr) -> RRef {

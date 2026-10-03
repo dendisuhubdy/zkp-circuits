@@ -170,12 +170,12 @@ use recursion::tables::{cpu, memory, poseidon2, program as program_table, public
 
 #[test]
 fn the_table_widths_and_constraint_degrees_are_pinned() {
-    assert_eq!(cpu::col::WIDTH, 81, "72 + the HINTN selector + its eight word columns (Cut B)");
+    assert_eq!(cpu::col::WIDTH, 82, "72 + the HINTN selector + its eight word columns (Cut B) + the COMPRESS selector (Cut C)");
     assert_eq!(memory::col::WIDTH, 11);
     assert_eq!(program_table::col::WIDTH, 3);
     assert_eq!(program_table::pre::WIDTH, 4);
     assert_eq!(public_table::col::WIDTH, 7);
-    assert_eq!(poseidon2::col::WIDTH, 341);
+    assert_eq!(poseidon2::col::WIDTH, 343, "341 + IS_COMPRESS, BIT (Cut C)");
     assert_eq!(range::col::WIDTH, 1);
     let p = Program {
         instrs: vec![

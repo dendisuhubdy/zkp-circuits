@@ -440,6 +440,47 @@ fn every_value_the_cpu_row_writes_is_bound_on_every_opcode() {
     assert!(failures.is_empty(), "the cpu table's binding rule is broken:\n  {}", failures.join("\n  "));
 }
 
+/// The binding rule's other half (Cut C): a *dispatch* message — the lookups that hand a row's
+/// operands to a chip or the public table — is a write too, of everything it carries, into a
+/// table that trusts it. The test above sees only `REG`/`RAM` writes, and `COMPRESS` writes
+/// nothing there: its index bit `D0` leaves the row on the `COMPRESS` bus alone, so if `D0` were
+/// not read from `rd` the prover would choose the child order. Here every operand column a
+/// dispatch carries on an opcode's rows must be carried by a `REG` read sent on those rows. `CLK`
+/// and `PUB_IDX` are the row chain's own, constrained by transitions, not operands.
+#[test]
+fn every_operand_a_dispatch_carries_is_read_from_a_register() {
+    use cpu::col::{CLK, PUB_IDX};
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x43_5554_43);
+    let (interactions, _) = common::symbolic_air(&cpu::CpuAir);
+    let (msgs, _) = cpu_messages_and_constraints();
+    let dispatches = [bus::POSEIDON2.name(), bus::SPONGE.name(), bus::REDUCE.name(), bus::PUBLIC.name(), bus::COMPRESS.name()];
+    let mut failures = Vec::new();
+    let mut seen_compress = false;
+    for op in Op::ALL {
+        let cur = row(Some(op), &mut rng);
+        let next = row(None, &mut rng);
+        let reg_reads: std::collections::BTreeSet<usize> = msgs
+            .iter()
+            .filter(|m| m.bus == "REG" && !m.is_write && eval_at(&m.count, &cur, &next) != F::ZERO)
+            .map(|m| m.value)
+            .collect();
+        for i in interactions.iter().filter(|i| dispatches.contains(&i.bus_name.as_str())) {
+            if eval_at(&i.count, &cur, &next) == F::ZERO {
+                continue;
+            }
+            seen_compress |= op == Op::Compress && i.bus_name == bus::COMPRESS.name();
+            for f in &i.fields {
+                let col = as_column(f).unwrap_or_else(|| panic!("a {} field is one column", i.bus_name));
+                if col != CLK && col != PUB_IDX && !reg_reads.contains(&col) {
+                    failures.push(format!("{}: {} carries {} and no REG read binds it", op.mnemonic(), i.bus_name, col_name(col)));
+                }
+            }
+        }
+    }
+    assert!(seen_compress, "COMPRESS rows dispatch on the COMPRESS bus");
+    assert!(failures.is_empty(), "dispatched operands the row never read:\n  {}", failures.join("\n  "));
+}
+
 // ── ZKQ-3: a multi-cell access is range-checked at both ends ──────────────────────────────────
 //
 // The cpu row range-checks one *subject* address per row kind — for LOADE/STOREE the top cell
@@ -463,6 +504,8 @@ fn multi_cell_program() -> Program {
         i(Op::Faddi, 8, 0, 96),    // 6: a source pointer
         ir(Op::Sponge, 0, 7, 8),   // 7
         i(Op::Hintn, 0, 8, 0),     // 8: mem[96..104] = the eight tape words (Cut B)
+        i(Op::Faddi, 9, 0, 1),     // 9: an index bit
+        ir(Op::Compress, 9, 7, 8), // 10: state at 64, sibling at 96 (Cut C)
         i(Op::Public, 0, 0, 0),
         i(Op::Public, 0, 0, 0),
         i(Op::Public, 0, 0, 0),
@@ -483,13 +526,15 @@ fn a_multi_cell_access_whose_base_wraps_below_zero_is_refused() {
     let row = |k: usize| t.cpu.values[k * WIDTH..(k + 1) * WIDTH].to_vec();
     let minus = |k: u64| F::ZERO - F::from_u64(k);
     // (row, what, column, new value): each moves one base below zero with its top still in range.
-    let cases: [(usize, &str, usize, F); 6] = [
+    let cases: [(usize, &str, usize, F); 8] = [
         (2, "STOREE at A0 + B = p − 1 (top cell 0)", A0, minus(1)),
         (3, "LOADE at A0 + B = p − 1 (top cell 0)", A0, minus(1)),
         (5, "POSEIDON2 at A0 = p − 4 (top cell 3)", A0, minus(4)),
         (7, "SPONGE's state at A0 = p − 4 (top cell 3)", A0, minus(4)),
         (7, "SPONGE's source at B0 = p − 2 (top cell 1)", B0, minus(2)),
         (8, "HINTN at A0 + B = p − 1 (top cell 6)", A0, minus(1)),
+        (10, "COMPRESS's state at A0 = p − 2 (top cell 1)", A0, minus(2)),
+        (10, "COMPRESS's sibling at B0 = p − 2 (top cell 1)", B0, minus(2)),
     ];
     let mut admitted = Vec::new();
     for (k, what, col, value) in cases {
@@ -515,4 +560,12 @@ fn a_multi_cell_access_whose_base_wraps_below_zero_is_refused() {
     let diff = cur[D0] - cur[A0];
     (cur[EQ_AUX], cur[EQ_INV]) = if diff == F::ZERO { (F::ONE, F::ZERO) } else { (F::ZERO, diff.inverse()) };
     assert!(common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_err(), "a HINTN whose top cell is 2^24 is refused");
+    // And COMPRESS's two top ends (groups 1 and 2, `A0 + 3` and `B0 + 3`): base `2^24 − 3`.
+    for (col, what) in [(A0, "state"), (B0, "sibling")] {
+        let (mut cur, next) = (row(10), row(11));
+        cur[col] = F::from_u64((1 << 24) - 3);
+        let diff = cur[D0] - cur[A0];
+        (cur[EQ_AUX], cur[EQ_INV]) = if diff == F::ZERO { (F::ONE, F::ZERO) } else { (F::ZERO, diff.inverse()) };
+        assert!(common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_err(), "a COMPRESS whose {what}'s top cell is 2^24 is refused");
+    }
 }

@@ -1,7 +1,7 @@
 //! The emulator is the rVM's reference semantics: one test per instruction group, and the event
 //! log M5.2's tables are generated from.
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
-use recursion::emulator::{execute, ExecError};
+use recursion::emulator::{execute, ExecError, PermKind};
 use recursion::isa::{Instr, Op, Program, F, MEM_LIMIT};
 
 fn prog(instrs: Vec<Instr>) -> Program {
@@ -268,4 +268,33 @@ fn hintn_whose_top_cell_is_at_two_to_the_twentyfour_is_refused() {
     // One lower is the last legal base.
     let p = Program { instrs: vec![i(Op::Faddi, 1, 0, (1 << 24) - 8), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![] };
     assert!(execute(&p, &tape, 100).is_ok());
+}
+
+#[test]
+fn compress_orders_the_children_by_the_bit_and_keeps_four_lanes() {
+    let (d, s): (Vec<F>, Vec<F>) = ((1..=4).map(F::from_u64).collect(), (11..=14).map(F::from_u64).collect());
+    let run = |bit: u64| {
+        let mut instrs = vec![i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 2, 0, 80), i(Op::Faddi, 3, 0, bit)];
+        for k in 0..4 { instrs.push(i(Op::Faddi, 4, 0, 1 + k)); instrs.push(i(Op::Store, 4, 1, k)); }
+        for k in 0..4 { instrs.push(i(Op::Faddi, 4, 0, 11 + k)); instrs.push(i(Op::Store, 4, 2, k)); }
+        instrs.push(ir(Op::Compress, 3, 1, 2));
+        for k in 0..4 { instrs.push(i(Op::Load, 5, 1, k)); instrs.push(i(Op::Public, 0, 5, 0)); }
+        instrs.push(i(Op::Halt, 0, 0, 0));
+        execute(&Program { instrs, checkpoints: vec![] }, &[], 1000).unwrap()
+    };
+    let want = |input: [F; 8]| rand_zkvm::hash::permute_state(input)[..4].to_vec();
+    let ds: [F; 8] = core::array::from_fn(|k| if k < 4 { d[k] } else { s[k - 4] });
+    let sd: [F; 8] = core::array::from_fn(|k| if k < 4 { s[k] } else { d[k - 4] });
+    assert_eq!(run(0).public, want(ds));
+    assert_eq!(run(1).public, want(sd));
+    let ev = run(1).events.iter().find(|e| e.instr.op == Op::Compress).cloned().unwrap();
+    assert_eq!(ev.mem.len(), 12, "4 + 4 reads, 4 writes");
+    assert_eq!(ev.d[0], F::ONE, "the bit is read from rd into D0");
+    match ev.perm.unwrap().kind { PermKind::Compress { sib: 80, bit: true } => {}, k => panic!("{k:?}") }
+}
+
+#[test]
+fn compress_refuses_a_non_boolean_bit() {
+    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 2, 0, 80), i(Op::Faddi, 3, 0, 2), ir(Op::Compress, 3, 1, 2), i(Op::Halt, 0, 0, 0)], checkpoints: vec![] };
+    assert_eq!(execute(&p, &[], 100), Err(ExecError::NonBooleanBit { pc: 3 }));
 }

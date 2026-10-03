@@ -1231,3 +1231,77 @@ fn a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused() {
         "the forged aggregate VERIFIED with the register table carrying its forged read"
     );
 }
+
+// ── Cut C: COMPRESS, the poseidon2 chip's third row kind — one forgery per new invariant ──────
+
+/// `tests/emulator.rs`'s `bit = 1` program (`common::compress_program`): one `COMPRESS` whose
+/// children swap, so a forgery that un-swaps them is visible.
+fn compress_setup() -> (Machine, Program, Traces) {
+    let p = common::compress_program(1);
+    let exec = execute(&p, &[], 10_000).unwrap();
+    let t = build_traces(&p, &exec, Tier(8)).unwrap();
+    (Machine::new(FriProfile::Test), p, t)
+}
+
+fn compress_row(t: &Traces) -> usize {
+    let w = poseidon2::col::WIDTH;
+    (0..t.poseidon2.height()).find(|r| t.poseidon2.values[r * w + poseidon2::col::IS_COMPRESS] == F::ONE).unwrap()
+}
+
+#[test]
+fn honest_compress_traces_pass() {
+    let (m, p, t) = compress_setup();
+    prove_and_verify(&m, &p, &t).unwrap();
+}
+
+/// BIT = 2 on the chip row: `assert_bool(BIT)` refuses it.
+#[test]
+fn a_compress_row_with_a_non_boolean_bit_is_rejected() {
+    let (m, p, mut t) = compress_setup();
+    let w = poseidon2::col::WIDTH;
+    let row = compress_row(&t);
+    t.poseidon2.values[row * w + poseidon2::col::BIT] = F::from_u64(2);
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// The chip row's BIT flipped against the cpu row's D0: the COMPRESS bus message no longer
+/// matches, or the RAM reads (now claiming swapped children) no longer match their writes.
+#[test]
+fn a_compress_row_whose_bit_disagrees_with_the_dispatch_is_rejected() {
+    let (m, p, mut t) = compress_setup();
+    let w = poseidon2::col::WIDTH;
+    let row = compress_row(&t);
+    t.poseidon2.values[row * w + poseidon2::col::BIT] = F::ZERO;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// The row claims the plain kind with BIT still set: `(1 − IS_COMPRESS)·BIT = 0` refuses it.
+#[test]
+fn a_compress_row_claiming_the_plain_kind_is_rejected() {
+    let (m, p, mut t) = compress_setup();
+    let w = poseidon2::col::WIDTH;
+    let row = compress_row(&t);
+    t.poseidon2.values[row * w + poseidon2::col::IS_COMPRESS] = F::ZERO;
+    t.poseidon2.values[row * w + poseidon2::col::IS_PERM] = F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// The sibling pointer moved by one cell: the four sibling reads find no matching writes.
+#[test]
+fn a_compress_row_reading_the_sibling_from_the_wrong_address_is_rejected() {
+    let (m, p, mut t) = compress_setup();
+    let w = poseidon2::col::WIDTH;
+    let row = compress_row(&t);
+    t.poseidon2.values[row * w + poseidon2::col::SRC_PTR] += F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// A padding row with IS_COMPRESS set: `MULT = IS_REAL` and the kind sum refuse it.
+#[test]
+fn a_padding_row_claiming_compress_is_rejected() {
+    let (m, p, mut t) = compress_setup();
+    let w = poseidon2::col::WIDTH;
+    let row = (0..t.poseidon2.height()).rev().find(|r| t.poseidon2.values[r * w + poseidon2::col::IS_REAL] == F::ZERO).unwrap();
+    t.poseidon2.values[row * w + poseidon2::col::IS_COMPRESS] = F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}

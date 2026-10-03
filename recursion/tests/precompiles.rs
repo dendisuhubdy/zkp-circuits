@@ -276,3 +276,46 @@ fn hint_array_via_hintn_matches_the_compiled_pairs() {
         assert_eq!(on_rows, off_rows - (n / 8) * 16 + (n / 8), "n = {n}: 16 rows per full block become 1");
     }
 }
+
+/// Cut C: the walk with injections under `Precompiles::On` (one COMPRESS per level) computes the
+/// compiled walk's digest, for random leaves, siblings and index bits, 1..=12 levels, with and
+/// without an injection — and costs one cpu row per level plus the dispatch of the injection.
+#[test]
+fn merkle_walk_via_compress_matches_the_compiled_walk() {
+    use recursion::dsl::{hash, Builder, Checkpoints, Digest, Liveness};
+    use recursion::isa::Op;
+    use recursion::programs::Precompiles;
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(27);
+    for levels in 1..=12usize {
+        for with_injection in [false, true] {
+            let leaf: Vec<F> = (0..4).map(|_| common::random_felt(&mut rng)).collect();
+            let sibs: Vec<F> = (0..4 * levels).map(|_| common::random_felt(&mut rng)).collect();
+            let bits: Vec<bool> = (0..levels).map(|_| rand::RngExt::random(&mut rng)).collect();
+            let inj: Vec<F> = (0..9).map(|_| common::random_felt(&mut rng)).collect();
+            let run = |pc: Precompiles| {
+                let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, pc);
+                let leaf_p = b.alloc(4);
+                for (k, v) in leaf.iter().enumerate() { let c = b.constant(*v); b.store(leaf_p, k as i64, c); }
+                let sib_p = b.alloc(4 * levels as u64);
+                for (k, v) in sibs.iter().enumerate() { let c = b.constant(*v); b.store(sib_p, k as i64, c); }
+                let bit_f: Vec<_> = bits.iter().map(|&t| b.constant(F::from_bool(t))).collect();
+                let inj_p = b.alloc(9);
+                for (k, v) in inj.iter().enumerate() { let c = b.constant(*v); b.store(inj_p, k as i64, c); }
+                let injections = if with_injection && levels >= 2 {
+                    vec![hash::Injection { after_level: levels / 2, rows: inj_p, n_cells: 9 }]
+                } else { vec![] };
+                let out = Digest(b.alloc(4));
+                hash::merkle_walk_with_injections(&mut b, Digest(leaf_p), &bit_f, sib_p, levels, &injections, out);
+                for k in 0..4 { let v = b.load(out.0, k); b.public(v); }
+                let exec = execute(&b.finish(), &[], 1_000_000).unwrap();
+                let compress_rows = exec.histogram()[Op::Compress as usize];
+                (exec.public, compress_rows)
+            };
+            let (off, _) = run(Precompiles::Off);
+            let (on, compress_rows) = run(Precompiles::On);
+            assert_eq!(on, off, "levels {levels}, injection {with_injection}");
+            let expected_compress = levels + usize::from(with_injection && levels >= 2);
+            assert_eq!(compress_rows, expected_compress, "one COMPRESS per level and per injection");
+        }
+    }
+}
