@@ -533,7 +533,7 @@ Expected: honest passes, both forgeries refused. (If the RAM table's own consist
 - [ ] **Step 12: Measure**
 
 Run: `cargo test --release --test profile -- --ignored --nocapture 2>&1 | grep -v warning`
-Projection: ≈ 1 321 000 production rows (−390 000 from Task 1's number). Gate ±15 % of the delta.
+Projection: ≈ 1 398 000 production rows (−390 000 from Task 1's **measured** 1 787 805; the spec's 1 321 000 assumed Task 1's own projection). Gate 1 330 000–1 465 000.
 
 - [ ] **Step 13: Commit**
 
@@ -882,7 +882,7 @@ Run: `cargo test --release --test cheating compress --test tables` → honest pa
 - [ ] **Step 9: Measure**
 
 Run: `cargo test --release --test profile -- --ignored --nocapture 2>&1 | grep -v warning`
-Projection: ≈ 790 000 production rows (−530 000 from Task 2's number), **tier 20**. Gate ±15 % of the delta. Also note the new `POSEIDON2`/`COMPRESS`/`SPONGE` histogram lines and RAM accesses.
+Projection: ≈ 868 000 production rows (−530 000 from Task 2's measured number, ≈ 1 398 000 if it lands as projected), **tier 20**. Gate ±15 % of the delta. Also note the new `POSEIDON2`/`COMPRESS`/`SPONGE` histogram lines and RAM accesses.
 
 - [ ] **Step 10: Commit**
 
@@ -900,7 +900,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ### Task 4: Re-pin everything that moved and write the record
 
 **Files:**
-- Modify: `tests/pins.json` (regenerated), `tests/exit.rs` (row literals, `Tier(19)`→ the measured tier for the twin, `Tier(21)` → `Tier(20)` for the exit), `tests/aggregate.rs` (`LOOP_OVERHEAD`, `N3_ROWS`, tier assertions), `src/programs/verify_rv32.digest` (regenerated), `tests/pins.json`
+- Modify: `tests/pins.json` (regenerated), `tests/exit.rs` (row literals, `Tier(19)`→ the measured tier for the twin, `Tier(21)` → `Tier(20)` for the exit), `tests/aggregate.rs` (`LOOP_OVERHEAD`, `N3_ROWS`, tier assertions), `src/programs/verify_rv32.digest` (regenerated), `tests/self_verify.rs` (`the_self_program_digest_is_deterministic_and_distinct`, `the_self_verifiers_measured_cost_at_two_fixture_shapes` — the self-verifier opens the wider tables), `tests/verifier.rs` (the aggregate digest and the Off-replay stream digest pins)
 - Modify: `docs/00-recursion-vm.md` ("Where the rows go" — append the new measurement), `docs/01-rvm-machine.md` (table widths/heights/tier), `docs/02-aggregate.md` (N-economics at the new tiers; admission vectors' `aggregate_program_digest`), `research/AGENTS.md` (the recursion paragraph)
 - Create: `docs/04-phase2-row-cuts.md`
 
