@@ -41,6 +41,10 @@ rand_zkvm = { path = "../research" }
 # The GPU (CUDA) and CPU-twin NTT/Poseidon2-Merkle engines the proving backends run on —
 # research's dependency, consumed as-is (M5.4 R1: the rVM's shapes need no new kernels).
 rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
+# The `parallel` feature's rayon: Plonky3's maybe-rayon shim (its `parallel` feature turns rayon on in
+# every p3 crate that uses it) and rayon itself, for `RAYON_NUM_THREADS`'s pool.
+p3-maybe-rayon = { version = "=0.7.0", optional = true }
+rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 hex = "0.4"
@@ -60,6 +64,11 @@ cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/cuda"]
 # enabling it would put a CUDA toolkit back in the way of a no-GPU test run. The two features
 # exercise the identical `Backend::Cuda` path.
 mock-cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/mock-driver"]
+# Plonky3's own `parallel` feature (rayon) for the prover, off by default: the proofs it makes are
+# the same proofs (same config, transcript and FRI parameters — `docs/03`'s retype discipline),
+# made on every core. Needs the two patched crates under `../vendor/` (hiding RNG lock forked,
+# never held across rayon work — upstream Plonky3 #2363; the fullnode's patch, copied verbatim).
+parallel = ["dep:p3-maybe-rayon", "p3-maybe-rayon/parallel", "dep:rayon"]
 
 # `research`'s profiles, verbatim. This crate is its own package root, so cargo reads *these*
 # tables and not `research/`'s — and without the dependency override every p3 crate and
@@ -70,3 +79,10 @@ opt-level = 3
 
 [profile.test]
 opt-level = 1
+
+# The fullnode's two patched Plonky3 crates (`../vendor/PROVENANCE.md`), for every build of this
+# package root, feature on or off: single-threaded the patch is behaviour-identical, and one source
+# tree for both builds is the point.
+[patch.crates-io]
+p3-fri = { path = "../vendor/p3-fri" }
+p3-merkle-tree = { path = "../vendor/p3-merkle-tree" }

@@ -224,6 +224,41 @@ fn tier8_toy() {
     report("tier8 toy", t0, exec.cpu_rows(), proof.tier, proof.size(), prove_s);
 }
 
+/// Threads (Task 6): a synthetic tier-16 program — 1 250 rounds of 16 hinted words stored and
+/// sponged (5 000 `SPONGE` absorbs; 63 762 rows, tier 16) — proved once and verified; prints the
+/// prove wall time and the peak live heap. Run it three ways (`docs/04-phase2-row-cuts.md`
+/// §"Threads"): without the feature (the baseline), then
+/// `RAYON_NUM_THREADS=1` and `=16 cargo test --release --features parallel --test memprofile
+/// tier16 -- --ignored --nocapture`. 2 000 rounds is 102 012 rows, past tier 16 (no tier 17 rung).
+#[test]
+#[ignore = "the thread benchmark: ~1-3 min; RAYON_NUM_THREADS=1 then 16, --features parallel"]
+fn tier16_synthetic_threads() {
+    use recursion::dsl::{hash, Builder, Checkpoints, Digest, Liveness};
+    use recursion::programs::Precompiles;
+    use p3_field::PrimeCharacteristicRing;
+    let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, Precompiles::On);
+    let mut tape: Vec<recursion::isa::F> = vec![];
+    let src = b.alloc(16);
+    let out = Digest(b.alloc(4));
+    for round in 0..1_250u64 {
+        for k in 0..16i64 {
+            let v = b.hint();
+            tape.push(recursion::isa::F::from_u64(round * 16 + k as u64 + 1));
+            b.store(src, k, v);
+        }
+        hash::sponge(&mut b, src, 16, out);
+    }
+    for k in 0..4 { let v = b.load(out.0, k); b.public(v); }
+    let p = b.finish();
+    let t0 = install();
+    let m = recursion::machine::Machine::new(rand_zkvm::machine::FriProfile::Test);
+    let t = Instant::now();
+    let (proof, exec) = m.prove(&p, &tape, None).unwrap();
+    let prove_s = t.elapsed().as_secs_f64();
+    m.verify(&p, &proof).unwrap();
+    report("tier16 synthetic", t0, exec.cpu_rows(), proof.tier, proof.size(), prove_s);
+}
+
 /// The exit twin's shape (`tests/exit.rs`): the verifier program over one real test-profile
 /// bundle proof — tier 19 at constraint set 8, the shape the 503 GB box measured at 94.2 GB RSS
 /// and this harness at 78.7 GB live when killed (2026-10-03, `docs/04-phase2-row-cuts.md`).

@@ -381,9 +381,9 @@ LDE of each chunk also allocates two transient copies of its own size (`random_e
   4. **the GPU backend**: as built, it changes none of this, because traces live on the host. A
      device-resident LDE and tree would, and that is the real reason to want the 80 GB device
      class.
-- **Threads.** The recursion crate proves single-threaded. The two Merkle trees alone are 460 s
+- **Threads.** The recursion crate proved single-threaded. The two Merkle trees alone are 460 s
   of the run's 782 s. Task 6 brings the fullnode's two-crate Plonky3 patch in behind a `parallel`
-  feature and measures it.
+  feature and measures it: 4.7× on 16 threads at tier 16, no heap cost (§"Threads", below).
 
 ### What the cuts change (derived from the measured terms)
 
@@ -414,3 +414,28 @@ height off it brings the production N=1 to ≈ 200 GB. Every one of these is a p
 tier-20 production proof runs on the big machine. The `tests/exit.rs` and `tests/aggregate.rs`
 ignore notes carry the projected numbers, and the test-profile tiers they assert (18 / 19 / 20)
 come from `Tier::for_cycles` over the pinned rows.
+
+### Threads (Task 6, measured 2026-10-04, this 48 GB box)
+
+`--features parallel` turns on Plonky3's own rayon feature (`p3-maybe-rayon/parallel`) for the
+prover. The proofs are the same proofs: same config, transcript and FRI parameters, verified by
+the stock verifier. The two crates whose hiding RNG lock deadlocked under rayon (`p3-fri`'s
+`hiding_pcs.rs`, `p3-merkle-tree`'s `hiding_mmcs.rs`; upstream Plonky3 #2363 / PR #2368) are the
+fullnode's patched copies, vendored at `vendor/` (`vendor/PROVENANCE.md`) and patched in for every
+build, feature on or off. The benchmark is `tests/memprofile.rs::tier16_synthetic_threads`: 1 250
+rounds of 16 hinted words stored and sponged (5 000 `SPONGE` absorbs), **63 762 rows, tier 16**,
+proved once and verified, on this box's 16 cores (12 performance + 4 efficiency).
+
+| build | prove (wall) | peak live heap |
+|---|---:|---:|
+| feature off (the stock single-threaded prover) | 170.6 s | 9.09 GB |
+| `--features parallel`, `RAYON_NUM_THREADS=1` | 171.1 s | 9.09 GB |
+| `--features parallel`, `RAYON_NUM_THREADS=16` | **36.4 s** | 9.09 GB |
+
+**4.7× on 16 threads** (171.1 → 36.4 s), against the RV32 prover's 7.7× in the fullnode. Not
+measured here, but the likely limits are this box's four efficiency cores and the prover's serial
+parts (trace generation, the transcript). The patched build on one thread costs nothing (+0.3 %,
+within run-to-run noise). **The memory delta is nil**: the peak live heap is 9.09 GB all three
+ways (the same to within 10 MB). Rayon's per-thread scratch does not register against the
+committed LDEs and trees, which are the same allocations whatever the pool. So the heap model
+above holds under threads, and the thread count is a pure wall-time lever.

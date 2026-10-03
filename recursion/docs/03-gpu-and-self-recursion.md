@@ -28,6 +28,16 @@ table-covering toy program at the smallest tier proves on `Backend::Reference` a
 commitment presence, every opened run's length, size within the salt factor). 3 tests per
 feature, green on both.
 
+**Threads (`parallel`, phase 2 Task 6).** A fourth feature, independent of the backend trio:
+`parallel` turns on Plonky3's rayon (`p3-maybe-rayon/parallel`) for the CPU work of every
+backend, with `RAYON_NUM_THREADS` setting the pool. It changes no config, transcript or FRI
+parameter, so its proofs verify on the stock verifier (the retype discipline above, trivially).
+It rests on the fullnode's two patched Plonky3 crates (`vendor/p3-fri`, `vendor/p3-merkle-tree`:
+the hiding RNG lock is never held across rayon work; upstream Plonky3 #2363 / PR #2368), which
+`recursion/Cargo.toml` patches in for every build. Measured on a tier-16 synthetic program (63 762
+rows): 170.6 s with the feature off, 171.1 s on one thread, **36.4 s on 16 threads (4.7×)**,
+peak live heap 9.09 GB all three ways (`docs/04-phase2-row-cuts.md` §"Threads").
+
 ## The device-memory model (Task 2, measured arithmetic)
 
 No GPU on this box, so the model is the backend's own chunking arithmetic, pinned in
