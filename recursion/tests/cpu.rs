@@ -279,8 +279,8 @@ enum Bound {
 }
 
 /// Per opcode, every column the row *writes* (to a register or to RAM) and how it is bound.
-/// Opcodes that write nothing (JMP, JEQ, JNE, PUBLIC, POSEIDON2, HALT, REDUCE, SPONGE — the
-/// dispatched chips' own RAM traffic is theirs, not the cpu row's) have no entry.
+/// Opcodes that write nothing (JMP, JEQ, JNE, PUBLIC, POSEIDON2, HALT, REDUCE, SPONGE, COMPRESS —
+/// the dispatched chips' own RAM traffic is theirs, not the cpu row's) have no entry.
 const DECLARED: &[(Op, &[(usize, Bound)])] = {
     use cpu::col::{D0, D1, W0};
     use Bound::*;

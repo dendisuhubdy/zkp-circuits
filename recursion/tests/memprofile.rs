@@ -229,7 +229,10 @@ fn tier8_toy() {
 /// prove wall time and the peak live heap. Run it three ways (`docs/04-phase2-row-cuts.md`
 /// §"Threads"): without the feature (the baseline), then
 /// `RAYON_NUM_THREADS=1` and `=16 cargo test --release --features parallel --test memprofile
-/// tier16 -- --ignored --nocapture`. 2 000 rounds is 102 012 rows, past tier 16 (no tier 17 rung).
+/// tier16 -- --ignored --nocapture`. 2 000 rounds is 102 012 rows, past tier 16 (no tier 17 rung):
+/// the program is emulated and its tier asserted before anything is proved, so a row drift fails
+/// in seconds instead of starting a tier-18 proof. Measured 2026-10-04 on the 48 GB box: off
+/// 170.6 s, `RAYON_NUM_THREADS=1` 171.1 s, `=16` 36.4 s; peak live 9.09 GB all three.
 #[test]
 #[ignore = "the thread benchmark: ~1-3 min; RAYON_NUM_THREADS=1 then 16, --features parallel"]
 fn tier16_synthetic_threads() {
@@ -250,6 +253,12 @@ fn tier16_synthetic_threads() {
     }
     for k in 0..4 { let v = b.load(out.0, k); b.public(v); }
     let p = b.finish();
+    let rows = recursion::emulator::execute(&p, &tape, 1 << 20).unwrap().cpu_rows();
+    assert_eq!(
+        recursion::machine::Tier::for_cycles(rows),
+        Some(recursion::machine::Tier(16)),
+        "the benchmark is a tier-16 program ({rows} rows): a drift must not start a larger proof"
+    );
     let t0 = install();
     let m = recursion::machine::Machine::new(rand_zkvm::machine::FriProfile::Test);
     let t = Instant::now();

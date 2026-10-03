@@ -117,7 +117,8 @@ impl Execution {
         self.events.len()
     }
 
-    /// The `poseidon2` chip's height: one permutation per `POSEIDON2` row, nothing else.
+    /// The `poseidon2` chip's height: one permutation per `POSEIDON2`, `SPONGE` or `COMPRESS`
+    /// row — every row whose event carries a permutation — and nothing else.
     pub fn permutations(&self) -> usize {
         self.events.iter().filter(|e| e.perm.is_some()).count()
     }

@@ -606,6 +606,14 @@ fn the_per_n_cycle_budget_is_pinned() {
 /// so the overhead is not assumed equal — it is measured) and the tier landing, recorded in
 /// `docs/02-aggregate.md`: tier 21 at constraint set 8, tier 20 since phase 2's row cuts
 /// (893 880 rows = 893 606 + 274, `docs/04-phase2-row-cuts.md`).
+///
+/// It also pins the N-generic program's digest at the production bundle shape — the number a
+/// chain's aggregation section registers and the fullnode re-pins at a chain cut (`docs/02`'s
+/// digest table, `docs/04`'s "what moved"). The in-suite digest test
+/// (`tests/verifier.rs`'s `the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes`)
+/// builds the Test shape and sees a different one, so the production value is checked here,
+/// beside the production fixture this test already builds. Re-registered for phase 2's row
+/// cuts: `1831f036…ddd7` → `c90b3f0a…74d8`.
 #[test]
 #[ignore = "a production-profile fixture proof plus a ~2M-row emulation: the M5.2 budget test's own cost class"]
 fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
@@ -627,6 +635,11 @@ fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
         .unwrap()
         .cpu_rows();
     assert_eq!(single_rows, common::pins().cpu_rows, "the M5.2 pin still holds");
+    assert_eq!(
+        recursion::programs::digest_hex(&verify_rv32n(&shape, &key, Checkpoints::Off).program),
+        "c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8",
+        "the aggregate program's digest at the production bundle shape, as docs/02 and docs/04 state it"
+    );
     let r = common::measure_aggregate(1, FriProfile::Production);
     eprintln!(
         "production N=1 aggregate: {} rows (single {single_rows}, overhead {})",

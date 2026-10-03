@@ -722,10 +722,9 @@ fn emit_input_round_root(
     let levels = max_h - CAP_HEIGHT;
     let bits_reduced = log_global - max_h;
     let heights: Vec<usize> = mats.iter().map(|m| m.log_height).collect();
-    let mut distinct = heights.clone();
-    distinct.sort_unstable_by(|a, bb| bb.cmp(a));
-    distinct.dedup();
-    debug_assert_eq!(distinct.len(), groups.len(), "one buffer per height group");
+    // The groups' heights, tallest first, from the same `height_groups` that sized the buffers.
+    let distinct: Vec<usize> = crate::shape::height_groups(&heights).iter().map(|g| heights[g[0]]).collect();
+    assert_eq!(distinct.len(), groups.len(), "one buffer per height group");
     // Cut A: the tallest group's rows were hinted straight into `groups[0]`; the leaf sponge
     // runs over that buffer in place. No copy.
     let (leaf_msg, n) = groups[0];

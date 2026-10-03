@@ -403,8 +403,12 @@ fn honest_hintn_traces_pass() {
 }
 
 /// The HINTN row's base moved to `p − 1` (so `A0 + B + 7 = 6`, in range by the top alone) with the
-/// group-3 base limbs forged to spell 0: the RANGE8 lookups on the forged limbs, or the
-/// `base3 − limbs3` identity, refuse it — the ZKQ-3 property, on the new row kind.
+/// group-3 base limbs forged to spell 0: refused by `Machine::verify`. What refuses it first is
+/// not the range groups but the row's `REG` read of `ra` — the edited `A0` no longer matches the
+/// `r1` the register table holds — so this is a whole-machine forgery test, not a test of the
+/// range gating. The range gating on HINTN's base and top is tested at the AIR, with the operand
+/// left free, by `tests/cpu.rs`'s ZKQ-3 cases (`a_multi_cell_access_whose_base_wraps_below_zero_is_refused`,
+/// its "HINTN at A0 + B = p − 1" case and its `2^24` top-end control).
 #[test]
 fn a_hintn_base_just_below_zero_with_forged_limbs_is_rejected() {
     let (m, p, mut t) = hintn_setup();
@@ -417,7 +421,11 @@ fn a_hintn_base_just_below_zero_with_forged_limbs_is_rejected() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 
-/// The top cell at `2^24`: base `2^24 − 7` with the group-1 limbs forged to spell `2^24 − 1`.
+/// The top cell at `2^24`: base `2^24 − 7` with the group-1 limbs forged to spell `2^24 − 1`:
+/// refused by `Machine::verify`, first by the row's `REG` read of `ra` (the edited `A0` no longer
+/// matches `r1`), not by the range groups — as the test above. The range gating at HINTN's top end
+/// is `tests/cpu.rs`'s `a_multi_cell_access_whose_base_wraps_below_zero_is_refused` (its HINTN
+/// `2^24` control).
 #[test]
 fn a_hintn_run_ending_at_two_to_the_twentyfour_with_forged_limbs_is_rejected() {
     let (m, p, mut t) = hintn_setup();
@@ -1234,6 +1242,11 @@ fn a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused() {
 }
 
 // ── Cut C: COMPRESS, the poseidon2 chip's third row kind — one forgery per new invariant ──────
+//
+// Each test below establishes that `Machine::verify` refuses its edit; the constraint each one
+// targets is named in its comment, but which check fires first is not pinned. The spec's §5 case
+// "an output lane written to the sibling instead of the state" has no test: it is not expressible
+// by a trace edit, since the chip's write address is the expression `PTR + k`, never a free column.
 
 /// `tests/emulator.rs`'s `bit = 1` program (`common::compress_program`): one `COMPRESS` whose
 /// children swap, so a forgery that un-swaps them is visible.
@@ -1255,7 +1268,7 @@ fn honest_compress_traces_pass() {
     prove_and_verify(&m, &p, &t).unwrap();
 }
 
-/// BIT = 2 on the chip row: `assert_bool(BIT)` refuses it.
+/// BIT = 2 on the chip row: refused by `Machine::verify` (the target is `assert_bool(BIT)`).
 #[test]
 fn a_compress_row_with_a_non_boolean_bit_is_rejected() {
     let (m, p, mut t) = compress_setup();
@@ -1265,8 +1278,9 @@ fn a_compress_row_with_a_non_boolean_bit_is_rejected() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 
-/// The chip row's BIT flipped against the cpu row's D0: the COMPRESS bus message no longer
-/// matches, or the RAM reads (now claiming swapped children) no longer match their writes.
+/// The chip row's BIT flipped against the cpu row's D0: refused by `Machine::verify` (the targets
+/// are the COMPRESS bus message, which no longer matches, and the RAM reads, now claiming swapped
+/// children).
 #[test]
 fn a_compress_row_whose_bit_disagrees_with_the_dispatch_is_rejected() {
     let (m, p, mut t) = compress_setup();
@@ -1276,7 +1290,8 @@ fn a_compress_row_whose_bit_disagrees_with_the_dispatch_is_rejected() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 
-/// The row claims the plain kind with BIT still set: `(1 − IS_COMPRESS)·BIT = 0` refuses it.
+/// The row claims the plain kind with BIT still set: refused by `Machine::verify` (the target is
+/// `(1 − IS_COMPRESS)·BIT = 0`).
 #[test]
 fn a_compress_row_claiming_the_plain_kind_is_rejected() {
     let (m, p, mut t) = compress_setup();
@@ -1287,7 +1302,8 @@ fn a_compress_row_claiming_the_plain_kind_is_rejected() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 
-/// The sibling pointer moved by one cell: the four sibling reads find no matching writes.
+/// The sibling pointer moved by one cell: refused by `Machine::verify` (the target is the four
+/// sibling reads, which find no matching writes).
 #[test]
 fn a_compress_row_reading_the_sibling_from_the_wrong_address_is_rejected() {
     let (m, p, mut t) = compress_setup();
@@ -1297,7 +1313,8 @@ fn a_compress_row_reading_the_sibling_from_the_wrong_address_is_rejected() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 
-/// A padding row with IS_COMPRESS set: `MULT = IS_REAL` and the kind sum refuse it.
+/// A padding row with IS_COMPRESS set: refused by `Machine::verify` (the targets are
+/// `MULT = IS_REAL` and the kind sum).
 #[test]
 fn a_padding_row_claiming_compress_is_rejected() {
     let (m, p, mut t) = compress_setup();
