@@ -55,15 +55,18 @@ spec's estimate as written.
 
 ## The three cuts, each measured
 
-| stage | commit | cpu rows (prod.) | Δ measured | Δ projected | RAM accesses | permutations | instructions (prod.) | test rows | tier |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| before (cs8) | `cba8468` | 2 047 268 | — | — | 2 851 913 | 54 515 | 2 057 401 | 461 988 | 21 |
-| A: hint into the height-group buffer | `43a52f3` | 1 787 805 | −259 463 | −336 000 | 2 600 290 | 54 515 | 1 797 938 | 409 821 | 21 |
-| B: `HINTN` (opcode 26) | `e850d8a` | 1 427 355 | −360 450 | −390 000 | 2 600 290 | 54 515 | 1 437 488 | 337 371 | 21 |
-| C: `COMPRESS` (opcode 27) | `63d1691` | **893 606** | −533 749 | −530 000 | 2 213 181 | 54 515 | 903 739 | 230 950 | **20** |
-| total | | | **−1 153 662** | −1 256 000 | −638 732 | 0 | −1 153 662 | −231 038 | −1 |
+| stage | commit | cpu rows (prod.) | gate band (landing rows) | Δ measured | Δ projected | RAM accesses | permutations | instructions (prod.) | test rows | tier |
+|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| before (cs8) | `cba8468` | 2 047 268 | — | — | — | 2 851 913 | 54 515 | 2 057 401 | 461 988 | 21 |
+| A: hint into the height-group buffer | `43a52f3` | 1 787 805 | 1 455 000–1 968 000 | −259 463 | −336 000 | 2 600 290 | 54 515 | 1 797 938 | 409 821 | 21 |
+| B: `HINTN` (opcode 26) | `e850d8a` | 1 427 355 | 1 330 000–1 465 000 | −360 450 | −390 000 | 2 600 290 | 54 515 | 1 437 488 | 337 371 | 21 |
+| C: `COMPRESS` (opcode 27) | `63d1691` | **893 606** | 817 000–977 000 | −533 749 | −530 000 | 2 213 181 | 54 515 | 903 739 | 230 950 | **20** |
+| total | | | | **−1 153 662** | −1 256 000 | −638 732 | 0 | −1 153 662 | −231 038 | −1 |
 
-Each cut landed inside the plan's ±15 % gate:
+The plan's gate (spec §6 ruling 1) is ±15 % on the **landing row count** — the cpu rows after the
+cut against the projected landing, restated from each previous stage's measurement — not on the
+size of the cut, so a cut can deliver less than 85 % of its projected Δ and still land inside its
+band. Each landed inside its band (table above); against the projected Δ:
 
 - **Cut A** delivered 77 % of its projection. The removed rows are exactly the copy's LOAD/STORE
   pairs plus some FADDI: LOAD −109 784, STORE −141 839, FADDI −7 840. 251 623 copy rows over 80
@@ -281,7 +284,7 @@ shorter at every N. The others are not:**
 
 - The **poseidon2** table keeps its height, because the permutation count did not change.
 - The **reduce** table keeps its height, because its rows did not change: 34 624 test and
-  173 120 production. Its test-shape height is `2^16`, not the `2^15` the spec §3.1 lists for the
+  173 120 production. Its test-shape height is `2^16`, not the `2^15` the spec's §3.1 originally listed (corrected 2026-10-04) for the
   tier-19 run. The base tree's own `build_traces` gives 16.
 - The **production RAM table stays at `2^22`**: 2 213 181 accesses against `2^21` = 2 097 152,
   so 116 029 over the line. The spec projected ~1.92 M.
@@ -325,7 +328,7 @@ swapped pages. So the September "15 GB / 30 GB observed" laptop figures in `docs
 figures are the honest ones, and these docs never use a macOS RSS figure as a memory number again.
 
 **The live model, from this run.** Tier 19, declared heights cpu 2^19, reg 2^21, ram 2^20,
-poseidon2 2^14, reduce 2^16 (the spec's §3.1 says 2^15; `build_traces` on the base tree gives
+poseidon2 2^14, reduce 2^16 (the spec's §3.1 originally listed 2^15, corrected 2026-10-04; `build_traces` on the base tree gives
 16), program 2^19. `log_blowup 3`, hiding.
 
 | term | GB | share of the 94 GB Linux peak |

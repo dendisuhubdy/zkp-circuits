@@ -127,6 +127,10 @@ emitted selectors and the quotient recomposition square `log(degree_bits)` times
 so the phase grows with the declared heights. The query phase dominates either way and scales
 with `queries ×` (opened columns `×` per-column cost `+` Merkle levels `×` per-level cost).
 
+(2026-10-03: this derivation predates phase 2's row cuts and the withdrawal of the oracle model —
+it is built on 1 968 619 rows and the 341-column chip; `docs/04-phase2-row-cuts.md` is the current
+record. Kept as derived history, not re-derived.)
+
 **The production requirement, derived from measured anchors** (replacing the plan's R6
 estimate with the same arithmetic made concrete): the M5.2-exit shape is tier 21, production
 profile, 80 queries, declared heights `[reg 23, ram 22, poseidon2 16, reduce 18]`, eight

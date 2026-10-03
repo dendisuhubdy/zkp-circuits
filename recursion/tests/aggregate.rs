@@ -475,8 +475,8 @@ fn a_tampered_tape_fails_the_prove_at_the_named_step() {
 /// the tier-20 prove's, and its GB figures are macOS RSS, which excludes compressed and swapped
 /// pages — `docs/04-phase2-row-cuts.md` §"The prover's live heap"). `#[ignore]`d after two jetsam deaths on the shared box: the
 /// prove peaks above the box's practical line (~33 GB today; 33.7 GB measured before the
-/// SIGKILL, twice), so the suite's heaviest *proven* aggregate is the N=1 round-trip at tier 19,
-/// and this runs alone, watchdog-guarded, the way the twin does.
+/// SIGKILL, twice), so the suite's heaviest *proven* aggregate is the N=1 round-trip — tier 18
+/// since phase 2, and itself skipped on the 48 GB box for memory — and this runs alone, watchdog-guarded, the way the twin does.
 #[test]
 #[ignore = "the N=2 in-suite aggregate: tier 19 (tier 20 before phase 2), ~34 GB macOS RSS observed before jetsam on the \
             shared box (twice); run alone: cargo test --release -p recursion --test aggregate \

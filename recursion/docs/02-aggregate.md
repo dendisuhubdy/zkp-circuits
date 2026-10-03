@@ -500,5 +500,6 @@ crate's printout on the shared cache.
 - **The spec amendment to report, not silently edit** — §7's M5.4 line ("its end-to-end proof
   if it fits the laptop, else deferred with the measured requirement") now has the measured
   requirement for the self-recursion input: the N=1 production aggregate at tier 21, 48.6 GB
-  oracle, ≥ 64 GB — the same class as M5.2's exit. The tier-23 rung exists nowhere until the
+  oracle, ≥ 64 GB — the same class as M5.2's exit (2026-10-03: history — tier 20 since phase 2,
+  and the oracle model is withdrawn; docs/04 has the measured live heap). The tier-23 rung exists nowhere until the
   GPU backend needs it for N=3 (R4).

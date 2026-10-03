@@ -66,6 +66,9 @@ heights from `machine::build_traces` over the same executions:
 | **declared heights** | 18, 20, 19, 14, 16, 18 | 20, 22, 22, 16, 18, 20 |
 | tier | 18 | **20** |
 
+(Declared heights in `chips()` order: cpu / reg / ram / poseidon2 / reduce / program; public is
+fixed at 2^3 and range at 2^8.)
+
 Constraint set 8 before the cuts was 461 988 / 2 047 268 rows at tiers 19 / 21, declared heights
 19, 21, 20, 14, 16, 19 and 21, 23, 22, 16, 18, 21 (re-measured on the base tree for docs/04).
 The poseidon2 and reduce tables keep their heights through the cuts (same permutations, same
@@ -87,8 +90,9 @@ from the emulator's own event log and pinned in `tests/pins.json` (production di
 | witness words | 43 344 | 199 760 |
 | **declared heights** | 19, 20, 20, 14, 15, 19 | 21, 23, 22, 16, 18, 21 |
 
-This is the constraint-set-6 measurement, kept because the register-access, reduce-row and
-declared-height columns were not re-taken. Constraint set 7 with VERIFIER-1 (chain 16, measured on
+This is the constraint-set-6 measurement, kept as the record; its register-access, reduce-row and
+declared-height columns were not re-taken for constraint set 7, and are re-taken for phase 2 in the
+current table above. Constraint set 7 with VERIFIER-1 (chain 16, measured on
 the integrated `feat/cs7` tree) is **461 082 / 2 044 506** cpu rows, 11 852 / 54 428 permutations,
 630 292 / 2 845 220 memory accesses, 463 199 / 2 054 639 instructions, 45 758 / 210 174 witness
 words, production digest `8f15919989c3975106b7663722fe892c20e14e9658948e073626662cc999e1e7` — still
