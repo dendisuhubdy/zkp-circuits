@@ -162,45 +162,79 @@ at the wallet's expense — `compute-optimization.md` §4.4's measured decision)
 
 `docs/02-aggregate.md` records 94.2–94.5 GB peak RSS for a tier-19 rVM proof and 376.9 GB for a
 tier-21 production one on the 503 GB Linux box (2026-09-30, `/usr/bin/time -v`), 4–8× the
-committed-oracle model, and the fullnode's hardware class for an aggregator was raised to
-≥ 512 GB on that number. Two facts did not fit it: the same tier-19 proof completes on this
-48 GB laptop without paging (1 707.7 s on 2026-09-15; 2 001.8 s on the EPYC — no thrashing
-signature), and the box's RSS time series (`~/rand-agg-512-results/out/17-A6-prod-n1.rss`)
-climbs monotonically for two hours (72 → 118 → 157 → 211 → 316 → 372 GB) with hour-long
-plateaus — the shape of heap the allocator never returns, not of a working set.
+committed-oracle model of `docs/01`. Two earlier facts seemed not to fit: the same tier-19 proof
+had completed on this 48 GB laptop (1 707.7 s, 2026-09-15, "~15 GB observed"), and the box's RSS
+series climbs monotonically for two hours. The working hypothesis going in was allocator
+retention. **The measurement refutes it.**
 
-`tests/memprofile.rs` measures the *live* heap: a counting global allocator and a `tracing`
-subscriber that prints live/peak bytes at every Plonky3 span boundary, plus RSS every 10 s. The
-tier-19 exit twin under it on this box (M4 Max, 48 GB, macOS, single-threaded): **§3.1 below is
-filled in from the run** (`scratchpad/mem/tier19.log`; the plan's Task 5 copies the numbers into
-`recursion/docs/04-phase2-row-cuts.md`).
+### 3.1 Tier-19 exit twin, live heap by phase (this box, 2026-10-03, `tests/memprofile.rs`)
 
-### 3.1 Tier-19 exit twin, live heap by phase
+A counting global allocator (live bytes and high-water mark, every allocation) and a `tracing`
+subscriber printing both at every Plonky3 span boundary; single-threaded; the shape is
+`tests/exit.rs`'s twin (one real test-profile bundle proof, 461 988 rows, tier 19, constraint
+set 8). The run (`scratchpad/mem/tier19.log`):
 
-*(filled from the measurement; see docs/04 once the plan's Task 5 lands)*
+| phase (Plonky3 span) | wall | Δ live | live after | note |
+|---|---:|---:|---:|---|
+| key build: preprocessed LDE + Merkle tree | 22 s | +2.0 GB | 2.05 GB | `with_zero_cols`, `coset_lde_batch`, `build merkle tree` |
+| main trace commit: `randomize polys` + 8 × `coset_lde_batch_with_transform` | 24 s | +13.2 GB | 15.3 GB | the hiding doubling and the four salt columns included |
+| main `build merkle tree` | 273 s | +4.3 GB | 19.6 GB | single-threaded Poseidon2 over the tallest LDE |
+| `generate lookup permutation` × 8 | 1 s | +0.3 GB | 19.9 GB | |
+| permutation trace commit (LDE) | 16 s | +7.0 GB | 27.0 GB | |
+| permutation `build merkle tree` | 187 s | +4.3 GB | 31.3 GB | |
+| `compute quotient` × 8 (program, cpu, reg, ram, poseidon2, public, range, reduce) | 245 s | +1.8, +6.5, **+13.7**, +6.8, +0.1, 0, 0, +0.8 GB | **61.0 GB** | the quotient-chunk LDEs are retained for the commit; the reg table (the tallest, degree 4 → 8 chunks under zk) is the largest single item |
+| quotient `commit_ldes` (Merkle tree) | killed 20 s in | +17.7 GB and rising | **78.7 GB** | **SIGKILL by the kernel at 782 s** |
 
-Preliminary, 140 s into the run: live heap 18.5 GB after the main-trace commit (the LDE of eight
-instances at `log_blowup 3` with the hiding doubling, plus the first digest layer), RSS 16–17 GB.
-The oracle model's prediction for the main commit at this shape is ≈ 15 GB. The whole-proof
-peak and the Linux-RSS gap are what the completed run states.
+macOS's `maximum resident set size` for the run was 19.8 GB and its `rss` samples 7–17 GB
+throughout: **on macOS, RSS excludes compressed and swapped pages**, so the September "15 GB /
+30 GB observed" laptop figures measured the compressor's output, not the working set. The
+September tier-19 proof that "completed on 48 GB" did so through ~50 GB of compressed swap. The
+Linux `/usr/bin/time -v` figures are the honest ones.
+
+**The live model, from this run** (tier 19, declared heights cpu 2^19, reg 2^21, ram 2^20,
+poseidon2 2^14, reduce 2^15, program 2^19; `log_blowup 3`, hiding):
+
+| term | GB | share of the 94 GB Linux peak |
+|---|---:|---:|
+| main LDE + salts + tree (the `docs/01` "committed oracle" term) | 17.6 | 19 % |
+| permutation (LogUp) LDE + tree | 11.3 | 12 % |
+| quotient LDEs (8 instances, 2–16 chunks each at blowup 2^(3+1)) | 29.7 | 32 % |
+| quotient tree, random-polynomial commitment, FRI opening and commit phase | ≈ 33 (by difference) | 35 % |
+
+The `docs/01` oracle model counted the first row only; the other three are 4× it, which is the
+4–8× the box measured. Nothing is retained that the opening does not need: every committed LDE
+is read again at the FRI query phase, so the batch prover's peak is inherent to committing
+everything before opening anything.
 
 ### 3.2 What follows for the hardware plan
 
-- If the live peak at tier 19 is in the 20–35 GB band, the 94 GB Linux figure is allocator
-  retention (glibc keeps freed heap; macOS's allocator returns it), and the remedy is an
-  allocator (`jemalloc`/`mimalloc` as the aggregator binary's global allocator) or
-  `malloc_trim` between phases — to be confirmed on a Linux host before the fullnode's
-  hardware page is changed. The production tier-21 proof would then be a ~4× scaling of the
-  tier-19 live peak, i.e. the ≥ 128 GB class, not ≥ 512 GB; after the §2 cuts (tier 20), the
-  ≥ 64 GB class.
-- The recursion crate proves single-threaded (`p3-batch-stark` without `parallel`). The RV32
-  prover's `parallel` build gave 7.7× on 16 threads (`fullnode/docs/node-hardware.md` §6) and
-  needs the fullnode's two-crate Plonky3 patch (`vendor/p3-fri`, `vendor/p3-merkle-tree`: the
-  hiding RNG lock is forked, never held across rayon work — upstream Plonky3 #2363). Task 6
-  brings both into `circuits/` behind a `parallel` feature and measures the twin's wall time
-  on 1 and 16 threads; proofs are unchanged (same config, same transcript — the postcard-retype
-  discipline of `docs/03`).
-- The GPU items (PTX build, N on the device) stay hardware-blocked; nothing here changes them.
+- **The ≥ 512 GB class for the production tier-21 proof stands today**; the ≥ 64 GB
+  "committed oracle" requirement in `docs/01` is withdrawn (Task 4 rewrites it). RSS measured on
+  macOS is never again a memory number in these docs.
+- **The §2 cuts halve it directly**: every table one height shorter (tier 21 → 20) halves every
+  term above, so the production N=1 aggregate lands near **≈ 190 GB** (a 256 GB host) and the
+  tier-19 twin near 47 GB. Still not `compute-optimization.md` §4.4's ≤ 64 GB; the rest is
+  structural and is the next phase's measured decision, candidates in order of leverage:
+  1. the **quotient's share (32 %)**: the memory tables are 11 columns wide but their degree-4
+     AIR makes 8 zk-chunks × 2 cells — a quotient as wide as the trace; a degree-2 memory AIR
+     (one extra witness column for the product term) halves that term for the two tallest
+     tables;
+  2. the **register table's height** (4× the cpu table): ~2.1 `REG` messages per cpu row — the
+     cuts shrink it with the rows, and a wider cpu row that reads fewer registers is the lever
+     beyond that;
+  3. `log_blowup 3 → 2` (rate ¼) halves every LDE at the price of ~1.5× the queries — the inner
+     profile decision §4.4 of the fullnode page already names, applied to the rVM's own profile;
+  4. the GPU backend as built changes none of this (traces live on the host); a device-resident
+     LDE/tree would, and is the real reason to want the 80 GB device class.
+- **Threads.** The recursion crate proves single-threaded (`p3-batch-stark` without `parallel`);
+  the two Merkle trees above alone are 460 s of the 782. The RV32 prover's `parallel` build gave
+  7.7× on 16 threads (`fullnode/docs/node-hardware.md` §6) and needs the fullnode's two-crate
+  Plonky3 patch (`vendor/p3-fri`, `vendor/p3-merkle-tree`: the hiding RNG lock forked, never held
+  across rayon work — upstream Plonky3 #2363). Task 6 brings both into `circuits/` behind a
+  `parallel` feature and measures a tier-16 synthetic program on 1 and 16 threads (a tier-19 proof
+  does not fit this box, as above); proofs are unchanged (same config, same transcript — the
+  postcard-retype discipline of `docs/03`).
+- The GPU items (PTX build, N on the device) stay hardware-blocked.
 
 ## 4. What moves, what does not
 

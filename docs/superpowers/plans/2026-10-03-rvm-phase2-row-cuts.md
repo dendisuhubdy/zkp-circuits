@@ -966,30 +966,36 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: The live-heap record (the measurement is already running)
+### Task 5: The live-heap record (the measurement is done; it was killed at 78.7 GB live)
 
 **Files:**
 - Modify: `docs/04-phase2-row-cuts.md` (§ "The prover's live heap")
-- Source: `/private/tmp/claude-501/-Users-dendisuhubdy-Github-randprotocol/c88907b2-a154-4173-bbc0-449b9c3f54c7/scratchpad/mem/tier19.log` (the tier-19 exit twin under `tests/memprofile.rs`, started 2026-10-03; `/usr/bin/time -l` wraps it, so the last lines carry the macOS maximum RSS)
+- Source: the spec, §3.1–3.2 (already holds the phase table and the model, extracted from
+  `/private/tmp/claude-501/-Users-dendisuhubdy-Github-randprotocol/c88907b2-a154-4173-bbc0-449b9c3f54c7/scratchpad/mem/tier19.log`; the raw log is also copied to `recursion/docs/measurements/2026-10-03-tier19-memprofile.log` in Step 1)
 
-- [ ] **Step 1: Extract the phase table**
+- [ ] **Step 1: Keep the raw log with the record**
 
 ```bash
-L=/private/tmp/claude-501/-Users-dendisuhubdy-Github-randprotocol/c88907b2-a154-4173-bbc0-449b9c3f54c7/scratchpad/mem/tier19.log
-grep -E '^\[.*\] [+-] |^\[.*\]   - ' $L | grep -v 'infer\|verify constraints' | cut -c1-140   # top-level spans with Δlive and seconds
-grep '# sample' $L | awk '{print $5, $8, $11}' | sort -n | tail -1                               # peak live / rss sample
-grep -E '^==|maximum resident|real' $L
+mkdir -p docs/measurements
+grep -E '^\[.*\] [+-] |^\[.*\]   - |# sample|^==|maximum resident|real' /private/tmp/claude-501/-Users-dendisuhubdy-Github-randprotocol/c88907b2-a154-4173-bbc0-449b9c3f54c7/scratchpad/mem/tier19.log | grep -v 'infer\|verify constraints' > docs/measurements/2026-10-03-tier19-memprofile.log
+wc -l docs/measurements/2026-10-03-tier19-memprofile.log   # ~200 lines
 ```
 
 - [ ] **Step 2: Write the section**
 
-Table: span → Δlive GB → seconds, for `randomize polys`, each `coset_lde_batch_with_transform` summed per commit, `first digest layer`, `compute quotient` (per instance), the quotient commit, the random commitment, `open`/`query phase`. Then: peak live heap, macOS max RSS, the Linux 94.2 GB figure for the same shape, the ratio, and the conclusion the spec §3.2 lays out (which branch applies). State the live model: `peak ≈ k × committed-oracle` with `k` measured; project tier 21 before the cuts and tier 20 after.
+Copy the spec §3.1's two tables and §3.2's consequences into `docs/04` § "The prover's live heap",
+then state in one paragraph what Task 4's re-measurement changes: the new declared heights (one
+lower per table) and the halved projection (tier-19 twin ≈ 47 GB, production N=1 ≈ 190 GB).
+Also fix `tests/memprofile.rs`'s module doc: the hypothesis paragraph ("RSS on Linux counts heap
+the allocator keeps …") is replaced by the finding (live heap 78.7 GB when killed; macOS RSS is
+not a memory number), and the `tier19_exit_twin` ignore note says "does not fit a 48 GB box; run
+on ≥ 128 GB".
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/04-phase2-row-cuts.md
-git commit -m "recursion docs: the tier-19 prover's live heap, by phase — <peak> GB live against 94.2 GB Linux RSS
+git add docs/04-phase2-row-cuts.md docs/measurements/ tests/memprofile.rs
+git commit -m "recursion docs: the tier-19 prover's live heap by phase — 78.7 GB live when killed; the quotient LDEs are a third of it
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -1002,7 +1008,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 - Create: `vendor/p3-fri/` and `vendor/p3-merkle-tree/` at the **circuits repository root** (`~/rand-worktrees/circuits-phase2/vendor/`), copied from `~/Github/randprotocol/fullnode/vendor/p3-fri` and `.../p3-merkle-tree` (crates.io 0.7.0 source plus the "RandProtocol patch (2026-10-01)" in `hiding_pcs.rs` and `hiding_mmcs.rs`; `diff -r` against `~/.cargo/registry/src/index.crates.io-*/p3-{fri,merkle-tree}-0.7.0/src` shows exactly those two files differ)
 - Create: `vendor/PROVENANCE.md` (what the two copies are, the upstream issue Plonky3 #2363 / PR #2368, the fullnode path they were copied from and its commit)
 - Modify: `recursion/Cargo.toml` (`[patch.crates-io]`, the `parallel` feature, `p3-maybe-rayon` optional dependency)
-- Test: `tests/backend.rs` or `tests/machine.rs` (the toy proves and verifies with the feature on), `tests/exit.rs` twin timed on 1 and 16 threads
+- Test: `tests/backend.rs` or `tests/machine.rs` (the toy proves and verifies with the feature on), `tests/memprofile.rs::tier16_synthetic_threads` timed on 1 and 16 threads
 
 **Interfaces:**
 - Produces: `cargo test --release --features parallel …` builds the prover with rayon; `RAYON_NUM_THREADS=N` sets the pool. Proofs verify with the stock (non-parallel) verifier — the config, transcript and FRI parameters are unchanged (the `docs/03` postcard-retype discipline).
@@ -1050,23 +1056,64 @@ cargo test --release --features parallel --test backend --test machine   # featu
 
 Expected: green both ways. If `Cargo.lock` changes (it will — the patch entries), commit it.
 
-- [ ] **Step 4: Time the twin on 1 and 16 threads**
+- [ ] **Step 4: Time a tier-16 synthetic program on 1 and 16 threads**
 
-```bash
-export RECURSION_FIXTURES=$HOME/rand-agg-512-results/out/fixtures
-RAYON_NUM_THREADS=1  cargo test --release --features parallel --test exit twin -- --ignored --nocapture 2>&1 | grep '^twin'
-RAYON_NUM_THREADS=16 cargo test --release --features parallel --test exit twin -- --ignored --nocapture 2>&1 | grep '^twin'
+A tier-19 proof does not fit this box (spec §3.1), so the thread measurement uses a synthetic
+rVM program that exercises every table at tier 16. Add to `tests/memprofile.rs` (it already has
+the heap counters; the span logger is optional here):
+
+```rust
+/// Threads (Task 6): a synthetic tier-16 program — 8 000 sponge absorbs over hinted blocks plus
+/// one REDUCE run — proved once; run under RAYON_NUM_THREADS=1 and =16 with `--features parallel`.
+#[test]
+#[ignore = "the thread benchmark: ~1-3 min; RAYON_NUM_THREADS=1 then 16, --features parallel"]
+fn tier16_synthetic_threads() {
+    use recursion::dsl::{hash, Builder, Checkpoints, Digest, Liveness};
+    use recursion::programs::Precompiles;
+    let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, Precompiles::On);
+    let mut tape: Vec<recursion::isa::F> = vec![];
+    let src = b.alloc(16);
+    let out = Digest(b.alloc(4));
+    for round in 0..2_000u64 {
+        for k in 0..16i64 {
+            let v = b.hint();
+            tape.push(recursion::isa::F::from_u64(round * 16 + k as u64 + 1));
+            b.store(src, k, v);
+        }
+        hash::sponge(&mut b, src, 16, out);
+    }
+    for k in 0..4 { let v = b.load(out.0, k); b.public(v); }
+    let p = b.finish();
+    let t0 = install();
+    let m = recursion::machine::Machine::new(rand_zkvm::machine::FriProfile::Test);
+    let t = Instant::now();
+    let (proof, exec) = m.prove(&p, &tape, None).unwrap();
+    let prove_s = t.elapsed().as_secs_f64();
+    m.verify(&p, &proof).unwrap();
+    report("tier16 synthetic", t0, exec.cpu_rows(), proof.tier, proof.size(), prove_s);
+}
 ```
 
-(Each run is one tier-19 proof: ~30 min single-threaded on this box, hopefully ~4–6 min on 16.) Record `prove`/`verify` seconds and the `/usr/bin/time -l` maximum RSS if wrapped. Compare with Task 5's single-threaded live-heap peak: rayon's per-thread scratch may raise the peak — say by how much.
+Check the row count the first run prints and adjust the loop count so the program lands in tier
+16 (65 535 rows max; `hint`+`store` is 2 rows a word, a 16-cell sponge is 4 `SPONGE` rows plus
+setup — ~36 rows a round, so ~1 800 rounds). Then:
+
+```bash
+RAYON_NUM_THREADS=1  cargo test --release --features parallel --test memprofile tier16 -- --ignored --nocapture 2>&1 | grep '^=='
+RAYON_NUM_THREADS=16 cargo test --release --features parallel --test memprofile tier16 -- --ignored --nocapture 2>&1 | grep '^=='
+cargo test --release --test memprofile tier16 -- --ignored --nocapture 2>&1 | grep '^=='    # feature off, the baseline
+```
+
+Record the three `prove` times and the three peak live heaps (rayon's per-thread scratch raises
+the peak — say by how much).
 
 - [ ] **Step 5: Record and commit**
 
-Add a "Threads" paragraph to `docs/04-phase2-row-cuts.md` (the two wall times, the speed-up, the memory delta) and note the feature in `docs/03-gpu-and-self-recursion.md`'s backend section.
+Add a "Threads" paragraph to `docs/04-phase2-row-cuts.md` (the three wall times, the speed-up, the memory delta) and note the feature in `docs/03-gpu-and-self-recursion.md`'s backend section.
 
 ```bash
 git add vendor/ recursion/Cargo.toml recursion/Cargo.lock docs/
-git commit -m "recursion: the parallel feature — Plonky3 rayon with the fullnode's hiding-RNG patch vendored; the tier-19 twin at 1 and 16 threads: <t1> s → <t16> s
+git commit -m "recursion: the parallel feature — Plonky3 rayon with the fullnode's hiding-RNG patch vendored; a tier-16 program at 1 and 16 threads: <t1> s → <t16> s
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
