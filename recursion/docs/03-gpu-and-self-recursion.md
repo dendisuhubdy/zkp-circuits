@@ -76,6 +76,10 @@ derived, the plan's own discipline):
 What does not move: the host classes — the backend accelerates NTT and Merkle *compute* and
 changes nothing about host memory (traces, salted matrices and digest layers live on the host
 in `ProverData`), so tier 21 → ≥ 64 GB, 22 → ≥ 128 GB, 23 → ≥ 160 GB host stand.
+(2026-10-03: those host classes are the withdrawn oracle model's — the measured live heap is
+`docs/04-phase2-row-cuts.md`; and since phase 2's row cuts every proof sits one tier lower at
+equal N — production exit/N=1 tier 20, N=2 tier 21, N=3/N=4 tier 22 — so the device model's
+rows above apply one rung down; the cpu table is 82 columns, 86 salted.)
 
 ## The tier-23 rung (Task 2, landed)
 
@@ -161,6 +165,10 @@ T5/T6 changed only the last row.
 | 9 | The PTX first run + `cuda-hw` suite (T3) | `rand-zkvm-cuda/ptx/PTX_BUILD.md`'s checklist | GPU node (R8) | ~1 h bring-up | — |
 | 10 | N re-measured on GPU (T4) | T4's `#[ignore]`d test | GPU node, ≥ 160 GB host | T4's numbers | per R3/R5 |
 | 11 | The self-verifier end-to-end proof | T6's twin: `verify_rv32r` over the M5.2-exit-shape tape | ≥ 128 GB host (production input, *derived* 2.9–3.9 M rows → tier 22); ≥ 64 GB at the test-profile shape (*derived* 1.0–1.5 M → tier 21) | *derived* hours on CPU | ~97–130 GB host oracle |
+
+(2026-10-03: the tiers in this runbook are constraint set 8's; since phase 2's row cuts each row's
+proof is one tier lower — row 3 and row 6 tier 20, row 4 tier 19, row 5 tier 20, row 7 tier 21,
+row 8 tier 22 — with the projected memory in `docs/04-phase2-row-cuts.md`.)
 
 Rows 3–6 ran on 2026-09-30 on a 503 GB box (`docs/02-aggregate.md`, "Constraint set 8,
 proved"): the measured peaks are 4–8× the derived ones, so rows 7–8 want a host above 512 GB

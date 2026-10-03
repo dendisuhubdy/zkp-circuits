@@ -2,18 +2,26 @@
 //!
 //! The 2026-09-30 measurements on the 503 GB box (`docs/02-aggregate.md`, "Constraint set 8,
 //! proved") recorded peak RSS 4–8× the committed-oracle model — 94 GB at tier 19, 377 GB at
-//! tier 21 — while the same tier-19 proof completes on a 48 GB laptop without paging. RSS on
-//! Linux counts heap the allocator keeps after `free`; this harness counts the bytes that are
-//! *live*, so the two can be told apart and the live model re-fitted. Two instruments, no new
-//! dependencies beyond `tracing` (already in the tree through Plonky3):
+//! tier 21. This harness counts the bytes that are *live*, phase by phase, and its tier-19 run
+//! (2026-10-03, this 48 GB box, `docs/measurements/2026-10-03-tier19-memprofile.log`) settled
+//! the question: **78.7 GB live when the kernel killed it**, 20 s into the quotient commit —
+//! the Linux peaks are the working set, not allocator retention. The committed main trace is
+//! one of four terms (main LDE + tree 17.6 GB, permutation 11.3 GB, the quotient LDEs 29.7 GB,
+//! the quotient tree and FRI the rest); the record and the model are
+//! `docs/04-phase2-row-cuts.md` §"The prover's live heap". macOS's RSS for the same run read
+//! 7–17 GB (19.8 GB maximum) because it excludes compressed and swapped pages: **macOS RSS is
+//! not a memory number**, and the September "completes on 48 GB" was ~50 GB of compressed
+//! swap. Two instruments, no new dependencies beyond `tracing` (already in the tree through
+//! Plonky3):
 //!
 //! 1. a counting global allocator — live bytes and the high-water mark, every allocation;
 //! 2. a minimal `tracing` subscriber that prints live/peak at every Plonky3 span boundary
 //!    (`prove_batch`, `compute quotient`, the PCS commit and open spans), so each step of the
-//!    prover is attributed its own delta; a sampler thread adds RSS every 10 s for the
-//!    allocator-retention comparison.
+//!    prover is attributed its own delta; a sampler thread adds RSS every 10 s (kept to show
+//!    how far RSS is from the live count, not as a measurement).
 //!
-//! Run (tier 19, the exit twin's shape, ~30 min single-threaded on an M4 Max):
+//! Run (the exit twin's shape — tier 19 at constraint set 8, tier 18 since phase 2's row cuts;
+//! single-threaded; does not fit a 48 GB box, run on ≥ 128 GB):
 //! `cargo test --release -p recursion --test memprofile tier19 -- --ignored --nocapture`
 //! The toy (`tier8`) is the harness's own smoke test.
 mod common;
@@ -217,9 +225,12 @@ fn tier8_toy() {
 }
 
 /// The exit twin's shape (`tests/exit.rs`): the verifier program over one real test-profile
-/// bundle proof, tier 19 — the shape the 503 GB box measured at 94.2 GB RSS.
+/// bundle proof — tier 19 at constraint set 8, the shape the 503 GB box measured at 94.2 GB RSS
+/// and this harness at 78.7 GB live when killed (2026-10-03, `docs/04-phase2-row-cuts.md`).
+/// Since phase 2's row cuts the same proof is 230 950 rows, tier 18 (≈ 47–50 GB by the measured
+/// terms); the name is kept for the record it produced.
 #[test]
-#[ignore = "one tier-19 rVM proof under the heap profiler: ~30 min single-threaded, live heap expected 10-30 GB"]
+#[ignore = "one exit-twin rVM proof under the heap profiler (tier 18 since phase 2; 78.7 GB live when killed at tier 19): does not fit a 48 GB box; run on >= 128 GB"]
 fn tier19_exit_twin() {
     use rand_zkvm::machine::FriProfile;
     use recursion::dsl::Checkpoints;

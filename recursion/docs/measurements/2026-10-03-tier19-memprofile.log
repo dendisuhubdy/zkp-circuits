@@ -1,0 +1,161 @@
+[      0.3s] + with_zero_cols                             live    0.92 GB  peak    0.97 GB
+[      0.3s] - with_zero_cols                             live    0.95 GB  peak    0.97 GB  Δlive   +0.03 GB       0.0 s
+[      0.3s] + with_zero_cols                             live    0.94 GB  peak    0.97 GB
+[      0.3s] - with_zero_cols                             live    0.94 GB  peak    0.97 GB  Δlive   +0.00 GB       0.0 s
+[      0.3s] + coset_lde_batch_with_transform             live    0.94 GB  peak    0.97 GB
+[      0.3s]   - reverse_matrix_index_bits                  live    0.95 GB  peak    0.97 GB  Δlive   +0.00 GB       0.0 s
+[      0.4s]   - first_half                                 live    0.95 GB  peak    0.97 GB  Δlive   +0.00 GB       0.0 s
+[      0.4s]   - reverse_matrix_index_bits                  live    0.95 GB  peak    0.97 GB  Δlive   +0.00 GB       0.0 s
+[      0.4s]   - second_half                                live    0.95 GB  peak    0.97 GB  Δlive   +0.00 GB       0.0 s
+[      0.4s]   - reserve_exact                              live    1.18 GB  peak    1.18 GB  Δlive   +0.23 GB       0.0 s
+[      0.5s]   - coset_dft_oop                              live    1.19 GB  peak    1.19 GB  Δlive   +0.01 GB       0.1 s
+[      0.5s]   - coset_dft_oop                              live    1.20 GB  peak    1.20 GB  Δlive   +0.01 GB       0.1 s
+[      0.6s]   - coset_dft_oop                              live    1.21 GB  peak    1.21 GB  Δlive   +0.01 GB       0.1 s
+[      0.6s]   - coset_dft_oop                              live    1.21 GB  peak    1.21 GB  Δlive   +0.01 GB       0.1 s
+[      0.7s]   - coset_dft_oop                              live    1.22 GB  peak    1.22 GB  Δlive   +0.01 GB       0.1 s
+[      0.8s]   - coset_dft_oop                              live    1.23 GB  peak    1.23 GB  Δlive   +0.01 GB       0.1 s
+[      0.8s]   - coset_dft_oop                              live    1.24 GB  peak    1.24 GB  Δlive   +0.01 GB       0.1 s
+[      0.9s]   - coset_dft                                  live    1.25 GB  peak    1.25 GB  Δlive   +0.01 GB       0.1 s
+[      0.9s] - coset_lde_batch_with_transform             live    1.25 GB  peak    1.25 GB  Δlive   +0.31 GB       0.6 s
+[      0.9s] + coset_lde_batch_with_transform             live    1.25 GB  peak    1.25 GB
+[      0.9s]   - reverse_matrix_index_bits                  live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - first_half                                 live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - reverse_matrix_index_bits                  live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - second_half                                live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - reserve_exact                              live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - coset_dft_oop                              live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - coset_dft_oop                              live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - coset_dft_oop                              live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - coset_dft_oop                              live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - coset_dft_oop                              live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - coset_dft_oop                              live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - coset_dft_oop                              live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s]   - coset_dft                                  live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      0.9s] - coset_lde_batch_with_transform             live    1.25 GB  peak    1.25 GB  Δlive   +0.00 GB       0.0 s
+[      9.8s] + build merkle tree                          live    1.52 GB  peak    1.52 GB
+[     10.0s] # sample  live    1.78 GB  peak    1.78 GB  rss    1.99 GB
+[     18.2s]   - first digest layer                         live    1.78 GB  peak    1.78 GB  Δlive   +0.27 GB       8.4 s
+[     20.0s] # sample  live    1.92 GB  peak    1.92 GB  rss    2.12 GB
+[     22.3s] - build merkle tree                          live    2.05 GB  peak    2.05 GB  Δlive   +0.54 GB      12.5 s
+[     22.3s]   - evaluate constraints symbolically          live    2.05 GB  peak    2.05 GB  Δlive   +0.00 GB       0.0 s
+[     22.3s]   - evaluate constraints symbolically          live    2.05 GB  peak    2.05 GB  Δlive   +0.00 GB       0.0 s
+[     22.3s]   - evaluate constraints symbolically          live    2.05 GB  peak    2.05 GB  Δlive   +0.00 GB       0.0 s
+[     22.3s]   - evaluate constraints symbolically          live    2.05 GB  peak    2.05 GB  Δlive   +0.00 GB       0.0 s
+[     22.3s]   - evaluate constraints symbolically          live    2.05 GB  peak    2.05 GB  Δlive   +0.00 GB       0.0 s
+[     22.3s]   - evaluate constraints symbolically          live    2.05 GB  peak    2.05 GB  Δlive   +0.00 GB       0.0 s
+[     22.3s]   - evaluate constraints symbolically          live    2.05 GB  peak    2.05 GB  Δlive   +0.00 GB       0.0 s
+[     22.3s]   - evaluate constraints symbolically          live    2.05 GB  peak    2.05 GB  Δlive   +0.00 GB       0.0 s
+[     22.3s] + prove_batch                                live    2.05 GB  peak    2.05 GB
+[     23.0s]   - randomize polys                            live    3.64 GB  peak    3.66 GB  Δlive   +0.93 GB       0.6 s
+[     23.9s]   - coset_lde_batch_with_transform             live    4.13 GB  peak    4.13 GB  Δlive   +0.49 GB       0.9 s
+[     30.0s] # sample  live    8.59 GB  peak    8.59 GB  rss    9.04 GB
+[     32.4s]   - coset_lde_batch_with_transform             live    8.59 GB  peak    8.59 GB  Δlive   +4.46 GB       8.5 s
+[     40.0s] # sample  live   12.41 GB  peak   12.41 GB  rss   12.06 GB
+[     40.5s]   - coset_lde_batch_with_transform             live   12.41 GB  peak   12.41 GB  Δlive   +3.83 GB       8.1 s
+[     44.4s]   - coset_lde_batch_with_transform             live   14.33 GB  peak   14.33 GB  Δlive   +1.91 GB       3.9 s
+[     45.2s]   - coset_lde_batch_with_transform             live   14.96 GB  peak   14.96 GB  Δlive   +0.64 GB       0.9 s
+[     45.2s]   - coset_lde_batch_with_transform             live   14.96 GB  peak   14.96 GB  Δlive   +0.00 GB       0.0 s
+[     45.2s]   - coset_lde_batch_with_transform             live   14.96 GB  peak   14.96 GB  Δlive   +0.00 GB       0.0 s
+[     45.8s]   - coset_lde_batch_with_transform             live   15.29 GB  peak   15.29 GB  Δlive   +0.33 GB       0.5 s
+[     50.0s] # sample  live   18.55 GB  peak   18.55 GB  rss   16.82 GB
+[     60.0s] # sample  live   18.55 GB  peak   18.55 GB  rss   16.77 GB
+[     70.0s] # sample  live   18.55 GB  peak   18.55 GB  rss   16.57 GB
+[     80.0s] # sample  live   18.55 GB  peak   18.55 GB  rss   16.06 GB
+[     90.0s] # sample  live   18.55 GB  peak   18.55 GB  rss   15.98 GB
+[    100.0s] # sample  live   18.55 GB  peak   18.55 GB  rss   16.07 GB
+[    110.1s] # sample  live   18.55 GB  peak   18.55 GB  rss   16.24 GB
+[    120.1s] # sample  live   18.55 GB  peak   18.55 GB  rss   16.35 GB
+[    130.1s] # sample  live   18.55 GB  peak   18.55 GB  rss   16.61 GB
+[    140.1s] # sample  live   19.09 GB  peak   19.09 GB  rss   17.19 GB
+[    150.1s] # sample  live   19.09 GB  peak   19.09 GB  rss   16.79 GB
+[    160.1s] # sample  live   19.09 GB  peak   19.09 GB  rss   16.75 GB
+[    170.1s] # sample  live   19.09 GB  peak   19.09 GB  rss   16.77 GB
+[    180.1s] # sample  live   19.09 GB  peak   19.09 GB  rss   16.77 GB
+[    190.1s] # sample  live   19.36 GB  peak   19.36 GB  rss   17.11 GB
+[    200.1s] # sample  live   19.36 GB  peak   19.36 GB  rss   17.22 GB
+[    210.1s] # sample  live   19.36 GB  peak   19.36 GB  rss   15.42 GB
+[    220.1s] # sample  live   19.36 GB  peak   19.36 GB  rss   15.50 GB
+[    230.1s] # sample  live   19.36 GB  peak   19.36 GB  rss   15.60 GB
+[    240.1s] # sample  live   19.36 GB  peak   19.36 GB  rss   15.70 GB
+[    250.1s] # sample  live   19.36 GB  peak   19.36 GB  rss   15.93 GB
+[    260.1s] # sample  live   19.36 GB  peak   19.36 GB  rss   16.03 GB
+[    270.2s] # sample  live   19.36 GB  peak   19.36 GB  rss   16.18 GB
+[    280.2s] # sample  live   19.36 GB  peak   19.36 GB  rss   16.30 GB
+[    290.2s] # sample  live   19.36 GB  peak   19.36 GB  rss   16.39 GB
+[    300.2s] # sample  live   19.56 GB  peak   19.56 GB  rss   16.68 GB
+[    310.2s] # sample  live   19.62 GB  peak   19.62 GB  rss   16.78 GB
+[    320.2s]   - build merkle tree                          live   19.62 GB  peak   19.62 GB  Δlive   +2.15 GB     273.3 s
+[    320.2s] # sample  live   19.67 GB  peak   19.67 GB  rss   17.20 GB
+[    320.2s]   - generate lookup permutation                live   19.66 GB  peak   19.67 GB  Δlive   +0.02 GB       0.0 s
+[    320.6s]   - generate lookup permutation                live   19.73 GB  peak   19.74 GB  Δlive   +0.09 GB       0.4 s
+[    320.9s]   - generate lookup permutation                live   19.87 GB  peak   19.90 GB  Δlive   +0.13 GB       0.2 s
+[    321.0s]   - generate lookup permutation                live   19.94 GB  peak   19.95 GB  Δlive   +0.07 GB       0.1 s
+[    321.0s]   - generate lookup permutation                live   19.94 GB  peak   19.95 GB  Δlive   +0.00 GB       0.0 s
+[    321.0s]   - generate lookup permutation                live   19.94 GB  peak   19.95 GB  Δlive   +0.00 GB       0.0 s
+[    321.0s]   - generate lookup permutation                live   19.94 GB  peak   19.95 GB  Δlive   +0.00 GB       0.0 s
+[    321.1s]   - generate lookup permutation                live   19.95 GB  peak   19.95 GB  Δlive   +0.01 GB       0.0 s
+[    321.4s]   - randomize polys                            live   20.55 GB  peak   20.59 GB  Δlive   +0.60 GB       0.3 s
+[    322.4s]   - coset_lde_batch_with_transform             live   21.02 GB  peak   21.02 GB  Δlive   +0.47 GB       1.1 s
+[    325.9s]   - coset_lde_batch_with_transform             live   22.54 GB  peak   22.54 GB  Δlive   +1.53 GB       3.4 s
+[    330.2s] # sample  live   25.36 GB  peak   25.36 GB  rss   12.86 GB
+[    333.2s]   - coset_lde_batch_with_transform             live   25.36 GB  peak   25.36 GB  Δlive   +2.82 GB       7.3 s
+[    336.4s]   - coset_lde_batch_with_transform             live   26.77 GB  peak   26.77 GB  Δlive   +1.41 GB       3.3 s
+[    336.5s]   - coset_lde_batch_with_transform             live   26.83 GB  peak   26.83 GB  Δlive   +0.06 GB       0.1 s
+[    336.5s]   - coset_lde_batch_with_transform             live   26.83 GB  peak   26.83 GB  Δlive   +0.00 GB       0.0 s
+[    336.5s]   - coset_lde_batch_with_transform             live   26.83 GB  peak   26.83 GB  Δlive   +0.00 GB       0.0 s
+[    336.8s]   - coset_lde_batch_with_transform             live   26.99 GB  peak   26.99 GB  Δlive   +0.16 GB       0.3 s
+[    340.2s] # sample  live   30.25 GB  peak   30.25 GB  rss    8.82 GB
+[    350.2s] # sample  live   30.25 GB  peak   30.25 GB  rss    5.59 GB
+[    360.2s] # sample  live   30.25 GB  peak   30.25 GB  rss    3.86 GB
+[    370.2s] # sample  live   30.25 GB  peak   30.25 GB  rss    2.53 GB
+[    380.2s] # sample  live   30.25 GB  peak   30.25 GB  rss    3.32 GB
+[    390.2s] # sample  live   30.25 GB  peak   30.25 GB  rss    4.10 GB
+[    400.2s] # sample  live   30.25 GB  peak   30.25 GB  rss    3.95 GB
+[    410.2s] # sample  live   30.79 GB  peak   30.79 GB  rss    4.81 GB
+[    420.3s] # sample  live   30.79 GB  peak   30.79 GB  rss    5.44 GB
+[    430.3s] # sample  live   30.79 GB  peak   30.79 GB  rss    5.87 GB
+[    440.3s] # sample  live   30.79 GB  peak   30.79 GB  rss    6.25 GB
+[    450.3s] # sample  live   30.79 GB  peak   30.79 GB  rss    4.21 GB
+[    460.3s] # sample  live   31.06 GB  peak   31.06 GB  rss    4.18 GB
+[    470.3s] # sample  live   31.06 GB  peak   31.06 GB  rss    4.67 GB
+[    480.3s] # sample  live   31.06 GB  peak   31.06 GB  rss    3.58 GB
+[    490.3s] # sample  live   31.06 GB  peak   31.06 GB  rss    3.79 GB
+[    500.3s] # sample  live   31.06 GB  peak   31.06 GB  rss    4.35 GB
+[    510.3s] # sample  live   31.06 GB  peak   31.06 GB  rss    4.91 GB
+[    520.3s] # sample  live   31.29 GB  peak   31.29 GB  rss    5.52 GB
+[    524.9s]   - build merkle tree                          live   31.33 GB  peak   31.33 GB  Δlive   +2.15 GB     187.0 s
+[    530.3s] # sample  live   32.83 GB  peak   32.84 GB  rss    7.61 GB
+[    533.8s]   - compute quotient                           live   33.13 GB  peak   33.63 GB  Δlive   +1.80 GB       8.9 s
+[    540.3s] # sample  live   33.53 GB  peak   33.63 GB  rss    6.65 GB
+[    550.3s] # sample  live   33.53 GB  peak   33.63 GB  rss    9.61 GB
+[    560.3s] # sample  live   33.53 GB  peak   33.63 GB  rss    9.32 GB
+[    570.3s] # sample  live   34.31 GB  peak   34.31 GB  rss    7.55 GB
+[    580.4s] # sample  live   36.22 GB  peak   36.22 GB  rss    6.14 GB
+[    590.4s] # sample  live   38.11 GB  peak   38.11 GB  rss    6.42 GB
+[    600.4s] # sample  live   39.98 GB  peak   40.01 GB  rss    6.74 GB
+[    602.2s]   - compute quotient                           live   39.58 GB  peak   40.39 GB  Δlive   +6.46 GB      68.4 s
+[    610.4s] # sample  live   40.39 GB  peak   40.39 GB  rss    5.95 GB
+[    620.4s] # sample  live   40.39 GB  peak   40.39 GB  rss    9.19 GB
+[    630.4s] # sample  live   44.85 GB  peak   44.85 GB  rss    8.33 GB
+[    640.4s] # sample  live   46.39 GB  peak   46.39 GB  rss    6.50 GB
+[    650.4s] # sample  live   47.94 GB  peak   47.94 GB  rss    8.42 GB
+[    660.4s] # sample  live   49.48 GB  peak   49.48 GB  rss   10.16 GB
+[    670.4s] # sample  live   50.94 GB  peak   51.02 GB  rss   10.43 GB
+[    680.4s] # sample  live   52.48 GB  peak   52.57 GB  rss    8.30 GB
+[    690.4s] # sample  live   54.03 GB  peak   54.11 GB  rss    8.79 GB
+[    697.1s]   - compute quotient                           live   53.24 GB  peak   55.65 GB  Δlive  +13.66 GB      94.9 s
+[    700.4s] # sample  live   53.64 GB  peak   55.65 GB  rss    7.52 GB
+[    710.4s] # sample  live   53.64 GB  peak   55.65 GB  rss    9.21 GB
+[    720.4s] # sample  live   55.83 GB  peak   55.87 GB  rss    7.52 GB
+[    730.5s] # sample  live   58.19 GB  peak   58.19 GB  rss    7.36 GB
+[    740.5s] # sample  live   59.73 GB  peak   59.73 GB  rss    7.85 GB
+[    749.6s]   - compute quotient                           live   60.07 GB  peak   61.27 GB  Δlive   +6.83 GB      52.5 s
+[    750.5s] # sample  live   60.07 GB  peak   61.27 GB  rss    7.83 GB
+[    752.5s]   - compute quotient                           live   60.17 GB  peak   61.27 GB  Δlive   +0.11 GB       2.9 s
+[    752.5s]   - compute quotient                           live   60.17 GB  peak   61.27 GB  Δlive   +0.00 GB       0.0 s
+[    752.5s]   - compute quotient                           live   60.17 GB  peak   61.27 GB  Δlive   +0.00 GB       0.0 s
+[    760.5s] # sample  live   60.86 GB  peak   61.27 GB  rss    7.77 GB
+[    761.5s]   - compute quotient                           live   61.01 GB  peak   61.27 GB  Δlive   +0.83 GB       8.9 s
+[    770.5s] # sample  live   78.72 GB  peak   78.72 GB  rss    7.63 GB
+      782.10 real       713.30 user        22.68 sys
+         19808239616  maximum resident set size

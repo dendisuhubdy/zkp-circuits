@@ -146,6 +146,17 @@ witness words — still tier 21, 49 884 rows under `2^21`. Production program di
 profile's single proof costs 11 875 permutations (was 11 852). `docs/02-aggregate.md`,
 "Constraint set 8", has the aggregate program's pins.
 
+**Phase 2 re-pin (2026-10-03, the three row cuts — `docs/04-phase2-row-cuts.md`).** Opened rows
+are hinted straight into per-height-group sponge buffers (Cut A), `HINTN` (opcode 26) writes
+eight tape words in one row (Cut B), and `COMPRESS` (opcode 27) does a Merkle level in one cpu
+row and one Poseidon2-chip row (Cut C). Production **893 606 cpu rows** (−56.4 % from 2 047 268),
+54 515 permutations (unchanged), 2 213 181 memory accesses, 903 739 instructions, 210 763
+witness words — **tier 20**, 154 969 rows under `2^20`; the test profile 230 950 rows, tier 18.
+Production program digest `454592b3…f2b3` →
+`723218da65a50f1f1581013f79fa5c5b1816b7ab46796dbaa4672c52bce2d0d1`. The tables in this
+document are the earlier measurements, kept for the history they explain; docs/04 has the
+current per-phase and per-opcode tables.
+
 **Constraint set 7 re-pin (chain 16).** The inner machine gained the LogUp blind (five columns
 and a `BLIND` bus interaction pair on every instance, `research/src/tables/blind.rs`), a `2^7`
 floor on every declared table height (the fixture's public table goes from `2^2` to `2^7` rows),
@@ -208,6 +219,14 @@ permutations and witness unchanged. Test profile: 496 028 → 441 643 rows. **Th
 tier 21: 1 968 619 < 2^21 = 2 097 152, with 6.1 % headroom** — the plan's target, landed.
 
 ### Where the rows go
+
+**2026-10-03 — the current split is in `docs/04-phase2-row-cuts.md`**, re-taken by
+`tests/profile.rs` (`cargo test --release -p recursion --test profile -- --ignored --nocapture`,
+emulation only) after each of phase 2's three cuts: 893 606 production rows, of which the query
+phase is 725 192 (80 %) and tape reads 50 235; `LOAD` (245 950, mostly the allocator's 218 283
+reloads) and `FADDI` (144 427) are the largest opcodes, the Merkle select and the buffer copies
+gone. The tables below are the M5.1 measurement (5.68 M rows), kept as the record the precompile
+decision was made on.
 
 Per-phase split of the program's instructions (the program is straight-line apart from assertion
 traps, so these are also the cpu rows per phase), and the executed opcode histogram, both measured:
@@ -326,7 +345,7 @@ to revisit this paragraph.
 
 **Superseded (M5.2 built, 2026-09-15).** The machine this section hands to exists now: the ISA
 is at 26 instructions (`REDUCE` = 24, `SPONGE` = 25; 0–23 frozen), the program is three row cuts
-smaller (5 682 847 → 1 968 619, tier 21), and the measured machine numbers — tables, buses,
+smaller (5 682 847 → 1 968 619, tier 21; 893 606 at tier 20 since phase 2's row cuts, `docs/04`), and the measured machine numbers — tables, buses,
 tiers, widths, degrees, the three cuts' deltas and gates, the test-profile twin's times and proof
 size, and the production exit's derived resource requirement — live in
 `docs/01-rvm-machine.md`. This section remains as the record of what M5.1 actually handed over.

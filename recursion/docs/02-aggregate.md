@@ -15,6 +15,11 @@ numbers in `tests/pins.json` (`tests/aggregate.rs::the_per_n_cycle_budget_is_pin
 differential and the tamper table in the same file, the stub vectors in
 `the_admission_stub_vectors`. Estimates are labelled with their derivation.
 
+**Current numbers (2026-10-03): phase 2's row cuts, "Phase 2" below and
+`docs/04-phase2-row-cuts.md`.** Every rung is one tier lower at equal N — production N=1 at
+tier 20 (893 880 rows), N=2 at 21, N=3 and N=4 at 22 — and the aggregate program digest moved.
+The sections in between are the record of how the earlier numbers were arrived at.
+
 ## AGG-2: the aggregate binding (audit v3, amended 2026-09-25)
 
 Before this amendment the interface was `[vk ‖ N ‖ 34·N]` and said nothing about who made the
@@ -127,6 +132,35 @@ program**, and every number above is an emulation measured on the 48 GB laptop (
 *proofs* — the tier-19 round trip (`two_test_profile`), the one-proof round trip, the N=3 twin and
 the production exits — were not re-run for cs8 here: they need the ≥ 64 GB box.
 
+## Phase 2: the three row cuts (2026-10-03)
+
+Cut A (opened rows hinted straight into per-height-group sponge buffers; the tape's segment 11 in
+height-group order), Cut B (`HINTN`, opcode 26) and Cut C (`COMPRESS`, opcode 27) — the record,
+per-stage measurements and the prover's live-heap finding are `docs/04-phase2-row-cuts.md`. The
+interface `[vk ‖ N ‖ B(8) ‖ 35·N]`, the binding, `verify_aggregate`'s API, the `inner_vk_digest`
+and the admission stub's list and digest do **not** move; the program does.
+
+| pin | constraint set 8 | phase 2 |
+|---|---|---|
+| `aggregate_program_digest`, production bundle shape (what a chain's aggregation section pins) | `1831f036a2d3524249df17a66a220457878f8aeed669c77db08d58026461ddd7` | `c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8` |
+| `aggregate_program_digest`, test fixture shape (`tests/verifier.rs`) | `9eba73805fa23361708d9ca1c58d904ac830aeb6810470ec7788c4f36880193d` | `5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df` |
+| single-proof program, production (`src/programs/verify_rv32.digest`) | `454592b35ccfd6feefe93b7d2353bc484fca8ff260f74deae4e0865f7da2f2b3` | `723218da65a50f1f1581013f79fa5c5b1816b7ab46796dbaa4672c52bce2d0d1` |
+| Off replay, production shape (`tests/verifier.rs`) | `af7728191e4ec0c1b8f6cc3d60aff36b04dc0d1b48b494aa9fbf107ebc708425` | `39bb6b8d94e62dd282001384d0b65294e7f024e6ef9b47381c8c96c6e1fd3352` |
+| `pins.json` production cpu rows / permutations / instructions | 2 047 268 / 54 515 / 2 057 401 | 893 606 / 54 515 / 903 739 |
+| `pins.json` aggregate test N=1/2/3 cpu rows (tier) | 462 262 (19) / 924 115 (20) / 1 385 968 (21) | 231 224 (18) / 462 039 (19) / 692 854 (20) |
+| `LOOP_OVERHEAD` (test and production alike) | 274 | 274 |
+| production N=1 aggregate, cpu rows (tier) | 2 047 542 (21) | 893 880 (20; 154 695 under `2^20`) |
+| production N=2 aggregate (`production_n2_aggregate_emulates_within_bounds`) | 4 094 675 (22) | 1 787 351 (21; 309 800 under `2^21`) |
+| production N=3 aggregate (`production_n3_aggregate_emulates_within_bounds`) | 6 141 808 (23) | 2 680 822 (22) |
+| production N=4 aggregate (one-off emulation, docs/04) | 8 188 941 (23) | 3 574 293 (22; 620 010 under `2^22`) |
+
+The production N=2/N=3 emulations stay inside the bounds (max address 4 540 120; top timestamps
+28 597 631 and 42 893 167, under `2^27`). The machine class per rung is docs/04's derivation from
+the measured live-heap terms — production N=1 ≈ 190–240 GB (a 256 GB host), N=2 ≈ 475 GB, N=4
+≈ 950 GB — projections until the tier-20 production proof runs. The fullnode re-vendors and
+re-pins `admitted_shapes[].aggregate_program_digest` at the next chain cut; no running chain has
+aggregation enabled.
+
 ## Constraint set 8, proved: the 512 GB run for fullnode #45 (2026-09-30)
 
 Every deferred rVM proof of the runbook (`docs/03`, rows 3–7) ran on one machine — a 64-vCPU
@@ -159,7 +193,10 @@ therefore needs on the order of 700–800 GB and tier 23 more than a terabyte: *
 about 5×**; the rung a CPU box can reach is the production N=1 at tier 21 (≥ 512 GB). The
 mismatch is between the 2026-09-15 oracle model and the prover as it stands (constraint sets 7
 and 8 widened every table and the model was never re-calibrated), not a leak: the exit at tier
-21 holds its peak through the commit phase and frees it before FRI.
+21 holds its peak through the commit phase and frees it before FRI. (2026-10-03: the live-heap
+profile of the tier-19 shape — 78.7 GB live when killed, four terms of which the committed main
+trace is one — is `docs/04-phase2-row-cuts.md` §"The prover's live heap"; the macOS figures this
+document quotes from September are RSS, which on macOS excludes compressed and swapped pages.)
 
 **Tier 22's headroom is 2.4 %.** The production N=2 program runs 4 094 675 rows against tier
 22's 4 194 303 (`production_n2_aggregate_emulates_within_bounds`); one more column-set in the
@@ -238,6 +275,9 @@ must open `D_in` in-program and assert `B_in == B_out`.
 
 ## The N-economics, measured (test profile)
 
+(Constraint set 6, 2026-09-15 — the record of the row model. Current: N=1/2/3 = 231 224 /
+462 039 / 692 854 rows at tiers 18 / 19 / 20, "Phase 2" above.)
+
 The shipped program (`Checkpoints::Off`, liveness and precompiles on) over the fixture shape;
 the tape is `1 + 43 344·N` words exactly. The program itself is 443 893 instructions — once,
 independent of `N`.
@@ -265,6 +305,9 @@ sponge), so the per-proof count is the single-proof's 11 205 minus the 29 the pr
 once.
 
 ## The N-economics, derived (production)
+
+(Constraint set 6, 2026-09-15. Current: N=1 at tier 20, N=2 at 21, N=3 and N=4 at 22, all
+emulated — "Phase 2" above; the oracle-memory column below is the withdrawn model.)
 
 The production inner proof's rows are M5.2's pin (1 968 619 rows, 51 605 permutations); the
 per-N scaling is the measured test-profile law applied to the same structure. The loop overhead
@@ -420,6 +463,13 @@ A new, small fullnode-side function; no rVM vendoring in M5.3. Exactly:
   ```
 - the interface digest for the list above:
   `5e3d7fb2bd1f5342e49577650a281996b656d1fa4e8f3eff7ee82adefe9d1ed6`
+- the program the stub registers, `aggregate_program_digest` at the fixture (test) shape —
+  phase 2's row cuts (2026-10-03) moved it from constraint set 8's
+  `9eba73805fa23361708d9ca1c58d904ac830aeb6810470ec7788c4f36880193d` to
+  `5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df` (pinned in
+  `tests/verifier.rs`); at the production bundle shape `1831f036…ddd7` →
+  `c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8`. The vk digest, the list
+  and its digest above do not move with it.
 
 The fullnode session's stub must reproduce all three byte-for-byte before it is trusted with
 admission: the vk digest against the pinned constant, the list and digest against the recursion
@@ -430,7 +480,9 @@ crate's printout on the shared cache.
 - **The pinned aggregate program and its digest** — one N-generic program per inner shape, the
   registered artifact the fullnode pins by digest; M5.4's self-verifier program reads it the
   way the aggregate program reads the RV32 machine's shape.
-- **The measured N-economics** — the tables above: production N=1 at tier 21 (48.6 GB oracle,
+- **The measured N-economics** — (2026-10-03: one tier lower since phase 2, and the oracle
+  figures in this bullet are the withdrawn model — "Phase 2" above and docs/04) — the tables
+  above: production N=1 at tier 21 (48.6 GB oracle,
   ≥ 64 GB), N=2 at tier 22 (~95 GB, ≥ 128 GB), N=3 at tier 23 (~127 GB, ≥ 160 GB, a rung that
   exists nowhere), and the test-profile N=1..3 measured rows calibrating the linear scaling.
   The production proofs are written; their execution is scheduled for a ≥64 GB machine after
