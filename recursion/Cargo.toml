@@ -44,6 +44,9 @@ rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
 
 [dev-dependencies]
 hex = "0.4"
+# `tests/memprofile.rs`: a span-boundary heap logger over Plonky3's own `tracing` spans (the
+# version is the one the p3 crates already lock).
+tracing = "0.1"
 
 [features]
 # `rand-zkvm-cuda`'s CPU-twin engines (the reference backend). Research's feature, mirrored.
