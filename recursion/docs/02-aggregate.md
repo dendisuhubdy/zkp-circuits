@@ -127,6 +127,80 @@ program**, and every number above is an emulation measured on the 48 GB laptop (
 *proofs* — the tier-19 round trip (`two_test_profile`), the one-proof round trip, the N=3 twin and
 the production exits — were not re-run for cs8 here: they need the ≥ 64 GB box.
 
+## Constraint set 8, proved: the 512 GB run for fullnode #45 (2026-09-30)
+
+Every deferred rVM proof of the runbook (`docs/03`, rows 3–7) ran on one machine — a 64-vCPU
+AMD EPYC 9555P, 503 GB, no swap, Ubuntu 24.04 — on `feat/issue-45` (`aeacf31`, the tree
+fullnode v0.6.7 vendors, plus test-only commits), `cargo test --release`, one process per proof
+(the prover is single-threaded; proofs ran side by side under a memory budget, so the walls are
+uncontended for CPU but not for memory bandwidth). Peaks are `/usr/bin/time -v`'s maximum
+resident set of the test binary. Fixture cache: 13 test + 50 production bundle proofs in 238 s
+wall, 63 processes at once, ~232 s of CPU each, 5.7 GB per process.
+
+| run | tier | cpu rows | prove | verify | proof size | peak RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| N=1 test aggregate round trip, in suite (`a_one_proof_aggregate_round_trips…`) | 19 | 462 262 | 2 034.6 s for the test binary (prove + verify + five tampered variants) | — | 334 778 B | **94.5 GB** |
+| exit twin: the single-proof program over one test proof | 19 | 461 988 | 2 001.8 s | 24.71 s | 335 003 B | 94.2 GB |
+| N=2 test aggregate (`two_test_profile`) | 20 | 924 115 | 3 983.5 s for the test binary | — | 355 577 B | **183.7 GB** |
+| N=3 test twin (`twin`) | 21 | 1 385 968 | 4 807.8 s | 24.75 s | 347 800 B | **221.0 GB** |
+| M5.2 production exit: the single-proof program over one production proof | 21 | 2 047 268 | 8 164.8 s | 99.31 s | 1 566 619 B | **376.9 GB** |
+| production N=1 aggregate (`production_n1_aggregate_proves_and_verifies`) | 21 | 2 047 542 | 8 131.3 s | 99.36 s | 1 563 226 B | 376.9 GB |
+| production N=2 aggregate (tier 22) | 22 | 4 094 675 | not attempted: the production tier-21 peak (376.9 GB, twice) scales to ~750 GB at tier 22 (every table one height taller), above the 503 GB box |
+| production N=3 aggregate (tier 23) | 23 | 6 141 808 | not attempted: the tier-22 run above already exceeds the box |
+
+**The memory finding.** Every measured peak is a multiple of what this document and `docs/01`
+derived: the tier-19 test aggregate takes 94.5 GB where the M5.3 exit table recorded 30 GB
+(cs6, macOS, watchdog-sampled) and the production exit takes 376.9 GB where `docs/01` derived a
+48.6 GB committed oracle and a 43–61 GB peak. The peaks scale by ~1.95× from tier 19 to 20 and
+~1.2× from 20 to 21 at the test profile, and the production shape at tier 21 costs 1.7× the
+test shape's (its memory tables are two heights taller). A tier-22 production aggregate
+therefore needs on the order of 700–800 GB and tier 23 more than a terabyte: **the ≥ 128 GB /
+≥ 160 GB host classes this document and `docs/03` name for production N=2/N=3 are wrong by
+about 5×**; the rung a CPU box can reach is the production N=1 at tier 21 (≥ 512 GB). The
+mismatch is between the 2026-09-15 oracle model and the prover as it stands (constraint sets 7
+and 8 widened every table and the model was never re-calibrated), not a leak: the exit at tier
+21 holds its peak through the commit phase and frees it before FRI.
+
+**Tier 22's headroom is 2.4 %.** The production N=2 program runs 4 094 675 rows against tier
+22's 4 194 303 (`production_n2_aggregate_emulates_within_bounds`); one more column-set in the
+inner AIR of the size constraint set 7 added (+75 887 rows a proof) would push N=2 to tier 23.
+
+**The #62 review's gap, closed (`tests/aggregate.rs`, the B3 vehicles).** The production N=2
+and N=3 aggregate programs execute in the emulator over real production proofs — 4 094 675 rows
+(tier 22, 109 004 permutations, 5 703 450 memory accesses, 421 535 tape words) and 6 141 808
+rows (tier 23, 163 491, 8 554 838, 632 298) — publishing the host's bound interface digest;
+the highest address touched is 4 664 040 for both N (the spill arena is reused per iteration, so
+the 80 unrolled queries' register pressure does not grow with N), and the top timestamp
+(65 514 815 and 98 268 943) is inside the 2^27 collision-free window. Emulation only; 11 s each.
+
+**The production-profile constraint differential and the non-first-instance break
+(`tests/verifier.rs`).** The emitted constraint DAG folds to the same accumulator, quotient and
+four Lagrange selectors as p3-batch-stark's own folder on all nine instances at 80 queries
+(`the_emitted_constraint_evaluation_equals_the_native_folder_at_production`), and one opened
+trace value of each non-first instance moved in turn traps at that instance's own
+`quotient identity[i]` (`breaking_one_air_constraint_on_a_non_first_instance_is_refused_at_that_instances_step`).
+
+**The forged-aggregate exercise (`tests/cheating.rs`, fullnode #45).** Two legs against the
+fixed rVM. (1) A real bundle proof with one published word moved no longer verifies natively
+and cannot be aggregated: `aggregate` refuses it at the tape replay, before any rVM work
+(`a_malicious_inner_proof_cannot_be_aggregated`). (2) Inside the real N=1 aggregate verifier's
+execution (462 262 events over one real inner proof), the stored high lane of the first
+register-allocator spill (STOREE event 963) is rewritten to `0xC0FFEE` the way RVM-1 describes,
+and the rVM proof is built two ways past every host check — with the pre-fix register table (no
+read of `rd + 1`) and with the fixed table carrying the forged read; both are refused by
+`Machine::verify` at tier 19 (`a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused`,
+58:46 for the two proves, 95.5 GB). **The red-first run, RVM-1's fix alone reverted** (in a scratch copy, `EXT_READ_RD` emptied, never
+committed): the toy vectors go red — the forged run *verifies*, publishing
+`[12648430, 11, 11, 22]` — so the committed refusals have teeth. The aggregate-scale test stays
+green on the reverted rVM, and its teeth are the RAM table's read-after-write, not RVM-1 (the
+forge rewrites the stored lane but the spill's reload still reads the honest value). Letting the
+program carry the forged lane forward instead, at 41 of the run's 14 788 STOREE rows, traps every
+time in the verifier's own checks (`commit phase root[*]` 32 times, `quotient identity[*]` 5,
+`sample_bits decomposition` 3, `lookup terminal sum` 2). A random lane is caught by the arithmetic
+that consumes it; a lane *chosen* to cancel a failing check — the recursion-VM report's §6 path —
+was not constructed, so nothing here claims the unfixed rVM was unforgeable at this scale. That
+choice is what the fix removes, and the toy vectors are its red.
+
 ## ZKQ-5: the self-verifier's binding against the inner aggregate's (decided 2026-09-28)
 
 The finding: `rv32r` hints its own eight binding words `B_out` and absorbs them into

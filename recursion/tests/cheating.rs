@@ -1029,3 +1029,149 @@ fn an_extension_pair_starting_at_r31_is_rejected() {
     let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, None);
     assert!(rejects(|| prove_and_verify(&m, &p, &t)), "ZKQ-3: a proof of LOADE r31 (a pair reaching register 32) VERIFIED");
 }
+
+// ── issue #45 B1: the end-to-end forged-aggregate exercise against the fixed rVM ───────────────
+//
+// The toy RVM-1 vectors above (`a_forged_storee_high_lane_is_rejected` and the spill twin) isolate
+// the freedom: a stored extension high lane the constraints did not bind, surfaced to a published
+// word so nothing else could catch it. #45 asks the same question at the scale that matters — the
+// *aggregate verifier* over a real inner proof, which stores ~14 370 such lanes per inner proof
+// (the REDUCE descriptors and the register allocator's extension spills). Two legs:
+//
+//  1. the malicious inner proof: a tampered bundle proof that does not verify natively cannot be
+//     aggregated at all — the tape's transcript replay is the native verifier's own checks, so a
+//     bad proof never reaches the prover (in-suite, no proving);
+//  2. the forged stored lane inside the aggregate verifier's own execution: forge one STOREE high
+//     lane the way RVM-1 describes and show the *fixed* rVM refuses the aggregate proof. This is a
+//     tier-19 rVM prove, so it is `#[ignore]`d for the >=64 GB machine.
+//
+// What the red-first run found (the 512 GB box, 2026-10-01, `EXT_READ_RD` emptied in a scratch copy
+// — RVM-1's fix alone reverted, never committed):
+//
+//  - the toy vectors above go red: "the forged run VERIFIED ... publishing [12648430, 11, 11, 22]"
+//    (and the spill twin's [1378, 2678, 11, 12648430]) — the forgery is accepted;
+//  - leg 2 below stays green on the reverted rVM. Its teeth are the RAM table's read-after-write,
+//    not RVM-1: the forged lane is written but the spill's reload (a LOADE 493 rows later) still
+//    reads the honest value, so the RAM log disagrees with itself ("read does not match last write
+//    at addr 0x3"). It is kept as the fixed rVM's refusal of the un-propagated forgery and does
+//    not by itself test RVM-1;
+//  - letting the program carry the forged lane forward (the emulator's STOREE storing 0xC0FFEE at
+//    one clock — the fully propagated forgery) at 41 of the run's 14 788 STOREE rows traps every
+//    time in the verifier's own checks: `commit phase root[*]`, `quotient identity[*]`,
+//    `sample_bits decomposition`, `lookup terminal sum`. A random lane value is caught by the
+//    arithmetic that consumes it; a lane value *chosen* to cancel a failing check (the report's
+//    §6 path) was not constructed, so that the reverted rVM cannot be forged at this scale is not
+//    claimed — what RVM-1's fix removes is exactly that choice, and the toy vectors are its red.
+
+use recursion::programs::verify_rv32n;
+use recursion::shape::{InnerKey as ZkInnerKey, InnerShape as ZkInnerShape};
+use recursion::witness::WitnessTape;
+
+fn agg_shape_and_key(p: &rand_zkvm::machine::Proof) -> (ZkInnerShape, ZkInnerKey) {
+    let shape = ZkInnerShape::of(
+        FriProfile::Test,
+        p.tier,
+        p.program_log_height,
+        p.input_log_height,
+        p.keccak_log_height,
+        p.sha256_log_height,
+        p.public_log_height,
+        p.mem_log_height,
+    );
+    let key = ZkInnerKey::of(FriProfile::Test, &shape);
+    (shape, key)
+}
+
+/// Leg 1: a bundle proof tampered so it no longer verifies natively cannot be aggregated — the
+/// aggregate tape's transcript replay refuses it before any rVM proving. (In-suite, emulation only.)
+#[test]
+fn a_malicious_inner_proof_cannot_be_aggregated() {
+    use recursion::aggregate::{aggregate, AggregateError, InnerVerifierKey};
+    let mut bp = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
+    let zk = rand_zkvm::machine::Machine::new(FriProfile::Test);
+    zk.verify(&bp.hc, &bp.proof).expect("the honest inner proof verifies natively");
+
+    // Tamper one published output word: still 35 canonical values (the shape check passes), but no
+    // longer the proof's own transcript.
+    bp.proof.public_values[rand_zkvm::tables::cpu::pv::OUT0] += 1;
+    assert!(zk.verify(&bp.hc, &bp.proof).is_err(), "the tampered inner proof does not verify natively");
+
+    let (shape, key) = agg_shape_and_key(&bp.proof);
+    let vk = InnerVerifierKey { shape, key };
+    let m = Machine::new(FriProfile::Test);
+    match aggregate(&m, &vk, std::slice::from_ref(&bp.proof), &common::TEST_BINDING, None) {
+        Err(AggregateError::Tape(_)) => {}
+        Err(e) => panic!("a malicious inner proof must be refused at the tape replay, got {e:?}"),
+        Ok(_) => panic!("a malicious inner proof must never yield an aggregate"),
+    }
+}
+
+/// Forge a STOREE's stored high lane in an aggregate-verifier execution, keeping the RAM store side
+/// consistent (the high cell's write carries the forged value). `rd + 1`'s register value is left
+/// honest, so the fix's `REG.read(rd+1)` disagrees with it; the unfixed register table omits that
+/// read entirely. Returns the forged execution and the index of the STOREE spill it hit.
+fn forge_a_stored_spill(exec: &mut Execution) -> usize {
+    // A register-allocator spill of an extension value: STOREE with `ra == r0` (the absolute-address
+    // form) writing two cells. The aggregate verifier makes thousands.
+    let idx = exec
+        .events
+        .iter()
+        .position(|e| e.instr.op == Op::Storee && e.instr.ra == 0 && e.mem.len() == 2 && e.mem[1].is_write)
+        .expect("the aggregate verifier spills extension values with STOREE");
+    let e = &mut exec.events[idx];
+    e.d[1] = F::from_u64(FORGED);
+    e.mem[1].value = F::from_u64(FORGED);
+    idx
+}
+
+/// Leg 2: the forged stored lane inside the real aggregate verifier, refused by the fixed rVM with
+/// the unfixed builder's register table (no `rd + 1` read) and with the fixed table carrying the
+/// forged read. A tier-19 rVM prove per variant, so `#[ignore]`d. On the fixed rVM the REG read the
+/// fix adds is unmatched; the un-propagated reload also breaks the RAM table's read-after-write,
+/// which is why this test stays green with RVM-1 reverted (the block comment above).
+#[test]
+#[ignore = "issue45 B1: the forged-aggregate exercise, tier 19 rVM prove (>=64 GB, ~30 min/variant). Run: \
+            cargo test --release -p recursion --test cheating a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused -- --ignored --nocapture"]
+fn a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused() {
+    let bp = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
+    let (shape, key) = agg_shape_and_key(&bp.proof);
+    let program = verify_rv32n(&shape, &key, recursion::dsl::Checkpoints::Off).program;
+    let tape = WitnessTape::build_n(FriProfile::Test, &shape, &key, std::slice::from_ref(&bp.proof), &common::TEST_BINDING).unwrap();
+    let m = Machine::new(FriProfile::Test);
+
+    let honest = execute(&program, &tape.words, 1 << 24).expect("the honest aggregate accepts");
+    let tier = Tier::for_cycles(honest.cpu_rows()).expect("the N=1 aggregate has a tier");
+    assert_eq!(tier, Tier(19), "the test-profile N=1 aggregate is tier 19");
+    // The reduce trace depends only on REDUCE events, which the STOREE forgery does not touch, so
+    // the honest build's reduce table is the one the forged trace uses.
+    let honest_traces = build_traces(&program, &honest, tier).unwrap();
+    let reduce = (honest_traces.reduce.clone().unwrap(), honest_traces.reduce_log_height);
+
+    let mut forged = honest.clone();
+    let storee = forge_a_stored_spill(&mut forged);
+    eprintln!(
+        "forged the stored high lane of STOREE event {storee} (of {} events) to {FORGED:#x}",
+        forged.events.len()
+    );
+    let ram = cpu::ram_accesses(&forged.events);
+    let reg_fixed = cpu::register_accesses(&forged.events);
+
+    // Variant (2): the unfixed builder's register table — no `rd + 1` read on any STOREE row.
+    let reg_unfixed: Vec<recursion::emulator::MemAccess> = reg_fixed
+        .iter()
+        .copied()
+        .filter(|a| !(a.ts % 16 == TS_RD1_READ && forged.events[(a.ts / 16) as usize].instr.op == Op::Storee))
+        .collect();
+    let t = traces_from_parts(&program, &forged, tier, &reg_unfixed, &ram, Some(reduce.clone()));
+    assert!(
+        rejects(|| prove_and_verify_at(&m, &program, &t, tier)),
+        "the forged aggregate VERIFIED with the unfixed register table"
+    );
+
+    // Variant (3): the fixed register table, carrying the forged `rd + 1` read.
+    let t = traces_from_parts(&program, &forged, tier, &reg_fixed, &ram, Some(reduce));
+    assert!(
+        rejects(|| prove_and_verify_at(&m, &program, &t, tier)),
+        "the forged aggregate VERIFIED with the register table carrying its forged read"
+    );
+}

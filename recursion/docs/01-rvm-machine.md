@@ -94,6 +94,13 @@ times). Measured 2026-09-15:
 
 ## The production exit's resource requirement (derived, not measured)
 
+**Measured 2026-09-30 (constraint set 8, a 503 GB box, fullnode #45): the exit proves in
+8 164.8 s, verifies in 99.3 s, is 1 566 619 bytes, and peaks at 376.9 GB resident** — 7.8× the
+oracle model below, which was calibrated on the cs5 rehearsal and never re-fitted after
+constraint sets 7 and 8 widened every table. The firm requirement is ≥ 512 GB, not ≥ 64 GB;
+`docs/02-aggregate.md`, "Constraint set 8, proved", has every rung's measured peak. The
+derivation is kept below as the record of how the 64 GB class was arrived at.
+
 The production exit is the same proof at `FriProfile::Production` over one real cs6 bundle proof:
 2 240 988 fewer rows than the pre-cut rehearsal, tier 21. Its peak resident memory is derived from
 the measured declared heights and the calibrated oracle model (the model the M5.2 plan's sizing

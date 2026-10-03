@@ -666,3 +666,149 @@ fn a_rewritten_commit_phase_pow_word_in_any_proof_is_refused() {
         }
     }
 }
+
+// ── issue #45 A6/B3: the production-profile aggregate proofs and the N>=2 emulator run ─────────
+//
+// The M5.3 doc's per-N production table was *derived* (the test-profile law applied to the
+// production single-proof pin); rows 6-8 of the big-machine runbook (docs/03) were never run.
+// These vehicles run them on the >=64 GB machine: A6 proves the production N=1 (tier 21) and N=2
+// (tier 22) aggregates and measures wall/verify/size/peak; B3 emulates the production N>=2
+// aggregate programs (the #62 review's gap: register pressure from 80 unrolled queries, the
+// memory and timestamp bounds at tier 22/23) with no proving.
+
+/// A Production-profile inner shape and key for `n` cached fixtures (the Test-profile
+/// `shape_and_key` above, at the production profile).
+fn production_shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
+    let shape = InnerShape::of(
+        FriProfile::Production,
+        p.tier,
+        p.program_log_height,
+        p.input_log_height,
+        p.keccak_log_height,
+        p.sha256_log_height,
+        p.public_log_height,
+        p.mem_log_height,
+    );
+    let key = InnerKey::of(FriProfile::Production, &shape);
+    (shape, key)
+}
+
+/// Prove and verify a production-profile N-proof aggregate, printing the runbook's numbers.
+fn prove_production_aggregate(n: usize, expected_tier: RvmTier) {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Production, n).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = production_shape_and_key(&proofs[0]);
+    let vk = InnerVerifierKey { shape: shape.clone(), key: key.clone() };
+    let m = RvmMachine::new(FriProfile::Production);
+    let t0 = std::time::Instant::now();
+    let a = aggregate(&m, &vk, &proofs, &common::TEST_BINDING, None)
+        .expect("the production aggregate proves");
+    let prove_s = t0.elapsed().as_secs_f64();
+    assert_eq!(a.proof.tier, expected_tier, "the production N={n} aggregate's tier");
+    let t1 = std::time::Instant::now();
+    let outs = verify_aggregate(&m, &aggregate_program(&vk), &a, &common::TEST_BINDING)
+        .expect("the production aggregate verifies");
+    let verify_s = t1.elapsed().as_secs_f64();
+    assert_eq!(outs.len(), n);
+    for (j, out) in outs.iter().enumerate() {
+        let want: [u32; 8] =
+            std::array::from_fn(|k| u32::try_from(proofs[j].public_values[pv::OUT0 + k]).unwrap());
+        assert_eq!(*out, want, "covered bundle {j}'s OUT0..7");
+    }
+    println!(
+        "issue45 A6: production N={n} aggregate (tier {}) — prove {prove_s:.1} s, verify \
+         {verify_s:.2} s, proof {} bytes",
+        expected_tier.0,
+        a.proof.size()
+    );
+}
+
+/// A6, runbook row 6: the production N=1 aggregate (tier 21, ~48.6 GB oracle, >=64 GB).
+#[test]
+#[ignore = "issue45 A6: production N=1 aggregate proof, tier 21, >=64 GB (~48.6 GB oracle). Run: \
+            cargo test --release -p recursion --test aggregate production_n1_aggregate_proves_and_verifies -- --ignored --nocapture"]
+fn production_n1_aggregate_proves_and_verifies() {
+    prove_production_aggregate(1, RvmTier(21));
+}
+
+/// A6, runbook row 7: the production N=2 aggregate (tier 22, ~95.3 GB oracle, >=128 GB host).
+#[test]
+#[ignore = "issue45 A6: production N=2 aggregate proof, tier 22, ~95.3 GB oracle. Run: \
+            cargo test --release -p recursion --test aggregate production_n2_aggregate_proves_and_verifies -- --ignored --nocapture"]
+fn production_n2_aggregate_proves_and_verifies() {
+    prove_production_aggregate(2, RvmTier(22));
+}
+
+/// A6, runbook row 8: the production N=3 aggregate (tier 23, ~127 GB oracle, >=160 GB host). Only
+/// attempt after the rest — TIERS stops at 23, so this is the top rung the CPU can reach.
+#[test]
+#[ignore = "issue45 A6: production N=3 aggregate proof, tier 23, ~127 GB oracle, >=160 GB host. Run: \
+            cargo test --release -p recursion --test aggregate production_n3_aggregate_proves_and_verifies -- --ignored --nocapture"]
+fn production_n3_aggregate_proves_and_verifies() {
+    prove_production_aggregate(3, RvmTier(23));
+}
+
+/// B3: the production N>=n aggregate program emulated (no proving) — the #62 review's gap. Runs
+/// the whole verifier loop over N real production inner proofs and checks the bounds that only an
+/// execution can: the tier the row count lands in, every address inside the 2^24 space (register
+/// pressure from the 80 unrolled queries' spills does not run the arena past its limit), and every
+/// `16·clk + slot` timestamp inside the machine's 2^27 collision-free window (docs/aggregation.md).
+fn emulate_production_aggregate(n: usize, expected_tier: RvmTier) {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Production, n).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = production_shape_and_key(&proofs[0]);
+    let vp = verify_rv32n(&shape, &key, Checkpoints::Off);
+    let tape =
+        WitnessTape::build_n(FriProfile::Production, &shape, &key, &proofs, &common::TEST_BINDING)
+            .unwrap();
+    let exec = execute(&vp.program, &tape.words, MAX_CYCLES)
+        .expect("the production aggregate program emulates over N real proofs");
+
+    // The interface digest is exactly the host's bound §4.4 list — the run did the whole job.
+    let pvs: Vec<Vec<u64>> = proofs.iter().map(|p| p.public_values.clone()).collect();
+    let words =
+        recursion::public_values::interface_words_bound(&shape, &key, &common::TEST_BINDING, &pvs);
+    assert_eq!(
+        exec.public,
+        recursion::public_values::public_digest(&words).to_vec(),
+        "the emulated production N={n} aggregate publishes the host's interface digest"
+    );
+
+    let rows = exec.cpu_rows();
+    assert_eq!(
+        RvmTier::for_cycles(rows),
+        Some(expected_tier),
+        "the production N={n} aggregate lands at tier {}",
+        expected_tier.0
+    );
+    assert!(exec.max_addr < (1 << 24), "every address stays inside the 2^24 space (max {})", exec.max_addr);
+    // `16·clk + slot`, slot <= 15: the top timestamp is under `16·rows`, and the collision-free
+    // window is 2^27 (16·CLK + slot, integral CLK on every real row).
+    let max_ts = (rows as u64) * 16 + 15;
+    assert!(max_ts < (1 << 27), "the top timestamp {max_ts} is inside the 2^27 window");
+    println!(
+        "issue45 B3: production N={n} aggregate emulation — {rows} cpu rows (tier {}), \
+         {} permutations, {} mem accesses, {} witness words, max addr {}, max ts {max_ts} (< 2^27)",
+        expected_tier.0,
+        exec.permutations(),
+        exec.mem_accesses(),
+        tape.words.len(),
+        exec.max_addr
+    );
+}
+
+/// B3: production N=2 aggregate emulation (tier 22, ~3.94M rows).
+#[test]
+#[ignore = "issue45 B3: production N=2 aggregate emulator run (~3.94M rows, tier 22, no proving). Run: \
+            cargo test --release -p recursion --test aggregate production_n2_aggregate_emulates_within_bounds -- --ignored --nocapture"]
+fn production_n2_aggregate_emulates_within_bounds() {
+    emulate_production_aggregate(2, RvmTier(22));
+}
+
+/// B3: production N=3 aggregate emulation (tier 23, ~5.9M rows) — the top rung.
+#[test]
+#[ignore = "issue45 B3: production N=3 aggregate emulator run (~5.9M rows, tier 23, no proving). Run: \
+            cargo test --release -p recursion --test aggregate production_n3_aggregate_emulates_within_bounds -- --ignored --nocapture"]
+fn production_n3_aggregate_emulates_within_bounds() {
+    emulate_production_aggregate(3, RvmTier(23));
+}

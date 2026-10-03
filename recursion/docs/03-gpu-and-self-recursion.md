@@ -152,18 +152,19 @@ T5/T6 changed only the last row.
 |---|---|---|---|---|---|
 | 1 | M4.3's ERC-20 `transfer` proof (research e2e) | `cd research && cargo +1.98.1 test --release --test e2e -- --ignored --nocapture` | ≥ 64 GB CPU | *derived* ~30–60 min | SIGKILLed 3× at 28.5–28.9 GB on the 48 GB box; requirement above that |
 | 2 | M4.4's SPL token proof (tier 20, 694 498 cycles) | same binary, the tier-20 ignore | ≥ 64 GB CPU | *derived* ~1 h | tier-18's ~4× rows |
-| 3 | M5.2's rVM exit: the verifier program over one production bundle proof (tier 21) | `cd recursion && cargo +1.98.1 test --release --test exit -- --ignored --nocapture` | ≥ 64 GB CPU | ~20–40 min (its ignore note) | 48.6 GB oracle committed; est. 43–61 GB peak |
-| 4 | M5.3's N=2 test-profile aggregate (tier 20) | `cargo test --release -p recursion --test aggregate two_test_profile -- --ignored --nocapture` | ≥ 64 GB CPU | *derived* ~50–60 min (2× the N=1 wall) | 33.7 GB sampled before jetsam; true peak above |
-| 5 | M5.3's N=3 test-profile twin (tier 21) | `cargo test --release -p recursion --test aggregate twin -- --ignored --nocapture` | ≥ 64 GB CPU | *derived* ~45–90 min | ~38–42 GB derived from the tier-20 peak |
-| 6 | Production N=1 aggregate (tier 21) | the M5.4 T4 vehicle on CPU, or a runbook binary | ≥ 64 GB CPU | *derived* ~1–2 h | 48.6 GB oracle (M5.2's derivation) |
-| 7 | Production N=2 aggregate (tier 22) | the M5.4 T4 vehicle, `Some(Tier(22))` | ≥ 128 GB host | *derived* hours on CPU; T4's GPU number replaces it | ~95.3 GB oracle |
-| 8 | Production N=3 aggregate (tier 23 — T2's rung) | the M5.4 T4 vehicle, `Some(Tier(23))` | ≥ 160 GB host + 80 GB device | T4's GPU number | ~127 GB host oracle; the device model above |
+| 3 | M5.2's rVM exit: the verifier program over one production bundle proof (tier 21) | `cd recursion && cargo +1.98.1 test --release --test exit -- --ignored --nocapture` | **≥ 512 GB CPU** | **measured 2026-09-30: prove 8 164.8 s, verify 99.3 s, 1 566 619 B** | **376.9 GB peak (measured)**; the 48.6 GB oracle was the cs6 model |
+| 4 | M5.3's N=2 test-profile aggregate (tier 20) | `cargo test --release -p recursion --test aggregate two_test_profile -- --ignored --nocapture` | ≥ 256 GB CPU | **measured: 3 983.5 s (test binary), 355 577 B** | **183.7 GB peak (measured)** |
+| 5 | M5.3's N=3 test-profile twin (tier 21) | `cargo test --release -p recursion --test aggregate twin -- --ignored --nocapture` | ≥ 256 GB CPU | **measured: prove 4 807.8 s, verify 24.75 s, 347 800 B** | **221.0 GB peak (measured)** |
+| 6 | Production N=1 aggregate (tier 21) | `cargo test --release -p recursion --test aggregate production_n1_aggregate_proves_and_verifies -- --ignored --nocapture` | **≥ 512 GB CPU** | **measured: 8 131.3 s prove, 99.36 s verify, 1 563 226 B** | **376.9 GB peak (measured)** |
+| 7 | Production N=2 aggregate (tier 22) | `… production_n2_aggregate_proves_and_verifies …` | **> 512 GB host** (the measured tier-21 production peak, 376.9 GB, doubled) | *derived* ~2× row 6's wall on CPU; T4's GPU number replaces it | ~700–800 GB, *derived* from rows 3–6's measured scaling |
+| 8 | Production N=3 aggregate (tier 23 — T2's rung) | `… production_n3_aggregate_proves_and_verifies …` | **> 1 TB host** + 80 GB device | T4's GPU number | *derived* > 1 TB host; not attempted |
 | 9 | The PTX first run + `cuda-hw` suite (T3) | `rand-zkvm-cuda/ptx/PTX_BUILD.md`'s checklist | GPU node (R8) | ~1 h bring-up | — |
 | 10 | N re-measured on GPU (T4) | T4's `#[ignore]`d test | GPU node, ≥ 160 GB host | T4's numbers | per R3/R5 |
 | 11 | The self-verifier end-to-end proof | T6's twin: `verify_rv32r` over the M5.2-exit-shape tape | ≥ 128 GB host (production input, *derived* 2.9–3.9 M rows → tier 22); ≥ 64 GB at the test-profile shape (*derived* 1.0–1.5 M → tier 21) | *derived* hours on CPU | ~97–130 GB host oracle |
 
-Runs 1–6 clear on the ≥ 64 GB machine in one session (in order; ~4–6 h total); 7–8 want the
-bigger host (or the GPU node for 8); 9–10 want the GPU node; 11 lands wherever its first
+Rows 3–6 ran on 2026-09-30 on a 503 GB box (`docs/02-aggregate.md`, "Constraint set 8,
+proved"): the measured peaks are 4–8× the derived ones, so rows 7–8 want a host above 512 GB
+(or the GPU node); 9–10 want the GPU node; 11 lands wherever its first
 fixture proof exists — the M5.2 exit's production proof (row 3) is the production-input tape,
 so 11 follows 3 on the same machine.
 
