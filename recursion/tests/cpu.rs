@@ -485,8 +485,8 @@ fn every_operand_a_dispatch_carries_is_read_from_a_register() {
 //
 // The cpu row range-checks one *subject* address per row kind — for LOADE/STOREE the top cell
 // `A0 + B + 1`, for POSEIDON2/SPONGE `A0 + 7`, for SPONGE's source `B0 + 3`, for HINTN (Cut B)
-// `A0 + B + 7` — and before ZKQ-3's
-// fix never the base: an address is a field element, so a base of `p − 1` put the top at 0,
+// `A0 + B + 7`, for COMPRESS (Cut C) the state's `A0 + 3` and the sibling's `B0 + 3` — and before
+// ZKQ-3's fix never the base: an address is a field element, so a base of `p − 1` put the top at 0,
 // inside the range, and the access touched a cell outside the machine's `2^24` address space.
 // The emulator refuses every such address, so no honest trace has one; this checks the AIR
 // refuses it too. Each case takes an honest row of that kind, moves one base to just below

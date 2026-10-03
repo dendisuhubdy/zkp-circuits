@@ -219,10 +219,15 @@ pub fn absorb_staged(b: &mut Builder, st: Ptr, cursor: Ptr, v: Felt) {
 /// which the caller compares with the cap entry at the remaining index — the walk itself never
 /// touches the commitment.
 ///
-/// Measured: `33·levels + 16` rows and `levels` permutations — 33 rows per level (32 for the child
-/// select, one for the permutation) and sixteen for copying the leaf digest in and the result out.
-/// The running digest lives in the permutation's own lanes for the whole walk, so a level costs no
-/// copy of its own.
+/// Measured under `Precompiles::Off` (the compiled walk, the differential reference): `33·levels +
+/// 16` rows and `levels` permutations — 33 rows per level (32 for the child select, one for the
+/// permutation) and sixteen for copying the leaf digest in and the result out; the running digest
+/// lives in the permutation's own lanes for the whole walk, so a level costs no copy of its own.
+///
+/// Measured under `Precompiles::On` (Cut C, the shipped setting): `2·levels + 15` rows and `levels`
+/// permutations — per level one `COMPRESS` plus one `FADDI` folding the sibling `Ptr`'s offset into
+/// a register (level 0's offset is zero, so it has none), and the same sixteen copy rows; the
+/// running digest lives in four dedicated cells instead of the hash scratch.
 pub fn merkle_walk(b: &mut Builder, leaf: Digest, index_bits: &[Felt], siblings: Ptr, levels: usize,
                    out: Digest) {
     merkle_walk_with_injections(b, leaf, index_bits, siblings, levels, &[], out);
@@ -257,8 +262,9 @@ pub struct Injection {
 /// Measured: an injection of `m` cells adds `sponge(m) + 25` rows and `ceil(m/4) + 1` permutations —
 /// 58 rows and four permutations for the nine-cell group a five-column salted matrix comes to.
 ///
-/// Under `Precompiles::On` (Cut C) a level is one `COMPRESS` row instead of 33, and an injection
-/// is its sponge plus one `COMPRESS`; the compiled body below stays the `Off` path, the
+/// Under `Precompiles::On` (Cut C) a level is two rows instead of 33 — the `COMPRESS` and the
+/// `FADDI` that folds the sibling's offset into a register (none at level 0) — and an injection is
+/// its sponge plus one `COMPRESS`; the compiled body below stays the `Off` path, the
 /// differential reference (`tests/precompiles.rs`).
 pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[Felt],
                                    siblings: Ptr, levels: usize, injections: &[Injection],
