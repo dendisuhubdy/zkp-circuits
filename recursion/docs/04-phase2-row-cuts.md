@@ -174,7 +174,7 @@ is the next phase's question.
 | pin | before (constraint set 8) | after (phase 2) | where |
 |---|---|---|---|
 | single-proof program digest, production shape | `454592b35ccfd6feefe93b7d2353bc484fca8ff260f74deae4e0865f7da2f2b3` | `723218da65a50f1f1581013f79fa5c5b1816b7ab46796dbaa4672c52bce2d0d1` | `src/programs/verify_rv32.digest` |
-| `aggregate_program_digest`, production bundle shape (what a chain's aggregation section pins) | `1831f036a2d3524249df17a66a220457878f8aeed669c77db08d58026461ddd7` | `c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8` | measured here (`verify_rv32n` at the production fixture shape); `docs/02` |
+| `aggregate_program_digest`, production bundle shape (what a chain's aggregation section pins) | `1831f036a2d3524249df17a66a220457878f8aeed669c77db08d58026461ddd7` | `c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8` | `tests/aggregate.rs` (`the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead`, ignored, emulation only); `docs/02` |
 | `aggregate_program_digest`, test fixture shape | `9eba73805fa23361708d9ca1c58d904ac830aeb6810470ec7788c4f36880193d` | `5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df` | `tests/verifier.rs` |
 | Off replay, production shape (`Liveness::Off`, `Precompiles::Off`) | `af7728191e4ec0c1b8f6cc3d60aff36b04dc0d1b48b494aa9fbf107ebc708425` | `39bb6b8d94e62dd282001384d0b65294e7f024e6ef9b47381c8c96c6e1fd3352` | `tests/verifier.rs` (Cut A's value; B and C are `On`-only) |
 | self-verifier digest, toy fixture shape | `6b2f058e60ffdf6a77091b932710513191688e4bdc59b2ecdc65b0dd5039033b` | `18514c2aa0ad8d6a5aa7ea8baa65754f9137db5f1ad1d60943930add0becde67` | `tests/self_verify.rs` |
@@ -242,6 +242,14 @@ contract is that the program and the tape agree, and the exit tests over real pr
 - the hashing (the compress row computes the same `TruncatedPermutation<Perm,2,4,8>`);
 - the aggregate's interface `[vk ‖ N ‖ B(8) ‖ 35·N]` and `verify_aggregate`'s API;
 - the chain's consensus rules.
+
+**Testing.** Each cut carries its forgeries in `tests/cheating.rs` (Cut B's `HINTN` rows, Cut
+C's `COMPRESS` rows, each refused by `Machine::verify`) and its range gating at the AIR in
+`tests/cpu.rs`'s ZKQ-3 cases. The spec's §5 COMPRESS case "an output lane written to the sibling
+instead of the state" has no test: it is not expressible by a trace edit, since the chip's write
+address is the expression `PTR + k`, never a free column. The suite at `7a0ae83`
+(`cargo test --release --no-fail-fast -- --skip a_one_proof_aggregate_round_trips`): 208 passed,
+0 failed, 20 ignored, 1 skipped (the tier-18 round trip).
 
 The fullnode re-vendors this tree and re-pins `admitted_shapes[].aggregate_program_digest`
 (`c90b3f0a…74d8` at the production bundle shape) at the next chain cut. No running chain has
