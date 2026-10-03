@@ -1099,7 +1099,8 @@ fn an_extension_pair_starting_at_r31_is_rejected() {
 //     bad proof never reaches the prover (in-suite, no proving);
 //  2. the forged stored lane inside the aggregate verifier's own execution: forge one STOREE high
 //     lane the way RVM-1 describes and show the *fixed* rVM refuses the aggregate proof. This is a
-//     tier-19 rVM prove, so it is `#[ignore]`d for the >=64 GB machine.
+//     tier-19 rVM prove (tier 18 since phase 2's row cuts), so it is `#[ignore]`d for the big machine
+//     (95.5 GB measured on Linux at tier 19; `docs/04-phase2-row-cuts.md` has the live heap).
 //
 // What the red-first run found (the 512 GB box, 2026-10-01, `EXT_READ_RD` emptied in a scratch copy
 // — RVM-1's fix alone reverted, never committed):
@@ -1186,7 +1187,7 @@ fn forge_a_stored_spill(exec: &mut Execution) -> usize {
 /// fix adds is unmatched; the un-propagated reload also breaks the RAM table's read-after-write,
 /// which is why this test stays green with RVM-1 reverted (the block comment above).
 #[test]
-#[ignore = "issue45 B1: the forged-aggregate exercise, tier 19 rVM prove (>=64 GB, ~30 min/variant). Run: \
+#[ignore = "issue45 B1: the forged-aggregate exercise, tier 18 rVM prove since phase 2 (tier 19 before: 95.5 GB measured on Linux), ~30 min/variant. Run: \
             cargo test --release -p recursion --test cheating a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused -- --ignored --nocapture"]
 fn a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused() {
     let bp = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
@@ -1197,7 +1198,7 @@ fn a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused() {
 
     let honest = execute(&program, &tape.words, 1 << 24).expect("the honest aggregate accepts");
     let tier = Tier::for_cycles(honest.cpu_rows()).expect("the N=1 aggregate has a tier");
-    assert_eq!(tier, Tier(19), "the test-profile N=1 aggregate is tier 19");
+    assert_eq!(tier, Tier(18), "the test-profile N=1 aggregate is tier 18 (231 224 rows since phase 2's row cuts; tier 19 before)");
     // The reduce trace depends only on REDUCE events, which the STOREE forgery does not touch, so
     // the honest build's reduce table is the one the forged trace uses.
     let honest_traces = build_traces(&program, &honest, tier).unwrap();

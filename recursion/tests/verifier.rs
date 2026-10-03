@@ -764,7 +764,10 @@ fn phase_5s_assertions_are_all_named() {
 /// instance and a public table floored at `2^7`, and embeds the inner key, whose salts HCS-1
 /// moved): `c1c04ac3…d731` → `989752d6…6e98`. Constraint set 8 re-recorded it (the `GAS` column
 /// and the 35th public value; the key the program embeds moved with the AIR): `aafb1584…38ea` →
-/// `af772819…8425`.
+/// `af772819…8425`. Phase 2's Cut A re-recorded it (2026-10-03: input openings are hinted into
+/// one buffer per height group and the tape's segment 11 follows that order — a change of the
+/// shared pipeline, so the Off replay moves with it; Cuts B and C are `Precompiles::On` only and
+/// leave it where Cut A put it): `af772819…8425` → `39bb6b8d…3352`.
 #[test]
 fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     use recursion::dsl::Liveness;
@@ -780,7 +783,7 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
-        "af7728191e4ec0c1b8f6cc3d60aff36b04dc0d1b48b494aa9fbf107ebc708425",
+        "39bb6b8d94e62dd282001384d0b65294e7f024e6ef9b47381c8c96c6e1fd3352",
         "the Off replay must reproduce the pre-Task-7 stream byte for byte (plus VERIFIER-1's \
          per-round assertions, and constraint set 7's and 8's inner changes)"
     );
@@ -817,14 +820,17 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// VERIFIER-1: `1ec0c545…eeeb` → `5e04fba0…2993`. Re-registered for constraint set 8 (the `GAS`
 /// column and the 35th public value move the inner shape and key; the deferred staged absorb,
 /// `dsl::hash::absorb_staged`, is itself a program change): `5e04fba0…2993` → `9eba7380…193d`.
+/// Re-registered for phase 2's row cuts (2026-10-03, `docs/04-phase2-row-cuts.md` — program
+/// changes all three: height-group hint buffers, `HINTN`, `COMPRESS`): `9eba7380…193d` →
+/// `5f1f6901…12df`.
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "9eba73805fa23361708d9ca1c58d904ac830aeb6810470ec7788c4f36880193d",
-        "the aggregate program's digest at the Test fixture shape, as re-registered for constraint set 8"
+        "5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df",
+        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 2's row cuts"
     );
 }
 
@@ -913,10 +919,10 @@ fn one_production_proof() -> (common::BundleProof, InnerShape, InnerKey) {
 /// B2, the Production-profile differential: the emitted constraint DAG folds to the *same*
 /// accumulator, quotient and four Lagrange selectors as `p3-batch-stark`'s `VerifierConstraintFolder`
 /// on every instance, at the production profile (80 queries) — the shape a chain actually proves.
-/// `#[ignore]`d: one production fixture and a `Checkpoints::On` emulation of ~2M rows (>=64 GB the
-/// production exit needs is not needed here — this is emulation, not proving — but the run is minutes).
+/// `#[ignore]`d: one production fixture and a `Checkpoints::On` emulation of ~0.9M rows since phase
+/// 2's row cuts (~2M before; the memory the production exit needs is not needed here — this is emulation, not proving — but the run is minutes).
 #[test]
-#[ignore = "issue45 B2: production-profile constraint differential (~2M-row Checkpoints::On emulation). Run: \
+#[ignore = "issue45 B2: production-profile constraint differential (~0.9M-row Checkpoints::On emulation). Run: \
             cargo test --release -p recursion --test verifier the_emitted_constraint_evaluation_equals_the_native_folder_at_production -- --ignored --nocapture"]
 fn the_emitted_constraint_evaluation_equals_the_native_folder_at_production() {
     let (p, shape, key) = one_production_proof();
