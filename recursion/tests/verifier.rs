@@ -390,11 +390,17 @@ fn an_input_rounds_leaf_group_and_restored_path_recompute_the_preprocessed_cap()
 
     // Group the matrices the way the leaf hash does: tallest first, everything whose padded height
     // equals the tallest's in the leaf, the rest injected at the level the walk reaches their height
-    // at. `sorted_by_key(Reverse(height))` is stable, so matrices of equal height keep dims order —
-    // which is the order their rows sit in on the tape.
+    // at. `sorted_by_key(Reverse(height))` is stable, so matrices of equal height keep dims order.
+    // Cut A: the tape lays the round out in that same group order (`shape::height_groups`), so a
+    // matrix's offset is the words of the matrices ahead of it in group order, not dims order.
     let tallest = dims.iter().map(|d| d.height).max().unwrap();
     let words_of = |m: usize| dims[m].width + recursion::witness::SALT_ELEMS;
-    let offset_in_round = |m: usize| (0..m).map(words_of).sum::<usize>();
+    let log_heights: Vec<usize> = dims.iter().map(|d| d.height.trailing_zeros() as usize).collect();
+    let tape_order: Vec<usize> =
+        recursion::shape::height_groups(&log_heights).into_iter().flatten().collect();
+    let offset_in_round = |m: usize| {
+        tape_order.iter().take_while(|&&k| k != m).map(|&k| words_of(k)).sum::<usize>()
+    };
     let leaf_group: Vec<usize> = (0..dims.len()).filter(|&m| dims[m].height == tallest).collect();
     let short: Vec<usize> = (0..dims.len()).filter(|&m| dims[m].height != tallest).collect();
     assert_eq!(leaf_group.len(), 1, "the preprocessed round's tallest matrix is the poseidon2 table");
@@ -433,7 +439,7 @@ fn an_input_rounds_leaf_group_and_restored_path_recompute_the_preprocessed_cap()
 
         let rows = b.alloc(short_cells as u64);
         for i in 0..short_cells {
-            let c = b.constant(tape.words[base + i]);
+            let c = b.constant(tape.words[base + offset_in_round(short[0]) + i]);
             b.store(rows, i as i64, c);
         }
         let sibs = b.alloc(4 * levels as u64);
