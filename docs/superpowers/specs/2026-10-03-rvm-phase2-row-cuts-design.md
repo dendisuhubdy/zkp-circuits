@@ -215,10 +215,10 @@ everything before opening anything.
   term above, so the production N=1 aggregate lands near **≈ 190 GB** (a 256 GB host) and the
   tier-19 twin near 47 GB. Still not `compute-optimization.md` §4.4's ≤ 64 GB; the rest is
   structural and is the next phase's measured decision, candidates in order of leverage:
-  1. the **quotient's share (32 %)**: the memory tables are 11 columns wide but their degree-4
-     AIR makes 8 zk-chunks × 2 cells — a quotient as wide as the trace; a degree-2 memory AIR
-     (one extra witness column for the product term) halves that term for the two tallest
-     tables;
+  1. the **quotient's share (32 %)** — probed to its cause (below): the hiding MMCS salts every
+     quotient chunk separately, tripling the term; committing one instance's chunks as one matrix
+     cuts it to a third, and a degree-2 memory AIR (fewer chunks for the two tallest tables) is
+     the second lever on the same term;
   2. the **register table's height** (4× the cpu table): ~2.1 `REG` messages per cpu row — the
      cuts shrink it with the rows, and a wider cpu row that reads fewer registers is the lever
      beyond that;
@@ -226,6 +226,20 @@ everything before opening anything.
      profile decision §4.4 of the fullnode page already names, applied to the rVM's own profile;
   4. the GPU backend as built changes none of this (traces live on the host); a device-resident
      LDE/tree would, and is the real reason to want the 80 GB device class.
+**Why the quotient is a third of the memory (probed 2026-10-03, `scratchpad/mem/probe14b.log`,
+a local `p3-fri` copy printing each chunk's buffer sizes at tier 14):** `HidingFriPcs::
+get_quotient_ldes` commits every quotient chunk as its own matrix, and the hiding MMCS appends
+its **four salt columns to each** — so a chunk that is 2 columns of quotient (one extension
+element) is committed as 6 (`evals 16384x6`). The cpu's 16 chunks, the memory tables' 8, all pay
+200 % salt overhead; with it the tier-19 figures close exactly (cpu 16 × 2^23 × 6 × 8 B =
+6.4 GB measured 6.46; reg 8 × 2^25 × 6 × 8 B = 12.9 GB measured 13.7). Committing one instance's
+chunks as **one matrix** (16 chunks → one 32-column matrix at the same height, four salts once)
+would cut the quotient term from 29.7 GB to ≈ 11 GB at tier 19 (−20 % of the proof's peak) and,
+for the recursive verifier, replace 16 Merkle paths per query with one for that round — a fork
+of `p3-batch-stark`'s prover *and* verifier (the chunk openings move inside one row) plus the
+rVM program's phase-6 reader. The LDE of each chunk also allocates two transient copies of its
+own size (`random_eval`, `vanishing_poly_coeffs`) — transient, not the retained term.
+
 - **Threads.** The recursion crate proves single-threaded (`p3-batch-stark` without `parallel`);
   the two Merkle trees above alone are 460 s of the 782. The RV32 prover's `parallel` build gave
   7.7× on 16 threads (`fullnode/docs/node-hardware.md` §6) and needs the fullnode's two-crate
