@@ -10,7 +10,7 @@ use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::emulator::{execute, CycleEvent, HashRow, MemAccess, Syscall, SLOT_W, SPACE_RAM};
 use rand_zkvm::guests;
 use rand_zkvm::isa::{AluOp, Decoded, Instr, Program, REG_A0, REG_A1, REG_A2, REG_A7, SYS_POSEIDON2};
-use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, Tier, Traces, Val};
+use rand_zkvm::machine::{build_traces_salted, build_traces_salted_with, FriProfile, Machine, Tier, Traces, Val};
 use rand_zkvm::tables::{alu, cpu, keccak, limbs, memory, nibble, poseidon2, program, range, F};
 
 /// `rejects()`, and the two constraint-panic prefixes it matches (`CONSTRAINT_PANIC` and
@@ -35,7 +35,7 @@ fn setup() -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     (m, p, t)
 }
 
@@ -330,7 +330,7 @@ fn storing_a_value_that_was_never_in_a_register_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 5);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     forge_a_store(&mut t, 0x0500_0000);
     assert_eq!(t.public_values[cpu::pv::OUT0], F::from_u32(0x0500_0000));
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
@@ -352,7 +352,7 @@ fn bumping_range8_on_a_bitwise_rows_now_unconstrained_a_limb_is_rejected() {
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     t.range.values[0x12 * range::col::WIDTH + range::col::M_RANGE] += F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
@@ -370,7 +370,7 @@ fn bumping_range8_on_an_slt_rows_now_unconstrained_c_limb_is_rejected() {
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     t.range.values[range::col::WIDTH + range::col::M_RANGE] += F::ONE;
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
 }
@@ -389,7 +389,7 @@ fn a_store_that_replaces_the_wrong_byte_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0x112233ff);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = cpu::col::WIDTH;
     // Find the SB row and corrupt MERGED to replace byte 1 instead of byte 0.
     let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
@@ -412,7 +412,7 @@ fn a_load_byte_with_flipped_sign_extension_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0xffff_ffff);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = cpu::col::WIDTH;
     let lb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_LB] == F::ONE).unwrap();
     t.cpu.values[lb_row * w + cpu::col::SGN] = F::ZERO; // flip: claim unsigned-looking zero-extend
@@ -433,7 +433,7 @@ fn a_misaligned_lh_is_rejected_by_the_air() {
     let p = a.assemble();
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = cpu::col::WIDTH;
     let lw_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_LW] == F::ONE).unwrap();
     // Retag this LW row as an LH with OFF0=1 (byte offset 1 — misaligned for a half).
@@ -456,7 +456,7 @@ fn a_sb_that_changes_a_byte_outside_its_offset_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0x1122ff44);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = cpu::col::WIDTH;
     let sb_row = (0..t.cpu.height()).find(|r| t.cpu.values[r * w + cpu::col::IS_SB] == F::ONE).unwrap();
     // Also corrupt byte 2 (outside off=1), leaving byte 1 correct.
@@ -489,7 +489,7 @@ fn mulhu_cannot_claim_hi_equals_2_32_minus_1_for_a_small_product() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulhu);
     let forged_carry = 0xffff_ffffu32; // would make HI = T2 + CARRY = 0xffff_ffff
@@ -522,7 +522,7 @@ fn a_small_in_range_forged_carry_on_a_mulhu_row_is_still_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulhu);
     let forged_carry = 100u32; // < 2^24, so the CARRY-limb check alone does not catch this
@@ -553,7 +553,7 @@ fn a_remainder_not_smaller_than_the_divisor_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 2);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Remu);
     t.alu.values[row * w + alu::col::Q0] = F::from_u32(2); // quotient core: 3 -> 2
@@ -578,7 +578,7 @@ fn a_wrong_divz_on_a_nonzero_divisor_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 3);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Divu);
     t.alu.values[row * w + alu::col::DIVZ] = F::ONE; // B = 3 != 0, but claim DIVZ
@@ -617,7 +617,7 @@ fn a_mul_flag_set_on_an_otherwise_all_zero_padding_row_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let p = guests::muldiv();
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let wa = alu::col::WIDTH;
     let pad = t.alu.height() - 1;
     assert_eq!(t.alu.values[pad * wa + alu::col::IS_REAL], F::ZERO, "last alu row is padding");
@@ -641,7 +641,7 @@ fn a_sign_flipped_mulh_is_rejected() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Mulh);
     assert_eq!(t.alu.values[row * w + alu::col::SA], F::ONE, "A = -2 is negative");
@@ -650,6 +650,274 @@ fn a_sign_flipped_mulh_is_rejected() {
     // genuine mismatch, and the public output stays whatever the (now-inconsistent) row
     // claims so `verify` doesn't reject on a public-value mismatch instead.
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// ---------------------------------------------------------------------------------------
+// Issue #66: the seven ALU forgeries the #62 review found no test for.
+//
+// Every test above that tampers an ALU row changes the row's `C` but leaves the cpu row, the
+// register file and the public output saying the honest value — so the `ALU` bus is unbalanced
+// and the proof fails whether or not the constraint the test is named after holds. These do not.
+// Each one is a *closed* edit: the op writes `a1` directly and the `WRITE_OUTPUT` ecall publishes
+// it, and `forge_the_op_result` carries the forged value through the cpu row, every later read of
+// `a1`, the memory table and the public output; the fixed tables (range, nibble) are then repaid
+// for whatever the forged row consumes (`common::repay_fixed_tables`). What is left is one ALU row
+// providing a wrong `(op, a, b, c)` that the rest of the batch agrees with — so the ALU AIR's own
+// constraints are the only thing between the forgery and a verifying proof. Each test's doc names
+// the constraint that catches it, and each was run with that constraint removed from
+// `tables/alu.rs` and seen to verify (the commit message quotes the runs).
+// ---------------------------------------------------------------------------------------
+
+/// `op(a1, t0, t1)` on `a`, `b`, then `WRITE_OUTPUT(0, a1)` and `HALT`. The op writes `a1` itself,
+/// so no `mv` (itself an ALU `Add` whose tuple would also need forging) stands between the op and
+/// the output.
+fn one_op(op: fn(u32, u32, u32) -> Instr, a: u32, b: u32) -> Program {
+    let mut asm = Assembler::new(0);
+    asm.extend(li(5, a as i32));
+    asm.extend(li(6, b as i32));
+    asm.push(op(REG_A1, 5, 6));
+    asm.extend(li(REG_A7, rand_zkvm::isa::SYS_WRITE_OUTPUT as i32));
+    asm.extend(li(REG_A0, 0));
+    asm.push(ecall());
+    asm.extend(halt());
+    asm.assemble()
+}
+
+/// The honest tier-10 traces of `p` and the machine to prove them with.
+fn one_op_traces(p: &Program) -> (Machine, Traces) {
+    let e = execute(p, &[], &[], 10_000).unwrap();
+    (Machine::new(FriProfile::Test), build_traces_salted_with(p, &[], &[], [0u32; 4], &e, Tier(10), Default::default()).unwrap())
+}
+
+/// The ALU row that provides `(op, a, b, ·)` with a nonzero multiplicity.
+fn alu_row_for(t: &Traces, op: AluOp, a: u32, b: u32) -> usize {
+    let w = alu::col::WIDTH;
+    (0..t.alu.height())
+        .find(|r| {
+            let row = &t.alu.values[r * w..(r + 1) * w];
+            row[alu::col::FLAG0 + op.code() as usize] == F::ONE && row[alu::col::A] == F::from_u32(a) && row[alu::col::B] == F::from_u32(b) && row[alu::col::MULT] != F::ZERO
+        })
+        .unwrap_or_else(|| panic!("no ALU row provides {op:?}({a:#x}, {b:#x})"))
+}
+
+/// Set an ALU row's `C` and its four limbs to `c`.
+fn set_alu_c(t: &mut Traces, row: usize, c: u32) {
+    let w = alu::col::WIDTH;
+    t.alu.values[row * w + alu::col::C] = F::from_u32(c);
+    for (k, l) in limbs(c).into_iter().enumerate() { t.alu.values[row * w + alu::col::C0 + k] = l; }
+}
+
+/// Set four byte-limb columns starting at `base` to `x`'s bytes.
+fn set_alu_word(t: &mut Traces, row: usize, base: usize, x: u32) {
+    let w = alu::col::WIDTH;
+    for (k, l) in limbs(x).into_iter().enumerate() { t.alu.values[row * w + base + k] = l; }
+}
+
+/// The closed edit: the register-register `op` that writes `a1` now yields `forged`. The cpu row's
+/// `ALU_OUT`/`C`, every later ecall row that reads `a1` (`MEM_VAL`), every memory-table row of `a1`
+/// from the write on, the public output word and the providing ALU row's `C` (and limbs) all move
+/// together. Returns the ALU row, whose remaining columns the caller forges.
+fn forge_the_op_result(t: &mut Traces, op: AluOp, a: u32, b: u32, forged: u32) -> usize {
+    let (wc, wm) = (cpu::col::WIDTH, memory::col::WIDTH);
+    let honest = F::from_u32(op.eval(a, b));
+    let new = F::from_u32(forged);
+    let op_row = (0..t.cpu.height())
+        .find(|r| {
+            let row = &t.cpu.values[r * wc..(r + 1) * wc];
+            row[cpu::col::IS_ALU] == F::ONE && row[cpu::col::ALU_OP] == F::from_u32(op.code()) && row[cpu::col::RD] == F::from_u32(REG_A1)
+        })
+        .expect("the op writes a1");
+    assert_eq!(t.cpu.values[op_row * wc + cpu::col::C], honest);
+    let write_ts = 4 * t.cpu.values[op_row * wc + cpu::col::CLK].as_canonical_u64() + SLOT_W as u64;
+    t.cpu.values[op_row * wc + cpu::col::ALU_OUT] = new;
+    t.cpu.values[op_row * wc + cpu::col::C] = new;
+    for r in op_row + 1..t.cpu.height() {
+        let row = &mut t.cpu.values[r * wc..(r + 1) * wc];
+        if row[cpu::col::IS_ECALL] == F::ONE && row[cpu::col::MEM_VAL] == honest { row[cpu::col::MEM_VAL] = new; }
+    }
+    for r in 0..t.memory.height() {
+        let row = &mut t.memory.values[r * wm..(r + 1) * wm];
+        if row[memory::col::IS_REAL] == F::ONE && row[memory::col::SPACE] == F::ZERO && row[memory::col::ADDR] == F::from_u32(REG_A1) && row[memory::col::TS].as_canonical_u64() >= write_ts {
+            row[memory::col::VALUE] = new;
+        }
+    }
+    t.public_values[cpu::pv::OUT0] = new;
+    let alu_row = alu_row_for(t, op, a, b);
+    set_alu_c(t, alu_row, forged);
+    alu_row
+}
+
+/// Repay the fixed tables for the forged row and prove: `true` iff the batch refuses it.
+fn forged_is_rejected(m: &Machine, p: &Program, mut t: Traces) -> bool {
+    let unpaid = common::repay_fixed_tables(&mut t, Tier(10));
+    if !unpaid.is_empty() { eprintln!("the forged row consumes tuples no fixed table holds: {unpaid:?}"); }
+    rejects(|| { let pr = m.prove_traces(p, &t, Tier(10)); m.verify(&p.digest(), &pr) })
+}
+
+/// The harness itself: an honest one-op run, pushed through the closed edit with its own honest
+/// value and the fixed-table repayment, still proves — so every test below that is rejected is
+/// rejected for its forgery, not for something the edit or the repayment broke.
+#[test]
+fn the_closed_alu_edit_with_the_honest_value_still_proves() {
+    for (op, ins, a, b) in [(AluOp::Div, div as fn(u32, u32, u32) -> Instr, (-7i32) as u32, 2u32), (AluOp::And, and, 0x0f, 0x0f)] {
+        let p = one_op(ins, a, b);
+        let (m, mut t) = one_op_traces(&p);
+        forge_the_op_result(&mut t, op, a, b, op.eval(a, b));
+        assert!(!forged_is_rejected(&m, &p, t), "{op:?}: the honest closed edit must verify");
+    }
+}
+
+/// DIV/REM sign fix-up, the `QH3` gadget. `DIV(-7, 2) = -3` and `REM(-7, 2) = -1` both negate a
+/// nonzero magnitude (`Q = 3`, `R = 1`). Forging `QH3 = 1` ("the magnitude is zero", with `INV =
+/// 0` so `mag·INV = 1 − QH3` holds) switches the negation off, and the row claims `+3` / `+1`, in
+/// range and otherwise consistent. Caught by the gadget's second half,
+/// `normal·QH3·mag = 0` (`tables/alu.rs`, the division block). Removed, both forgeries verify.
+#[test]
+fn a_div_or_rem_skipping_its_sign_fix_through_qh3_is_rejected() {
+    for (op, ins) in [(AluOp::Div, div as fn(u32, u32, u32) -> Instr), (AluOp::Rem, rem)] {
+        let (a, b) = ((-7i32) as u32, 2u32);
+        let p = one_op(ins, a, b);
+        let (m, mut t) = one_op_traces(&p);
+        let honest = op.eval(a, b);
+        let forged = honest.wrapping_neg(); // +3 / +1: the magnitude, unnegated
+        let row = forge_the_op_result(&mut t, op, a, b, forged);
+        let w = alu::col::WIDTH;
+        assert_eq!(t.alu.values[row * w + alu::col::QH3], F::ZERO, "the magnitude is nonzero");
+        t.alu.values[row * w + alu::col::QH3] = F::ONE;
+        t.alu.values[row * w + alu::col::INV] = F::ZERO;
+        assert!(forged_is_rejected(&m, &p, t), "{op:?}(-7, 2) claiming {forged}");
+    }
+}
+
+/// SRA sign fill. `SRA(-8, 1) = -4 = 0xffff_fffc`. Forging `SA = 0` (A "non-negative") turns the
+/// row into a logical shift — complement-free, `Q = 0x7fff_fffc`, `R = 0`, `T = PW − 1 − R = 1` — and
+/// it claims `0x7fff_fffc`, every identity of the shift block satisfied. Caught by A's sign-bit
+/// extraction, `AND4[AH3, 8, SA·8]` (`AH3 = 0xf`, so `0xf & 8 = 8 ≠ 0`), counted on `sra` rows
+/// through `need_sa`. With `sra` removed from `need_sa`, it verifies.
+#[test]
+fn an_sra_without_its_sign_fill_is_rejected() {
+    let (a, b) = ((-8i32) as u32, 1u32);
+    let p = one_op(sra, a, b);
+    let (m, mut t) = one_op_traces(&p);
+    let forged = a >> 1; // the logical shift
+    let row = forge_the_op_result(&mut t, AluOp::Sra, a, b, forged);
+    let w = alu::col::WIDTH;
+    assert_eq!(t.alu.values[row * w + alu::col::SA], F::ONE);
+    t.alu.values[row * w + alu::col::SA] = F::ZERO;
+    set_alu_word(&mut t, row, alu::col::Q0, forged); // a' = A >> 1, uncomplemented
+    set_alu_word(&mut t, row, alu::col::S0, 0);      // r = A mod 2
+    set_alu_word(&mut t, row, alu::col::T0, 1);      // t = PW − 1 − r
+    assert!(forged_is_rejected(&m, &p, t));
+}
+
+/// SLT on mixed signs. `SLT(-1, 1) = 1`, but the unsigned compare says `0xffff_ffff ≥ 1` (the
+/// adder's borrow is 0). Claiming `C = 0` — the unsigned answer — with `SA`/`SB` left honest is
+/// caught only by the mixed-sign selection, `slt·(C − (1 − sx)·borrow − sx·SA) = 0` with `sx = 1`.
+/// Removed, it verifies (`C` stays boolean; nothing else on an `slt` row reads it).
+#[test]
+fn an_slt_answering_the_unsigned_compare_on_mixed_signs_is_rejected() {
+    let (a, b) = ((-1i32) as u32, 1u32);
+    let p = one_op(slt, a, b);
+    let (m, mut t) = one_op_traces(&p);
+    forge_the_op_result(&mut t, AluOp::Slt, a, b, 0);
+    assert!(forged_is_rejected(&m, &p, t));
+}
+
+/// DIVU by zero. `DIVU(10, 0) = 0xffff_ffff`; claiming `0` is caught only by
+/// `DIVZ·(div + divu)·(C − 0xffff_ffff) = 0` (the division identity is off: `normal = 0`).
+/// Removed, it verifies.
+#[test]
+fn a_divu_by_zero_not_returning_all_ones_is_rejected() {
+    let p = one_op(divu, 10, 0);
+    let (m, mut t) = one_op_traces(&p);
+    forge_the_op_result(&mut t, AluOp::Divu, 10, 0, 0);
+    assert!(forged_is_rejected(&m, &p, t));
+}
+
+/// REM by zero. `REM(-7, 0) = -7` (the dividend); claiming `0` is caught only by
+/// `DIVZ·(rem + remu)·(C − A) = 0`. Removed, it verifies.
+#[test]
+fn a_rem_by_zero_not_returning_the_dividend_is_rejected() {
+    let a = (-7i32) as u32;
+    let p = one_op(rem, a, 0);
+    let (m, mut t) = one_op_traces(&p);
+    forge_the_op_result(&mut t, AluOp::Rem, a, 0, 0);
+    assert!(forged_is_rejected(&m, &p, t));
+}
+
+/// MULHSU. `MULHSU(-1, 1) = 0xffff_ffff` (`-1 · 1`, high word). Forging `SA = 0` makes it the
+/// unsigned product's high word, `0` — with the sign-correction `borrow` (`S0`) set to `0` to
+/// match, every product identity holds. Caught by A's sign-bit extraction, which `need_sa` counts
+/// on `mulhsu` rows (and `need_sb` deliberately does not: MULHSU's `B` is unsigned). With
+/// `mulhsu` removed from `need_sa`, it verifies.
+#[test]
+fn a_mulhsu_dropping_as_sign_is_rejected() {
+    let (a, b) = ((-1i32) as u32, 1u32);
+    let p = one_op(mulhsu, a, b);
+    let (m, mut t) = one_op_traces(&p);
+    let row = forge_the_op_result(&mut t, AluOp::Mulhsu, a, b, 0);
+    let w = alu::col::WIDTH;
+    assert_eq!(t.alu.values[row * w + alu::col::SA], F::ONE);
+    assert_eq!(t.alu.values[row * w + alu::col::S0], F::ONE, "the honest row borrows");
+    t.alu.values[row * w + alu::col::SA] = F::ZERO;
+    t.alu.values[row * w + alu::col::S0] = F::ZERO;
+    assert!(forged_is_rejected(&m, &p, t));
+}
+
+/// A branch on `EQ` whose target is its own fall-through, so taken and not taken continue at the
+/// same pc and the cpu side of an `EQ` forgery is one column (`ALU_OUT`).
+fn one_beq(a: u32, b: u32) -> Program {
+    let mut asm = Assembler::new(0);
+    asm.extend(li(5, a as i32));
+    asm.extend(li(6, b as i32));
+    asm.branch(rand_zkvm::isa::BranchCond::Eq, 5, 6, "next");
+    asm.label("next");
+    asm.extend(halt());
+    asm.assemble()
+}
+
+/// Forge the `EQ` row behind `one_beq(a, b)` to say `c` (and `INV` to `inv`).
+fn forge_eq(a: u32, b: u32, c: u32, inv: F) -> (Machine, Program, Traces) {
+    let p = one_beq(a, b);
+    let (m, mut t) = one_op_traces(&p);
+    let wc = cpu::col::WIDTH;
+    let br = (0..t.cpu.height()).find(|r| t.cpu.values[r * wc + cpu::col::IS_BRANCH] == F::ONE).expect("a branch row");
+    assert_eq!(t.cpu.values[br * wc + cpu::col::ALU_OUT], F::from_u32(AluOp::Eq.eval(a, b)));
+    t.cpu.values[br * wc + cpu::col::ALU_OUT] = F::from_u32(c);
+    let row = alu_row_for(&t, AluOp::Eq, a, b);
+    set_alu_c(&mut t, row, c);
+    t.alu.values[row * alu::col::WIDTH + alu::col::INV] = inv;
+    (m, p, t)
+}
+
+/// The EQ inverse gadget, second half: `EQ(5, 7) = 0`. Claiming `1` with `INV = 0` satisfies the
+/// first half, `diff·INV + C − 1 = 0`; it is caught only by `eq·C·diff = 0`. Removed, it verifies.
+#[test]
+fn an_eq_claiming_equal_for_different_operands_is_rejected() {
+    let (m, p, t) = forge_eq(5, 7, 1, F::ZERO);
+    assert!(forged_is_rejected(&m, &p, t));
+}
+
+/// The EQ inverse gadget, first half: `EQ(5, 5) = 1`. Claiming `0` satisfies `eq·C·diff = 0`
+/// (`diff = 0`), and no `INV` makes `diff·INV + C − 1 = −1` vanish: caught only by
+/// `eq·(diff·INV + C − 1) = 0`. Removed, it verifies.
+#[test]
+fn an_eq_claiming_different_for_equal_operands_is_rejected() {
+    let (m, p, t) = forge_eq(5, 5, 0, F::ZERO);
+    assert!(forged_is_rejected(&m, &p, t));
+}
+
+/// The derived high nibble on a bitwise row. `AND(0x0f, 0x0f) = 0x0f`; forge `C = 0xff`. The low
+/// nibbles are untouched (`AND4[0xf, 0xf, 0xf]` still holds) and `C0`'s `RANGE8` is off on bitwise
+/// rows (`g_c = 0`), so the only thing binding `C0`'s top half is the high-nibble lookup on the
+/// *derived* `ch = (C0 − cl)·16⁻¹ = 0xf`: `AND4[0, 0, 0xf]` is no row of the table. With that
+/// lookup removed (the `AND4.lookup_key(b, [ah, bh, ch], …)` line), it verifies.
+#[test]
+fn a_bitwise_row_with_a_forged_high_nibble_is_rejected() {
+    let p = one_op(and, 0x0f, 0x0f);
+    let (m, mut t) = one_op_traces(&p);
+    forge_the_op_result(&mut t, AluOp::And, 0x0f, 0x0f, 0xff);
+    assert!(forged_is_rejected(&m, &p, t));
 }
 
 /// M3.1: the Poseidon2 table's round-transition constraints are gated by the *preprocessed*
@@ -700,7 +968,7 @@ fn setup_poseidon2(msg: &[u32]) -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::poseidon2_demo(msg);
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     (m, p, t)
 }
 
@@ -938,7 +1206,7 @@ fn rogue_write_out(fin: bool, pc: u32, next_pc: u32, ptr: u32, words: [u32; 4], 
 fn rogue_traces(p: &rand_zkvm::isa::Program, mut events: Vec<CycleEvent>, outputs: [u32; 8]) -> Traces {
     for (i, e) in events.iter_mut().enumerate() { e.clk = i as u32; }
     let exec = rand_zkvm::emulator::Execution { events, outputs, halted: true };
-    build_traces_salted(p, &[], &[], [0u32; 4], &exec, Tier(10)).unwrap()
+    build_traces_salted(p, &[], &[], [0u32; 4], &exec, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap()
 }
 
 /// ZC1, the entry gate `(1 − SYS_HASH − is_hash − is_hash_out)·n(IS_HASH_OUT) = 0`: a
@@ -1262,7 +1530,7 @@ fn setup_with_inputs(inputs: &[u32]) -> (Machine, rand_zkvm::isa::Program, Trace
     let m = Machine::new(FriProfile::Test);
     let p = guests::balance_check(1000); // reads inputs 0..3 once each
     let e = execute(&p, inputs, &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, inputs, &[], TEST_SALT, &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, inputs, &[], TEST_SALT, &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     (m, p, t)
 }
 
@@ -1377,7 +1645,7 @@ fn two_reads_of_the_same_index_returning_different_words_is_rejected() {
     let e = execute(&p, &inputs, &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 0, "two honest reads of the same index must agree");
     let m = Machine::new(FriProfile::Test);
-    let mut t = build_traces_salted(&p, &inputs, &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &inputs, &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = cpu::col::WIDTH;
     // Locate the second SYS_READ row (there are exactly two) and forge its returned word.
     let read_rows: Vec<usize> = (0..t.cpu.height()).filter(|&i| t.cpu.values[i * w + cpu::col::SYS_READ] == F::ONE).collect();
@@ -1658,7 +1926,7 @@ fn setup_keccak() -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::keccak_demo(b"hi");
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     (m, p, t)
 }
 
@@ -1681,7 +1949,7 @@ fn setup_keccak_with_a_padding_block() -> (Machine, rand_zkvm::isa::Program, Tra
     a.extend(halt());
     let p = a.assemble();
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     assert_eq!(t.keccak_log_height, 7, "three blocks rounded up to four");
     (m, p, t)
 }
@@ -1859,7 +2127,16 @@ fn a_nonzero_keccak_height_below_one_block_is_rejected_before_any_verifier_key_i
     use rand_zkvm::machine::VerifyError;
     let prover = Machine::new(FriProfile::Test);
     let p = guests::keccak_demo(b"hi");
-    let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
+    // Constraint set 8: lowering `keccak_log_height` also lowers this header's own gas ceiling
+    // (`gas::gas_max`), so the proof declares, honestly — the `HALT` row's limbs match it — a limit
+    // the tampered header still admits: `gas_max(Tier(10), 3, 0)` (= the hash-free ceiling, 1 279;
+    // a 3 is below one block and buys no keccak weight). The height is then the only lie, and the
+    // `KeccakHeight` refusal below is what names it.
+    let limit = rand_zkvm::gas::gas_max(Tier(10), 3, 0);
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &e, Tier(10), limit).unwrap();
+    let mut proof = prover.prove_traces(&p, &t, Tier(10));
+    assert!(prover.verify(&p.digest(), &proof).is_ok(), "the untampered proof is honest at this limit");
     assert_eq!(proof.keccak_log_height, 7, "one block, floored at 128 rows (COV-2 / INT-6)");
     proof.keccak_log_height = 3;
     // Constraint set 6: the optional hash instance is no longer the last entry — the
@@ -1916,8 +2193,16 @@ fn a_keccak_height_past_the_absolute_cap_is_rejected_where_the_tier_bound_would_
     }
     // The cap itself, and everything under it, still passes the declared-shape checks at a tier
     // whose own bound is looser — this is a ceiling, not a narrowing of what tier 20 may declare.
-    for klh in [0, keccak::MIN_LOG_HEIGHT, 19, keccak::MAX_LOG_HEIGHT] {
+    // Constraint set 7: the smallest legal non-zero height is the private-data floor (7), not the
+    // one-block `keccak::MIN_LOG_HEIGHT` (5) — a shorter table is refused like a taller one.
+    for klh in [0, rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT, 19, keccak::MAX_LOG_HEIGHT] {
         assert!(check_declared_heights(Tier(20), plh, ilh, klh, 0, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh).is_ok(), "klh = {klh} is legal at tier 20");
+    }
+    for klh in [keccak::MIN_LOG_HEIGHT, rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT - 1] {
+        assert!(
+            matches!(check_declared_heights(Tier(20), plh, ilh, klh, 0, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh), Err(VerifyError::KeccakHeight)),
+            "klh = {klh} is under the constraint-set-7 floor",
+        );
     }
     // And where the tier is the tighter of the two, the tier variant is still what a forgery
     // earns: at tier 10 anything in `16..=20` is flat-legal but past `t + 5`.
@@ -2047,7 +2332,7 @@ fn keccak_ptr_traces(p1: u32) -> (Machine, rand_zkvm::isa::Program, Traces) {
     let p = keccak_ptr_from_input();
     let mut e = execute(&p, &[P0], &[], 10_000).unwrap();
     relocate_keccak_ptr(&mut e, P0, p1);
-    let t = build_traces_salted(&p, &[p1], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[p1], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = cpu::col::WIDTH;
     let row = keccak_row(&t);
     // `HASH_PTR = B` (the `a0` the row read) and the four limbs recompose to it: the two
@@ -2090,7 +2375,7 @@ fn setup_sha256() -> (Machine, rand_zkvm::isa::Program, Traces) {
     let m = Machine::new(FriProfile::Test);
     let p = guests::sha256_demo();
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     // One real block plus one padding block since audit COV-2 / INT-6's private-data floor (was 6).
     assert_eq!(t.sha256_log_height, 7, "one compression, floored at 128 rows");
     (m, p, t)
@@ -2111,7 +2396,7 @@ fn setup_sha256_with_a_padding_block() -> (Machine, rand_zkvm::isa::Program, Tra
     a.extend(halt());
     let p = a.assemble();
     let e = execute(&p, &[], &[], 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     assert_eq!(t.sha256_log_height, 8, "three blocks rounded up to four");
     (m, p, t)
 }
@@ -2218,7 +2503,13 @@ fn a_nonzero_sha256_height_below_one_block_is_rejected() {
     use rand_zkvm::machine::VerifyError;
     let prover = Machine::new(FriProfile::Test);
     let p = guests::sha256_demo();
-    let (mut proof, _) = prover.prove_salted(&p, &[], &[], [0; 4], Some(Tier(10))).unwrap();
+    // Constraint set 8: as the keccak twin above — prove at a limit the tampered header
+    // (`sha256_log_height = 5`, below one block) still admits, so the height is the only lie.
+    let limit = rand_zkvm::gas::gas_max(Tier(10), 0, 5);
+    let e = execute(&p, &[], &[], 10_000).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &e, Tier(10), limit).unwrap();
+    let mut proof = prover.prove_traces(&p, &t, Tier(10));
+    assert!(prover.verify(&p.digest(), &proof).is_ok(), "the untampered proof is honest at this limit");
     proof.sha256_log_height = 5;
     // Constraint set 6: the optional hash instance is no longer the last entry — the
     // mandatory `public` one is appended after it (`machine::chips`), so it is second to
@@ -2257,9 +2548,15 @@ fn declared_sha256_heights_outside_the_range_or_past_the_tier_are_refused() {
             "slh = {slh} is a table too short to hold one block",
         );
     }
-    for slh in [0, sha256::MIN_LOG_HEIGHT, 19, sha256::MAX_LOG_HEIGHT] {
+    // Constraint set 7: the smallest legal non-zero height is the private-data floor (7), not the
+    // one-block `sha256::MIN_LOG_HEIGHT` (6).
+    for slh in [0, rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT, 19, sha256::MAX_LOG_HEIGHT] {
         assert!(check_declared_heights(Tier(20), plh, ilh, 0, slh, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh20).is_ok(), "slh = {slh} is legal at tier 20");
     }
+    assert!(
+        matches!(check_declared_heights(Tier(20), plh, ilh, 0, sha256::MIN_LOG_HEIGHT, rand_zkvm::tables::public::MIN_LOG_HEIGHT, mlh20), Err(VerifyError::Sha256Height)),
+        "one block (slh = 6) is under the constraint-set-7 floor",
+    );
     // And where the tier is the tighter of the two, the tier variant is what a forgery earns.
     let mlh10 = Tier(10).min_mem_log_height();
     assert_eq!(Tier(10).max_sha256_log_height(), 16);
@@ -2370,7 +2667,7 @@ fn a_workload_exceeding_the_poseidon2_budget_is_a_clean_error() {
     let exec = execute(&p, &[], &[], 10_000).unwrap();
     assert!(exec.cycles() < 20, "only the leading few instructions ever execute");
     assert!(
-        matches!(build_traces_salted(&p, &[], &[], [0u32; 4], &exec, Tier(10)), Err(ProveError::TooManyPoseidon2Permutations { .. })),
+        matches!(build_traces_salted(&p, &[], &[], [0u32; 4], &exec, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)), Err(ProveError::TooManyPoseidon2Permutations { .. })),
         "151 permutations cannot fit tier 10's 128 poseidon2 blocks"
     );
     let (proof, _) = m.prove(&p, &[], &[], None).expect("auto-tier must climb past the permutation wall, not panic");
@@ -2407,7 +2704,7 @@ fn a_program_input_or_public_vector_longer_than_the_16_bit_hash_left_cap_is_a_cl
     // this the way it would at tier 10.
     let exec = execute(&small, &[], &public, 10_000).unwrap();
     assert!(matches!(
-        build_traces_salted(&small, &[], &public, [0u32; 4], &exec, Tier(20)),
+        build_traces_salted(&small, &[], &public, [0u32; 4], &exec, Tier(20), rand_zkvm::gas::gas_max(Tier(20), 0, 0)),
         Err(ProveError::PublicTooLong { len: 65536 })
     ));
 }
@@ -2467,7 +2764,7 @@ fn setup_with_public(public: &[u32]) -> (Machine, rand_zkvm::isa::Program, Trace
     let m = Machine::new(FriProfile::Test);
     let p = guests::public_echo(); // reads public[0..4], and public[1] twice
     let e = execute(&p, &[], public, 10_000).unwrap();
-    let t = build_traces_salted(&p, &[], public, TEST_SALT, &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], public, TEST_SALT, &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     (m, p, t)
 }
 
@@ -2804,7 +3101,7 @@ fn setup_with_inputs_and_public(inputs: &[u32], public: &[u32]) -> (Machine, ran
     a.extend(halt());
     let p = a.assemble();
     let e = execute(&p, inputs, public, 10_000).unwrap();
-    let t = build_traces_salted(&p, inputs, public, TEST_SALT, &e, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, inputs, public, TEST_SALT, &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     (m, p, t)
 }
 
@@ -3146,7 +3443,7 @@ fn an_sll_that_wraps_the_field_is_refused_by_the_overflow_guard() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 10);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Sll);
     let al = |t: &Traces, c: usize| t.alu.values[row * w + c];
@@ -3181,7 +3478,7 @@ fn a_right_shift_remainder_not_below_the_shift_is_refused() {
     let m = Machine::new(FriProfile::Test);
     let e = execute(&p, &[], &[], 10_000).unwrap();
     assert_eq!(e.outputs[0], 4);
-    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [0u32; 4], &e, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let w = alu::col::WIDTH;
     let row = find_alu_row(&t, rand_zkvm::isa::AluOp::Srl);
     let al = |t: &Traces, c: usize| t.alu.values[row * w + c];
@@ -3197,4 +3494,122 @@ fn a_right_shift_remainder_not_below_the_shift_is_refused() {
     range8_moved(&mut t, 1, 5); // S0
     // `T` left at its honest 2: no byte value of it satisfies `PW − 1 − R − T = 0` with `R = 5`.
     assert!(rejects(|| { let pr = m.prove_traces(&p, &t, Tier(10)); m.verify(&p.digest(), &pr) }));
+}
+
+// ───────────────────── Constraint set 7: the LogUp blind (audit INT-2) ─────────────────────
+
+/// The blind is one more balanced bus, and unbalancing it is refused like unbalancing any other:
+/// an instance whose `OUT` nobody receives (its successor's `IN` is left at the old value), and an
+/// instance that receives a value nobody sent. In a debug build `prove_batch`'s own balance check
+/// panics with `LOOKUP_BALANCE_PANIC`; in release the terminals no longer sum to zero and
+/// `verify_batch` refuses. `tables::blind`'s module comment has why the honest cycle balances and
+/// why a dishonest one cannot be made to by choosing the values after the challenges.
+#[test]
+fn mismatched_blinds_are_refused() {
+    let (m, p, t) = setup();
+    let honest = rand_zkvm::tables::blind::fresh(t.as_slice().len());
+    let proof = m.prove_traces_with_blinds(&p, &t, Tier(10), &honest);
+    m.verify(&p.digest(), &proof).expect("the honest cycle verifies");
+    // Instance 3 sends something else; instance 4 still receives the value it was drawn for.
+    let mut sent = honest.clone();
+    sent[3][rand_zkvm::tables::blind::col::OUT1] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces_with_blinds(&p, &t, Tier(10), &sent); m.verify(&p.digest(), &pr) }));
+    // Instance 5 receives a value nobody sent.
+    let mut received = honest.clone();
+    received[5][rand_zkvm::tables::blind::col::IN0] += F::ONE;
+    assert!(rejects(|| { let pr = m.prove_traces_with_blinds(&p, &t, Tier(10), &received); m.verify(&p.digest(), &pr) }));
+}
+
+/// The cycle is the honest prover's arrangement, not a rule: any blinds that balance as a multiset
+/// verify — here every instance sends and receives one value of its own, which blinds nothing. That
+/// is a prover declining its own privacy, not a way to cheat, and it is why the constraint system
+/// needs no notion of an instance's neighbour.
+#[test]
+fn any_balanced_blinds_verify() {
+    let (m, p, t) = setup();
+    let own: Vec<rand_zkvm::tables::blind::Blind> = (0..t.as_slice().len())
+        .map(|i| { let x = F::from_u32(1000 + i as u32); [x, F::ONE, x, F::ONE] })
+        .collect();
+    let proof = m.prove_traces_with_blinds(&p, &t, Tier(10), &own);
+    m.verify(&p.digest(), &proof).expect("balanced blinds verify");
+}
+
+// ───────────────────────────── Constraint set 8: the GAS column ─────────────────────────────
+
+/// Review focus 2 (cs8): a `KECCAK` row that pays one gas instead of 192. Every `GAS` from that
+/// row on is lowered by 191, so the chain is consistent everywhere but on the transition into
+/// the `KECCAK` row, and the `HALT` row's limbs are re-derived for the lowered total (with the
+/// `RANGE8` multiplicities moved to match), so the halt-row equation and the range bus hold too.
+/// The symbolic pass below confirms that transition is the one constraint the forgery breaks;
+/// the real proof must then be refused.
+#[test]
+fn a_keccak_row_that_pays_one_gas_is_refused() {
+    let (m, p, mut t) = setup_keccak();
+    let k = keccak_row(&t);
+    assert_eq!(underpay_gas_from(&mut t, k, 191), vec![(k - 1, 1)], "only the GAS transition into the KECCAK row breaks");
+    assert!(rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &t, Tier(10)))));
+}
+
+/// The trace-forgery shape the cs8 cheating tests share: lower `GAS` by `by` on every row from
+/// `from` on (so the chain is consistent everywhere but on the transition into `from`, or on
+/// row 0's boundary when `from == 0`), re-derive the `HALT` row's four limbs for the lowered total
+/// and move their `RANGE8` multiplicities to match — so the halt-row equation and the range bus
+/// hold too. Returns the `(row, count)` of every cpu constraint the forged trace breaks,
+/// evaluated symbolically, so each test can pin that it breaks exactly the one it targets.
+fn underpay_gas_from(t: &mut Traces, from: usize, by: u64) -> Vec<(usize, usize)> {
+    use common::{eval_boundary, symbolic_air, Rows};
+    let w = cpu::col::WIDTH;
+    let rows = t.cpu.height();
+    for r in from..rows { t.cpu.values[r * w + cpu::col::GAS] -= F::from_u64(by); }
+    let halt = (0..rows).find(|&r| t.cpu.values[r * w + cpu::col::SYS_HALT] == F::ONE).unwrap();
+    let diff = (t.public_values[cpu::pv::GAS] - t.cpu.values[halt * w + cpu::col::GAS]).as_canonical_u64();
+    assert!(diff < 1 << 32);
+    let mut edits = Vec::new();
+    for j in 0..4 {
+        let old = t.cpu.values[halt * w + cpu::col::GD0 + j].as_canonical_u64() as u32;
+        let new = ((diff >> (8 * j)) & 0xff) as u32;
+        t.cpu.values[halt * w + cpu::col::GD0 + j] = F::from_u32(new);
+        edits.push((old, new));
+    }
+    shift_range8(t, &edits);
+
+    let (_, cons) = symbolic_air(&cpu::CpuAir);
+    let row = |r: usize| t.cpu.values[(r % rows) * w..(r % rows) * w + w].to_vec();
+    let mut failing = Vec::new();
+    for r in 0..rows {
+        let pair = Rows { cur: row(r), next: row(r + 1), pre_cur: vec![], pre_next: vec![], public: t.public_values.clone() };
+        let n = cons.iter().filter(|c| eval_boundary(c, &pair, r == 0, r == rows - 1) != F::ZERO).count();
+        if n > 0 { failing.push((r, n)); }
+    }
+    failing
+}
+
+/// Final review (cs8), the `SHA256` twin: a `SYS_SHA256` row that pays one gas instead of 64.
+#[test]
+fn a_sha256_row_that_pays_one_gas_is_refused() {
+    let (m, p, mut t) = setup_sha256();
+    let w = cpu::col::WIDTH;
+    let k = (0..t.cpu.height()).find(|&r| t.cpu.values[r * w + cpu::col::SYS_SHA256] == F::ONE).expect("a SYS_SHA256 row");
+    assert_eq!(underpay_gas_from(&mut t, k, 63), vec![(k - 1, 1)], "only the GAS transition into the SHA256 row breaks");
+    assert!(rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &t, Tier(10)))));
+}
+
+/// Final review (cs8), the `POSEIDON2` twin: an `IS_HASH` absorb row that pays one gas instead
+/// of three (its permutation's +2 dropped).
+#[test]
+fn a_poseidon2_absorb_row_that_pays_one_gas_is_refused() {
+    let (m, p, mut t) = setup_poseidon2(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    let (_, absorbs, _) = hash_rows(&t);
+    let k = absorbs[0];
+    assert_eq!(underpay_gas_from(&mut t, k, 2), vec![(k - 1, 1)], "only the GAS transition into the absorb row breaks");
+    assert!(rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &t, Tier(10)))));
+}
+
+/// Final review (cs8): row 0 starts the chain at `GAS = 0` instead of 1 — every row one short, so
+/// every transition holds and only the first-row boundary `GAS = 1` stands in the way.
+#[test]
+fn a_first_row_gas_of_zero_is_refused() {
+    let (m, p, mut t) = setup();
+    assert_eq!(underpay_gas_from(&mut t, 0, 1), vec![(0, 1)], "only the first-row GAS boundary breaks");
+    assert!(rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &t, Tier(10)))));
 }

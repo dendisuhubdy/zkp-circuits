@@ -24,11 +24,14 @@ struct Syscalls;
 
 impl sbpf_core::Host for Syscalls {
     fn sha256_compress(&mut self, words: &mut [u32; 24]) {
-        guest_sdk::sha256_compress(words.as_mut_ptr());
+        guest_sdk::sha256_compress(words);
     }
 
     fn poseidon2(&mut self, words: &mut [u32], n: usize) {
-        guest_sdk::poseidon2(words.as_mut_ptr(), n);
+        // SAFETY: `sbpf_core` calls this with `n <= words.len()` and `words.len() >= 8` (its
+        // digest buffers are sized for the digest), and `words` is a live, exclusive `&mut` for the
+        // call — `guest_sdk::poseidon2`'s `# Safety` contract.
+        unsafe { guest_sdk::poseidon2(words.as_mut_ptr(), n) };
     }
 }
 

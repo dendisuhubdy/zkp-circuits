@@ -25,7 +25,7 @@ use crate::shape::{InnerKey, InnerShape, ProofBatch, ShapeKey, VerifierShape, CA
 use p3_air::BaseAir;
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use p3_matrix::Dimensions;
-use p3_util::log2_ceil_usize;
+use p3_util::{log2_ceil_usize, log2_strict_usize};
 use rand_zkvm::machine::{Config, FriProfile, Proof, Val};
 
 /// The salt elements the hiding MMCS appends to every committed row. `crate::dsl::hash::SALT_ELEMS`
@@ -45,10 +45,10 @@ pub enum Segment {
     /// round's `log_arity`. Read off the *proof* and pinned against the program's own shape word
     /// by word, so a proof of another shape is refused here rather than misparsed later.
     Header,
-    /// The 34 inner public values (constraint set 6: `PC_ENTRY`, `TIER`, `OUT0..7`, `HC0..7`,
-    /// `IN0..7`, then `PUB0..7` — the unsalted `H_PUB`, which for the empty public segment these
-    /// fixtures prove is a prover-computed constant of the shape, carried as ordinary public
-    /// values; no public-segment words enter the tape).
+    /// The 35 inner public values (constraint set 8: `PC_ENTRY`, `TIER`, `OUT0..7`, `HC0..7`,
+    /// `IN0..7`, `PUB0..7`, then `GAS`, the declared gas limit — `PUB0..7` the unsalted `H_PUB`,
+    /// which for the empty public segment these fixtures prove is a prover-computed constant of
+    /// the shape, carried as ordinary public values; no public-segment words enter the tape).
     PublicValues,
     /// The `main`, `permutation`, `quotient_chunks` and `random` caps: four times sixteen elements.
     Commitments,
@@ -70,7 +70,9 @@ pub enum Segment {
     /// sampled element, in **sampling** order — the query proof-of-work check's element first (it
     /// is sampled before any query index), then one per query.
     QueryBits,
-    /// Per query, per input round, per matrix: the opened row and its four salts.
+    /// Per query, per input round, per height group (tallest first, `shape::height_groups`), per
+    /// matrix: the opened row and its four salts — a group contiguous, because the program hints
+    /// it straight into the buffer its leaf (or injection) sponge reads (Cut A).
     InputOpenings,
     /// Per query, per input round: the restored authentication path's siblings, four words a level.
     InputPaths,
@@ -379,7 +381,7 @@ where
 
         // 7 ── per FRI round, the commit cap and its PoW witness. `commit_proof_of_work_bits == 0`,
         // so the witness is *never observed* (`grinding_challenger.rs:44-49`); the program reads it
-        // and discards it, which is why it is on the tape at all.
+        // and asserts it is the honest `0` (VERIFIER-1), which is why it is on the tape at all.
         w.begin(Segment::FriCommits);
         for (comm, witness) in fri.commit_phase_commits.iter().zip(&fri.commit_pow_witnesses) {
             w.cap(comm.roots());
@@ -455,17 +457,24 @@ where
             log_current = log_folded;
         }
 
-        // 11 ── per query, per input round, per matrix: the opened row then its four salts, which is
-        // the leaf message the hiding MMCS hashes (`hiding_mmcs.rs:232-275`).
+        // 11 ── per query, per input round, per *height group* (tallest first — `shape::height_groups`,
+        // the same call the program makes in `read_input_openings`), per matrix: the opened row
+        // then its four salts, which is the leaf message the hiding MMCS hashes
+        // (`hiding_mmcs.rs:232-275`). Cut A: the program hints a group straight into the buffer
+        // its sponge reads, so the tape lays a group out contiguously.
         w.begin(Segment::InputOpenings);
         for q in 0..shape.num_queries() {
-            for round in 0..r.input_rounds.len() {
+            for (round, geom) in r.input_rounds.iter().enumerate() {
                 let opening = &fri.input_openings[round];
                 let salts = &opening.opening_proof.0[q];
-                for (m, row) in opening.opened_values[q].iter().enumerate() {
-                    assert_eq!(salts[m].len(), SALT_ELEMS);
-                    w.base(row);
-                    w.base(&salts[m]);
+                let log_heights: Vec<usize> = geom.dims.iter().map(|d| log2_strict_usize(d.height)).collect();
+                for group in crate::shape::height_groups(&log_heights) {
+                    for m in group {
+                        let row = &opening.opened_values[q][m];
+                        assert_eq!(salts[m].len(), SALT_ELEMS);
+                        w.base(row);
+                        w.base(&salts[m]);
+                    }
                 }
             }
         }

@@ -1,6 +1,6 @@
 //! The N-generic aggregate program (M5.3): one counted loop over the tape's N, each iteration
 //! the per-proof pipeline with a fresh challenger, then the interface digest over
-//! `[inner_vk_digest ‖ N ‖ 34·N]`. The differentials: N=1 is the single-proof program plus a
+//! `[inner_vk_digest ‖ N ‖ B(8) ‖ 35·N]`. The differentials: N=1 is the single-proof program plus a
 //! pinned loop overhead, and the thirteen segment tampers are refused at the M5.1 table's named
 //! steps, verbatim, at `(proof, segment)`.
 
@@ -25,18 +25,30 @@ const MAX_CYCLES: usize = 1 << 24;
 
 /// The rows the counted loop and the runtime-length interface sponge cost over the single-proof
 /// program at N=1, measured on this tree: the count word and its guard, the sponge state and
-/// cursor, the per-proof 34-word staged absorb (with its eight rate-fill permutations), the
-/// final partial-block permutation, and the loop scaffolding — against the single-proof phase
-/// 8's list build and one-shot `sponge_seeded` it replaces — plus AGG-2's eight binding words
-/// (their hints, stores, and two rate-fill absorbs: 80 rows, the same at every N).
-const LOOP_OVERHEAD: usize = 219;
+/// cursor, the per-proof 35-word staged absorb (with its rate-fill permutations), the final
+/// permutation, and the loop scaffolding — against the single-proof phase 8's list build and
+/// one-shot `sponge_seeded` it replaces — plus AGG-2's eight binding words (their hints, stores,
+/// and two rate-fill absorbs, the same at every N). Constraint set 7 moved it by one row
+/// (219 → 220). Constraint set 8 moved it 220 → 274: the 35th public value and the wider inner
+/// shape measure 235 on the eager absorb, and the deferred absorb (`hash::absorb_staged`, which
+/// fixed the double final permutation on a list ending at a block boundary — `N = 1` at 35
+/// words a proof) costs one cursor reload per staged word (+43 at N=1) and drops the doubled
+/// permutation's four rows: 235 + 43 − 4 = 274. Phase 2's row cuts (2026-10-03) leave it at 274:
+/// the cuts are inside the per-proof pipeline, the loop scaffolding around it is unchanged
+/// (re-measured: N=1 231 224 = 230 950 + 274).
+const LOOP_OVERHEAD: usize = 274;
 
 /// The N=3 total, measured on this tree. The per-N total is *not* a clean multiple of the
-/// per-proof rows: the staged absorb permutes when the rate fills, and the fill phase advances
-/// by two lanes per proof (34 mod 4), so an odd-numbered iteration permutes nine times where an
-/// even one permutes eight — the per-N rows are `pre + Σ body_j + post` with the parity term,
-/// pinned per N rather than modelled.
-const N3_ROWS: usize = 1_324_774;
+/// per-proof rows: the staged absorb permutes when a block fills, and the fill phase advances
+/// by three lanes per proof (35 mod 4), so iterations differ by one permutation depending on
+/// where their run of 35 words starts — the per-N rows are `pre + Σ body_j + post` with the
+/// phase term, pinned per N rather than modelled. Constraint set 7 with VERIFIER-1: 1 383 100.
+/// Constraint set 8 (the 35th public value, the wider inner shape, the deferred absorb):
+/// 1 383 100 → 1 385 968 (`tests/pins.json`'s `aggregate_test_n3_cpu_rows`, re-measured; the
+/// eager absorb measured 1 385 855 on the same tree — the 113 rows are one cursor reload per
+/// staged word, 8 + 3·35). Phase 2's row cuts (height-group hint buffers, `HINTN`, `COMPRESS`;
+/// `docs/04-phase2-row-cuts.md`): 1 385 968 → 692 854, re-measured into `tests/pins.json`.
+const N3_ROWS: usize = 692_854;
 
 fn shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
     let shape = InnerShape::of(
@@ -54,7 +66,7 @@ fn shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
 }
 
 /// The N=1 differential: the looped program over one fixture proof accepts, publishes exactly
-/// the host's `[vk ‖ 1 ‖ B(8) ‖ 34]` bound-interface digest, and costs the single-proof rows
+/// the host's `[vk ‖ 1 ‖ B(8) ‖ 35]` bound-interface digest, and costs the single-proof rows
 /// plus the pinned loop overhead. (The aggregate's interface carries the eight binding words, so
 /// it is *not* the single-proof program's digest — that equality held before AGG-2.)
 #[test]
@@ -96,7 +108,8 @@ fn n1_aggregate_publishes_the_bound_interface_digest_at_a_pinned_overhead() {
 }
 
 /// Three real proofs, one looped run: accepted, and the published digest is the host's
-/// `[vk ‖ 3 ‖ B(8) ‖ 34·3]` list — the staged absorb's two rate-fill parities both exercised.
+/// `[vk ‖ 3 ‖ B(8) ‖ 35·3]` list — the staged absorb over three proofs whose runs start at
+/// three different lanes. (N=1 is the block-boundary case: 13 + 35 = 48 words.)
 #[test]
 fn n3_aggregate_publishes_the_host_interface_digest() {
     let proofs: Vec<Proof> =
@@ -323,7 +336,7 @@ fn a_one_proof_aggregate_round_trips_and_tampered_variants_are_refused() {
     let m = RvmMachine::new(FriProfile::Test);
     let a = aggregate(&m, &vk, std::slice::from_ref(&p.proof), &common::TEST_BINDING, None)
         .expect("one real bundle proof aggregates");
-    assert_eq!(a.proof.tier, RvmTier(19), "the test-profile N=1 aggregate lands at tier 19");
+    assert_eq!(a.proof.tier, RvmTier(18), "the test-profile N=1 aggregate lands at tier 18 (231 224 rows; tier 19 before phase 2's row cuts)");
     eprintln!("N=1 aggregate proof: {} bytes", a.proof.size());
     let program = aggregate_program(&vk);
     let outs = verify_aggregate(&m, &program, &a, &common::TEST_BINDING).expect("the aggregate verifies");
@@ -408,7 +421,7 @@ fn a_wrong_shape_proof_in_the_set_is_named_by_index_before_any_tape_work() {
 // ── Task 4: the refusal suite, the in-suite aggregate, and the N=3 twin ──────────────────────
 
 /// (a) an inner proof tampered inside the set makes `aggregate` fail — never an aggregate. The
-/// tamper is one of the 34 public values of proof 1: `matches` still passes (length and
+/// tamper is one of the 35 public values of proof 1: `matches` still passes (length and
 /// canonicality are all it checks), so the refusal lands in the tape builder's transcript
 /// replay, where the native verifier's own checks run.
 #[test]
@@ -419,7 +432,7 @@ fn a_tampered_inner_proof_never_yields_an_aggregate() {
     let vk = inner_vk(&shape, &key);
     let m = RvmMachine::new(FriProfile::Test);
     let mut set = proofs;
-    set[1].public_values[pv::OUT0] += 1; // still 34 canonical words; no longer its transcript
+    set[1].public_values[pv::OUT0] += 1; // still 35 canonical words; no longer its transcript
     match aggregate(&m, &vk, &set, &common::TEST_BINDING, None) {
         Err(AggregateError::Tape(_)) => {}
         Err(e) => panic!("a tampered inner proof must fail at the tape replay, got {e:?}"),
@@ -458,12 +471,14 @@ fn a_tampered_tape_fails_the_prove_at_the_named_step() {
 }
 
 /// (e) the in-suite aggregate: two real test-profile bundle proofs prove and verify natively —
-/// tier 20 on this fixture shape. `#[ignore]`d after two jetsam deaths on the shared box: the
+/// tier 19 on this fixture shape since phase 2's row cuts (tier 20 before; the history below is
+/// the tier-20 prove's, and its GB figures are macOS RSS, which excludes compressed and swapped
+/// pages — `docs/04-phase2-row-cuts.md` §"The prover's live heap"). `#[ignore]`d after two jetsam deaths on the shared box: the
 /// prove peaks above the box's practical line (~33 GB today; 33.7 GB measured before the
-/// SIGKILL, twice), so the suite's heaviest *proven* aggregate is the N=1 round-trip at tier 19,
-/// and this runs alone, watchdog-guarded, the way the twin does.
+/// SIGKILL, twice), so the suite's heaviest *proven* aggregate is the N=1 round-trip — tier 18
+/// since phase 2, and itself skipped on the 48 GB box for memory — and this runs alone, watchdog-guarded, the way the twin does.
 #[test]
-#[ignore = "the N=2 in-suite aggregate: tier 20, ~34 GB peak observed before jetsam on the \
+#[ignore = "the N=2 in-suite aggregate: tier 19 (tier 20 before phase 2), ~34 GB macOS RSS observed before jetsam on the \
             shared box (twice); run alone: cargo test --release -p recursion --test aggregate \
             two_test_profile -- --ignored --nocapture"]
 fn two_test_profile_bundle_proofs_aggregate_and_verify_natively() {
@@ -473,7 +488,7 @@ fn two_test_profile_bundle_proofs_aggregate_and_verify_natively() {
     let vk = inner_vk(&shape, &key);
     let m = RvmMachine::new(FriProfile::Test);
     let a = aggregate(&m, &vk, &proofs, &common::TEST_BINDING, None).expect("two real bundle proofs aggregate");
-    assert_eq!(a.proof.tier, RvmTier(20), "the test-profile N=2 aggregate lands at tier 20");
+    assert_eq!(a.proof.tier, RvmTier(19), "the test-profile N=2 aggregate lands at tier 19 (462 039 rows; tier 20 before phase 2's row cuts)");
     eprintln!("N=2 aggregate proof: {} bytes", a.proof.size());
     let outs = verify_aggregate(&m, &aggregate_program(&vk), &a, &common::TEST_BINDING).expect("the aggregate verifies");
     assert_eq!(outs.len(), 2);
@@ -486,13 +501,13 @@ fn two_test_profile_bundle_proofs_aggregate_and_verify_natively() {
 }
 
 /// The M5.3 exit (spec §7, R4's profile ruling): an aggregate of **3 real test-profile bundle
-/// proofs** verifies natively — tier 21, ~38 GB on this tree's prover (the tier-20 prove's
-/// measured peak is 33.7 GB). Timed and measured: wall time, proof size, verify time; the RSS
+/// proofs** verifies natively — tier 20 since phase 2's row cuts (tier 21 before; the GB figures
+/// in this note are the pre-cut macOS RSS readings, not live-heap numbers — `docs/04`). Timed and measured: wall time, proof size, verify time; the RSS
 /// watchdog runs outside the process (see the ignore note). On a box that jetsams the largest
 /// process at ~33 GB the attempt is expected to die there — the peak it reaches is the
 /// measurement, and the plan's fallback records N=1 (tier 19, completed) as the in-scope proof.
 #[test]
-#[ignore = "the N=3 exit twin: tier 21, ~38 GB, est. ~2-4 h contended; watchdog-guarded; \
+#[ignore = "the N=3 exit twin: tier 20 (tier 21 before phase 2), est. ~2-4 h contended; watchdog-guarded; \
             run alone: cargo test --release -p recursion --test aggregate twin -- --ignored --nocapture"]
 fn twin_three_test_profile_bundle_proofs_aggregate_and_verify_natively() {
     let proofs: Vec<Proof> =
@@ -503,7 +518,7 @@ fn twin_three_test_profile_bundle_proofs_aggregate_and_verify_natively() {
     let t0 = std::time::Instant::now();
     let a = aggregate(&m, &vk, &proofs, &common::TEST_BINDING, None).expect("three real bundle proofs aggregate");
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(a.proof.tier, RvmTier(21), "the test-profile N=3 aggregate lands at tier 21");
+    assert_eq!(a.proof.tier, RvmTier(20), "the test-profile N=3 aggregate lands at tier 20 (692 854 rows; tier 21 before phase 2's row cuts)");
     let t1 = std::time::Instant::now();
     let outs = verify_aggregate(&m, &aggregate_program(&vk), &a, &common::TEST_BINDING).expect("the aggregate verifies");
     let verify_s = t1.elapsed().as_secs_f64();
@@ -540,12 +555,12 @@ fn the_admission_stub_vectors() {
     let vk_digest = recursion::shape::inner_vk_digest(&shape, &key);
     assert_eq!(
         hex_words(&vk_digest),
-        "33a94ec690bb7cbe5a3d4564967460996277ac61b539f6525b5fe7f92992a1c8",
+        "346ee1841980e46a3501f5b04cdf40dd3208e5b1c67360285353cf7a0b735fb9",
         "the inner vk digest is a deterministic constant of the fixture shape"
     );
     let pvs: Vec<Vec<u64>> = proofs.iter().map(|p| p.public_values.clone()).collect();
     let list = recursion::public_values::interface_words_bound(&shape, &key, &common::TEST_BINDING, &pvs);
-    assert_eq!(list.len(), 4 + 1 + 8 + 34 * 3);
+    assert_eq!(list.len(), 4 + 1 + 8 + 35 * 3);
     let digest = recursion::public_values::public_digest(&list);
     eprintln!("binding (8 words), hex: {}", hex_words(&common::TEST_BINDING.map(|x| F::from_u64(x as u64))));
     eprintln!("inner_vk_digest: {}", hex_words(&vk_digest));
@@ -588,8 +603,17 @@ fn the_per_n_cycle_budget_is_pinned() {
 
 /// The production N=1 aggregate, re-confirmed against the M5.2 single-proof pin: the loop
 /// overhead at the production shape (its `log_arities` schedule differs from the test profile's,
-/// so the overhead is not assumed equal — it is measured) and the tier-21 landing, recorded in
-/// `docs/02-aggregate.md`.
+/// so the overhead is not assumed equal — it is measured) and the tier landing, recorded in
+/// `docs/02-aggregate.md`: tier 21 at constraint set 8, tier 20 since phase 2's row cuts
+/// (893 880 rows = 893 606 + 274, `docs/04-phase2-row-cuts.md`).
+///
+/// It also pins the N-generic program's digest at the production bundle shape — the number a
+/// chain's aggregation section registers and the fullnode re-pins at a chain cut (`docs/02`'s
+/// digest table, `docs/04`'s "what moved"). The in-suite digest test
+/// (`tests/verifier.rs`'s `the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes`)
+/// builds the Test shape and sees a different one, so the production value is checked here,
+/// beside the production fixture this test already builds. Re-registered for phase 2's row
+/// cuts: `1831f036…ddd7` → `c90b3f0a…74d8`.
 #[test]
 #[ignore = "a production-profile fixture proof plus a ~2M-row emulation: the M5.2 budget test's own cost class"]
 fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
@@ -611,10 +635,207 @@ fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
         .unwrap()
         .cpu_rows();
     assert_eq!(single_rows, common::pins().cpu_rows, "the M5.2 pin still holds");
+    assert_eq!(
+        recursion::programs::digest_hex(&verify_rv32n(&shape, &key, Checkpoints::Off).program),
+        "c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8",
+        "the aggregate program's digest at the production bundle shape, as docs/02 and docs/04 state it"
+    );
     let r = common::measure_aggregate(1, FriProfile::Production);
     eprintln!(
         "production N=1 aggregate: {} rows (single {single_rows}, overhead {})",
         r.cpu_rows,
         r.cpu_rows - single_rows
     );
+}
+
+/// VERIFIER-1, the rVM half, through the shipped N-generic program: a commit-phase PoW word
+/// rewritten in *any* proof's region of an N=2 tape is refused at that round's named step, the
+/// loop giving every iteration the single-proof program's check. Before the fix the program
+/// discarded the word and the aggregate accepted a re-encoded inner proof
+/// (`tests/verifier.rs`'s single-proof test has the reasoning and the native refusal).
+#[test]
+fn a_rewritten_commit_phase_pow_word_in_any_proof_is_refused() {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Test, 2).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = shape_and_key(&proofs[0]);
+    let vp = verify_rv32n(&shape, &key, Checkpoints::Off);
+    let honest = WitnessTape::build_n(FriProfile::Test, &shape, &key, &proofs, &common::TEST_BINDING).unwrap();
+    execute(&vp.program, &honest.words, MAX_CYCLES).expect("the honest N=2 tape is accepted");
+    let rounds = shape.log_arities.len();
+    for j in 0..proofs.len() {
+        let r = *honest
+            .segment_refs()
+            .iter()
+            .find(|r| r.proof == j && r.segment == Segment::FriCommits)
+            .unwrap();
+        assert_eq!(r.len, rounds * 17);
+        for round in [0, rounds - 1] {
+            let at = r.start + 17 * round + 16;
+            assert_eq!(honest.words[at], F::ZERO);
+            let mut t = honest.clone();
+            t.words[at] = F::ONE;
+            match execute(&vp.program, &t.words, MAX_CYCLES) {
+                Err(ExecError::InverseOfZero { pc }) => assert_eq!(
+                    vp.program.checkpoint_at(pc),
+                    Some(format!("commit pow witness[{round}]").as_str()),
+                    "proof {j}, round {round}: refused at the wrong step"
+                ),
+                other => panic!("proof {j}, round {round}: expected a refusal, got {:?}", other.map(|e| format!("acceptance, {} cpu rows", e.cpu_rows()))),
+            }
+        }
+    }
+}
+
+// ── issue #45 A6/B3: the production-profile aggregate proofs and the N>=2 emulator run ─────────
+//
+// The M5.3 doc's per-N production table was *derived* (the test-profile law applied to the
+// production single-proof pin); rows 6-8 of the big-machine runbook (docs/03) were never run.
+// These vehicles run them on the big machine: A6 proves the production N=1 (tier 20 since phase
+// 2's row cuts; tier 21 before) and N=2 (tier 21; 22 before) aggregates and measures
+// wall/verify/size/peak; B3 emulates the production N>=2 aggregate programs (the #62 review's
+// gap: register pressure from 80 unrolled queries, the memory and timestamp bounds at tier
+// 21/22 now, 22/23 before) with no proving. The ">=64 GB" sizing these were written against is
+// withdrawn (docs/04 §"The prover's live heap").
+
+/// A Production-profile inner shape and key for `n` cached fixtures (the Test-profile
+/// `shape_and_key` above, at the production profile).
+fn production_shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
+    let shape = InnerShape::of(
+        FriProfile::Production,
+        p.tier,
+        p.program_log_height,
+        p.input_log_height,
+        p.keccak_log_height,
+        p.sha256_log_height,
+        p.public_log_height,
+        p.mem_log_height,
+    );
+    let key = InnerKey::of(FriProfile::Production, &shape);
+    (shape, key)
+}
+
+/// Prove and verify a production-profile N-proof aggregate, printing the runbook's numbers.
+fn prove_production_aggregate(n: usize, expected_tier: RvmTier) {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Production, n).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = production_shape_and_key(&proofs[0]);
+    let vk = InnerVerifierKey { shape: shape.clone(), key: key.clone() };
+    let m = RvmMachine::new(FriProfile::Production);
+    let t0 = std::time::Instant::now();
+    let a = aggregate(&m, &vk, &proofs, &common::TEST_BINDING, None)
+        .expect("the production aggregate proves");
+    let prove_s = t0.elapsed().as_secs_f64();
+    assert_eq!(a.proof.tier, expected_tier, "the production N={n} aggregate's tier");
+    let t1 = std::time::Instant::now();
+    let outs = verify_aggregate(&m, &aggregate_program(&vk), &a, &common::TEST_BINDING)
+        .expect("the production aggregate verifies");
+    let verify_s = t1.elapsed().as_secs_f64();
+    assert_eq!(outs.len(), n);
+    for (j, out) in outs.iter().enumerate() {
+        let want: [u32; 8] =
+            std::array::from_fn(|k| u32::try_from(proofs[j].public_values[pv::OUT0 + k]).unwrap());
+        assert_eq!(*out, want, "covered bundle {j}'s OUT0..7");
+    }
+    println!(
+        "issue45 A6: production N={n} aggregate (tier {}) — prove {prove_s:.1} s, verify \
+         {verify_s:.2} s, proof {} bytes",
+        expected_tier.0,
+        a.proof.size()
+    );
+}
+
+/// A6, runbook row 6: the production N=1 aggregate (tier 20 since phase 2's row cuts, ≈ 190–240 GB
+/// projected from docs/04's measured terms — the ~48.6 GB oracle / ≥ 64 GB sizing it carried
+/// at tier 21 counted one of four terms and is withdrawn).
+#[test]
+#[ignore = "issue45 A6: production N=1 aggregate proof, tier 20, ~190-240 GB projected (docs/04), >=256 GB host. Run: \
+            cargo test --release -p recursion --test aggregate production_n1_aggregate_proves_and_verifies -- --ignored --nocapture"]
+fn production_n1_aggregate_proves_and_verifies() {
+    prove_production_aggregate(1, RvmTier(20));
+}
+
+/// A6, runbook row 7: the production N=2 aggregate (tier 21 since phase 2's row cuts; its memory tables are
+/// one height taller than the measured tier-21 N=1's 376.9 GB, ≈ 475 GB derived in docs/04 — a
+/// >= 512 GB host, tight).
+#[test]
+#[ignore = "issue45 A6: production N=2 aggregate proof, tier 21, ~475 GB derived (docs/04), >=512 GB host. Run: \
+            cargo test --release -p recursion --test aggregate production_n2_aggregate_proves_and_verifies -- --ignored --nocapture"]
+fn production_n2_aggregate_proves_and_verifies() {
+    prove_production_aggregate(2, RvmTier(21));
+}
+
+/// A6, runbook row 8: the production N=3 aggregate (tier 22 since phase 2's row cuts; N=4 at tier 22 is
+/// ≈ 950 GB derived in docs/04, N=3 shares its cpu height). Only attempt after the rest — TIERS stops at 23.
+#[test]
+#[ignore = "issue45 A6: production N=3 aggregate proof, tier 22, under ~950 GB derived (docs/04), >=1 TB host. Run: \
+            cargo test --release -p recursion --test aggregate production_n3_aggregate_proves_and_verifies -- --ignored --nocapture"]
+fn production_n3_aggregate_proves_and_verifies() {
+    prove_production_aggregate(3, RvmTier(22));
+}
+
+/// B3: the production N>=n aggregate program emulated (no proving) — the #62 review's gap. Runs
+/// the whole verifier loop over N real production inner proofs and checks the bounds that only an
+/// execution can: the tier the row count lands in, every address inside the 2^24 space (register
+/// pressure from the 80 unrolled queries' spills does not run the arena past its limit), and every
+/// `16·clk + slot` timestamp inside the machine's 2^27 collision-free window (docs/aggregation.md).
+fn emulate_production_aggregate(n: usize, expected_tier: RvmTier) {
+    let proofs: Vec<Proof> =
+        common::bundle_proofs(FriProfile::Production, n).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = production_shape_and_key(&proofs[0]);
+    let vp = verify_rv32n(&shape, &key, Checkpoints::Off);
+    let tape =
+        WitnessTape::build_n(FriProfile::Production, &shape, &key, &proofs, &common::TEST_BINDING)
+            .unwrap();
+    let exec = execute(&vp.program, &tape.words, MAX_CYCLES)
+        .expect("the production aggregate program emulates over N real proofs");
+
+    // The interface digest is exactly the host's bound §4.4 list — the run did the whole job.
+    let pvs: Vec<Vec<u64>> = proofs.iter().map(|p| p.public_values.clone()).collect();
+    let words =
+        recursion::public_values::interface_words_bound(&shape, &key, &common::TEST_BINDING, &pvs);
+    assert_eq!(
+        exec.public,
+        recursion::public_values::public_digest(&words).to_vec(),
+        "the emulated production N={n} aggregate publishes the host's interface digest"
+    );
+
+    let rows = exec.cpu_rows();
+    assert_eq!(
+        RvmTier::for_cycles(rows),
+        Some(expected_tier),
+        "the production N={n} aggregate lands at tier {}",
+        expected_tier.0
+    );
+    assert!(exec.max_addr < (1 << 24), "every address stays inside the 2^24 space (max {})", exec.max_addr);
+    // `16·clk + slot`, slot <= 15: the top timestamp is under `16·rows`, and the collision-free
+    // window is 2^27 (16·CLK + slot, integral CLK on every real row).
+    let max_ts = (rows as u64) * 16 + 15;
+    assert!(max_ts < (1 << 27), "the top timestamp {max_ts} is inside the 2^27 window");
+    println!(
+        "issue45 B3: production N={n} aggregate emulation — {rows} cpu rows (tier {}), \
+         {} permutations, {} mem accesses, {} witness words, max addr {}, max ts {max_ts} (< 2^27)",
+        expected_tier.0,
+        exec.permutations(),
+        exec.mem_accesses(),
+        tape.words.len(),
+        exec.max_addr
+    );
+}
+
+/// B3: production N=2 aggregate emulation (tier 21, 1 787 351 rows since phase 2's row cuts;
+/// tier 22, ~3.94M rows before).
+#[test]
+#[ignore = "issue45 B3: production N=2 aggregate emulator run (1 787 351 rows, tier 21, no proving). Run: \
+            cargo test --release -p recursion --test aggregate production_n2_aggregate_emulates_within_bounds -- --ignored --nocapture"]
+fn production_n2_aggregate_emulates_within_bounds() {
+    emulate_production_aggregate(2, RvmTier(21));
+}
+
+/// B3: production N=3 aggregate emulation (tier 22, 2 680 822 rows since phase 2's row cuts; tier 23,
+/// ~5.9M rows before — the top rung then).
+#[test]
+#[ignore = "issue45 B3: production N=3 aggregate emulator run (2 680 822 rows, tier 22, no proving). Run: \
+            cargo test --release -p recursion --test aggregate production_n3_aggregate_emulates_within_bounds -- --ignored --nocapture"]
+fn production_n3_aggregate_emulates_within_bounds() {
+    emulate_production_aggregate(3, RvmTier(22));
 }

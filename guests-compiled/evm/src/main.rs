@@ -13,10 +13,13 @@ struct Syscalls;
 
 impl Host for Syscalls {
     fn keccak_f(&mut self, state: &mut [u32; 50]) {
-        keccak(state.as_mut_ptr());
+        keccak(state);
     }
     fn poseidon2(&mut self, words: &mut [u32], n: usize) {
-        poseidon2(words.as_mut_ptr(), n);
+        // SAFETY: `evm_core` calls this with `n <= words.len()` and `words.len() >= 8` (its
+        // domain-tagged wrapper hashes a buffer it sized for the digest), and `words` is a live,
+        // exclusive `&mut` for the call — `guest_sdk::poseidon2`'s `# Safety` contract.
+        unsafe { poseidon2(words.as_mut_ptr(), n) };
     }
 }
 

@@ -7,7 +7,8 @@ program — the RV32-machine verifier — and measures what that program costs p
 proof. The program is built against **constraint set 6** of the inner machine: the `public`
 table is a mandatory ninth instance of every shape (last in `chips()` order), every proof
 declares a sixth height (`public_log_height`), `pv::NUM` is 34 (`PUB0..7`, the unsalted
-`H_PUB`, joins the inner public values), and `Machine::verifier_key` is a 6-tuple. The bundle
+`H_PUB`, joins the inner public values; constraint set 8 appends `GAS`, the declared gas limit,
+for 35), and `Machine::verifier_key` is a 6-tuple. The bundle
 proofs the chain admits have an **empty** public segment (`verify_public(hc, &[], _)`) — the
 rVM verifies `H_PUB` as ordinary public values (a prover-computed constant of the shape), and
 no public-segment words enter the tape.
@@ -67,12 +68,12 @@ order — and commits to nothing about it (spec §2/§10). Fourteen pinned segme
 | # | segment | contents |
 |---|---|---|
 | 1 | `Header` | `tier`, the **six** declared log-heights (program, input, keccak, sha256, **public**, mem), `num_queries`, one word per FRI round's `log_arity` |
-| 2 | `PublicValues` | the **34** inner public values (`PC_ENTRY`, `TIER`, `OUT0..7`, `HC0..7`, `IN0..7`, `PUB0..7`) |
+| 2 | `PublicValues` | the **35** inner public values (`PC_ENTRY`, `TIER`, `OUT0..7`, `HC0..7`, `IN0..7`, `PUB0..7`, `GAS` — cs8 appended `GAS`; 34 before) |
 | 3 | `Commitments` | `main`, `permutation`, `quotient_chunks`, `random` caps (16 words each) |
 | 4 | `LookupTerminals` | one extension element per instance with lookups |
 | 5 | `OpenedValues` | per instance: `trace_local`, `trace_next`, `preprocessed_local`, `preprocessed_next`, quotient chunks, `random`, `permutation_local`, `permutation_next` |
 | 6 | `RandomOpenings` | the hiding wrapper's 4 hidden values per round / matrix / point (none for `preprocessed`) |
-| 7 | `FriCommits` | per FRI round: the commit cap (16) and the commit-phase PoW witness (1, discarded — 0 bits) |
+| 7 | `FriCommits` | per FRI round: the commit cap (16) and the commit-phase PoW witness (1, asserted `0` — 0 bits; VERIFIER-1) |
 | 8 | `FinalPoly` | one extension coefficient (`log_final_poly_len = 0`) |
 | 9 | `QueryPow` | the query grinding witness (1) |
 | 10 | `QueryBits` | per sampled element: 64 bit words + 1 canonicality hint — the PoW sample first, then one per query |
@@ -90,17 +91,26 @@ The public instance's openings flow through these segments exactly like every ot
 one more matrix in the `random`, `main`, `quotient_chunks` and `permutation` rounds.
 
 **Segment 7's PoW words (VERIFIER-1, the 2026-09-27 reviews).** At zero commit-phase grinding bits
-p3 neither checks nor observes these words, and the program reads each one and drops it. Since
-2026-09-28 the RV32 verifier (`research`'s `Machine::verify`, `check_commit_pow_witnesses`) refuses
-any word other than the honest `0`, so a proof can no longer be re-encoded there. The program is
-**not** changed to match: an in-program `assert_zero` on the word adds instructions to the
-aggregate program, which changes its digest — and that digest is what a chain's aggregation
-section pins. It is recorded here for the next aggregate program version: `rv32.rs`'s FRI-commits
-loop should constrain each hinted word to zero (`Builder::assert_eq` against a zero constant, once per
-FRI round). Until then nothing is lost: every bundle an aggregate covers was admitted by the
-chain through `Machine::verify` first, so a rewritten word never reaches an aggregate from the
-chain's own queue, and the aggregate's statement (the inner proof verifies) does not depend on the
-word either way.
+p3 neither checks nor observes these words, so any value verified and one proof had as many byte
+encodings as there are field elements per round. Since 2026-09-28 the RV32 verifier (`research`'s
+`Machine::verify`, `check_commit_pow_witnesses`) refuses any word other than the honest `0`. The
+program now matches it (the next constraint set, chain 16, v0.6.1): `rv32.rs`'s FRI-commits loop
+asserts each hinted word zero (`Builder::assert_zero`, one `JEQ` against the zero register per
+round, the trap named `commit pow witness[r]`). The word is still observed by nothing, so the
+transcript — every challenge, every checkpoint — is unchanged; an accepting run pays one cpu row
+per FRI round per proof. The same check is made by the
+host replay (`reference::replay` refuses the word as `PowWitness("commit phase")`, keeping it
+`Machine::verify`'s acceptance) and by the rVM's own native verifier
+(`machine::check_commit_pow_witnesses`, `VerifyError::CommitPowWitness`) — the rVM machine grinds
+zero commit-phase bits too, and the self-verifier (`rv32r`) inherits the in-program assertion
+through the shared `emit_proof`. Before this an inner proof with a rewritten word verified inside
+an aggregate (a chain admits every covered bundle through `Machine::verify` first, so its own
+queue never carried one, but the aggregate's acceptance was wider than the native verifier's).
+Pinned by `tests/verifier.rs::a_rewritten_commit_phase_pow_word_is_refused_at_its_round`,
+`tests/aggregate.rs::a_rewritten_commit_phase_pow_word_in_any_proof_is_refused` and
+`tests/self_verify.rs::a_rewritten_commit_phase_pow_word_in_an_rvm_proof_is_refused`. The program
+changed, so `aggregate_program_digest` and every program pin moved (the record is in
+`docs/02-aggregate.md`, "VERIFIER-1: the re-pin").
 
 ## The measured number
 
@@ -111,22 +121,61 @@ log:
 
 | | `FriProfile::Test` (16 queries) | `FriProfile::Production` (80 queries) |
 |---|---:|---:|
-| cpu rows | 441 643 | **1 968 619** |
-| Poseidon2 permutations | 11 205 | **51 605** |
-| memory accesses | 597 021 | 2 705 197 |
-| program instructions | 443 686 | 1 978 422 |
-| witness words read | 43 344 | 199 760 |
-| tape words | 43 344 | 199 760 |
+| cpu rows | 461 082 | **2 044 506** |
+| Poseidon2 permutations | 11 852 | **54 428** |
+| memory accesses | 630 292 | 2 845 220 |
+| program instructions | 463 199 | 2 054 639 |
+| witness words read | 45 758 | 210 174 |
+| tape words | 45 758 | 210 174 |
 
 The program is straight-line in the proof's data: every proof of the shape costs the same rows
 (asserted by the exit test on 5 test-profile and 50 production-profile proofs). The production
 row is pinned in `tests/pins.json`; the production program's digest
-(`Checkpoints::Off`, `8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`) in
-`src/programs/verify_rv32.digest`.
+(`Checkpoints::Off`, `8f15919989c3975106b7663722fe892c20e14e9658948e073626662cc999e1e7`) in
+`src/programs/verify_rv32.digest`. This is **constraint set 7 with VERIFIER-1**, measured on the
+integrated `feat/cs7` tree (2026-09-28, the 128 GB box); the constraint-set-6 row was 441 643 /
+**1 968 619** cpu rows, 11 205 / 51 605 permutations, 597 021 / 2 705 197 memory accesses,
+443 686 / 1 978 422 instructions, 43 344 / 199 760 witness words, digest
+`8901cec9c1681c9674f1e5582805d625c60b20d9f69be546da982622f36e0bda`.
+
+**Constraint set 8 re-pin (chain 18, 2026-09-29, emulated on the 48 GB laptop).** The inner
+machine's `GAS` column and 35th public value (`pv::GAS`): production **2 047 268 cpu rows**
+(+2 762), 54 515 permutations, 2 851 913 memory accesses, 2 057 401 instructions, 210 763
+witness words — still tier 21, 49 884 rows under `2^21`. Production program digest
+`8f159199…e1e7` → `454592b35ccfd6feefe93b7d2353bc484fca8ff260f74deae4e0865f7da2f2b3`; the test
+profile's single proof costs 11 875 permutations (was 11 852). `docs/02-aggregate.md`,
+"Constraint set 8", has the aggregate program's pins.
+
+**Phase 2 re-pin (2026-10-03, the three row cuts — `docs/04-phase2-row-cuts.md`).** Opened rows
+are hinted straight into per-height-group sponge buffers (Cut A), `HINTN` (opcode 26) writes
+eight tape words in one row (Cut B), and `COMPRESS` (opcode 27) does a Merkle level in one cpu
+row and one Poseidon2-chip row (Cut C). Production **893 606 cpu rows** (−56.4 % from 2 047 268),
+54 515 permutations (unchanged), 2 213 181 memory accesses, 903 739 instructions, 210 763
+witness words — **tier 20**, 154 969 rows under `2^20`; the test profile 230 950 rows, tier 18.
+Production program digest `454592b3…f2b3` →
+`723218da65a50f1f1581013f79fa5c5b1816b7ab46796dbaa4672c52bce2d0d1`. The tables in this
+document are the earlier measurements, kept for the history they explain; docs/04 has the
+current per-phase and per-opcode tables.
+
+**Constraint set 7 re-pin (chain 16).** The inner machine gained the LogUp blind (five columns
+and a `BLIND` bus interaction pair on every instance, `research/src/tables/blind.rs`), a `2^7`
+floor on every declared table height (the fixture's public table goes from `2^2` to `2^7` rows),
+32-bit range checks on the input and public words and the salt lanes (ZKM-1 / ZKH-2: the input and
+public tables widen 4 → 8 columns, wider leaves for every query to hash), and the rVM's keys moved
+to `key_derivation_v2` (HCS-1); VERIFIER-1 adds one `commit pow witness[r]` assertion per FRI round
+(one executed `JEQ` row each; it hashes nothing). Production **2 044 506 cpu rows** (+75 887,
++3.9 %; still tier 21, with 52 646 rows of headroom under `2^21` where there were 128 533).
+The aggregate program (`aggregate_program_digest`, the value a chain's genesis registers) at the
+production bundle shape `e0578970a1981321e044a6bbb947210b79d102daf1083c9b53b752a185709108` →
+`66a8094f19f8b1b47177a611e065d88c5ba27e100b5189d485cd28f09345356d`, at the test fixture shape
+`1ec0c545…eeeb` → `5e04fba0c0b900dcafbf37aa0acae87afb9ba2269f4d1970706ce2320b962993` (both move
+with the inner AIR, with the inner key's salts, which the program embeds, and with VERIFIER-1's
+assertions). The tables below are the constraint-set-6 measurement, kept for the history they
+explain.
 
 **M5.2 Task 4 re-pin (2026-09-14, ruling R5).** The table above is the *current* program's
 measurement, re-taken after phase 8 changed from thirty-nine raw `PUBLIC` rows to the
-four-element **interface digest**: the §4.4 list (vk digest, `N`, the 34 inner public values) is
+four-element **interface digest**: the §4.4 list (vk digest, `N`, the inner public values — 34 then, 35 since constraint set 8) is
 stored, sponged with a capacity-seeded header (`RVM_PUB_DOMAIN = 17`, the `Program::digest`
 construction — the proof's batch public values are always exactly those four elements, the cs6
 `H_PUB` pattern; the node recomputes the list from the covered bundles and compares digests).
@@ -171,6 +220,14 @@ tier 21: 1 968 619 < 2^21 = 2 097 152, with 6.1 % headroom** — the plan's targ
 
 ### Where the rows go
 
+**2026-10-03 — the current split is in `docs/04-phase2-row-cuts.md`**, re-taken by
+`tests/profile.rs` (`cargo test --release -p recursion --test profile -- --ignored --nocapture`,
+emulation only) after each of phase 2's three cuts: 893 606 production rows, of which the query
+phase is 725 192 (80 %) and tape reads 50 235; `LOAD` (245 950, mostly the allocator's 218 283
+reloads) and `FADDI` (144 427) are the largest opcodes, the Merkle select and the buffer copies
+gone. The tables below are the M5.1 measurement (5.68 M rows), kept as the record the precompile
+decision was made on.
+
 Per-phase split of the program's instructions (the program is straight-line apart from assertion
 traps, so these are also the cpu rows per phase), and the executed opcode histogram, both measured:
 
@@ -178,7 +235,7 @@ traps, so these are also the cpu rows per phase), and the executed opcode histog
 |---|---:|---:|
 | 0–4: header, transcript, commitments, terminal sum | 2 525 | 2 525 |
 | 5: constraint evaluation at `zeta` | 38 983 | 38 983 |
-| 6 preamble: claimed evals, betas, final poly, PoW, indices | 67 738 | 140 794 |
+| 6 preamble: claimed evals, betas, final poly, PoW, indices | 67 754 | 140 810 |
 | query segments: tape reads | 79 936 | 399 680 |
 | queries: Merkle walks, reduction, folds | 1 021 836 | 5 109 772 |
 | 8: §4.4 public values | 895 | 895 |
@@ -212,6 +269,24 @@ work (leaf sponges, walks, injections, commit-phase rows) is ≈ 1.3 M; `sample_
 canonical decompositions are ≈ 94 k; the fold rounds themselves are ≈ 100 k.
 
 ## The exit tests and their wall time
+
+**The fixture cache.** Every test proves its fixtures on first use and caches them under
+`$RECURSION_FIXTURES` (default `recursion/target/recursion-fixtures`), re-verifying each cached
+proof on load. The prover is single-threaded per proof, so a full cache (13 `Test-k` + 50
+`Production-k`, what the in-suite and `--ignored` exit/aggregate tests read) is generated in
+parallel by `tests/fixtures.rs`, one disjoint index list per process — on the 128 GB box
+(2026-09-28, cache at `/root/recursion-fixtures`): 7 test processes (~470 s a proof), then 8
+production ones (~260–560 s a proof), ~1 h in all:
+
+```text
+export RECURSION_FIXTURES=/root/recursion-fixtures
+for ks in 0,7 1,8 2,9 3,10 4,11 5,12 6; do
+  FIXTURE_PROFILE=Test FIXTURE_KS=$ks cargo test --release --test fixtures -- --ignored --nocapture &
+done; wait
+for i in 0 1 2 3 4 5 6 7; do
+  FIXTURE_PROFILE=Production FIXTURE_KS=$(seq -s, $i 8 49) cargo test --release --test fixtures -- --ignored --nocapture &
+done; wait
+```
 
 `tests/exit.rs`, against real bundle proofs produced by `Machine::prove` (disk-cached under
 `recursion/target/recursion-fixtures`; the cs6 fixtures were regenerated — the cs5 files were
@@ -270,7 +345,7 @@ to revisit this paragraph.
 
 **Superseded (M5.2 built, 2026-09-15).** The machine this section hands to exists now: the ISA
 is at 26 instructions (`REDUCE` = 24, `SPONGE` = 25; 0–23 frozen), the program is three row cuts
-smaller (5 682 847 → 1 968 619, tier 21), and the measured machine numbers — tables, buses,
+smaller (5 682 847 → 1 968 619, tier 21; 893 606 at tier 20 since phase 2's row cuts, `docs/04`), and the measured machine numbers — tables, buses,
 tiers, widths, degrees, the three cuts' deltas and gates, the test-profile twin's times and proof
 size, and the production exit's derived resource requirement — live in
 `docs/01-rvm-machine.md`. This section remains as the record of what M5.1 actually handed over.

@@ -390,11 +390,17 @@ fn an_input_rounds_leaf_group_and_restored_path_recompute_the_preprocessed_cap()
 
     // Group the matrices the way the leaf hash does: tallest first, everything whose padded height
     // equals the tallest's in the leaf, the rest injected at the level the walk reaches their height
-    // at. `sorted_by_key(Reverse(height))` is stable, so matrices of equal height keep dims order —
-    // which is the order their rows sit in on the tape.
+    // at. `sorted_by_key(Reverse(height))` is stable, so matrices of equal height keep dims order.
+    // Cut A: the tape lays the round out in that same group order (`shape::height_groups`), so a
+    // matrix's offset is the words of the matrices ahead of it in group order, not dims order.
     let tallest = dims.iter().map(|d| d.height).max().unwrap();
     let words_of = |m: usize| dims[m].width + recursion::witness::SALT_ELEMS;
-    let offset_in_round = |m: usize| (0..m).map(words_of).sum::<usize>();
+    let log_heights: Vec<usize> = dims.iter().map(|d| d.height.trailing_zeros() as usize).collect();
+    let tape_order: Vec<usize> =
+        recursion::shape::height_groups(&log_heights).into_iter().flatten().collect();
+    let offset_in_round = |m: usize| {
+        tape_order.iter().take_while(|&&k| k != m).map(|&k| words_of(k)).sum::<usize>()
+    };
     let leaf_group: Vec<usize> = (0..dims.len()).filter(|&m| dims[m].height == tallest).collect();
     let short: Vec<usize> = (0..dims.len()).filter(|&m| dims[m].height != tallest).collect();
     assert_eq!(leaf_group.len(), 1, "the preprocessed round's tallest matrix is the poseidon2 table");
@@ -433,7 +439,7 @@ fn an_input_rounds_leaf_group_and_restored_path_recompute_the_preprocessed_cap()
 
         let rows = b.alloc(short_cells as u64);
         for i in 0..short_cells {
-            let c = b.constant(tape.words[base + i]);
+            let c = b.constant(tape.words[base + offset_in_round(short[0]) + i]);
             b.store(rows, i as i64, c);
         }
         let sibs = b.alloc(4 * levels as u64);
@@ -706,9 +712,14 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
     // is the query phase — the FRI transcript's duplexes, the five input rounds' leaf sponges,
     // walks and injections, and the commit-phase rows and walks — plus phase 8's interface
     // digest (R5): a 39-word seeded sponge, `ceil(39/4)` = 10 permutations. Pinned at the
-    // measured Test-profile number (constraint set 6's shape); the production one lives in
-    // `docs/00-recursion-vm.md` and `pins.json`.
-    assert_eq!(exec.permutations(), 11_205, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
+    // measured Test-profile number (constraint set 7's shape; 11 205 in constraint set 6 — the
+    // LogUp blind's five columns per instance and ZKM-1's 32-bit input/public/salt lanes widen
+    // every opened leaf the query phase hashes, and the public table is floored at `2^7` rows;
+    // VERIFIER-1's per-round assertion hashes nothing; constraint set 8 moved it 11 852 → 11 875:
+    // the cpu table's `GAS` column widens every opened main-trace leaf, and the 35th public value
+    // is observed and sponged — phase 8's list is 40 words, still ten permutations); the
+    // production one lives in `docs/00-recursion-vm.md` and `pins.json`.
+    assert_eq!(exec.permutations(), 11_875, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
 }
 
 /// Every assertion phase 5 makes is a *named* checkpoint, and the names are the interface Task 6's
@@ -748,7 +759,15 @@ fn phase_5s_assertions_are_all_named() {
 /// for byte, and the two builds accept the same proofs with the same public values. The
 /// hardcoded digest is the production shape's pre-Task-7 program digest (the value committed
 /// before the liveness rework — after this task re-records, `src/programs/verify_rv32.digest`
-/// carries the On build's own, different, digest).
+/// carries the On build's own, different, digest). Constraint set 7 re-recorded it (the Off
+/// replay compiles the inner AIR, which gained the LogUp blind's columns and bus on every
+/// instance and a public table floored at `2^7`, and embeds the inner key, whose salts HCS-1
+/// moved): `c1c04ac3…d731` → `989752d6…6e98`. Constraint set 8 re-recorded it (the `GAS` column
+/// and the 35th public value; the key the program embeds moved with the AIR): `aafb1584…38ea` →
+/// `af772819…8425`. Phase 2's Cut A re-recorded it (2026-10-03: input openings are hinted into
+/// one buffer per height group and the tape's segment 11 follows that order — a change of the
+/// shared pipeline, so the Off replay moves with it; Cuts B and C are `Precompiles::On` only and
+/// leave it where Cut A put it): `af772819…8425` → `39bb6b8d…3352`.
 #[test]
 fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     use recursion::dsl::Liveness;
@@ -764,8 +783,9 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
-        "c1c04ac3a9faf266eb8980260dae6c7f12fe9ee4cf3dfa40de8440182258d731",
-        "the Off replay must reproduce the pre-Task-7 stream byte for byte"
+        "39bb6b8d94e62dd282001384d0b65294e7f024e6ef9b47381c8c96c6e1fd3352",
+        "the Off replay must reproduce the pre-Task-7 stream byte for byte (plus VERIFIER-1's \
+         per-round assertions, and constraint set 7's and 8's inner changes)"
     );
 
     let on = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::On, recursion::programs::Precompiles::On);
@@ -789,13 +809,194 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// the Test fixture's shape, recorded on circuits `224960c` (before the fix) and asserted after
 /// it; the self-verifier (`verify_rv32r`), which compiles the rVM's own tables into its program,
 /// is the one whose digest and costs do move (`tests/self_verify.rs`).
+///
+/// An *inner* constraint change does move it, by the same reasoning: constraint set 7 (the LogUp
+/// blind on every RV32 instance, the `2^7` floor on the public table's declared height — the
+/// fixture's `public_log_height` goes 2 → 7) changes the instructions phase 5 and the opening phase
+/// emit — and the constraint-set-7 key derivation (HCS-1) moves the inner key the program embeds.
+/// VERIFIER-1 (2026-09-28, in the same constraint set) *is* a program change — one
+/// `commit pow witness[r]` assertion per FRI round in the shared pipeline. The claim above still
+/// holds for constraint-only fixes of the rVM's own AIR. Re-registered for constraint set 7 with
+/// VERIFIER-1: `1ec0c545…eeeb` → `5e04fba0…2993`. Re-registered for constraint set 8 (the `GAS`
+/// column and the 35th public value move the inner shape and key; the deferred staged absorb,
+/// `dsl::hash::absorb_staged`, is itself a program change): `5e04fba0…2993` → `9eba7380…193d`.
+/// Re-registered for phase 2's row cuts (2026-10-03, `docs/04-phase2-row-cuts.md` — program
+/// changes all three: height-group hint buffers, `HINTN`, `COMPRESS`): `9eba7380…193d` →
+/// `5f1f6901…12df`.
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "1ec0c545003179b1ca4215b439d2d69fa33149a5257a04dc8473030fc2deeeeb",
-        "the aggregate program's digest at the Test fixture shape, as registered before RVM-1"
+        "5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df",
+        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 2's row cuts"
     );
+}
+
+/// VERIFIER-1 (the 2026-09-27 reviews), the rVM half: a commit-phase proof-of-work word other
+/// than the honest `0` is refused by the verifier program, at that round's named step — exactly
+/// where `Machine::verify` (`check_commit_pow_witnesses`) refuses the same rewritten proof. At
+/// zero commit-phase grinding bits p3 neither checks nor observes the word, so before this the
+/// program read it and dropped it and a re-encoded inner proof verified inside an aggregate.
+///
+/// The rewritten proof is built for real (the word changed in `commit_pow_witnesses`, the proof
+/// re-decoded), refused natively and by the host replay; its tape — which a prover hands the
+/// program as untrusted hints — is the honest tape with that one word rewritten, since the word
+/// is observed by nothing and moves no other tape word.
+#[test]
+fn a_rewritten_commit_phase_pow_word_is_refused_at_its_round() {
+    let (p, shape, key) = one_test_proof();
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let honest = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let (_, start, len) = *honest
+        .segments
+        .iter()
+        .find(|(s, _, _)| *s == recursion::witness::Segment::FriCommits)
+        .unwrap();
+    let rounds = shape.log_arities.len();
+    assert_eq!(len, rounds * 17, "per round: a 16-word cap, then its PoW word");
+    let m = Machine::new(FriProfile::Test);
+    for r in 0..rounds {
+        let at = start + 17 * r + 16;
+        assert_eq!(honest.words[at], F::ZERO, "an honest prover's grind(0) writes zero");
+        for w in [F::ONE, F::from_u64(0xdead_beef), F::NEG_ONE] {
+            // The rewritten proof, for real: refused natively and by the replay.
+            let mut bad: rand_zkvm::machine::Proof = postcard::from_bytes(&p.proof.to_bytes()).unwrap();
+            bad.batch.opening_proof.1.commit_pow_witnesses[r] = w;
+            assert!(
+                matches!(m.verify(&p.hc, &bad), Err(rand_zkvm::machine::VerifyError::CommitPowWitness { round }) if round == r),
+                "round {r}: Machine::verify refuses the rewritten word"
+            );
+            assert_eq!(
+                replay(FriProfile::Test, &shape, &key, &bad).err(),
+                Some(recursion::reference::ReplayError::PowWitness("commit phase")),
+                "round {r}: the host replay refuses it too"
+            );
+            // Its tape, and the program's verdict on it.
+            let mut t = honest.clone();
+            t.words[at] = w;
+            match execute(&vp.program, &t.words, 100_000_000) {
+                Err(ExecError::InverseOfZero { pc }) => assert_eq!(
+                    vp.program.checkpoint_at(pc),
+                    Some(format!("commit pow witness[{r}]").as_str()),
+                    "round {r}: refused at the wrong step"
+                ),
+                other => panic!("round {r}, word {w:?}: expected a refusal, got {:?}", other.map(|e| format!("acceptance, {} cpu rows", e.cpu_rows()))),
+            }
+        }
+    }
+    // And the honest tape still runs to acceptance.
+    execute(&vp.program, &honest.words, 100_000_000).expect("the honest tape is accepted");
+}
+
+// ── issue #45 B2: the Production-profile differential and a non-first-instance constraint break ─
+//
+// docs/aggregation.md "Before enabling aggregation" listed, still missing after the 2026-09-28
+// scan: "a Production-profile differential and a test that breaks a single AIR constraint on a
+// non-first instance". Both here. The Test-profile differential
+// (`the_emitted_constraint_evaluation_equals_the_native_folded_accumulator_on_every_instance`)
+// checks the emitted DAG folds bit-for-bit as p3-batch-stark's own folder; the query count is the
+// only Test/Production difference in the emitted code, so the Production run is the same claim at
+// 80 queries and the shape a real chain proves.
+
+fn one_production_proof() -> (common::BundleProof, InnerShape, InnerKey) {
+    let p = common::bundle_proofs(FriProfile::Production, 1).pop().unwrap();
+    let shape = InnerShape::of(
+        FriProfile::Production,
+        p.proof.tier,
+        p.proof.program_log_height,
+        p.proof.input_log_height,
+        p.proof.keccak_log_height,
+        p.proof.sha256_log_height,
+        p.proof.public_log_height,
+        p.proof.mem_log_height,
+    );
+    let key = InnerKey::of(FriProfile::Production, &shape);
+    (p, shape, key)
+}
+
+/// B2, the Production-profile differential: the emitted constraint DAG folds to the *same*
+/// accumulator, quotient and four Lagrange selectors as `p3-batch-stark`'s `VerifierConstraintFolder`
+/// on every instance, at the production profile (80 queries) — the shape a chain actually proves.
+/// `#[ignore]`d: one production fixture and a `Checkpoints::On` emulation of ~0.9M rows since phase
+/// 2's row cuts (~2M before; the memory the production exit needs is not needed here — this is emulation, not proving — but the run is minutes).
+#[test]
+#[ignore = "issue45 B2: production-profile constraint differential (~0.9M-row Checkpoints::On emulation). Run: \
+            cargo test --release -p recursion --test verifier the_emitted_constraint_evaluation_equals_the_native_folder_at_production -- --ignored --nocapture"]
+fn the_emitted_constraint_evaluation_equals_the_native_folder_at_production() {
+    let (p, shape, key) = one_production_proof();
+    let r = replay(FriProfile::Production, &shape, &key, &p.proof).unwrap();
+    let vp = verify_rv32(&shape, &key, Checkpoints::On);
+    let tape = WitnessTape::build(FriProfile::Production, &shape, &key, &p.proof).unwrap();
+    let exec = execute(&vp.program, &tape.words, 1 << 24).unwrap();
+    let cp = recursion::programs::checkpoint_values(&vp, &exec);
+    for i in 0..shape.degree_bits.len() {
+        assert_eq!(
+            cp[&format!("accumulator[{i}]")], r.accumulators[i],
+            "instance {i}: the emitted DAG must fold exactly as p3-batch-stark folds (production)"
+        );
+        assert_eq!(cp[&format!("quotient[{i}]")], r.quotients[i], "instance {i}: quotient(zeta)");
+        assert_eq!(cp[&format!("selectors[{i}].is_first_row")], r.selectors[i].is_first_row, "instance {i}: is_first_row");
+        assert_eq!(cp[&format!("selectors[{i}].is_last_row")], r.selectors[i].is_last_row, "instance {i}: is_last_row");
+        assert_eq!(cp[&format!("selectors[{i}].is_transition")], r.selectors[i].is_transition, "instance {i}: is_transition");
+        assert_eq!(cp[&format!("selectors[{i}].inv_vanishing")], r.selectors[i].inv_vanishing, "instance {i}: 1/Z_H(zeta)");
+    }
+    println!(
+        "issue45 B2: production differential green on all {} instances (80 queries)",
+        shape.degree_bits.len()
+    );
+}
+
+/// The per-instance width of the `OpenedValues` segment, in tape words (base-flattened Ext = 2 F),
+/// the layout `the_opened_value_segments_are_sized_by_the_shape_alone` pins.
+fn opened_words_of(shape: &InnerShape, i: usize) -> usize {
+    let w = shape.widths[i];
+    let pre = shape.preprocessed_widths[i];
+    let chunks = (1usize << shape.log_num_quotient_chunks[i]) << 1;
+    let aux = if shape.num_lookups[i] > 0 { shape.num_lookups[i] + 1 } else { 0 };
+    let opened = w
+        + if shape.main_next[i] { w } else { 0 }
+        + pre
+        + if shape.pre_next[i] { pre } else { 0 }
+        + chunks * 2
+        + 2
+        + 2 * aux * 2;
+    2 * opened
+}
+
+/// B2, breaking a single AIR constraint on a *non-first* instance: one opened trace value of
+/// instance `i > 0` is moved, so *that* instance's quotient identity
+/// (`accumulator · inv_vanishing == quotient`) fails — and the program traps at the checkpoint
+/// named for instance `i`, not instance 0's. `OpenedValues` is not observed into the transcript
+/// (the exit tamper table maps it to `quotient identity[0]` for a tamper in instance 0's block),
+/// so zeta does not move and instances `0..i` still pass: the first failing check is instance `i`'s
+/// own. The sibling `a_tampered_opened_value_fails_the_quotient_identity_at_the_named_checkpoint`
+/// does instance 0; this one proves the per-instance naming is real for every instance.
+#[test]
+fn breaking_one_air_constraint_on_a_non_first_instance_is_refused_at_that_instances_step() {
+    let (p, shape, key) = one_test_proof();
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let n = shape.instances();
+    assert!(n >= 2, "the bundle machine has several instances");
+    // Every non-first instance, so no single instance's naming is taken on faith.
+    for i in 1..n {
+        let mut tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+        let (_, start, len) = *tape
+            .segments
+            .iter()
+            .find(|(s, _, _)| *s == recursion::witness::Segment::OpenedValues)
+            .unwrap();
+        let off: usize = (0..i).map(|j| opened_words_of(&shape, j)).sum();
+        assert!(off < len, "instance {i}'s opened block is inside the segment");
+        tape.words[start + off] += F::ONE; // instance i's first opened trace value
+        match execute(&vp.program, &tape.words, 200_000_000) {
+            Err(ExecError::InverseOfZero { pc }) => assert_eq!(
+                vp.program.checkpoint_at(pc),
+                Some(format!("quotient identity[{i}]").as_str()),
+                "a broken constraint on instance {i} must trap at instance {i}'s quotient identity, not another's"
+            ),
+            other => panic!("instance {i}: expected the quotient identity to fail, got {other:?}"),
+        }
+    }
 }

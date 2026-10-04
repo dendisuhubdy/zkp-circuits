@@ -234,6 +234,10 @@ can be shown today it is pinned by a **failing-by-design** test in `tests/next_c
 and passes when the rule lands.
 
 1. **ZKM-1 / ZKH-2 — input and public words are 32-bit in the AIR** (with ISA-2, ARITH-3, COV-4).
+   **Done on `feat/cs7-range-pad-isa`**: `WL0..3` on both tables as below, and — beyond this rule,
+   at the lead's call — the salt row's four lanes too, for free: they reuse the write-back rows'
+   `HVL0_0..15` limb columns (`IS_HASH_OUT + IS_SALT` gates them), 16 `RANGE8` lookups a proof, no
+   new cpu column, so `H_IN` commits only to a salt that four `u32`s reproduce.
    Today the `input` table provides `(IDX, WORD)` and nothing range-checks `WORD`, and the cpu's
    `SYS_READ` row receives it into `C`, which is range-checked nowhere on that row either: a guest
    can be handed `2^32 + 5` for `5` consistently in every table
@@ -258,20 +262,115 @@ and passes when the rule lands.
    and `SYS_HASH_LEN · (n(HS0 + 4) − n(HASH_N)) = 0` — the length in capacity lane 4, the rest of
    the group unchanged (the `POSEIDON2` bus and chip permute whatever state they are given).
    `hash::sponge_hash_len`, the emulator and `guest_sdk::poseidon2_len` follow; the test above
-   then targets the new syscall.
+   then targets the new syscall. **Done on `feat/cs7-range-pad-isa`**, with one addition the test
+   forced: seeding lane 4 alone leaves `POSEIDON2_LEN([])` the zero digest (no block, no
+   permutation, and the digest is rate lanes 0..3), so an `n = 0` call absorbs **one empty block**
+   — `SYS_HASH_LEN · (1 − n(IS_HASH)) = 0` (never straight to write-back) — and the blanket
+   "lane 0 is active on every absorb row" becomes "on every absorb row but a group's first"
+   (`IS_HASH · (1 − ACT0) · HASH_IDX = 0`), with `SYS_HASH · n(IS_HASH) · (1 − n(ACT0)) = 0`
+   keeping a plain `POSEIDON2` group's first block non-empty.
 3. **VERIFIER-1, the rVM half.** `research`'s `Machine::verify` refuses a non-zero commit-phase
    proof-of-work word since this branch (`check_commit_pow_witnesses`); the aggregate program still
    reads each word and drops it (`recursion/docs/00-recursion-vm.md`, segment 7). The next
    aggregate program version constrains each to zero (one `assert_eq` against a zero constant per
    FRI round, in `programs/rv32.rs`'s FRI-commits loop) — a new aggregate program digest, which
-   is why it waits for the version bump rather than riding a same-chain release.
+   is why it waits for the version bump rather than riding a same-chain release. *Landed in
+   constraint set 7 (`feat/cs7-rvm-pow`, integrated on `feat/cs7`)*: the FRI-commits loop asserts
+   each word zero (trap `commit pow witness[r]`), the host replay and the rVM's own native
+   verifier refuse it too, and every program pin was re-measured on the integrated tree.
 4. **HCS-1 — stable verifier-key salts.** Switch every key config from `StdRng::seed_from_u64(
    KEY_SEED)` to `key_derivation_v2` (research and recursion; the module comment is the recipe),
    re-pin `tests/verifier_key.rs` in both crates, and the three exact `rand` pins can go back to
-   carets.
+   carets. *Landed as constraint set 7 (branch `feat/cs7-logup-blind`)*: one salt type,
+   `key_derivation_v2::SaltRng`, with a key source (the v2 stream, from `research`'s labels or the
+   rVM's own `rvm/key/*`) and a proving source (`StdRng` from OS entropy — proving blinding, where
+   `rand` belongs); `SeedableRng::from_seed` is always the v2 stream, so p3's clone-by-reseed never
+   routes a key through `StdRng`. `rand-zkvm-cuda`'s `HidingMmcs` is generic over the generator so
+   the backends salt identically. The exact pins were kept (they now decide only proving's salts).
 5. **ISA-4 / ISA-5 — the decoder's two tolerances** (`docs/01-isa.md`, "Deliberate deviations"):
    `JALR` clears bit 0 of its target and requires `funct3 = 0`. Each changes what the in-circuit
-   decoder accepts, so it is a program-table change and rides the cut.
+   decoder accepts, so it is a program-table change and rides the cut. **Done on
+   `feat/cs7-range-pad-isa`**: `Instr::decode` and the program table's `JALR` flag require
+   `funct3 = 0`; the emulator jumps to `(rs1 + imm) & !1` and the cpu's `JALR_B0` column is the
+   dropped bit (`NEXT_PC = ALU_OUT − JALR_B0`, sound by the next row's fetch). No in-tree
+   program's words or digest change.
+6. **INT-2 / GV-1 — blind every LogUp terminal; floor every table at `2^7`.** *Landed as
+   constraint set 7 (branch `feat/cs7-logup-blind`).* Each table's published LogUp terminal was a
+   checkable function of its trace (a call's private words, a bundle's dummy slots —
+   `tests/logup_blind.rs` replays the challenges and predicts them exactly on the old tree). Every
+   instance now carries five columns after its own (`tables::blind`, appended by `machine::Chip`):
+   a two-coordinate value sent and one received on a new `BLIND` bus, first row only (a `FIRST`
+   selector column is the multiplicity), the honest
+   prover cycling fresh values through the batch so each terminal moves by a uniform element of
+   `F_{p²}` while their sum stays zero. The verifier's floor on every declared table height is now
+   `MIN_PRIVATE_TABLE_LOG_HEIGHT` (program, input and public `MIN_LOG_HEIGHT` 7; keccak and sha256
+   at least 7 when present), because a table's running-sum columns are opened like its main
+   columns. `docs/03-privacy.md`, "LogUp terminals are blinded", has the argument; the chain side
+   derives a call's program height from `program_log_height` (floored), and a deploy's pc window
+   has to cover the floored table (PCW-FLOOR).
+
+## Constraint set 8: the gas meter
+
+Not a finding from the 2026-09-27 reviews above — a separate driver, the fullnode's gas design
+(spec 2026-09-28, "Phase 0/1" of chain 18's plan: pay per instruction in RAND on a declared,
+in-circuit-proven bound). Branch `feat/cs8-gas`, seven commits (`4d448ec`, `f0dc825`, `13dc769`,
+`6ec5a5b`, `6ad7d74`, `f95a1ce`, `6d4f124`) plus the final review's fix wave. What it carries:
+
+- **`pv::GAS`** (`tables::cpu::pv`), a 35th public value (`PUB0 + 8`, `pv::NUM` 34 → 35) — the
+  header's declared gas ceiling. `gas::gas_max(tier, keccak_log_height, sha256_log_height)` is
+  `(2^t − 1) + 2^(t−2) + 191·(2^klh/32) + 63·(2^slh/64)`: the tier's cycle budget, plus `+2` for
+  each of the at most `2^(t−3)` `POSEIDON2` absorb rows the poseidon2 table's `2^(t+2)` rows can
+  hold (one 32-row permutation each), plus the weight of every permutation and compression block
+  the declared keccak/sha256 heights could hold. It is the header's ceiling because each term is
+  the most its row kind can spend under that header, so no run the header admits costs more. (The
+  first cut omitted the absorb term, and a tier-10 run of 30 absorbs and 1 016 rows spent 1 078
+  gas against a 1 023 ceiling — refused `GasLimitBelowRun` with no limit that made it provable;
+  the final review's fix added the term.) The tier is clamped to `[10, 20]` before any shift, and
+  `check_public_values` refuses a tier outside `TIERS`. `Machine::verify`
+  refuses `pv::GAS > gas_max(...)` natively (`VerifyError::GasLimit`), before any verifier key is
+  built — the same cheap-before-expensive placement as the tier and height checks beside it.
+- **`gas::gas_of`**, the native meter over an execution (`Program`, inputs, public words, the
+  `CycleEvent` trace): the digest-prefix rows (program, input, public — each counted once, never
+  per cycle) plus `row_gas` per cycle — 1 gas for an ordinary row, `KECCAK_GAS = 192` for a
+  `KECCAK` row, `SHA256_GAS = 64` for a `SHA256` row, `POSEIDON2_ABSORB_GAS = 3` for a `POSEIDON2`/
+  `POSEIDON2_LEN` absorb row (a row is never charged more than one of these). `gas_of` is what the
+  prover's own run costs; `gas_max` is the most a header could ever cost. Used only off-circuit
+  (fee computation, `ProveOptions.gas_limit`'s own floor) — the circuit charges gas independently,
+  below.
+- **The cpu table's `GAS` column and its four `GD0..3` halt-row limbs** (`col::WIDTH` 277 → 282):
+  `GAS = 1` on row 0 (a digest row); on every transition into a real row, `GAS` grows by exactly
+  `gas_of`'s weights (degree 2); on the one `HALT` row, the slack `pv::GAS − GAS` is held,
+  byte-limbed, in the witness-only columns `GD0..3` and range-checked (`RANGE8`,
+  `Count::bounded(SYS_HALT, 1)`) — never published, only proven non-negative — so the declared
+  ceiling is provably at or above the run's own gas without the run's gas itself ever appearing as
+  a public value; the limbs are pinned to zero on every other row, padding included. Four limbs
+  are enough because the native check above already bounds `pv::GAS` under `2^32`.
+  `docs/02-tables-and-buses.md`, "Constraint set 8: the gas meter", has the constraints in full;
+  `docs/01-isa.md`'s syscall table gains a gas column built from these same weights.
+- **`ProveOptions.gas_limit: Option<u64>`** — a prover may declare any ceiling from its own run's
+  gas up to the header's `gas_max` (refused outside that range, `GasLimitBelowRun` /
+  `GasLimitAboveHeader`, before the cpu trace is built — `keccak_trace`/`sha256_trace` are built
+  first, since the limit needs their declared heights); `None` (the default, unchanged behaviour)
+  declares the header's own ceiling. `docs/03-privacy.md`, "What a proof leaks", has the leakage
+  argument: the default leaks nothing beyond the tier and hash heights already do, and a coarser
+  declared bucket leaks `log2(bucket)` fewer bits than the exact count would.
+
+**Measured proof-size deltas** (`FriProfile::Production`, `measure_production_profile_at_tier_10_and_12`,
+two runs each side, run-to-run noise ≈ ±6 KB — five cpu columns (`GAS`, `GD0..3`) and four
+`RANGE8` lookups added, no new preprocessed table):
+
+| Shape | Before cs8 | After cs8 | Change |
+|---|---|---|---|
+| tier 10, no hash chip | 1 368 874 / 1 363 178 B | 1 367 083 / 1 368 939 B (re-measured: 1 370 443 / 1 367 371 B) | ≈ +2 KB, +0.15 % |
+| tier 12, no hash chip | 1 419 308 / 1 426 027 B | 1 428 781 / 1 432 365 B (re-measured: 1 431 181 / 1 431 981 B) | ≈ +8 KB, +0.56 % |
+| tier 10, one keccak block | 3 280 413 / 3 269 053 B | 3 284 155 / 3 284 413 B (re-measured: 3 286 141 / 3 286 941 B) | ≈ +10 KB, +0.29 % |
+
+The re-measured pairs are this task's own run, reconciling within the ±6 KB noise band against the
+pair the column landed with (`13dc769`'s commit body). All four verifier keys' `common` digest
+moved (the four new `RANGE8` lookups); no `commitment` digest moved (no new preprocessed periodic
+table) — `tests/verifier_key.rs` re-pinned, in the same shape as constraint set 7's own RANGE8
+widening. **Every verifier key changed; ships only with a chain cut** — chain 18 in the fullnode's
+plan, alongside Phase 1's per-instruction fee schedule.
 
 ## Relationship to `../../fullnode`
 

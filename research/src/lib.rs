@@ -2,6 +2,7 @@ pub mod isa;
 pub mod asm;
 pub mod guests;
 pub mod emulator;
+pub mod gas;
 pub mod tables;
 pub mod machine;
 pub mod key_derivation_v2;

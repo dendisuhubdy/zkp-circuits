@@ -118,6 +118,17 @@ fn the_self_program_digest_is_deterministic_and_distinct() {
     let d1 = self_program_digest(&shape, &key);
     let d2 = self_program_digest(&shape, &key);
     assert_eq!(d1, d2, "rebuilding the self-verifier reproduces its digest");
+    // Pinned at the toy fixture's shape (2026-09-28), constraint set 7: VERIFIER-1's per-round
+    // assertion and HCS-1's rVM key salts (the program embeds the key) both moved it —
+    // `c18fa9eadf161ab625fc23048a6bcd4020eea8eaac33720d34e17f7148cd4804` before either.
+    // Phase 2's row cuts (2026-10-03) moved it again: the shared pipeline hints input openings
+    // into height-group buffers (Cut A), `hint_array` emits `HINTN` (Cut B) and the Merkle walks
+    // emit `COMPRESS` (Cut C), and the self-verifier compiles the rVM's wider cpu (82) and
+    // poseidon2 (343) tables — `6b2f058e60ffdf6a77091b932710513191688e4bdc59b2ecdc65b0dd5039033b`
+    // in constraint set 7/8 before them.
+    let hex: String = d1.iter().map(|w| format!("{:016x}", p3_field::PrimeField64::as_canonical_u64(w))).collect();
+    assert_eq!(hex, "18514c2aa0ad8d6a5aa7ea8baa65754f9137db5f1ad1d60943930add0becde67",
+               "the self-verifier's digest at the toy fixture shape");
 
     // And it is not the single-proof RV32-machine verifier's digest for the same profile: build
     // one bundle-shaped verifier and compare (the fixture is cached, the build is cheap).
@@ -319,14 +330,23 @@ fn the_self_verifiers_measured_cost_at_two_fixture_shapes() {
     // instructions, +56 permutations, +2 582 memory accesses, +160 witness words; busy +1 232,
     // +40, +2 439, +1 232, +160. The reduce-chip fixes (OPCODES-1, V-OPCODES-1, ZKR-4, ZKQ-3's
     // reduce half) move nothing here: neither fixture proof carries a reduce table.
+    // VERIFIER-1 (2026-09-28): one `commit pow witness[r]` assertion per FRI round — a `JEQ`
+    // against the zero register over its trap, so +1 row and +2 instructions per round, nothing
+    // else: toy +5 rows / +10 instructions (five rounds), busy +9 / +18 (nine rounds) (was
+    // (276555, 7498, 405853, 278398, 29575) and (368761, 9132, 481628, 370864, 35407)).
+    // Phase 2's row cuts (2026-10-03, `docs/04-phase2-row-cuts.md`): the shared pipeline's three
+    // cuts (height-group hint buffers, `HINTN`, `COMPRESS`) and the rVM's own wider tables, which
+    // the self-verifier opens and evaluates (cpu 72 → 82 columns, poseidon2 341 → 343, the
+    // `COMPRESS` bus): toy 276 560 → 152 527 rows, busy 368 770 → 188 390 (was
+    // (276560, 7498, 405853, 278408, 29575) and (368770, 9132, 481628, 370882, 35407)).
     assert_eq!(
         (r.cpu_rows, r.permutations, r.mem_accesses, r.program_instrs, r.witness_words),
-        (276555, 7498, 405853, 278398, 29575),
+        (152527, 7660, 345333, 154375, 30255),
         "the tier-8 toy fixture's CycleReport, pinned"
     );
     assert_eq!(
         (rb.cpu_rows, rb.permutations, rb.mem_accesses, rb.program_instrs, rb.witness_words),
-        (368761, 9132, 481628, 370864, 35407),
+        (188390, 9310, 388321, 190502, 36087),
         "the busy fixture's CycleReport, pinned"
     );
 
@@ -339,7 +359,55 @@ fn the_self_verifiers_measured_cost_at_two_fixture_shapes() {
     // measured only the CycleReport deltas above (its run stopped at the first failing pin);
     // this one was measured here. OPCODES-4 and ZKQ-3 added 102 more to both (7 263 / 7 543
     // after RVM-1): the public table's two new constraints and the cpu's two limb groups.
+    // Phase 2's row cuts (2026-10-03) added 480 more to both (7 365 / 7 645 before): `HINTN`'s
+    // eight RAM writes and `COMPRESS`'s lookup on the cpu row, two more decode selectors, and the
+    // poseidon2 chip's third row kind (`IS_COMPRESS`, `BIT`, its twelve RAM messages).
     let p5a: usize = vp.phase5.iter().map(|c| c.instrs).sum();
     let p5b: usize = vp_b.phase5.iter().map(|c| c.instrs).sum();
-    assert_eq!((p5a, p5b), (7365, 7645), "phase 5 varies with the degree bits, measured");
+    assert_eq!((p5a, p5b), (7845, 8125), "phase 5 varies with the degree bits, measured");
+}
+
+/// VERIFIER-1 for the rVM's own proofs: the rVM machine grinds zero commit-phase bits too
+/// (`machine::config`), so its words were equally free. A rewritten word is refused by the rVM's
+/// native `Machine::verify`, by the host replay, and by the self-verifier at that round's named
+/// step — the same check `tests/verifier.rs` pins for the RV32 machine's proofs.
+#[test]
+fn a_rewritten_commit_phase_pow_word_in_an_rvm_proof_is_refused() {
+    let (program, proof, shape, key) = fixture();
+    let m = Machine::new(FriProfile::Test);
+    m.verify(&program, &proof).expect("the honest fixture verifies natively");
+    let vp = verify_rv32r(&shape, &key, Checkpoints::Off);
+    let honest = WitnessTape::build_for_with_binding(FriProfile::Test, &shape, &key, &proof, &common::TEST_BINDING).unwrap();
+    let r = *honest
+        .segment_refs()
+        .iter()
+        .find(|r| r.proof == 0 && r.segment == Segment::FriCommits)
+        .unwrap();
+    let rounds = shape.log_arities().len();
+    assert_eq!(r.len, rounds * 17, "per round: a 16-word cap, then its PoW word");
+    for round in 0..rounds {
+        let mut bad: recursion::machine::Proof = postcard::from_bytes(&proof.to_bytes()).unwrap();
+        bad.batch.opening_proof.1.commit_pow_witnesses[round] = F::ONE;
+        assert!(
+            matches!(m.verify(&program, &bad), Err(recursion::machine::VerifyError::CommitPowWitness { round: got }) if got == round),
+            "round {round}: the rVM's Machine::verify refuses the rewritten word"
+        );
+        assert_eq!(
+            WitnessTape::build_for(FriProfile::Test, &shape, &key, &bad).err(),
+            Some(recursion::witness::TapeError::Replay(recursion::reference::ReplayError::PowWitness("commit phase"))),
+            "round {round}: the host replay refuses it"
+        );
+        let at = r.start + 17 * round + 16;
+        assert_eq!(honest.words[at], F::ZERO, "an honest prover's grind(0) writes zero");
+        let mut t = honest.clone();
+        t.words[at] = F::ONE;
+        match execute(&vp.program, &t.words, MAX_CYCLES) {
+            Err(ExecError::InverseOfZero { pc }) => assert_eq!(
+                vp.program.checkpoint_at(pc),
+                Some(format!("commit pow witness[{round}]").as_str()),
+                "round {round}: refused at the wrong step"
+            ),
+            other => panic!("round {round}: expected a refusal, got {:?}", other.map(|e| format!("acceptance, {} cpu rows", e.cpu_rows()))),
+        }
+    }
 }

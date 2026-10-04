@@ -42,7 +42,7 @@ fn a_program_much_longer_than_a_small_tiers_cpu_height_but_briefly_executed_prov
 
     let exec = rand_zkvm::emulator::execute(&p, &[], &[], 1 << 20).unwrap();
     assert!(exec.cycles() < 20, "only the leading few instructions ever execute");
-    let traces = build_traces_salted(&p, &[], &[], [0u32; 4], &exec, Tier(14)).unwrap();
+    let traces = build_traces_salted(&p, &[], &[], [0u32; 4], &exec, Tier(14), rand_zkvm::gas::gas_max(Tier(14), 0, 0)).unwrap();
     // The program table's own height is driven by the program's length (`program_log_height`),
     // not by `Tier(14).cpu_height()` (16 384) — it is far smaller, and in particular still
     // bigger than `Tier(10).cpu_height()` would have offered, confirming the fix actually sized
@@ -74,6 +74,24 @@ fn every_guest_proves_and_verifies() {
         for k in 0..8 {
             assert_eq!(proof.public_values[pv::IN0 + k], expected_hin[k] as u64, "{name}: H_IN word {k}");
         }
+    }
+}
+
+/// HCS-4: `POSEIDON2_LEN` end to end — the length-seeded group start, the `n = 0` empty block, a
+/// partial block and a two-block message — each proved, verified, and publishing
+/// `hash::sponge_hash_len`'s digest.
+#[test]
+fn poseidon2_len_demo_proves_and_verifies() {
+    let m = Machine::new(FriProfile::Test);
+    for n in [0usize, 1, 4, 5] {
+        let msg: Vec<u32> = (0..n as u32).map(|k| 0x0dea_0000 + k).collect();
+        let p = guests::poseidon2_len_demo(&msg);
+        let (proof, exec) = m.prove_salted(&p, &[], &[], [1, 2, 3, 4], Some(Tier(10))).unwrap_or_else(|e| panic!("n={n}: {e:?}"));
+        m.verify(&p.digest(), &proof).unwrap_or_else(|e| panic!("n={n}: {e:?}"));
+        let want = rand_zkvm::hash::sponge_hash_len(&msg);
+        assert_eq!(&exec.outputs[..], &want[..], "n={n}");
+        use rand_zkvm::tables::cpu::pv;
+        for k in 0..8 { assert_eq!(proof.public_values[pv::OUT0 + k], want[k] as u64, "n={n}: output {k}"); }
     }
 }
 
@@ -109,7 +127,7 @@ fn keccak_demo_proves_and_verifies_at_tier_10() {
 
 /// A keccak-free `guests::fib(10)` proof at `Tier(10)` and `FriProfile::Test`, measured.
 ///
-/// **The current figure is constraint set 6's**, which is why the constant is no longer named for
+/// **The current figure is constraint set 7's**, which is why the constant is no longer named for
 /// M4.2 — it was `PRE_M4_2_TIER_10_TEST_PROFILE_BYTES` while it held the **pre**-M4.2 baseline, the
 /// size of this proof on the last commit *before* the keccak table existed, and it kept that name
 /// for one commit too long after it stopped holding that.
@@ -123,14 +141,19 @@ fn keccak_demo_proves_and_verifies_at_tier_10() {
 /// `SYS_READ_PUB`/`IS_PUBDIGEST`/`PUBDIGEST_LAST` selectors, `IPOUT0..7`, and the
 /// `PHVL0..31`/`PHIMAX0..3`/`PINV0..3` final-encoding block) and the batch gained a mandatory
 /// ninth instance, the 4-column `public` table; every FRI query opens a leaf of the batch's
-/// full width. `SIZE_BAND_PCT` is the tolerance around the current figure.
-const TIER_10_TEST_PROFILE_BYTES: usize = 298_791;
+/// full width. Constraint set 7 grew it again, by ~5.7% to **315 847**, the middle of five on the
+/// integrated `feat/cs7` tree (314 919 / 315 239 / 315 847 / 316 167 / 317 191): the LogUp blind's
+/// five columns and bus pair on every instance, the `2^7` floor on the program, input and public
+/// tables, and ZKM-1's four byte limbs on the input and public tables all widen or lengthen what
+/// every FRI query opens. `SIZE_BAND_PCT` is the tolerance around the current figure.
+const TIER_10_TEST_PROFILE_BYTES: usize = 315_847;
 
 /// Tolerance, in percent, on the size assertion in `a_keccak_free_proof_carries_no_keccak_table`.
 ///
-/// Derived, not picked: the four measured proofs above span 297 223..299 783, i.e. ±0.6% around
-/// the constant, so 5% is ~8x the per-proof entropy noise — room for the odd extra
-/// declared-height byte or an upstream postcard tweak. The thing the assertion exists to detect
+/// Derived, not picked: the constraint-set-6 proofs above spanned 297 223..299 783 and the
+/// constraint-set-7 ones span 314 919..317 191, i.e. ±0.6% around the constant either time, so
+/// 5% is ~8x the per-proof entropy noise — room for the odd extra declared-height byte or an
+/// upstream postcard tweak. The thing the assertion exists to detect
 /// is an order of magnitude beyond it: a 2 612-column keccak table adds roughly +450 KB at this
 /// profile (+1.91 MB at the production one), i.e. +160%, so the band would have to be ~32x wider
 /// before the regression could hide inside it. The load-bearing check is the
@@ -178,7 +201,7 @@ fn a_keccak_free_proof_declares_the_tier_floor_memory_height() {
     let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
     let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
     assert!(accesses < 1 << 12, "fib(10) is nowhere near the tier-10 floor: {accesses} accesses");
-    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     assert_eq!(t.mem_log_height, 12, "exactly `t + 2`");
     assert_eq!(t.memory.height(), 1 << 12);
     let proof = m.prove_traces(&p, &t, Tier(10));
@@ -208,7 +231,7 @@ fn a_few_keccak_permutations_still_fit_under_the_tier_floor() {
     let p = a.assemble();
     let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
     assert_eq!(exec.events.iter().filter(|e| e.keccak_row.is_some()).count(), 3);
-    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     // Three permutations need three 32-row blocks -> 128 rows -> 2^7.
     assert_eq!(t.keccak_log_height, 7);
     let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
@@ -238,7 +261,7 @@ fn enough_keccak_permutations_raise_the_declared_memory_height_past_the_floor() 
     let p = a.assemble();
     let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
     assert_eq!(exec.events.iter().filter(|e| e.keccak_row.is_some()).count(), 40);
-    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10)).unwrap();
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 11, 0)).unwrap(); // cs8: the 40 permutations weigh 7 640 gas, past the hash-free ceiling; 11 = the height asserted below
     let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
     assert!(((1 << 12)..1 << 13).contains(&accesses), "{accesses} accesses: past the floor, inside one more bit");
     assert_eq!(t.mem_log_height, 13, "the access count now drives the height");
@@ -331,13 +354,14 @@ fn a_declared_sha256_table_costs_about_a_hundred_kilobytes_at_the_test_profile()
     let m = Machine::new(FriProfile::Test);
     let p = guests::fib(10);
     let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
-    let mut t = build_traces_salted(&p, &[], &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [1, 2, 3, 4], &exec, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     assert_eq!(t.sha256_log_height, 0, "fib makes no SHA256 call");
     let free = m.prove_traces(&p, &t, Tier(10));
     m.verify(&p.digest(), &free).unwrap();
 
-    t.sha256 = Some(sha256::sha256_trace(&[], sha256::MIN_LOG_HEIGHT));
-    t.sha256_log_height = sha256::MIN_LOG_HEIGHT;
+    // Constraint set 7: a declared table is at least the private-data floor, two 64-row blocks.
+    t.sha256 = Some(sha256::sha256_trace(&[], rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT));
+    t.sha256_log_height = rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT;
     let carried = m.prove_traces(&p, &t, Tier(10));
     m.verify(&p.digest(), &carried).unwrap();
 
@@ -362,13 +386,14 @@ fn measure_the_sha256_table_cost_at_the_production_profile() {
     let m = Machine::new(FriProfile::Production);
     let p = guests::fib(10);
     let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
-    let mut t = build_traces_salted(&p, &[], &[], [1, 2, 3, 4], &exec, Tier(10)).unwrap();
+    let mut t = build_traces_salted(&p, &[], &[], [1, 2, 3, 4], &exec, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 0, 0)).unwrap();
     let t0 = std::time::Instant::now();
     let free = m.prove_traces(&p, &t, Tier(10));
     let free_prove = t0.elapsed();
     m.verify(&p.digest(), &free).unwrap();
-    t.sha256 = Some(sha256::sha256_trace(&[], sha256::MIN_LOG_HEIGHT));
-    t.sha256_log_height = sha256::MIN_LOG_HEIGHT;
+    // Constraint set 7: a declared table is at least the private-data floor, two 64-row blocks.
+    t.sha256 = Some(sha256::sha256_trace(&[], rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT));
+    t.sha256_log_height = rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT;
     let t1 = std::time::Instant::now();
     let carried = m.prove_traces(&p, &t, Tier(10));
     let carried_prove = t1.elapsed();

@@ -219,17 +219,22 @@ where
     let fri_alpha = ch.sample_ext(b);
     b.checkpoint("fri_alpha", fri_alpha);
 
-    // 2. The commit phase — per round: the cap, the discarded PoW witness, one `beta` draw.
+    // 2. The commit phase — per round: the cap, the PoW witness (asserted zero), one `beta` draw.
     let mut fri_caps = Vec::with_capacity(shape.log_arities().len());
     let mut betas = Vec::with_capacity(shape.log_arities().len());
     for r in 0..shape.log_arities().len() {
         let cap = read_cap(b);
         ch.observe_cap(b, &cap);
-        // `commit_proof_of_work_bits == 0` on this machine, and `check_witness(0, w)` observes
+        // `commit_proof_of_work_bits == 0` on both machines, and `check_witness(0, w)` observes
         // nothing — it returns `true` without touching the transcript
-        // (`grinding_challenger.rs:44-49`). The witness element is therefore read off the tape
-        // and discarded, exactly as the native verifier discards it.
-        let _discarded = b.hint();
+        // (`grinding_challenger.rs:44-49`) — so p3 accepts any word here. `Machine::verify`
+        // (research's `check_commit_pow_witnesses`, and the rVM's own) refuses all but the
+        // honest `0` (VERIFIER-1, the 2026-09-27 reviews): one encoding per proof. The word is
+        // asserted zero here to match — observed by nothing still, so the transcript is
+        // unchanged — at one `JEQ` row per round. Before this the word was read and discarded,
+        // and an inner proof with a rewritten word verified inside an aggregate.
+        let pow = b.hint();
+        b.assert_zero(pow, &format!("commit pow witness[{r}]"));
         let beta = ch.sample_ext(b);
         b.checkpoint(&format!("beta[{r}]"), beta);
         fri_caps.push(cap);
@@ -263,11 +268,14 @@ where
     // segments are read first, in tape order — each segment holds *every* query's run, so a
     // per-query read would land on the next query's rows, not this query's paths.
     let mut all_rows = Vec::with_capacity(shape.num_queries());
+    let mut all_groups = Vec::with_capacity(shape.num_queries());
     let mut all_paths = Vec::with_capacity(shape.num_queries());
     let mut all_commit_openings = Vec::with_capacity(shape.num_queries());
     let mut all_commit_paths = Vec::with_capacity(shape.num_queries());
     for _ in 0..shape.num_queries() {
-        all_rows.push(read_input_openings(b, &opened));
+        let (rows, groups) = read_input_openings(b, &opened);
+        all_rows.push(rows);
+        all_groups.push(groups);
     }
     for _ in 0..shape.num_queries() {
         all_paths.push(read_input_paths(b, &opened));
@@ -281,7 +289,7 @@ where
     mark(b, "query segments: tape reads");
     b.unrolled(shape.num_queries(), |b, q| {
         emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
-                   &index_bits[q], &all_rows[q], &all_paths[q], &all_commit_openings[q],
+                   &index_bits[q], &all_rows[q], &all_groups[q], &all_paths[q], &all_commit_openings[q],
                    &all_commit_paths[q]);
     });
     mark(b, "queries: merkle walks, reduction, folds");
@@ -327,7 +335,7 @@ pub fn verify_rv32_with(
     //
     // `inner_vk_digest`, recomputed in-program from the compile-time shape words and the key's
     // cap (so it is bound by the program digest twice over), then the §4.4 list — the vk digest,
-    // `N = 1`, the 34 inner public values — stored, sponged with the capacity header, and the
+    // `N = 1`, the 35 inner public values — stored, sponged with the capacity header, and the
     // digest's four lanes published. The batch public values are always exactly those four (R5):
     // the node recomputes the list from the covered bundles' public fields and compares digests
     // (the cs6 `H_PUB` pattern). What used to be thirty-nine `PUBLIC` rows is the digest's four.
@@ -528,16 +536,33 @@ fn levels_of(mats: &[MatrixOpening]) -> usize {
     mats.iter().map(|m| m.log_height).max().expect("a committed round has matrices") - CAP_HEIGHT
 }
 
-/// One query's run of `Segment::InputOpenings`: per round, per matrix, the opened row and its
-/// four salts.
-fn read_input_openings(b: &mut Builder, opened: &QueryOpenings) -> Vec<Vec<Array<Felt>>> {
-    opened
-        .rounds
-        .iter()
-        .map(|mats| {
-            mats.iter().map(|m| b.hint_array(m.points[0].1.len + SALT_ELEMS)).collect()
-        })
-        .collect()
+/// One query's run of `Segment::InputOpenings`: per round, per height group (tallest first,
+/// `shape::height_groups`), the group's matrices' `row ‖ salt` runs hinted **straight into one
+/// contiguous buffer** — the buffer the leaf sponge (or the injection sponge) hashes, so no copy
+/// is made later (Cut A). Returns the per-matrix views, indexed `[round][matrix]` exactly as
+/// before, and the per-round group buffers `(base, n_cells)` in group order.
+fn read_input_openings(b: &mut Builder, opened: &QueryOpenings) -> (Vec<Vec<Array<Felt>>>, Vec<Vec<(Ptr, usize)>>) {
+    let mut rows = Vec::with_capacity(opened.rounds.len());
+    let mut groups = Vec::with_capacity(opened.rounds.len());
+    for mats in &opened.rounds {
+        let heights: Vec<usize> = mats.iter().map(|m| m.log_height).collect();
+        let mut views: Vec<Option<Array<Felt>>> = vec![None; mats.len()];
+        let mut bufs = Vec::new();
+        for group in crate::shape::height_groups(&heights) {
+            let lens: Vec<usize> = group.iter().map(|&m| mats[m].points[0].1.len + SALT_ELEMS).collect();
+            let total: usize = lens.iter().sum();
+            let buf = b.hint_array(total);
+            let mut off = 0i64;
+            for (&m, &len) in group.iter().zip(&lens) {
+                views[m] = Some(Array::new(b.offset(buf.base, off), len, 1));
+                off += len as i64;
+            }
+            bufs.push((buf.base, total));
+        }
+        rows.push(views.into_iter().map(|v| v.expect("every matrix is in exactly one group")).collect());
+        groups.push(bufs);
+    }
+    (rows, groups)
 }
 
 /// One query's run of `Segment::InputPaths`: per round, the restored path's siblings.
@@ -587,6 +612,7 @@ fn emit_query<S: VerifierShape>(
     final_poly: Ext,
     index_bits: &[Felt],
     rows: &[Vec<Array<Felt>>],
+    groups: &[Vec<(Ptr, usize)>],
     paths: &[Array<Felt>],
     commit_openings: &[Array<Felt>],
     commit_paths: &[Array<Felt>],
@@ -596,7 +622,7 @@ fn emit_query<S: VerifierShape>(
     // ── every input round, Merkle-verified against its commitment before any arithmetic reads the
     // openings (`open_inputs` authenticates first, for the same reason).
     for (ri, mats) in opened.rounds.iter().enumerate() {
-        emit_input_round_root(b, log_global, mats, &rows[ri], paths[ri], index_bits, &metas[ri]);
+        emit_input_round_root(b, log_global, mats, &groups[ri], paths[ri], index_bits, &metas[ri]);
     }
 
     // ── the batch-opening reduction.
@@ -679,14 +705,15 @@ fn emit_query<S: VerifierShape>(
 }
 
 /// One input round's Merkle authentication, `verify_batch`'s loop with the pruned multiproof
-/// expanded into one full path per query: the leaf sponge over the tallest group's concatenated
-/// `row ‖ salt` runs, the walk, the shorter-height groups injected at their levels, and the
-/// surviving digest compared against the round's cap entry (`mmcs/batch.rs:203-267`).
+/// expanded into one full path per query: the leaf sponge over the tallest group's `row ‖ salt`
+/// runs (hinted contiguously by [`read_input_openings`], so sponged in place), the walk, the
+/// shorter-height groups injected at their levels, and the surviving digest compared against the
+/// round's cap entry (`mmcs/batch.rs:203-267`).
 fn emit_input_round_root(
     b: &mut Builder,
     log_global: usize,
     mats: &[MatrixOpening],
-    rows: &[Array<Felt>],
+    groups: &[(Ptr, usize)],
     path: Array<Felt>,
     index_bits: &[Felt],
     meta: &RoundMeta,
@@ -694,33 +721,20 @@ fn emit_input_round_root(
     let max_h = mats.iter().map(|m| m.log_height).max().expect("a round has matrices");
     let levels = max_h - CAP_HEIGHT;
     let bits_reduced = log_global - max_h;
-    // Distinct heights, tallest first; matrices of one height keep their committed order (the
-    // reference's `sorted_by_key(Reverse(height))` is stable).
-    let mut heights: Vec<usize> = mats.iter().map(|m| m.log_height).collect();
-    heights.sort_unstable_by(|a, bb| bb.cmp(a));
-    heights.dedup();
-    let group = |h: usize| -> Vec<usize> {
-        mats.iter().enumerate().filter(|(_, m)| m.log_height == h).map(|(i, _)| i).collect()
-    };
-    // Concatenate a group's `row ‖ salt` runs into one fresh buffer, in group order.
-    let concat = |b: &mut Builder, members: &[usize]| -> (Ptr, usize) {
-        let total: usize = members.iter().map(|&m| rows[m].len).sum();
-        let buf = b.alloc(total as u64);
-        let mut off = 0i64;
-        for &m in members {
-            b.copy_cells(buf, off, rows[m].base, 0, rows[m].len);
-            off += rows[m].len as i64;
-        }
-        (buf, total)
-    };
-    let (leaf_msg, n) = concat(b, &group(heights[0]));
+    let heights: Vec<usize> = mats.iter().map(|m| m.log_height).collect();
+    // The groups' heights, tallest first, from the same `height_groups` that sized the buffers.
+    let distinct: Vec<usize> = crate::shape::height_groups(&heights).iter().map(|g| heights[g[0]]).collect();
+    assert_eq!(distinct.len(), groups.len(), "one buffer per height group");
+    // Cut A: the tallest group's rows were hinted straight into `groups[0]`; the leaf sponge
+    // runs over that buffer in place. No copy.
+    let (leaf_msg, n) = groups[0];
     let leaf = Digest(b.alloc(DIGEST_ELEMS as u64));
     hash::sponge(b, leaf_msg, n, leaf);
-    let mut injections = Vec::new();
-    for &h in &heights[1..] {
-        let (buf, n) = concat(b, &group(h));
-        injections.push(hash::Injection { after_level: max_h - h - 1, rows: buf, n_cells: n });
-    }
+    let injections: Vec<hash::Injection> = distinct[1..]
+        .iter()
+        .zip(&groups[1..])
+        .map(|(&h, &(buf, n))| hash::Injection { after_level: max_h - h - 1, rows: buf, n_cells: n })
+        .collect();
     let out = Digest(b.alloc(DIGEST_ELEMS as u64));
     hash::merkle_walk_with_injections(
         b,

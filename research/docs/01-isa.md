@@ -39,34 +39,29 @@ hard-wired to zero: the program table's `writes_rd` selector is already
 the `MEMORY` bus, and the emulator forces `regs[0] = 0` after every cycle to
 match.
 
-`JALR` does not clear bit 0 of its target the way the RISC-V spec's C-extension
-convention expects. `next_pc = a + imm` is used exactly as computed; if that
-value is odd, the next fetch looks up an odd `pc` in the `program` table, the
-`PROGRAM` lookup fails, and the run simply cannot be proved. There is no
-implicit alignment fixup.
+`JALR` clears bit 0 of its target, as RV32I says: `next_pc = (a + imm) & !1`
+(the next constraint set, ISA-4 — before it the sum was used as computed and
+an odd target was simply unfetchable). A target that is even but not 4-aligned
+is still unfetchable: the `program` table holds only `base_pc + 4j`, and the
+emulator reports `BadPc`. There is no C extension.
 
-### Deliberate deviations from RV32I (ISA-4, ISA-5 — the 2026-09-27 review)
+### Deviations from RV32I (ISA-4, ISA-5 — the 2026-09-27 review)
 
-The review recorded two places where this machine accepts or computes something the RV32I spec
-does not, and one where the host tooling silently rewrote what it was given. The first two are
-**kept, deliberately, on the live chain**: each is consistent between the emulator and the
-in-circuit decoder (so no proof ever says something the emulator did not do), neither lets a
-guest reach a state an honest RV32I program could not, and changing either changes what the
-`program` table's in-circuit decoder accepts — a verifier-key change, i.e. the next constraint set
-(`docs/05-roadmap.md`, "The next constraint set", item 5).
+The review recorded two places where this machine accepted or computed something the RV32I spec
+does not, and one where the host tooling silently rewrote what it was given. The first two were
+kept on the live chain (each was consistent between the emulator and the in-circuit decoder, and
+changing either changes what the `program` table's in-circuit decoder accepts — a verifier-key
+change) and are **fixed by the next constraint set** (`docs/05-roadmap.md`, item 5):
 
-1. **`JALR` does not clear bit 0 of its target** (the paragraph above). RV32I computes
-   `(rs1 + imm) & !1`; here an odd target is simply unfetchable, so a program that relies on the
-   masking is unprovable rather than wrong. No compiled guest does: `rustc`/`clang` emit `JALR` to
-   word-aligned targets only (there is no C extension here), and `rand-guest check` refuses
-   anything but 4-byte instructions.
-2. **`JALR` accepts any `funct3`.** RV32I reserves every `funct3 ≠ 0` under opcode `0x67`;
-   `Instr::decode` (and the program table's `JALR` decode flag, which mirrors it case for case)
-   reads the opcode and ignores the field, so eight words decode to the same `JALR`. What that
-   admits is non-canonical *encodings* of an instruction that exists — never a new behaviour — and
-   since `hc` hashes the words, the eight are eight different programs with identical semantics,
-   which only matters to someone comparing programs by digest. `Instr::encode` always writes
-   `funct3 = 0`; a toolchain never emits anything else.
+1. **`JALR` clears bit 0 of its target** (the paragraph above). The cpu's `JALR_B0` column is the
+   dropped bit: `NEXT_PC = ALU_OUT − JALR_B0` (`docs/02-tables-and-buses.md`). Every program that
+   ran before runs identically — a run that met an odd target used to stop with `BadPc` — and no
+   word changes, so no digest moves.
+2. **`JALR` requires `funct3 = 0`.** RV32I reserves every `funct3 ≠ 0` under opcode `0x67`;
+   `Instr::decode` returns `DecodeError::Funct` for them and the program table's `JALR` flag is
+   pinned to `funct3 = 0`, so the eight encodings that used to decode to one `JALR` are now one.
+   `Instr::encode` always wrote `funct3 = 0` and no in-tree program holds another (checked over
+   every research guest and the four compiled images).
 3. **The assembler helpers no longer truncate (ISA-5, fixed here — host-only).** `asm::ops`
    masked shift amounts to five bits and `lui`/`auipc` immediates to their upper twenty *before*
    `Instr::encode` could range-check them (audit ZM3 put the checks at `encode`), so
@@ -76,6 +71,17 @@ guest reach a state an honest RV32I program could not, and changing either chang
    assembler is not in the AIR and every in-range operand encodes to the word it always did — the
    research guests' digests are unchanged — so this is not a consensus change
    (`tests/asm.rs`, the `…_through_the_helper` and `…_past_31_…` tests).
+4. **The pc window (ISA-1's residual, randprotocol/fullnode#53, fixed here).** The circuit does
+   its PC arithmetic in the field — the program table's PC chain, the cpu's fall-through `PC + 4`,
+   the `JAL`/`JALR` link — while the emulator wraps mod `2^32`, so a program whose *declared*
+   program table (`2^program_log_height` rows from `base_pc`, floored at `2^7`) runs past `2^32`
+   has padding rows whose field PCs no execution produces, and no honest proof of it verifies.
+   `tables::program::pc_window_fits` is the rule, `base_pc + 4 · 2^program_log_height ≤ 2^32`;
+   `Machine::prove*` refuses such a program (`ProveError::PcWindow`) and `Machine::verify` a proof
+   whose `pv::PC_ENTRY` and declared height break it (`VerifyError::PcWindow`), with the other
+   cheap header checks, before any key is built. A verifier-side refusal of a proof no honest
+   prover makes; every program at `base_pc` 0 below `2^30` words is untouched (`tests/pc_window.rs`).
+   The node's deploy-side mirror is fullnode's `randprotocol_core::program::pc_window_fits`.
 
 ## Encoding
 
@@ -186,15 +192,32 @@ contents are checkable by anyone but the prover, and that is precisely
 because they are published. Which vector a value belongs in is a privacy
 decision, not a performance one: see `docs/03-privacy.md`.
 
-| # | Name | Milestone | Effect |
-|---|---|---|---|
-| 0 | `HALT` | M1 | ends execution; every remaining row in the table is padding |
-| 1 | `WRITE_OUTPUT slot word` | M1 | `out[slot] = word`, `slot < 8`; constrained directly against the public values, at most once per slot, and any slot never written is pinned to zero |
-| 2 | `READ_INPUT idx` | M1 | returns private input word `idx` in `a0` — bound to a commitment `H_IN` over the whole private-input vector since milestone 4.1 — two reads of the same `idx` are guaranteed to agree, and `idx >= n_in` cannot be satisfied at all; see `docs/03-privacy.md` |
-| 3 | `POSEIDON2 ptr n` | M3.2 | hashes the `n` words at word address `ptr` (`0 <= n <= POSEIDON2_MAX_WORDS = 4096`) with the Poseidon2 sponge (rate 4, overwrite mode, no padding — `hash::sponge_hash`, the exact `PaddingFreeSponge<_, 8, 4, 4>` semantics) and overwrites `ptr..ptr+8` with the 8-word (lo/hi) digest in place. **Not injective on variable-length input** (ZKH-3, below the table) |
-| 4 | `KECCAK ptr` | M4.2 | applies one Keccak-f[1600] permutation in place to the `KECCAK_WORDS = 50` words at word address `ptr` (`ptr <= KECCAK_PTR_LIMIT = 0x3000_0000 - 50`, so the whole state stays below `2^30`; the cpu AIR's own bound on a `SYS_KECCAK` row is the marginally looser `ptr < 0x3000_0000`) — lane `i`'s low word at `ptr + 2i`, its high word at `ptr + 2i + 1` (`keccak::state_to_words`). Takes no second argument: the state's width is fixed. One cpu row per call (unlike `POSEIDON2`), because the `keccak` chip proves the 24 rounds and sends the permutation's own 100 memory accesses — the cpu table witnesses the call, never the rounds. Padding and rate are the guest's business; `guest_sdk::keccak256` is the Keccak-256 sponge built over it |
-| 5 | `SHA256 ptr` | M4.4 | applies one SHA-256 compression in place to the `SHA256_WORDS = 24` words at word address `ptr` (`ptr <= SHA256_PTR_LIMIT = 0x3000_0000 - 24`, so the whole buffer stays below `2^30`; the cpu AIR's own bound on a `SYS_SHA256` row is the marginally looser `ptr < 0x3000_0000`). Words `0..16` are the 512-bit message block as sixteen **big-endian-valued** 32-bit words (word `i` holds the block's bytes `4i..4i+4` as `u32::from_be_bytes`, `sha256::bytes_to_words`' layout); words `16..24` are the chaining state `H[0..8]`. The syscall computes `H <- H + f(H, W)` (FIPS 180-4 §6.2.2) and writes the new state back over words `16..24`, leaving the message words untouched — so a Merkle-Damgard loop can refill just the block slot for the next call. Takes no second argument: both widths are fixed. One cpu row per call, like `KECCAK`, because the `sha256` chip proves the 64 rounds and sends the compression's own 32 memory accesses (24 reads, 8 write-backs). Padding and the Merkle-Damgard loop are the guest's business; `guest_sdk::sha256` is the full hash built over it |
-| 6 | `READ_PUBLIC idx` | CS6 | returns public segment word `idx` in `a0` — committed to the **unsalted** `H_PUB` (`pv::PUB0..7`), which a verifier holding the words recomputes natively and compares (`Machine::verify_public`); two reads of the same `idx` are guaranteed to agree, and `idx >= n_pub` cannot be satisfied at all. Structurally `READ_INPUT`'s twin — its own `public` table, its own `PUBLIC_DIGEST`/`PUBLIC_READ` bus pair, its own digest region in the cpu table — and semantically its opposite: `H_IN` hides what it binds, `H_PUB` publishes it. The segment is mandatory and may be empty; a guest that never calls this pays four table rows and one permutation (`docs/02-tables-and-buses.md`, `docs/03-privacy.md`) |
+| # | Name | Milestone | Gas | Effect |
+|---|---|---|---|---|
+| 0 | `HALT` | M1 | 1 | ends execution; every remaining row in the table is padding |
+| 1 | `WRITE_OUTPUT slot word` | M1 | 1 | `out[slot] = word`, `slot < 8`; constrained directly against the public values, at most once per slot, and any slot never written is pinned to zero |
+| 2 | `READ_INPUT idx` | M1 | 1 | returns private input word `idx` in `a0` — bound to a commitment `H_IN` over the whole private-input vector since milestone 4.1 — two reads of the same `idx` are guaranteed to agree, and `idx >= n_in` cannot be satisfied at all; see `docs/03-privacy.md` |
+| 3 | `POSEIDON2 ptr n` | M3.2 | `3 + 3·⌈n/4⌉` | hashes the `n` words at word address `ptr` (`0 <= n <= POSEIDON2_MAX_WORDS = 4096`) with the Poseidon2 sponge (rate 4, overwrite mode, no padding — `hash::sponge_hash`, the exact `PaddingFreeSponge<_, 8, 4, 4>` semantics) and overwrites `ptr..ptr+8` with the 8-word (lo/hi) digest in place. **Not injective on variable-length input** (ZKH-3, below the table) |
+| 4 | `KECCAK ptr` | M4.2 | 192 | applies one Keccak-f[1600] permutation in place to the `KECCAK_WORDS = 50` words at word address `ptr` (`ptr <= KECCAK_PTR_LIMIT = 0x3000_0000 - 50`, so the whole state stays below `2^30`; the cpu AIR's own bound on a `SYS_KECCAK` row is the marginally looser `ptr < 0x3000_0000`) — lane `i`'s low word at `ptr + 2i`, its high word at `ptr + 2i + 1` (`keccak::state_to_words`). Takes no second argument: the state's width is fixed. One cpu row per call (unlike `POSEIDON2`), because the `keccak` chip proves the 24 rounds and sends the permutation's own 100 memory accesses — the cpu table witnesses the call, never the rounds. Padding and rate are the guest's business; `guest_sdk::keccak256` is the Keccak-256 sponge built over it |
+| 5 | `SHA256 ptr` | M4.4 | 64 | applies one SHA-256 compression in place to the `SHA256_WORDS = 24` words at word address `ptr` (`ptr <= SHA256_PTR_LIMIT = 0x3000_0000 - 24`, so the whole buffer stays below `2^30`; the cpu AIR's own bound on a `SYS_SHA256` row is the marginally looser `ptr < 0x3000_0000`). Words `0..16` are the 512-bit message block as sixteen **big-endian-valued** 32-bit words (word `i` holds the block's bytes `4i..4i+4` as `u32::from_be_bytes`, `sha256::bytes_to_words`' layout); words `16..24` are the chaining state `H[0..8]`. The syscall computes `H <- H + f(H, W)` (FIPS 180-4 §6.2.2) and writes the new state back over words `16..24`, leaving the message words untouched — so a Merkle-Damgard loop can refill just the block slot for the next call. Takes no second argument: both widths are fixed. One cpu row per call, like `KECCAK`, because the `sha256` chip proves the 64 rounds and sends the compression's own 32 memory accesses (24 reads, 8 write-backs). Padding and the Merkle-Damgard loop are the guest's business; `guest_sdk::sha256` is the full hash built over it |
+| 6 | `READ_PUBLIC idx` | CS6 | 1 | returns public segment word `idx` in `a0` — committed to the **unsalted** `H_PUB` (`pv::PUB0..7`), which a verifier holding the words recomputes natively and compares (`Machine::verify_public`); two reads of the same `idx` are guaranteed to agree, and `idx >= n_pub` cannot be satisfied at all. Structurally `READ_INPUT`'s twin — its own `public` table, its own `PUBLIC_DIGEST`/`PUBLIC_READ` bus pair, its own digest region in the cpu table — and semantically its opposite: `H_IN` hides what it binds, `H_PUB` publishes it. The segment is mandatory and may be empty; a guest that never calls this pays four table rows and one permutation (`docs/02-tables-and-buses.md`, `docs/03-privacy.md`) |
+| 7 | `POSEIDON2_LEN ptr n` | next set (HCS-4) | `3 + 3·max(⌈n/4⌉, 1)` | `POSEIDON2` with the message length bound: the same arguments (`0 <= n <= 4096`, `ptr < 2^30`), the same in-place 8-word digest and the same cpu row group, over `hash::sponge_hash_len` — the sponge starts from `[0, 0, 0, 0, n, 0, 0, 0]` (the length in capacity lane 4, which absorption never overwrites) and always permutes at least once (`n = 0` absorbs one empty block). So `[a]` and `[a, 0]` differ and the empty message is not the zero digest. `POSEIDON2` itself is unchanged — every note commitment, nullifier, Merkle root and `hc` is built on it; use this one for anything whose length can vary (`guest_sdk::poseidon2_len`, `asm::ops::call_poseidon2_len`) |
+
+**Gas** (constraint set 8, `gas.rs`, fullnode spec 2026-09-28 §3.1): every cpu row costs 1 gas, so
+every ordinary RV32IM instruction — no row of the table above — costs 1. A syscall's own ecall row
+is one such row; `HALT`/`WRITE_OUTPUT`/`READ_INPUT`/`READ_PUBLIC` add nothing beyond it, so each is
+1. `KECCAK` and `SHA256` are one cpu row each that pulls a whole hash-chip instance behind it —
+`KECCAK_GAS = 192` and `SHA256_GAS = 64` are that row's *total* cost (base 1 folded in), not an
+addition to it. `POSEIDON2`/`POSEIDON2_LEN` spend their own ecall row (1) plus two write-out rows
+(1 each) plus `⌈n/4⌉` absorb rows at rate 4, each costing `POSEIDON2_ABSORB_GAS = 3` (base 1 +
+weight 2) — `3 + 3·⌈n/4⌉` for `n ≥ 1`, and for `n = 0` too under plain `POSEIDON2` (zero absorb
+rows, so the ecall and write-out rows alone cost 3). `POSEIDON2_LEN` is the one exception the
+formula does not fold in: its `n = 0` still absorbs the one length-seeded empty block described
+above, so its true minimum is `3 + 3·1 = 6`, not the `⌈0/4⌉ = 0` the bare formula would give — the
+`max(⌈n/4⌉, 1)` above is exact for every `n`, and coincides with `⌈n/4⌉` for every `n ≥ 1`.
+A proof header's gas ceiling is `gas::gas_max = (2^t − 1) + 2^(t−2) + 191·(2^klh/32) +
+63·(2^slh/64)` — the absorb rows' `+2` is bounded by the poseidon2 table's `2^(t−3)` permutation
+slots, so a hash-free tier-10 header's ceiling is 1 279 and a tier-14 one's 20 479.
 
 **`POSEIDON2` does not pad (audit ZKH-3).** The sponge starts from the all-zero
 state and *overwrites* the first `min(4, remaining)` lanes with each chunk, so
@@ -207,7 +230,9 @@ words — but that is precisely the size of a short tag, an amount, or an id. Th
 syscall is left as it is (it is `PaddingFreeSponge`'s semantics, which the chip
 proves and every existing commitment is built on); **a guest that hashes data
 whose length can vary must make the length part of the message** — prefix it
-(`[n, w0, …, w(n−1)]`), or hash a fixed-length encoding. Every in-crate use
+(`[n, w0, …, w(n−1)]`), hash a fixed-length encoding, or — since the next
+constraint set (HCS-4) — call `POSEIDON2_LEN` (7), which seeds the length into the
+sponge's capacity itself. Every in-crate use
 already does: the note layer's `notes::hash` hashes a domain tag and a
 fixed-width message per domain, and `hc`'s capacity-lane header carries the
 program's length (`hash::program_digest`).

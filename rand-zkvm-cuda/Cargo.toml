@@ -19,15 +19,12 @@ p3-goldilocks = "=0.7.0"
 p3-poseidon2 = "=0.7.0"
 p3-symmetric = "=0.7.0"
 p3-util = "=0.7.0"
-# HCS-1 (2026-09-27 zkVM review): exact pins, not carets — `research/`'s, verbatim, because this
-# crate's `HidingMmcs` draws the same salts through the same `StdRng` on the GPU/reference path. Every verifier key's preprocessed
-# commitment is salted from `StdRng::seed_from_u64(KEY_SEED)` (`machine::key_config`), and `rand`
-# documents `StdRng`'s stream as free to change between releases — a node built against another
-# `rand` would compute different keys and refuse every proof. The stream is `rand`'s `StdRng`
-# (ChaCha12 from `chacha20`), seeded through `rand_core`'s `SeedableRng::seed_from_u64`, so all
-# three are pinned; `rand_core`/`chacha20` are named here only for the pin. `research/tests/verifier_key.rs`
-# is the tripwire: a changed stream changes its pinned digests. The stable, `rand`-free derivation
-# the next chain cut switches to is `key_derivation_v2`.
+# HCS-1 (2026-09-27 zkVM review): exact pins, not carets — `research/`'s, verbatim. Through
+# constraint set 6 this crate's `HidingMmcs` drew a verifier key's salts through `StdRng` on the
+# GPU/reference path, exactly as `research/`'s `machine::key_config` did, so `rand`'s stream was
+# consensus. Constraint set 7 makes `HidingMmcs` generic over its salt generator and `research/`
+# hands it `SaltRng`, whose key streams are `key_derivation_v2`'s — so no key depends on `rand`; the
+# pins stay for proving's salts and cost nothing. `research/tests/verifier_key.rs` pins the keys.
 rand = { version = "=0.10.2", features = ["std_rng"] }
 rand_core = "=0.10.1"
 chacha20 = { version = "=0.10.2", default-features = false }

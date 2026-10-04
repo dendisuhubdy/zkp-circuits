@@ -99,7 +99,17 @@ keccak chip sends its own traffic, and `memory_trace` records it
 (`CycleEvent::keccak_accesses`) alongside the cpu's own — as it does M4.4's
 `CycleEvent::sha256_accesses`, the sha256 chip's own 32 per compression.
 
-## `input` — main, `col::WIDTH = 4` (M4.1)
+**Constraint set 7 adds a seventeenth, `BLIND`** — a `PermutationCheckBus`
+that every instance both sends and receives on, on its first row only,
+through five columns `machine::Chip` appends after each table's own
+(`OUT0, OUT1, IN0, IN1, FIRST`; `tables/blind.rs`). It carries no machine
+semantics at all: the honest prover cycles fresh random values through the
+batch so that every table's published LogUp terminal is shifted by a
+uniform element while their sum stays zero — `docs/03-privacy.md`, "LogUp
+terminals are blinded". The per-table `col::WIDTH`s in the headings below
+are the tables' own; each committed trace is five columns wider.
+
+## `input` — main, `col::WIDTH = 8` (M4.1; `WL0..3` since the next constraint set)
 
 One row per committed private-input word: `IDX` (the row's own index, 0 at
 row 0, `+1` every row including through padding — input indices always
@@ -149,6 +159,17 @@ supply — it can't be spread across rows to hide an over-count, and any
 excess is caught by `INPUT_READ`'s own balance against the true
 `SYS_READ` demand regardless of magnitude.
 
+**`WORD` is a 32-bit word in the AIR (ZKM-1/ZKH-2, the next constraint
+set).** Four byte limbs `WL0..3` sit after `MULT_READ`, with
+`IS_REAL · (WORD − (WL0 + 2^8·WL1 + 2^16·WL2 + 2^24·WL3)) = 0` and one
+`RANGE8` lookup per limb counted by `IS_REAL` (the limbs are pinned to 0 on
+padding). Before it nothing bounded `WORD` below `p`: the cpu's `SYS_READ`
+row receives the pair into `C` and writes `C` to `a0`, so a guest could be
+handed `2^32 + 5` for `5` consistently in every table
+(`tests/next_constraint_set.rs`). The salt row's four lanes are held to
+`u32` the same way, through the write-back rows' `HVL0_0..15` limb columns
+(`tables::cpu`), so `H_IN` can only commit to a salt four `u32`s reproduce.
+
 **Padding.** `WORD` and `MULT_READ` are both pinned to 0 wherever
 `IS_REAL = 0` (AGENTS.md invariant 1/2) — a stray nonzero `MULT_READ` on a
 padding row is exactly the "unconstrained column nothing currently reads"
@@ -169,10 +190,11 @@ shared absorb machinery range-checks `HASH_LEFT` via two `RANGE8` limbs on
 every indigest row, bounding it to 16 bits — so the effective cap on
 `n_in` is 65535, well below what `MAX_LOG_HEIGHT` alone would allow.
 
-## `public` — main, `col::WIDTH = 4` (CS6)
+## `public` — main, `col::WIDTH = 8` (CS6; `WL0..3` since the next constraint set)
 
 `input`'s twin, one segment over: one row per committed **public** input
-word, with the same four columns (`IDX`, `WORD`, `IS_REAL`, `MULT_READ`),
+word, with the same columns (`IDX`, `WORD`, `IS_REAL`, `MULT_READ` and, since the
+next constraint set, the four `RANGE8`-checked limbs `WL0..3` of `WORD`),
 the same monotone real/padding prefix, and the same `+1`-per-row `IDX`
 chain through the padding. `src/tables/public.rs` is deliberately a copy of
 `src/tables/input.rs` with the two bus names substituted rather than a
@@ -279,6 +301,10 @@ through the `OP_ALU, funct7 = 1` flags — no `OP_ALUI` flag ever maps to
 one, mirroring `isa::Instr::decode`'s own `funct7 = 1` gate exactly (an
 `OP_ALUI` word can never be legally read as an M op, regardless of its
 `funct7` bits, which are just part of its sign-extended immediate there).
+Since the next constraint set (ISA-4) the `JALR` flag is pinned to
+`funct3 = 0` as well as its opcode, mirroring `Instr::decode`, which now
+refuses the seven reserved `funct3` values RV32I leaves under `0x67` (before,
+both ignored the field and eight words decoded to one `JALR`).
 Every constraint here is at most degree 2 in the columns (a flag times a
 linear bit-sum, or a flag times a fixed constant).
 
@@ -361,7 +387,7 @@ separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 exactly one traversal of the whole program for `hc`, regardless of how the
 program actually ran.
 
-## `cpu` — main, `col::WIDTH = 275`
+## `cpu` — main, `col::WIDTH = 282` (275 through constraint set 6, 277 through set 7)
 
 (The heading read `222` from M4.1 until M4.4 corrected it: M4.2's `SYS_KECCAK`
 column took the table to 223 without the heading following, and M4.4's
@@ -370,7 +396,10 @@ column took the table to 223 without the heading following, and M4.4's
 final-encoding block `PHVL0..31`/`PHIMAX0..3`/`PINV0..3` — for 275. All of
 them are appended at the end of the column list so no pre-existing index
 moves — see the `SYS_KECCAK`/`SYS_SHA256`/`SYS_READ_PUB` doc comments
-in `src/tables/cpu.rs` for why that matters to the vendoring node.)
+in `src/tables/cpu.rs` for why that matters to the vendoring node. The next
+constraint set appends two more, `SYS_HASH_LEN` (HCS-4, below) and `JALR_B0`
+(ISA-4, below), for 277. Constraint set 8 appends five — `GAS` and its
+slack limbs `GD0..3` (the gas meter, below) — for 282.)
 
 Columns: `clk pc next_pc is_real`, the same 23 decoded fields (fetched, not
 recomputed — `is_load`/`is_store` are *expressions* the AIR computes from
@@ -1032,6 +1061,73 @@ same choice for the same reason.
 
 And, as for `KECCAK`: none of the 24 words read or the 8 written back appear
 here. They are the `sha256` table's own `MEMORY` sends.
+
+### The next constraint set (HCS-4): the `POSEIDON2_LEN` ecall row
+
+`SYS_HASH_LEN` (appended after `PINV0..3`) is `SYS_HASH`'s twin: syscall 7, the
+same `a0 = ptr`/`a1 = n` arguments, the same `HASH_PTR` bound (`hp_gate`), the
+same `continues` carry and the same absorb/write-back row group — every rule
+the two ecall rows share is gated on `sys_hash_any = SYS_HASH + SYS_HASH_LEN`,
+and both open a group in the CRITICAL 5 entry whitelists. Three rules differ:
+
+- **The seed.** The row after a `SYS_HASH_LEN` row enters
+  `[0, 0, 0, 0, HASH_N, 0, 0, 0]` (`SYS_HASH_LEN · n(HS0 + i) = 0` for
+  `i ≠ 4`, `SYS_HASH_LEN · (n(HS0 + 4) − HASH_N) = 0`) where a `SYS_HASH`
+  group enters the zero state — `hash::sponge_hash_len`'s length in capacity
+  lane 4, which absorption never overwrites.
+- **The empty block.** `SYS_HASH_LEN · (1 − n(IS_HASH)) = 0`: the row after
+  is always an absorb row, so `n = 0` absorbs one block with every lane
+  inactive and the digest is `perm(seed)`, not the seed's zero rate lanes.
+  The blanket "lane 0 is active on an absorb row" rule becomes
+  `IS_HASH · (1 − ACT0) · HASH_IDX = 0` — every absorb row but a group's first
+  — and an empty first row is sound only at `n = 0` (it drains nothing, so
+  being the last absorb row forces `HASH_LEFT = n = 0`, and not being the last
+  forces a full block).
+- **Its converse on `POSEIDON2`.** `SYS_HASH · n(IS_HASH) · (1 − n(ACT0)) = 0`
+  keeps a plain group's first absorb row non-empty, so `POSEIDON2([])` still
+  routes straight to its write-back rows and has exactly one digest, zero.
+
+`tests/next_constraint_set.rs::the_poseidon2_len_group_rules_refuse_their_forgeries`
+pins each of the three (each goes red with its rule removed).
+
+### The next constraint set (ISA-4): `JALR` clears bit 0 of its target
+
+RV32I's `JALR` jumps to `(rs1 + imm) & !1`; this machine used `rs1 + imm` as
+computed, so an odd target was an unfetchable `pc`. `JALR_B0` (appended last)
+is boolean, zero off `JALR` rows, and
+`IS_JALR · (NEXT_PC − ALU_OUT + JALR_B0) = 0`. It is *the* low bit of
+`ALU_OUT` (32-bit, from the ALU table) because of the next row's fetch: a
+`JALR` is never the last real row, the row after it is an ordinary
+instruction row (hash rows need a `SYS_HASH`/`SYS_HASH_LEN` row before them,
+the digest regions are a prefix), and its `PC = NEXT_PC` must be a program
+row's, all of which are `base_pc + 4j` — even, since `hc` binds `base_pc` and
+every program a verifier holds an `hc` for has `base_pc % 4 == 0`. A wrong bit
+leaves `ALU_OUT − JALR_B0` odd (or `p − 1`), which no program row answers —
+the argument that already made an odd branch or `JAL` target unprovable.
+`tests/next_constraint_set.rs::a_jalr_to_an_odd_target_clears_bit_0` proves a
+run that lands on an odd target.
+
+### Constraint set 8: the gas meter (`GAS`, `GD0..3`)
+
+fullnode spec 2026-09-28 §4.2. `GAS` is the gas accumulated *through* each
+row, with exactly `gas::gas_of`'s weights: `GAS = 1` on row 0 (a digest row),
+and on every transition into a real row
+`n(GAS) = GAS + 1 + 2·n(IS_HASH) + 191·n(SYS_KECCAK) + 63·n(SYS_SHA256)` —
+the constants are `gas.rs`'s (`POSEIDON2_ABSORB_GAS − 1`, `KECCAK_GAS − 1`,
+`SHA256_GAS − 1`), and the rule is degree 2 (`n(IS_REAL)` times a form linear
+in next-row selectors). On the one `HALT` row, `pv::GAS − GAS = Σ 2^(8k)·GD_k`
+with each `GD_k` on `RANGE8` (`Count::bounded(SYS_HALT, 1)`), so the declared
+limit is at or above the run's gas without the run's gas being published;
+`(1 − SYS_HALT)·GD_k = 0` pins the limbs to zero everywhere else, padding
+included. The slack fits four bytes because `check_public_values` refuses a
+`pv::GAS` above `gas::gas_max(header)` =
+`(2^t − 1) + 2^(t−2) + 191·(2^klh/32) + 63·(2^slh/64)` (the `2^(t−2)`: at most
+`2^(t−3)` absorb rows, one per poseidon2 permutation slot, `+2` each), and the
+largest admissible ceiling (tier 20, both hash tables at `2^20` rows,
+8 601 599) is under `2^32`. `GAS` is free on padding rows (the fill carries the
+halt row's value forward). The prover refuses a limit below the run
+(`ProveError::GasLimitBelowRun`) or above the header (`GasLimitAboveHeader`)
+before building the cpu trace.
 
 ## `memory` — main, `col::WIDTH = 12`
 
@@ -1872,6 +1968,9 @@ the cached hit at under 40% of the first, uncached recomputation.
 need to be seeded from the program either — they are seeded from a fixed
 constant (`machine::KEY_SEED`, documented alongside `PERM_SEED`), since the
 preprocessed trace they salt no longer varies by program, only by tier.
+(Constraint set 7, HCS-1: not a `StdRng` seed any more — the salts are
+`key_derivation_v2`'s Poseidon2 stream from two fixed labels, so no `rand`
+release can move a key.)
 Every actual `prove_batch` call still runs against `make_config`'s
 fresh-entropy config for the main-trace, quotient, and permutation
 commitments — that is what keeps zero knowledge intact, and is why two

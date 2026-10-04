@@ -1,28 +1,54 @@
 # PTX_BUILD.md
-Status: **no PTX has been built yet.** `gpu-kernels` has never been compiled: the author's
-machines have no NVIDIA GPU and no CUDA 13 toolkit. `GpuProver::probe()` returns
-`CudaError::MissingPtx` until `kernels.sm_80.ptx` exists here.
+Status: **built and run on hardware once (2026-09-28, below); no PTX is committed.**
+`GpuProver::probe()` returns `CudaError::MissingPtx` until `kernels.sm_80.ptx` exists here (or
+`RAND_ZKVM_PTX` names one), so build it on the proving machine.
 
 To build: on a Linux box with an R580+ driver, CUDA 13, LLVM 21 and the pinned nightly,
 `cd gpu-kernels && just kernels sm_80`, then fill in:
 - cuda-oxide commit: `26754ae52c26c097dc1c465a1e42c4c5d05a3d40` (cloned 2026-09-10, dated
   2026-09-06; pinned as `rev` in `gpu-kernels/Cargo.toml`)
-- CUDA toolkit: (unfilled)
-- built on: (unfilled)
-and run `cargo test -p rand-zkvm-cuda --features cuda-hw`.
+- CUDA toolkit: 13.1 (V13.1.115), driver 580.173.02, LLVM 21.1.8, rustc nightly-2026-08-28
+- built on: DigitalOcean `gpu-h100x1-80gb` (NVIDIA H100 80GB HBM3, sm_90), Ubuntu 22.04, image
+  "NVIDIA AI/ML Ready", 2026-09-28
+and run `cargo test -p rand-zkvm-cuda --features cuda-hw` (`tests/gpu_hw.rs`).
 
-## Unverified details
+## Compile-only check (2026-09-28, no GPU)
 
-Nothing below has been run. In particular:
+`cargo oxide build --arch sm_80` at the pinned cuda-oxide rev, run on a GPU-less Ubuntu 24.04
+box without the CUDA toolkit (cargo-oxide uses the Rust toolchain's `llc`), builds the
+kernels. The flag spelling is right, and the output is `rand_zkvm_kernels.ptx` in
+`gpu-kernels/` (the `Justfile`'s `cp` line now uses that name). The PTX was not committed:
+this file's toolkit and "built on" lines are for the real build (below).
 
-- The `cargo oxide build --arch sm_80` flag spelling in `gpu-kernels/Justfile` is a guess at
-  `cargo-oxide`'s CLI and may need adjusting (a different flag name, or `--target`-style
-  spelling).
-- The output filename the `Justfile` copies, `rand-zkvm-kernels.ptx`, is likewise a guess: it
-  assumes the emitted PTX is named after the `[[bin]]` target and lands in the crate root.
-  Check what `cargo oxide build` actually writes and fix the `cp` line.
+## First hardware run (2026-09-28, H100, circuits `feat/r4a-gpu-aliasing-cs7`)
 
-## First hardware run
+Run for R4-a (randprotocol/fullnode#49), on this branch and on its base `b9ffc39` (the base
+built only with the `poseidon2_compress`/`_inject` digest-array change of this branch applied
+as a scratch patch, which is the only way it lowers to PTX).
+
+- `cargo oxide build --arch sm_80` and `--arch sm_90` both build; each PTX has the eleven
+  entries. Step 1 below holds: `to_col_major` has 6 params (ptr, len, ptr, len, u32, u32),
+  `poseidon2_rows` 8 (ptr, len, u32, u32, ptr, len, ptr, len), `dif_tiles` 9 — what
+  `real.rs::Device::launch` packs. Step 4 holds: `real.rs` compiles against `cuda-core 0.3.1`.
+- `cargo test --release --features cuda-hw` with `RAND_ZKVM_PTX` at the sm_90 and at the sm_80
+  PTX (JIT-compiled by the driver): every test passes on both trees, including
+  `tests/gpu_hw.rs` — the ABI round trip, every DFT entry point equal to the CPU twin and to
+  Plonky3's `Radix2DitParallel` for log n = 1…16 and widths 1/6/56, the large-n `dif_tiles`
+  cross-check (step 3: log n = 20 and 22, `dft_batch` and a coset LDE, against Plonky3), and
+  Poseidon2 Merkle commitments and openings equal to the CPU twin's up to 2^18 rows. The
+  `mock-driver` and default-feature suites pass on both trees too.
+- `compute-sanitizer` 13.1 over `gpu_hw`'s ABI, DFT and Merkle tests (the large-n test left
+  out for time), sm_90 PTX, both trees: memcheck 0 errors, racecheck 0 hazards (the
+  `dif_tiles` shared tile included), synccheck 0 errors.
+- Host side, Miri (nightly-2026-08-28, Stacked and Tree Borrows): `tests/cells_launch.rs` runs
+  the kernel bodies as a parallel launch on host threads, each simulated GPU thread with its
+  own `Cells::from_raw` over the shared buffer — clean. The pre-fix `all()` pattern
+  (`from_raw_parts_mut` per thread) run the same way is reported as UB, a data race between
+  the threads' `&mut [u64]` retags, under both models. The Plonky3-comparing suites cannot run
+  under Miri (inline assembly).
+- sha256 of the PTX this branch built: sm_80 `4142929d…be8f5`, sm_90 `4a16612d…7c5a7`.
+
+## First hardware run: the checklist
 
 1. **Verify the kernel parameter ABI before anything else.** Dump the generated PTX and read
    the `.param` list of `to_col_major` and `poseidon2_rows`:
@@ -62,8 +88,8 @@ Nothing below has been run. In particular:
 - A relocated binary **must** set `RAND_ZKVM_PTX`: the default path is
   `<CARGO_MANIFEST_DIR>/ptx/kernels.sm_80.ptx`, i.e. the build machine's crate directory, and
   the default filename hardcodes `sm_80`.
-- The shared kernel bodies in `src/device/kernels.rs` contain `unwrap` and `copy_from_slice`
-  calls, i.e. panic paths. cuda-oxide may reject them outright (no panic machinery on device),
-  in which case they have to be rewritten as unchecked indexing/manual copies.
+- The shared kernel bodies in `src/device/kernels.rs` keep bounds-checked indexing (panic
+  paths, lowered to traps). `try_into().unwrap()` on a slice is the one form cuda-oxide cannot
+  lower (it pulls in `dyn Debug`); the digests are built as explicit arrays instead.
 - `dif_tiles` launches with `tile / 2` threads per block; for `n = 2` that is a single thread
   per block, which is legal but exercises the barrier path degenerately.

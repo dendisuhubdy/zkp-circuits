@@ -9,7 +9,7 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::{MerkleCap, MerkleTreeError, MerkleTreeHidingMmcs, PrunedMerklePaths};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_util::log2_ceil_usize;
-use rand::{SeedableRng, rngs::StdRng};
+use rand::{CryptoRng, SeedableRng, rngs::StdRng};
 use super::{build_tree, cap, prune::prune_paths, Digest, HashEngine, Tree};
 
 pub type Val = Goldilocks;
@@ -24,13 +24,18 @@ pub const SALT_ELEMS: usize = 4;
 /// crate actually hashed, and the digest layers of our own tree.
 pub struct ProverData<M> { pub originals: Vec<M>, pub salted: Vec<RowMajorMatrix<Val>>, pub tree: Tree }
 
-pub struct HidingMmcs<E: HashEngine> {
+/// `G` is the salt generator (HCS-1, constraint set 7): `rand_zkvm` builds this over its own
+/// `SaltRng`, whose key configs draw from `key_derivation_v2` rather than `StdRng`, and whatever
+/// `G` is must be the one Plonky3's `MerkleTreeHidingMmcs` is built over on the CPU path, or the two
+/// paths salt differently and the backend's preprocessed commitment stops matching the CPU
+/// verifier's. `StdRng` stays the default for this crate's own tests and benches.
+pub struct HidingMmcs<E: HashEngine, G = StdRng> {
     engine: Arc<E>,
     /// Verifier-side only — see `new`: its salt RNG is seeded 0 and never drawn from, because
     /// nothing calls `commit`/`open_*` on this instance, only `verify_batch`/`verify_multi_batch`.
     verifier: P3Hiding,
     cap_height: usize,
-    rng: Arc<Mutex<StdRng>>,
+    rng: Arc<Mutex<G>>,
 }
 
 /// Cloning *forks* the salt stream — a fresh seed drawn from the source RNG — exactly as
@@ -39,20 +44,20 @@ pub struct HidingMmcs<E: HashEngine> {
 /// original's stream by one `from_rng` draw. Sharing the `Arc` instead would leave the original
 /// un-advanced and every subsequent commit salted differently from Plonky3's, which shows up as
 /// a preprocessed commitment the CPU verifier cannot reproduce.
-impl<E: HashEngine> Clone for HidingMmcs<E> {
+impl<E: HashEngine, G: CryptoRng + SeedableRng> Clone for HidingMmcs<E, G> {
     fn clone(&self) -> Self {
-        let forked = StdRng::from_rng(&mut *self.rng.lock().unwrap());
+        let forked = G::from_rng(&mut *self.rng.lock().unwrap());
         Self { engine: self.engine.clone(), verifier: self.verifier.clone(), cap_height: self.cap_height, rng: Arc::new(Mutex::new(forked)) }
     }
 }
 
-impl<E: HashEngine> HidingMmcs<E> {
+impl<E: HashEngine, G> HidingMmcs<E, G> {
     /// `perm_seed` must be the *same* seed the `engine` was built with: the prover side hashes
     /// with the engine's own Poseidon2 round constants and the verifier side hashes with
     /// `constants::permutation(perm_seed)`, so a mismatch produces a commitment this MMCS's own
     /// `verify_batch` rejects. There is no way to check it here — the engine does not expose its
     /// seed — so it is the caller's obligation.
-    pub fn new(engine: Arc<E>, perm_seed: u64, cap_height: usize, rng: StdRng) -> Self {
+    pub fn new(engine: Arc<E>, perm_seed: u64, cap_height: usize, rng: G) -> Self {
         let perm = crate::constants::permutation(perm_seed);
         // The `StdRng::seed_from_u64(0)` handed to the verifier instance is *unused*: it is
         // `MerkleTreeHidingMmcs`'s salt stream, and only the `verify_*` methods of this instance
@@ -89,7 +94,7 @@ impl<E: HashEngine> HidingMmcs<E> {
     fn split_salt(row: Vec<Val>) -> (Vec<Val>, Vec<Val>) { let n = row.len() - SALT_ELEMS; let mut r = row; let s = r.split_off(n); (r, s) }
 }
 
-impl<E: HashEngine> Mmcs<Val> for HidingMmcs<E> {
+impl<E: HashEngine, G: CryptoRng + SeedableRng + Send> Mmcs<Val> for HidingMmcs<E, G> {
     type ProverData<M> = ProverData<M>;
     type Commitment = MerkleCap<Val, [Val; 4]>;
     type Proof = (Vec<Vec<Val>>, Vec<[Val; 4]>);

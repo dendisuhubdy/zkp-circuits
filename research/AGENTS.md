@@ -17,21 +17,27 @@ layer (notes, envelopes, scoped disclosure, simulated ledger). Design docs
 are `docs/01–06`; the README has the reading order.
 
 **The sibling `recursion/` crate is the recursion VM (rVM), complete through
-M5.4 and merged on 2026-09-16** (`271679d`): the field-native 26-instruction
-ISA + emulator + DSL; the eight-instance batch machine (`machine/`) proving the
+M5.4** (M5.4 merged on 2026-09-16, `271679d`) **and phase 2's row cuts**
+(2026-10-04, branch `feat/rvm-phase2`, `recursion/docs/04`): the field-native
+ISA — 26 instructions at M5.4, 28 since phase 2 — + emulator + DSL; the eight-instance batch machine (`machine/`) proving the
 $N$-generic aggregate program that verifies $N$ of *this* crate's proofs in one
-recursive STARK — $1{,}968{,}619$ cpu rows per inner proof after three
-measurement-gated cuts (liveness, `REDUCE`, `SPONGE`), tier 21; the
+recursive STARK — $893{,}606$ cpu rows per inner proof, tier 20, after M5.2's
+three measurement-gated cuts (liveness, `REDUCE`, `SPONGE`: $1{,}968{,}619$,
+tier 21) and phase 2's three (2026-10-03: opened rows hinted into the
+height-group sponge buffers, `HINTN` = 26, `COMPRESS` = 27 — from
+$2{,}047{,}268$ at constraint set 8; `recursion/docs/04`); the
 chain-facing `aggregate`/`verify_aggregate` API the fullnode's `shrugg-rvm`
 vendors; the proving-backend split (`Backend::{Reference, Cuda}`, zero new
 kernels — the RV32 CUDA crate covers the rVM's instances as-is); and the
 self-verifier, written with its measured requirement. Its measured records are
 `recursion/docs/00` (ISA/emulator/verifier), `01` (the machine), `02` (the
 aggregate economics), `03` (GPU + self-recursion, the 11-row big-machine
-runbook); plans/specs in `docs/superpowers/`. **Open only on hardware**: the
+runbook), `04` (phase 2's row cuts and the prover's measured live heap); plans/specs in `docs/superpowers/`. **Open only on hardware**: the
 PTX first build and the production N re-measurement, blocked on a fleet GPU
 node (80 GB device, ≥ 160 GB host; `PTX_BUILD.md`); the deferred proofs
-(M5.2's tier-21 exit, N≥2 twins, the self-proof) run on ≥ 64 GB after
+(M5.2's exit — tier 20 since phase 2 —, N≥2 twins, the self-proof) run on the
+big machine (the measured live heap, not the withdrawn ≥ 64 GB oracle class,
+sizes it: `recursion/docs/04`) after
 chain-side aggregation lands, per the user's 2026-09-15 ruling. `recursion/` is
 its own cargo package root (never a workspace member — that would void
 `research`'s `[profile.*]` tables); commands run from inside it.
@@ -325,7 +331,9 @@ it (`rand-guest/src/build.rs`'s `flags`), not written in the guest.
   published `GOLDILOCKS_POSEIDON2_RC_8_*` constants — swapping them is a
   config change, not a rewrite); `machine::KEY_SEED` similarly (M3.4: the
   verifier-key config's fixed seed, replacing the old program-derived one
-  now that the preprocessed trace no longer depends on the program);
+  now that the preprocessed trace no longer depends on the program —
+  constraint set 7 replaced the seed itself with `key_derivation_v2`'s
+  labels, HCS-1: the keys no longer depend on `rand`'s `StdRng` stream);
   statistical (not perfect) ZK from Plonky3 0.7's hiding PCS; `hc`
   binding-but-not-hiding (M3.4: still true — `hc` is now an in-circuit
   digest, not a verifier-side commitment, but it still has no hiding salt

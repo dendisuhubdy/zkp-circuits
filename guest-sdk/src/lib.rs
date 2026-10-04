@@ -1,7 +1,8 @@
 //! Syscall wrappers and the guest entry point for RV32IM binaries this machine can load and
 //! prove (`Program::from_flat_binary`, `research/src/isa.rs`). Every wrapper matches
 //! `research/docs/01-isa.md`'s syscall ABI exactly: syscall number in `a7`, first argument in
-//! `a0`, a second argument (only `POSEIDON2` needs one) in `a1`, a returned value in `a0`.
+//! `a0`, a second argument (only `POSEIDON2` and `POSEIDON2_LEN` need one) in `a1`, a returned
+//! value in `a0`.
 #![no_std]
 
 #[cfg(not(target_arch = "riscv32"))]
@@ -14,6 +15,9 @@ const SYS_POSEIDON2: u32 = 3;
 const SYS_KECCAK: u32 = 4;
 const SYS_SHA256: u32 = 5;
 const SYS_READ_PUBLIC: u32 = 6;
+const SYS_POSEIDON2_LEN: u32 = 7;
+/// `research/src/isa.rs`'s `POSEIDON2_MAX_WORDS`.
+const POSEIDON2_MAX_WORDS: usize = 4096;
 
 /// SHA-256's initial hash value `H(0)` (FIPS 180-4 §5.3.3), the chaining state `sha256` starts
 /// from; `research/src/sha256.rs::IV` is the same table host-side.
@@ -83,17 +87,28 @@ pub fn write_output(slot: u32, word: u32) {
 /// `[a, 0, 0]`, `[a, 0, 0, 0]`) hash identically. If the length of what you hash can vary — a
 /// short id, an amount, a variable-length record — put the length in the message (`[n, w0, ..]`)
 /// or hash a fixed-length encoding, and give each use its own domain-tag word, as the note layer
-/// does (`research/docs/01-isa.md`, "`POSEIDON2` does not pad").
+/// does (`research/docs/01-isa.md`, "`POSEIDON2` does not pad") — or use `poseidon2_len`, whose
+/// sponge binds the length itself (a different hash of the same words, HCS-4).
 ///
 /// The syscall takes a **word address** in `a0` (`research/docs/01-isa.md`'s `MEM_ADDR`
 /// convention), so this divides the byte pointer by 4. Fixed in M4.2: the doc comment always
 /// said word address but the body passed the byte pointer straight through, so a compiled guest
 /// calling this would have hashed the words at four times the intended address. No committed
 /// guest binary calls `poseidon2` (`fib.bin` does not), so no binary changes with this fix.
+///
+/// # Safety
+///
+/// The syscall reads `n` words at `ptr` and overwrites 8 there, so `ptr` must be 4-byte aligned and
+/// valid for reads of `n` words and writes of 8, with nothing else reading or writing those words
+/// for the duration of the call, and `n <= 4096`. (R4-b: this used to be a safe fn over the
+/// caller's raw pointer. It stays a raw-pointer `unsafe fn` rather than taking a slice because the
+/// two chained-digest callers in `evm2rv`/`sbpf2rv`'s shims hash in place over a `static` buffer,
+/// and a checked slice API would add code to the pinned images; `poseidon2_len` is the safe
+/// slice-taking API.)
 #[inline(always)]
-pub fn poseidon2(ptr: *mut u32, n: usize) {
+pub unsafe fn poseidon2(ptr: *mut u32, n: usize) {
     debug_assert!((ptr as u32) % 4 == 0);
-    unsafe { // SAFETY: the syscall writes no register and reads `n` words and overwrites 8 at `ptr`, so this block is sound only if `ptr` is 4-aligned and valid for reads of `n` and writes of `max(n, 8)` words with nothing else borrowing them. NOT upheld here: this is a safe fn over a caller's raw pointer (R4 report) — every caller in this repository passes a live buffer it owns (`HASH_BUF`, a `&mut [u32]`).
+    unsafe { // SAFETY: the syscall writes no register, reads `n` words and overwrites 8 at `ptr`; the caller upholds this fn's `# Safety` contract for exactly that range.
         core::arch::asm!(
             "ecall",
             in("a7") SYS_POSEIDON2,
@@ -104,18 +119,45 @@ pub fn poseidon2(ptr: *mut u32, n: usize) {
     }
 }
 
-/// `ptr`: a 4-byte-aligned pointer to 50 words (200 bytes) holding a Keccak-f[1600] state —
-/// lane `i`'s low word at `2i`, its high word at `2i+1` — permuted in place by one call. The
-/// syscall takes a **word** address in `a0`, so this divides the byte pointer by 4, the same
-/// convention as `poseidon2`.
+/// Hashes `buf[..n]` with the **length-bound** Poseidon2 sponge — the `POSEIDON2_LEN` syscall
+/// (HCS-4, the next constraint set; `research/src/hash.rs`'s `sponge_hash_len`) — writes the 8-word
+/// (lo/hi) digest over `buf[..8]` and returns it. The sponge starts with `n` in its capacity, so
+/// `[a]` and `[a, 0]` differ and the empty message is not the zero digest: prefer this to
+/// `poseidon2` for anything whose length can vary.
+///
+/// Safe: `buf` is a live, exclusively borrowed, 4-aligned buffer, and the call panics (the panic
+/// handler halts with the sentinel output) unless it covers both what the syscall reads (`n` words)
+/// and what it writes (8 words), with `n <= 4096`.
 #[inline(always)]
-pub fn keccak(ptr: *mut u32) {
-    debug_assert!((ptr as u32) % 4 == 0);
-    unsafe { // SAFETY: the syscall writes no register and permutes the 50 words at `ptr` in place, so this block is sound only if `ptr` is 4-aligned and valid for reads and writes of 50 words with nothing else borrowing them. NOT upheld here: this is a safe fn over a caller's raw pointer (R4 report) — every caller passes a live `[u32; 50]` it owns (`keccak256` below, the `Host::keccak_f` impls).
+pub fn poseidon2_len(buf: &mut [u32], n: usize) -> [u32; 8] {
+    assert!(n <= buf.len() && buf.len() >= 8 && n <= POSEIDON2_MAX_WORDS);
+    unsafe { // SAFETY: the syscall writes no register, reads `buf[..n]` and overwrites `buf[..8]`; the assert above keeps both inside `buf`, which `&mut` makes 4-aligned, valid and unaliased for the whole call.
+        core::arch::asm!(
+            "ecall",
+            in("a7") SYS_POSEIDON2_LEN,
+            in("a0") (buf.as_mut_ptr() as u32) / 4,
+            in("a1") n as u32,
+            options(nostack),
+        );
+    }
+    let mut out = [0u32; 8];
+    out.copy_from_slice(&buf[..8]);
+    out
+}
+
+/// `state`: 50 words (200 bytes) holding a Keccak-f[1600] state — lane `i`'s low word at `2i`, its
+/// high word at `2i+1` — permuted in place by one call. The syscall takes a **word** address in
+/// `a0`, so this divides the array's byte address by 4, the same convention as `poseidon2`.
+///
+/// R4-b: this took a raw pointer and was a safe fn over it; the array reference makes the contract
+/// the type's (4-aligned, 50 words, exclusively borrowed), with the same machine code at every call.
+#[inline(always)]
+pub fn keccak(state: &mut [u32; 50]) {
+    unsafe { // SAFETY: the syscall writes no register and permutes the 50 words at `state` in place; `&mut [u32; 50]` is exactly 50 valid, 4-aligned, unaliased words for the whole call.
         core::arch::asm!(
             "ecall",
             in("a7") SYS_KECCAK,
-            in("a0") (ptr as u32) / 4,
+            in("a0") (state.as_mut_ptr() as u32) / 4,
             options(nostack),
         );
     }
@@ -140,7 +182,7 @@ pub fn keccak256(msg: &[u8]) -> [u8; 32] {
         let last = take < 136;
         if last { block[take] ^= 0x01; block[135] ^= 0x80; }
         for i in 0..34 { state[i] ^= u32::from_le_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]); }
-        keccak(state.as_mut_ptr());
+        keccak(&mut state);
         off += take;
         if last { break; }
     }
@@ -149,19 +191,21 @@ pub fn keccak256(msg: &[u8]) -> [u8; 32] {
     out
 }
 
-/// `ptr`: a 4-byte-aligned pointer to 24 words (96 bytes) holding one SHA-256 compression's
-/// argument — the 512-bit message block as sixteen big-endian-valued words at `0..16`, the
-/// chaining state `H` at `16..24`. One call compresses them, writing `H + f(H, W)` back over
-/// words `16..24` and leaving the block untouched. The syscall takes a **word** address in `a0`,
-/// so this divides the byte pointer by 4, the same convention as `keccak`.
+/// `buf`: 24 words (96 bytes) holding one SHA-256 compression's argument — the 512-bit message
+/// block as sixteen big-endian-valued words at `0..16`, the chaining state `H` at `16..24`. One
+/// call compresses them, writing `H + f(H, W)` back over words `16..24` and leaving the block
+/// untouched. The syscall takes a **word** address in `a0`, so this divides the array's byte
+/// address by 4, the same convention as `keccak`.
+///
+/// R4-b: this took a raw pointer and was a safe fn over it; the array reference makes the contract
+/// the type's, with the same machine code at every call.
 #[inline(always)]
-pub fn sha256_compress(ptr: *mut u32) {
-    debug_assert!((ptr as u32) % 4 == 0);
-    unsafe { // SAFETY: the syscall writes no register, reads 24 words at `ptr` and overwrites words `16..24`, so this block is sound only if `ptr` is 4-aligned and valid for reads and writes of 24 words with nothing else borrowing them. NOT upheld here: this is a safe fn over a caller's raw pointer (R4 report) — its one caller, `compress_bytes`, passes a live `[u32; 24]` it owns.
+pub fn sha256_compress(buf: &mut [u32; 24]) {
+    unsafe { // SAFETY: the syscall writes no register, reads the 24 words at `buf` and overwrites words `16..24`; `&mut [u32; 24]` is exactly 24 valid, 4-aligned, unaliased words for the whole call.
         core::arch::asm!(
             "ecall",
             in("a7") SYS_SHA256,
-            in("a0") (ptr as u32) / 4,
+            in("a0") (buf.as_mut_ptr() as u32) / 4,
             options(nostack),
         );
     }
@@ -212,7 +256,7 @@ fn compress_bytes(buf: &mut [u32; 24], block: &[u8; 64]) {
     for i in 0..16 {
         buf[i] = u32::from_be_bytes([block[4 * i], block[4 * i + 1], block[4 * i + 2], block[4 * i + 3]]);
     }
-    sha256_compress(buf.as_mut_ptr());
+    sha256_compress(buf);
 }
 
 // Deviation from the brief's literal `options(nostack, noreturn)`: on this bare-metal target

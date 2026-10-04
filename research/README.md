@@ -28,6 +28,8 @@ cargo run --release     # the narrated demo, ~6-7 minutes wall time (thirteen pr
 cargo test              # 395 tests (389 pass, 6 ignored, ~17 min): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, sha256, the public input segment, the EVM guest's four host suites, the sBPF interpreter + the real SPL Token program, viewing keys, shielded-pool bundles
 ```
 
+Optional, outside `cargo test`: `tools/alu_z3/` is an SMT model of the ALU AIR (issue #66) -- `pip install z3-solver`, then `cd tools/alu_z3 && python3 alu_z3_int.py --timeout 60 Add Sltu Divu` (output uniqueness per op) and `python3 sanity.py --sensitivity` (dropping a load-bearing constraint brings its old forgery back); its README has the rest.
+
 The toolchain is pinned by `rust-toolchain.toml` (1.98.1); `rustup` will pick
 it up automatically. `cargo test` uses `FriProfile::Test` throughout (16
 queries, 4 proof-of-work bits) so the suite runs in well under a minute per

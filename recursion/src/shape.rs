@@ -50,6 +50,22 @@ pub const PV_INSTANCE: usize = 1;
 /// permutation, so a collision would let one construction's digest stand in for another's.
 pub const RVM_VK_DOMAIN: u64 = 16;
 
+/// A round's matrices grouped by log-height, tallest group first, each group in ascending
+/// matrix-index order — `MerkleTreeMmcs::verify_batch`'s `sorted_by_key(Reverse(height))`
+/// (stable) and so the order the leaf sponge hashes a group's `row ‖ salt` runs in. Cut A: the
+/// program hints each group straight into one buffer in this order, and the tape
+/// (`WitnessTape::build`, segment 11) emits the rows in the same order; both call this and
+/// nothing else, so they cannot drift.
+pub fn height_groups(log_heights: &[usize]) -> Vec<Vec<usize>> {
+    let mut heights: Vec<usize> = log_heights.to_vec();
+    heights.sort_unstable_by(|a, b| b.cmp(a));
+    heights.dedup();
+    heights
+        .into_iter()
+        .map(|h| (0..log_heights.len()).filter(|&i| log_heights[i] == h).collect())
+        .collect()
+}
+
 /// The shape of one inner proof: the declared heights, plus everything the batch transcript and the
 /// opening argument need that follows from them.
 ///
@@ -835,8 +851,9 @@ impl PartialEq for RvmShape {
 impl Eq for RvmShape {}
 
 /// The rVM preprocessed commitment for `(program, tier, reduce)`: sixteen field elements,
-/// recomputable by anyone through `machine::Machine::verifier_key` (seeded from the fixed
-/// `KEY_SEED` precisely so that it is).
+/// recomputable by anyone through `machine::Machine::verifier_key` (salted from fixed
+/// `key_derivation_v2` labels precisely so that it is — constraint set 7; a `StdRng` `KEY_SEED`
+/// before).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RvmKey {
     pub cap: [[F; 4]; 4],

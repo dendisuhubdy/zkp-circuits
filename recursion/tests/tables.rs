@@ -170,12 +170,12 @@ use recursion::tables::{cpu, memory, poseidon2, program as program_table, public
 
 #[test]
 fn the_table_widths_and_constraint_degrees_are_pinned() {
-    assert_eq!(cpu::col::WIDTH, 72, "the cpu's designed width after Tasks 8–9 (26 selectors + the SPONGE group-2 limbs) and ZKQ-3 (the base-address groups 3 and 4)");
+    assert_eq!(cpu::col::WIDTH, 82, "72 + the HINTN selector + its eight word columns (Cut B) + the COMPRESS selector (Cut C)");
     assert_eq!(memory::col::WIDTH, 11);
     assert_eq!(program_table::col::WIDTH, 3);
     assert_eq!(program_table::pre::WIDTH, 4);
     assert_eq!(public_table::col::WIDTH, 7);
-    assert_eq!(poseidon2::col::WIDTH, 341);
+    assert_eq!(poseidon2::col::WIDTH, 343, "341 + IS_COMPRESS, BIT (Cut C)");
     assert_eq!(range::col::WIDTH, 1);
     let p = Program {
         instrs: vec![
@@ -420,35 +420,12 @@ fn a_reduce_run_touching_a_cell_outside_the_address_space_is_refused() {
 // message the chip sends or provides may have a non-zero count. The range table is skipped: every
 // row of it is a table entry whose count is a provided multiplicity, balanced by the global sum.
 
-/// A program that reaches every chip: registers and RAM (`STORE`, `LOAD`), a `POSEIDON2`
-/// dispatch, a three-row `REDUCE` run over a hand-written descriptor, the four `PUBLIC`s, `HALT`.
-fn every_chip_program() -> Program {
-    let mut v = vec![];
-    let st = |v: &mut Vec<Instr>, addr: u64, val: u64| {
-        v.push(Instr { op: Op::Faddi, rd: 1, ra: 0, b: F::from_u64(val) });
-        v.push(Instr { op: Op::Store, rd: 1, ra: 0, b: F::from_u64(addr) });
-    };
-    for (k, val) in [100u64, 120, 3, 1, 0, 0, 0, 1, 0, 3, 0].iter().enumerate() {
-        st(&mut v, 200 + k as u64, *val);
-    }
-    v.push(Instr { op: Op::Load, rd: 3, ra: 0, b: F::from_u64(201) });
-    v.push(Instr { op: Op::Faddi, rd: 2, ra: 0, b: F::from_u64(200) });
-    v.push(Instr { op: Op::Reduce, rd: 0, ra: 2, b: F::ZERO });
-    v.push(Instr { op: Op::Faddi, rd: 7, ra: 0, b: F::from_u64(64) });
-    v.push(Instr { op: Op::Poseidon2, rd: 0, ra: 7, b: F::ZERO });
-    for _ in 0..4 {
-        v.push(Instr { op: Op::Public, rd: 0, ra: 0, b: F::ZERO });
-    }
-    v.push(Instr { op: Op::Halt, rd: 0, ra: 0, b: F::ZERO });
-    Program { instrs: v, checkpoints: vec![] }
-}
-
 #[test]
 fn no_admissible_padding_row_of_any_chip_sends_a_message() {
     use p3_air::BaseAir;
     use recursion::machine::Chip;
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x0bc0_de03);
-    let p = every_chip_program();
+    let p = common::every_chip_program();
     let exec = recursion::emulator::execute(&p, &[], 1000).unwrap();
     let t = recursion::machine::build_traces(&p, &exec, Tier(8)).unwrap();
     assert!(t.reduce.is_some(), "the program dispatches REDUCE, so the batch declares the chip");

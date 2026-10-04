@@ -403,14 +403,20 @@ fn input_digest_rows_len(inputs: &[u32]) -> usize { rand_zkvm::hash::input_diges
 #[test]
 fn input_table_shape_and_padding() {
     use rand_zkvm::tables::input::{col, input_trace};
-    let t = input_trace(&[10, 20, 30], &[0, 2, 1], 8);
+    let mut range = RangeCounts::default();
+    let t = input_trace(&[10, 20, 30], &[0, 2, 1], 8, &mut range);
     assert_eq!(t.height(), 8);
+    // ZKM-1/ZKH-2: one `RANGE8` receipt per byte limb of every real word, none for padding.
+    assert_eq!(range.range.iter().sum::<u64>(), 12);
+    assert_eq!((range.range[10], range.range[20], range.range[30], range.range[0]), (1, 1, 1, 9));
     for (i, (word, mult)) in [(10u32, 0u32), (20, 2), (30, 1)].iter().enumerate() {
         let r = i * col::WIDTH;
         assert_eq!(t.values[r + col::IDX], rand_zkvm::tables::F::from_u32(i as u32));
         assert_eq!(t.values[r + col::WORD], rand_zkvm::tables::F::from_u32(*word));
         assert_eq!(t.values[r + col::IS_REAL], rand_zkvm::tables::F::ONE);
         assert_eq!(t.values[r + col::MULT_READ], rand_zkvm::tables::F::from_u32(*mult));
+        assert_eq!(t.values[r + col::WL0], rand_zkvm::tables::F::from_u32(*word));
+        for k in 1..4 { assert_eq!(t.values[r + col::WL0 + k], rand_zkvm::tables::F::ZERO); }
     }
     for i in 3..8 {
         let r = i * col::WIDTH;
@@ -427,7 +433,7 @@ fn cpu_trace_mirrors_events_and_pads() {
     let e = execute(&p, &[], &[], 10_000).unwrap();
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
-    let t = cpu_trace(&p, &[], &[], [0u32; 4], &e.events, 64, &mut range, &mut nibble);
+    let t = cpu_trace(&p, &[], &[], [0u32; 4], &e.events, 64, rand_zkvm::gas::gas_of(&p, &[], &[], &e.events), &mut range, &mut nibble);
     let w = cpu::col::WIDTH;
     // M4.1: ordinary events now start after both the program-digest prefix (`dr`) and the
     // (always >= 1) input-digest prefix (`rand_zkvm::hash::input_digest_row_count(0) == 1`
@@ -454,17 +460,27 @@ fn cpu_trace_mirrors_events_and_pads() {
     assert_eq!(t.values[last_real * w + cpu::col::SYS_HALT], F::ONE);
     let write_row = dr + e.events.iter().position(|ev| matches!(ev.sys, Some(rand_zkvm::emulator::Syscall::WriteOutput { .. }))).unwrap();
     assert_eq!(t.values[write_row * w + cpu::col::OUT_SEL0], F::ONE);
+    // Constraint set 8: `GAS` accumulates through every real row and ends, on the `HALT` row, at
+    // exactly `gas::gas_of` — the limit passed above, so the halt row's `GD0..3` slack is zero.
+    let gas = rand_zkvm::gas::gas_of(&p, &[], &[], &e.events);
+    assert_eq!(t.values[cpu::col::GAS], F::ONE, "row 0 is a digest row, weight 1");
+    assert_eq!(t.values[last_real * w + cpu::col::GAS], F::from_u64(gas));
+    for k in 0..4 { assert_eq!(t.values[last_real * w + cpu::col::GD0 + k], F::ZERO); }
     // Padding rows are all-zero except the `written` accumulators, which must carry the
-    // final per-slot write counts through to the last row for the unwritten-slot constraint.
+    // final per-slot write counts through to the last row for the unwritten-slot constraint,
+    // and `GAS`, which the fill carries forward from the `HALT` row (the AIR leaves it free).
     let pad = &t.values[(last_real + 1) * w..(last_real + 2) * w];
     for (i, x) in pad.iter().enumerate() {
-        let expected = if i == cpu::col::WRITTEN0 { F::ONE } else { F::ZERO };
+        let expected = if i == cpu::col::WRITTEN0 { F::ONE } else if i == cpu::col::GAS { F::from_u64(gas) } else { F::ZERO };
         assert_eq!(*x, expected, "padding column {i}");
     }
     let last = &t.values[(t.height() - 1) * w..t.height() * w];
     assert_eq!(last[cpu::col::WRITTEN0], F::ONE, "slot 0 was written");
     for k in 1..8 { assert_eq!(last[cpu::col::WRITTEN0 + k], F::ZERO, "slot {k} was not"); }
-    let pv = public_values(0, 10, &e.outputs, &p.digest(), &rand_zkvm::hash::input_digest([0u32; 4], &[]), &rand_zkvm::hash::public_digest(&[]));
+    // Constraint set 8: a real gas limit for tier 10, no hash tables (the tier this hand-built
+    // trace call names).
+    let gas_limit = rand_zkvm::gas::gas_max(rand_zkvm::machine::Tier(10), 0, 0);
+    let pv = public_values(0, 10, &e.outputs, &p.digest(), &rand_zkvm::hash::input_digest([0u32; 4], &[]), &rand_zkvm::hash::public_digest(&[]), gas_limit);
     assert_eq!(pv.len(), cpu::pv::NUM);
     assert_eq!(pv[cpu::pv::OUT0], F::from_u32(2));
 }
@@ -475,7 +491,7 @@ fn cpu_trace_limbs_and_counts_every_load_store_address() {
     let e = execute(&p, &[], &[], 10_000).unwrap();
     let mut range = RangeCounts::default();
     let mut nibble = NibbleCounts::default();
-    let t = cpu_trace(&p, &[], &[], [0u32; 4], &e.events, 1 << 10, &mut range, &mut nibble);
+    let t = cpu_trace(&p, &[], &[], [0u32; 4], &e.events, 1 << 10, rand_zkvm::gas::gas_of(&p, &[], &[], &e.events), &mut range, &mut nibble);
     let w = cpu::col::WIDTH;
     // M4.1: as in `cpu_trace_mirrors_events_and_pads`, ordinary events start after both the
     // program-digest prefix and the (always >= 1) input-digest prefix — and, since constraint
@@ -510,9 +526,11 @@ fn cpu_trace_limbs_and_counts_every_load_store_address() {
     // into `dr = program digest rows + idr`) plus its own 32-word `IHVL0..31` canonical
     // encoding on its own last row — a second +32, on top of the program digest's own.
     // Constraint set 6: the public-digest prefix (`pdr` rows, also folded into `dr`) pays the
-    // same 4-per-row rate plus its own 32-word `PHVL0..31` encoding — a third +32.
-    let digest_range8 = 4 * dr + 32 + 32 + 32;
-    assert_eq!(range.range.iter().sum::<u64>() as usize, 8 * mem_rows.len() + 4 * n_stores + digest_range8);
+    // same 4-per-row rate plus its own 32-word `PHVL0..31` encoding — a third +32. The next
+    // constraint set (ZKM-1/ZKH-2): the salt row's four lanes are byte-limbed too — +16.
+    // Constraint set 8: the `HALT` row's four `GD0..3` gas-slack limbs — +4.
+    let digest_range8 = 4 * dr + 32 + 32 + 32 + 16;
+    assert_eq!(range.range.iter().sum::<u64>() as usize, 8 * mem_rows.len() + 4 * n_stores + digest_range8 + 4);
     let nibble_total: u64 = nibble.and.iter().sum();
     assert_eq!(nibble_total as usize, 2 * mem_rows.len());
 }
@@ -756,7 +774,11 @@ fn alu_max_constraint_degree_is_pinned() {
             rand_zkvm::tables::public::MIN_LOG_HEIGHT,
         );
         assert_eq!(common.lookups.len(), 11);
-        assert_eq!(common.lookups[9].len(), 7, "sha256 packed lookup groups");
+        // Constraint set 7: the LogUp blind's `BLIND` send/receive pair is one more group (a bus
+        // of its own, so it folds with nothing else) — 20 interactions, 8 groups (was 18, 7). The
+        // degrees above did not move: the blind's count is a degree-1 column and its messages are
+        // degree 1, so its fraction pin is degree 2, under every table's own maximum.
+        assert_eq!(common.lookups[9].len(), 8, "sha256 packed lookup groups");
     }
 }
 
@@ -1099,7 +1121,9 @@ mod keccak_tests {
 fn public_table_rows_are_committed_words_with_their_read_counts() {
     use rand_zkvm::tables::public;
     let w = public::col::WIDTH;
-    let t = public::public_trace(&[5, 6, 7], &[2, 0, 1], 8);
+    let mut range = RangeCounts::default();
+    let t = public::public_trace(&[5, 6, 7], &[2, 0, 1], 8, &mut range);
+    assert_eq!(range.range.iter().sum::<u64>(), 12);
     assert_eq!(t.height(), 8);
     for i in 0..3 {
         assert_eq!(t.values[i * w + public::col::IDX], F::from_u32(i as u32));
@@ -1112,9 +1136,13 @@ fn public_table_rows_are_committed_words_with_their_read_counts() {
     assert_eq!(t.values[3 * w + public::col::IS_REAL], F::ZERO);
     assert_eq!(t.values[3 * w + public::col::WORD], F::ZERO);
     assert_eq!(t.values[3 * w + public::col::MULT_READ], F::ZERO);
-    // Height rule: declare n+1, floor at MIN_HEIGHT — tables::input's rule exactly.
+    // Height rule: declare n+1, floor at MIN_HEIGHT — tables::input's rule exactly — and then,
+    // constraint set 7, at the private-data floor (128 rows): every segment up to 127 words
+    // declares 7 (was 2 for 0..=3, 3 for 4..=7, …).
     assert_eq!(public::public_log_height(0), public::MIN_LOG_HEIGHT);
-    assert_eq!(public::public_log_height(3), 2);
-    assert_eq!(public::public_log_height(4), 3);
+    assert_eq!(public::MIN_LOG_HEIGHT, rand_zkvm::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT);
+    assert_eq!(public::public_log_height(3), 7);
+    assert_eq!(public::public_log_height(127), 7);
+    assert_eq!(public::public_log_height(128), 8);
     assert_eq!(public::public_log_height(1000), 10);
 }
