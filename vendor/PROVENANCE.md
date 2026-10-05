@@ -1,4 +1,4 @@
-# vendor/ — two patched Plonky3 crates
+# vendor/ — three patched Plonky3 crates
 
 - `p3-fri` 0.7.0 and `p3-merkle-tree` 0.7.0: the crates.io sources, each with exactly one file changed —
   `p3-fri/src/hiding_pcs.rs` and `p3-merkle-tree/src/hiding_mmcs.rs` ("RandProtocol patch (2026-10-01)").
@@ -27,3 +27,9 @@
 - Review: `diff -r --exclude Cargo.toml --exclude Cargo.lock --exclude tests --exclude benches
   $(ls -d ~/.cargo/registry/src/*/p3-batch-stark-0.7.0) vendor/p3-batch-stark` shows exactly the
   marked hunks.
+- Tests: the in-crate `layout_tests` (`src/prover.rs`) and `recursion/tests/quotient_layout.rs`.
+  The manifest carries a marked `[dev-dependencies]` block (Plonky3 `=0.7.0` crates and `rand
+  =0.10.2`, the recursion crate's pin) because upstream's own `#[cfg(test)]` modules need it;
+  `vendor/` has no toolchain file, so run `cargo +1.98.1 test --release` inside the fork. The
+  `Cargo.lock` that creates is git-ignored (`.gitignore`) and never committed.
+- Measured record: `recursion/docs/05-quotient-layout.md`.

@@ -363,11 +363,10 @@ With that overhead counted, the tier-19 figures close exactly:
 
 Committing one instance's chunks as **one matrix** would cut the quotient term from 29.7 GB to
 ≈ 11 GB at tier 19, −20 % of the proof's peak: 16 chunks would become one 32-column matrix at the
-same height, with four salts once. For the recursive verifier it would also replace 16 Merkle
-paths per query with one for that round. The cost is a fork of `p3-batch-stark`'s prover *and*
+same height, with four salts once. (Correction, 2026-10-05: a round opens with one Merkle path per query already — the MMCS batches every matrix of a round into one tree — so the recursive verifier's saving is the salts and hidden values it no longer absorbs, not Merkle paths.) The cost is a fork of `p3-batch-stark`'s prover *and*
 verifier (the chunk openings move inside one row), plus the rVM program's phase-6 reader. The
 LDE of each chunk also allocates two transient copies of its own size (`random_eval`,
-`vanishing_poly_coeffs`). Those are transient, not part of the retained term.
+`vanishing_poly_coeffs`). Those are transient, not part of the retained term. **Done:** `docs/05-quotient-layout.md` (the fork, measured 2026-10-05).
 
 ### What follows for the hardware plan
 
@@ -377,7 +376,7 @@ LDE of each chunk also allocates two transient copies of its own size (`random_e
 - **The three cuts shrink it directly** (derived, below). Even so, the result is not
   `compute-optimization.md` §4.4's ≤ 64 GB. The rest is structural and is the next phase's
   measured decision. Candidates, in order of leverage:
-  1. **the quotient's share (32 %)**: one matrix per instance's chunks, as above. A degree-2
+  1. **the quotient's share (32 %)**: one matrix per instance's chunks, as above — done, `docs/05`. A degree-2
      memory AIR (fewer chunks for the two tallest tables) is a second lever on the same term.
   2. **the register table's height** (4× the cpu table): about 2.5 `REG` messages per cpu row
      after the cuts (582 743 accesses over 230 950 rows at the test shape, up from ~2.3, since

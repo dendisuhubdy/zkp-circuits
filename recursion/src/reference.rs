@@ -120,7 +120,7 @@ pub enum ReplayError {
     Key,
     /// One of the ZK commitments the config requires is absent.
     Randomization,
-    /// `commitments_with_opening_points` refused the opening argument's shape.
+    /// `commitments_with_opening_points_with_layout` refused the opening argument's shape.
     OpeningArgument(String),
     /// `accumulator · inv_vanishing != quotient` for this instance.
     Constraints(usize),

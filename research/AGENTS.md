@@ -40,7 +40,10 @@ big machine (the measured live heap, not the withdrawn ≥ 64 GB oracle class,
 sizes it: `recursion/docs/04`) after
 chain-side aggregation lands, per the user's 2026-09-15 ruling. `recursion/` is
 its own cargo package root (never a workspace member — that would void
-`research`'s `[profile.*]` tables); commands run from inside it.
+`research`'s `[profile.*]` tables); commands run from inside it. The quotient-layout fork (2026-10-05,
+`recursion/docs/05-quotient-layout.md`, `vendor/p3-batch-stark`): rVM proofs commit one quotient
+matrix per instance; `machine::QUOTIENT_LAYOUT`; the RV32 machine and the aggregate program digest
+`c90b3f0a…` unchanged; measured 9.09 → 6.41 GB peak live heap (−29 %) at tier 16.
 
 **`rand-guest`, the sibling guest toolchain, is done through Task 7 (2026-09-18),
 on branch `feat/rand-guest`** — v0.4 piece 1 of 3 (the RPC track took v0.3 first; the two

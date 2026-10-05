@@ -134,7 +134,7 @@ times). Measured 2026-09-15:
 
 **The ≥ 64 GB requirement below is withdrawn (2026-10-03).** The committed-oracle model counted
 one of the prover's four memory terms — main LDE and tree; the permutation (LogUp) LDE and tree;
-the quotient-chunk LDEs, each chunk salted with four columns of its own; the quotient tree and
+the quotient-chunk LDEs, each chunk salted with four columns of its own (one matrix per instance, salted once, since the quotient-layout fork — `docs/05-quotient-layout.md`); the quotient tree and
 the FRI phases — and the other three are ~4× it. The measured record and the live model are
 `docs/04-phase2-row-cuts.md` §"The prover's live heap" (a tier-19 proof: 78.7 GB live when killed
 on a 48 GB box, 94.2 GB peak on Linux). Since phase 2's row cuts the exit is 893 606 rows at
