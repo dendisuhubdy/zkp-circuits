@@ -52,9 +52,11 @@ jobs:
           # The four fuzz-corpus tests link a 10 000-contract shared library that overflows the
           # x86-64 small code model's PC32 relocations on the runner (crtbeginS.o: "relocation
           # truncated to fit") and take over an hour under instrumentation; the directed parity
-          # files cover the same opcodes one by one, so the corpus stays out here.
+          # files cover the same opcodes one by one, so the corpus stays out here. The two
+          # `hc_is_pinned` tests compare the ERC-20 image's hc with the published one, which only
+          # the pinned clang reproduces.
           - crate: evm2rv
-            args: --release -- --skip the_shim_refuses_a_clang_other_than_the_pin --skip _corpus
+            args: --release -- --skip the_shim_refuses_a_clang_other_than_the_pin --skip _corpus --skip hc_is_pinned
           # The three SPL Token pipeline tests need the pinned clang: the runner's clang compiles
           # the translated program to 66 394 words, over the loader's 65 536-word cap (TooLong), so
           # they are skipped here along with the test about the pin itself.
