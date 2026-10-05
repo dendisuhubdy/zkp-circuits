@@ -295,21 +295,24 @@ fn the_committed_program_digest_is_reproducible() {
 // ── M5.2 Task 10: the test-profile exit twin ──────────────────────────────────────────────────
 
 /// The Task-10 twin: **the post-cut verifier program over one real test-profile bundle proof,
-/// proved and verified natively** — 202 198 rows since phase 3's Cut D (230 950 after phase 2's row cuts), tier 18 (461 988 rows
-/// at tier 19 in constraint set 8, 441 643 in constraint set 6), with the exact shape of Task 10's
-/// production exit (tier 20, 749 846 rows). `#[ignore]`d for its cost: the tier-19 twin was
+/// proved and verified natively** — 169 366 rows at phase 3's end (Cut F; 202 198 after Cut D,
+/// 230 950 after phase 2's row cuts), tier 18 (461 988 rows at tier 19 in constraint set 8, 441 643
+/// in constraint set 6), with the exact shape of Task 10's production exit (tier 20, 585 686
+/// rows). `#[ignore]`d for its cost: the tier-19 twin was
 /// killed at 78.7 GB live on a 48 GB box (`recursion/docs/04-phase2-row-cuts.md` §"The prover's
 /// live heap", against a 94.2 GB Linux peak); one height shorter (all but the poseidon2 and reduce
 /// tables), the tier-18 twin was projected at ≈ 47–50 GB. Since the quotient-layout fork the same
 /// shape proves on this 48 GB box at 33.27 GB peak live (2026-10-05,
 /// `tests/memprofile.rs::tier19_exit_twin`, 16 threads; `recursion/docs/05-quotient-layout.md`),
-/// and at 24.86 GB since phase 3's Cut D (`recursion/docs/06-phase3-fold-reduce.md` §3).
+/// at 24.86 GB after phase 3's Cut D, and at 26.88 GB at phase 3's end (2026-10-06; this test
+/// itself proved then in 92.3 s on 16 threads, verify 6.70 s, 270 760 B —
+/// `recursion/docs/06-phase3-fold-reduce.md` §3, §6).
 /// The sibling
 /// `cheating.rs`'s `a_proof_of_one_program_does_not_verify_another` covers the small-scale case;
 /// here the R1 binding is checked at full scale: a proof of the verifier program never verifies
 /// against a *different* program's key.
 #[test]
-#[ignore = "the M5.2 Task-10 twin: post-cut program, tier 18; the same shape proved on this 48 GB box at 33.27 GB live, 2026-10-05, since the quotient-layout fork (docs/05; tier 19 was killed at 78.7 GB live, docs/04); run alone: cargo +1.98.1 test -p recursion --release --test exit twin -- --ignored --nocapture"]
+#[ignore = "the M5.2 Task-10 twin: post-cut program, 169 366 rows, tier 18; proved on this 48 GB box at 26.88 GB live, 2026-10-06, at phase 3's end (docs/06; 33.27 GB at the quotient-layout fork, docs/05; tier 19 was killed at 78.7 GB live, docs/04); run alone: cargo +1.98.1 test -p recursion --release --features parallel --test exit twin -- --ignored --nocapture"]
 fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_verifies_natively() {
     let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
     let shape = InnerShape::of(FriProfile::Test, p.proof.tier, p.proof.program_log_height,
@@ -344,12 +347,14 @@ fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_ver
 /// requirement (a 48.6 GB committed oracle, a ≥ 64 GB machine) counted one of the prover's four
 /// memory terms and is withdrawn: the tier-21 proof measured 376.9 GB on the 503 GB box, and the
 /// measured live-heap model (`recursion/docs/04-phase2-row-cuts.md` §"The prover's live heap")
-/// puts this tier-20 proof at ≈ 190–240 GB (modelled with the production RAM table at 2^22; since
-/// phase 3's Cut D the REG and RAM tables declare 2^21, `recursion/docs/06-phase3-fold-reduce.md`) — a
-/// ≥ 256 GB host. Not attempted on this 48 GB box.
+/// put this tier-20 proof at ≈ 190–240 GB with the production REG and RAM tables at 2^22. Since
+/// phase 3 (`recursion/docs/06-phase3-fold-reduce.md` §3) both declare 2^21, and the same
+/// cell-weighted model projects ≈ 110–130 GB (108 GB from the tier-18 twin measured at 26.88 GB,
+/// 123–127 GB from docs/05's 170–175 GB scaled by the cells phase 3 removed) — a ≥ 160 GB host.
+/// A projection until it runs; not attempted on this 48 GB box.
 #[test]
-#[ignore = "the M5.2 exit: production profile, post-cut program, tier 20, 749 846 rows; \
-            ~190-240 GB projected (docs/04 §live heap; tier 21 measured 376.9 GB), a >= 256 GB host. \
+#[ignore = "the M5.2 exit: production profile, post-cut program, tier 20, 585 686 rows; \
+            ~110-130 GB projected (docs/06 §3, cell-weighted; tier 21 measured 376.9 GB), a >= 160 GB host. \
             Run on the big machine: \
             cargo +1.98.1 test -p recursion --release --test exit -- --ignored --nocapture"]
 fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_natively() {
@@ -413,5 +418,21 @@ fn a_committed_row_whose_own_slot_differs_is_refused_at_the_own_slot_step() {
     match execute(&off.program, &tape.words, MAX_CYCLES) {
         Err(ExecError::InverseOfZero { pc }) => assert_eq!(off.program.checkpoint_at(pc), Some("commit phase own slot[0]")),
         other => panic!("Off: expected the own-slot refusal, got {other:?}"),
+    }
+    // Task 5 sweep (Task 2 review): the same tamper under `Checkpoints::On` (the differential
+    // build, whose checkpoint `PUBLIC`s change the allocator's schedule around the check), and the
+    // own slot's high lane tampered instead of its low one, under every build.
+    let on = verify_rv32(&shape, &key, Checkpoints::On);
+    match execute(&on.program, &tape.words, MAX_CYCLES) {
+        Err(ExecError::InverseOfZero { pc }) => assert_eq!(on.program.checkpoint_at(pc), Some("commit phase own slot[0]")),
+        other => panic!("Checkpoints::On: expected the own-slot refusal, got {other:?}"),
+    }
+    tape.words[opens + 2 * idx] -= F::ONE;
+    tape.words[opens + 2 * idx + 1] += F::ONE;
+    for (what, prog) in [("shipped", &vp.program), ("Precompiles::Off", &off.program), ("Checkpoints::On", &on.program)] {
+        match execute(prog, &tape.words, MAX_CYCLES) {
+            Err(ExecError::InverseOfZero { pc }) => assert_eq!(prog.checkpoint_at(pc), Some("commit phase own slot[0]"), "{what}, lane 1"),
+            other => panic!("{what}, lane 1: expected the own-slot refusal, got {other:?}"),
+        }
     }
 }

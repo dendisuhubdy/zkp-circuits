@@ -437,3 +437,38 @@ fn spans_attribute_every_emitted_row_to_the_innermost_open_span() {
     assert!(tagged.contains(&(Op::Faddi, "(none)")), "{tagged:?}");
     assert_eq!(name(p.instrs.len() - 1), "(none)", "HALT is emitted outside every span");
 }
+
+/// Task 5 sweep (Task 0 review): the kind tag. Forty constants defined outside any span force the
+/// allocator to spill; summing them inside the `"sum"` span reloads the spilled ones there. Every
+/// reload the allocator inserts while `"sum"` is open is tagged `PC_RELOAD` *and* attributed to
+/// `"sum"` (not to the span that defined the value, nor to `"(none)"`), every reload is a `LOAD`
+/// from the spill arena, and the spills land where the constants were defined, outside the span.
+#[test]
+fn a_reload_inside_a_span_is_tagged_a_reload_and_counted_to_that_span() {
+    use p3_field::PrimeCharacteristicRing;
+    use recursion::dsl::{Builder, Checkpoints, PC_INSTR, PC_RELOAD, PC_SPILL};
+    use recursion::isa::{Op, F};
+    let mut b = Builder::new(Checkpoints::Off);
+    let vals: Vec<_> = (1..=40u64).map(|k| b.constant(F::from_u64(k))).collect();
+    let acc = b.span("sum", |b| {
+        let mut acc = vals[0];
+        for v in &vals[1..] {
+            acc = b.add(acc, *v);
+        }
+        acc
+    });
+    b.public(acc);
+    let (p, stats) = b.finish_stats();
+    assert!(stats.spills > 0 && stats.reloads > 0, "40 live constants must spill and reload: {stats:?}");
+    let name = |pc: usize| stats.span_names[stats.pc_span[pc] as usize];
+    let of_kind = |k: u8| -> Vec<usize> { (0..p.instrs.len()).filter(|&pc| stats.pc_kind[pc] == k).collect() };
+    let reloads = of_kind(PC_RELOAD);
+    assert_eq!(reloads.len(), stats.reloads, "one PC_RELOAD tag per reload the allocator counted");
+    assert!(reloads.iter().all(|&pc| p.instrs[pc].op == Op::Load), "a base-field reload is a LOAD");
+    assert!(reloads.iter().all(|&pc| name(pc) == "sum"), "every reload is inside \"sum\", where the values are read");
+    let spills = of_kind(PC_SPILL);
+    assert!(!spills.is_empty() && spills.iter().all(|&pc| p.instrs[pc].op == Op::Store), "a spill is a STORE");
+    assert!(spills.iter().any(|&pc| name(pc) == "(none)"), "the definitions' spills are outside the span");
+    assert!(of_kind(PC_INSTR).iter().any(|&pc| p.instrs[pc].op == Op::Fadd && name(pc) == "sum"), "the adds are the span's own rows");
+    assert_eq!(execute(&p, &[], 1_000_000).unwrap().public, vec![F::from_u64(40 * 41 / 2)]);
+}

@@ -268,38 +268,76 @@ fn every_reduce_run_row_carries_its_addresses_and_clock_from_the_row_before() {
 }
 
 /// V-OPCODES-1, as a rule: no admissible padding row sends or provides anything, whatever its
-/// row-kind witnesses (`IS_FIRST`, `IS_LAST`, `CHAIN_START`, `CARRY`) — off the layout region,
-/// where `MULT` must be zero.
+/// row-kind witnesses — off the provider region (the preprocessed columns are zero there). Every
+/// column is random except the three kind columns (zero: it is padding) and the witnesses that are
+/// enumerated: the run kind's `IS_FIRST`, `IS_LAST`, `CHAIN_START`, `CARRY`, the fold kind's
+/// `F_FIRST`, `F_PH1`, `F_LAST`, the pow kind's `P_FIRST`, `P_LAST`, `P_BIT`, and the two provider
+/// multiplicities `MULT` and `MULT_C` (each zero or random). Task 5 sweep (Task 3 review): the
+/// fold and pow kinds' columns are random here too — they were held at zero, so a padding row's
+/// fold or pow message was never tried — and a random `MULT`/`MULT_C` off the provider region is
+/// tried, which the provider rules alone refuse (`a_multiplicity_off_the_layout_is_refused_by_the_provider_rule`).
 #[test]
 fn no_admissible_padding_reduce_row_sends_a_message() {
     use reduce_table::col::*;
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x0bc0_de02);
     let (interactions, constraints) = common::symbolic_air(&reduce_air());
     let next = vec![F::ZERO; WIDTH];
+    let flags = [IS_FIRST, IS_LAST, CHAIN_START, CARRY, F_FIRST, F_PH1, F_LAST, P_FIRST, P_LAST, P_BIT];
     let mut sends = Vec::new();
     let mut admitted = 0;
-    for bits in 0u32..16 {
-        let mut cur: Vec<F> = (0..WIDTH).map(|c| if c < REDUCE_KIND_COLS { common::random_felt(&mut rng) } else { F::ZERO }).collect();
-        cur[IS_REAL] = F::ZERO;
-        cur[IS_FIRST] = F::from_bool(bits & 1 != 0);
-        cur[IS_LAST] = F::from_bool(bits & 2 != 0);
-        cur[CHAIN_START] = F::from_bool(bits & 4 != 0);
-        cur[CARRY] = F::from_bool(bits & 8 != 0);
+    for bits in 0u32..1 << (flags.len() + 2) {
+        let mut cur: Vec<F> = (0..WIDTH).map(|_| common::random_felt(&mut rng)).collect();
+        for c in [IS_REAL, IS_FOLD, IS_POW] {
+            cur[c] = F::ZERO;
+        }
+        for (k, &c) in flags.iter().enumerate() {
+            cur[c] = F::from_bool(bits >> k & 1 != 0);
+        }
         cur[WRITES] = cur[IS_LAST] * (F::ONE - cur[CARRY]);
         cur[READ_ALPHA] = cur[IS_FIRST] * cur[CHAIN_START];
-        cur[MULT] = F::ZERO;
+        if bits >> flags.len() & 1 == 0 {
+            cur[MULT] = F::ZERO;
+        }
+        if bits >> (flags.len() + 1) & 1 == 0 {
+            cur[MULT_C] = F::ZERO;
+        }
         if constraints.iter().any(|c| common::eval_at(c, &cur, &next) != F::ZERO) {
             continue;
         }
         admitted += 1;
         for i in &interactions {
             if common::eval_at(&i.count, &cur, &next) != F::ZERO {
-                sends.push(format!("kinds {bits:04b}: sends on {}", i.bus_name));
+                sends.push(format!("kinds {bits:012b}: sends on {}", i.bus_name));
             }
         }
     }
     assert!(admitted >= 1, "the all-zero kind assignment is admissible padding");
     assert!(sends.is_empty(), "admissible padding rows of the reduce chip send messages:\n  {}", sends.join("\n  "));
+}
+
+/// Task 5 sweep (Task 1a review): `MULT·(1 − L_IS_ENTRY) = 0`, pinned on its own. A row past the
+/// layout with `MULT = 1` would provide the all-zero `REDUCE_LAYOUT` entry. No run can consume that
+/// entry — its flags are 0, so its first row must be a continuation entered by a carry from entry
+/// `ENTRY − 1 = −1`, and every real row's `ENTRY` is a layout index (looked up on a first row,
+/// carried on the rest), never `−1` — so an end-to-end forgery is refused by the bus imbalance as
+/// well (`tests/cheating.rs`'s `a_multiplicity_off_the_layout_is_rejected`), and the provider rule
+/// is defence in depth that no proof-level forgery can isolate. Here it is isolated at the AIR: on
+/// an honest padding row off the provider region, setting `MULT` (or, for the coefficient table's
+/// rule, `MULT_C`) violates exactly one constraint, and it is that rule — the row with the
+/// multiplicity cleared satisfies every constraint.
+#[test]
+fn a_multiplicity_off_the_layout_is_refused_by_the_provider_rule() {
+    use reduce_table::col::*;
+    let (_, constraints) = common::symbolic_air(&reduce_air());
+    let zero = vec![F::ZERO; WIDTH];
+    assert!(constraints.iter().all(|c| common::eval_at(c, &zero, &zero) == F::ZERO), "an all-zero padding row is admissible");
+    for (name, c) in [("MULT", MULT), ("MULT_C", MULT_C)] {
+        let mut cur = zero.clone();
+        cur[c] = F::ONE;
+        let violated: Vec<usize> = (0..constraints.len()).filter(|&k| common::eval_at(&constraints[k], &cur, &zero) != F::ZERO).collect();
+        assert_eq!(violated.len(), 1, "{name} = 1 off the provider region violates exactly one constraint: {violated:?}");
+        assert_eq!(common::eval_at(&constraints[violated[0]], &cur, &zero), F::ONE, "{name}: the violated rule is `{name}·(1 − provider flag)`");
+    }
 }
 
 /// ZKR-4 and R5, as a rule: a run ends exactly on the row where ADDR_R = ROW_END. Checked on

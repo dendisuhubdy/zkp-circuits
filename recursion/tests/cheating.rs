@@ -287,6 +287,40 @@ fn a_chain_continuation_starting_from_a_forged_accumulator_is_rejected() {
     assert!(rejects(|| reduce_verify(&m, &p, &t)));
 }
 
+/// Task 5 sweep (Task 1a review): a carry hands its accumulator to the *next* entry. The layout
+/// is a three-entry chain — entry 0 (carries), entry 1 (a continuation that carries), entry 2 (a
+/// continuation that closes, with entry 1's fields as `common::reduce_chain_program(true)`'s
+/// closing entry has them) — and the program dispatches entry 0 and then entry 2, skipping 1.
+/// The emulator refuses that (`ReduceChain`), so the execution is the honest two-entry chain's,
+/// relabelled: its second `REDUCE` becomes this program's `REDUCE 2` and its event's entry 2.
+/// Entry 2 reads exactly what the honest closing entry read, so the run's rows, the layout lookup
+/// (entry 2's provider row, `MULT` 1), the `REDUCE` dispatch `[clk + 1, 2]`, the `CLK + 1` carry,
+/// the accumulator hand-over and every RAM message balance; only `n(ENTRY) = ENTRY + 1` on the
+/// carrying row refuses it. (Over a real layout, skipping entries drops columns from a reduction.)
+#[test]
+fn a_carry_followed_by_the_wrong_entry_is_rejected_by_the_entry_step() {
+    let honest = common::reduce_chain_program(true);
+    let mut p = honest.clone();
+    let close = honest.reduce_layout[1];
+    p.reduce_layout = vec![honest.reduce_layout[0], recursion::isa::ReduceEntry { carry: true, ..close }, close];
+    let second = p.instrs.iter().rposition(|x| x.op == Op::Reduce).unwrap();
+    assert_eq!(p.instrs[second].b, F::ONE, "the honest chain's second dispatch is entry 1");
+    p.instrs[second].b = F::TWO;
+    assert_eq!(Machine::check_program(&p), Ok(()), "the three-entry layout is a legal chain");
+    assert!(matches!(execute(&p, &[], 10_000), Err(recursion::emulator::ExecError::ReduceChain { .. })), "the emulator refuses the skip");
+    let m = Machine::new(FriProfile::Test);
+    let mut exec = execute(&honest, &[], 10_000).unwrap();
+    let ev = exec.events.iter_mut().find(|e| e.pc as usize == second).unwrap();
+    ev.instr = p.instrs[second];
+    ev.b_val[0] = F::TWO; // the cpu row's immediate operand, as the fetched instruction carries it
+    ev.reduce.as_mut().unwrap().entry = 2;
+    let t = build_traces(&p, &exec, Tier(8)).unwrap();
+    let w = reduce_table::col::WIDTH;
+    let red = t.reduce.as_ref().unwrap();
+    assert_eq!((red.values[w + reduce_table::col::CARRY], red.values[2 * w + reduce_table::col::ENTRY]), (F::ONE, F::TWO), "entry 0's carrying row hands over to entry 2");
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a carry from entry 0 into entry 2 VERIFIED, skipping entry 1");
+}
+
 /// The provider region: a multiplicity on a row past the layout provides an all-zero entry.
 #[test]
 fn a_multiplicity_off_the_layout_is_rejected() {
@@ -1518,12 +1552,23 @@ fn a_fold_coefficient_off_the_table_is_rejected_by_the_coefficient_lookup() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a phase-1 row with a coefficient off the table VERIFIED");
 }
 
+/// The zero-row fold's message base and arity, and so its cells: `y_k` at `MSG + 2k`, the four
+/// salts, then the result pair at [`zero_row_result`] (Task 5 sweep: the forgeries below named
+/// these as literals).
+const ZERO_ROW_MSG: u64 = 300;
+const ZERO_ROW_ARITY: u64 = 2;
+
+/// The result cell the fold run writes: after the row's `2a` cells and its salts.
+fn zero_row_result() -> u64 {
+    ZERO_ROW_MSG + 2 * ZERO_ROW_ARITY + recursion::isa::FOLD_SALT_CELLS
+}
+
 /// An arity-2 fold of the all-zero row at u = 3 whose result is never read back by the program
 /// (so a forged result needs only its two RAM writes changed): the cells are stored as zero, the
 /// fold runs, and the program publishes four zeros.
 fn zero_row_fold_program() -> Program {
-    let mut v: Vec<Instr> = (300..304).map(|a| i(Op::Store, 0, 0, a)).collect();
-    v.extend([i(Op::Faddi, 2, 0, 3), i(Op::Faddi, 3, 0, 0), i(Op::Faddi, 4, 0, 300), i(Op::Fold, 2, 4, 2)]);
+    let mut v: Vec<Instr> = (ZERO_ROW_MSG..ZERO_ROW_MSG + 2 * ZERO_ROW_ARITY).map(|a| i(Op::Store, 0, 0, a)).collect();
+    v.extend([i(Op::Faddi, 2, 0, 3), i(Op::Faddi, 3, 0, 0), i(Op::Faddi, 4, 0, ZERO_ROW_MSG), i(Op::Fold, 2, 4, ZERO_ROW_ARITY)]);
     v.extend([i(Op::Public, 0, 0, 0), i(Op::Public, 0, 0, 0), i(Op::Public, 0, 0, 0), i(Op::Public, 0, 0, 0), i(Op::Halt, 0, 0, 0)]);
     Program { instrs: v, checkpoints: vec![], reduce_layout: vec![] }
 }
@@ -1548,7 +1593,7 @@ fn a_fold_run_whose_horner_does_not_start_at_zero_is_rejected_by_the_phase_switc
     red.values[(first + 3) * w + FACC0] = F::from_u64(3); // 1·u + D_0
     red.values[(first + 3) * w + FOUT0] = F::from_u64(9); // 3·u + D_0
     let f = exec.events.iter().position(|e| e.instr.op == Op::Fold).unwrap();
-    let res = exec.events[f].mem.iter_mut().find(|a| a.is_write && a.addr == 300 + 4 + 4).unwrap();
+    let res = exec.events[f].mem.iter_mut().find(|a| a.is_write && a.addr == zero_row_result()).unwrap();
     res.value = F::from_u64(9);
     let reg = cpu::register_accesses(&exec.events);
     let ram = cpu::ram_accesses(&exec.events);
@@ -1581,7 +1626,8 @@ fn a_fold_run_whose_phase_switch_is_early_is_rejected_by_the_switch_index() {
     // The coefficient table's row for (a = 2, k = 1) is row 1; its multiplicity loses the lookup.
     red.values[w + MULT_C] -= F::ONE;
     let f = exec.events.iter().position(|e| e.instr.op == Op::Fold).unwrap();
-    exec.events[f].mem.retain(|a| a.is_write || a.addr < 302);
+    // y_1's two cells, MSG + 2 and MSG + 3, are the reads the early switch skips.
+    exec.events[f].mem.retain(|a| a.is_write || a.addr < ZERO_ROW_MSG + 2);
     let reg = cpu::register_accesses(&exec.events);
     let ram = cpu::ram_accesses(&exec.events);
     let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
@@ -2052,4 +2098,135 @@ fn a_headless_reduce_row_after_a_pow_run_is_rejected() {
     ram.push(MemAccess { addr: 501, ts: ts + 15, value: F::ZERO, is_write: true });
     let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
     assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a headless reduce row after a pow run VERIFIED, writing 777 to cell 500");
+}
+
+// ── Task 5 sweep (Task 4 review): the four pow rules no forgery isolated ─────────────────────
+// Each forgery below keeps every other constraint and every bus satisfied and is refused by the
+// one rule its name gives; each was mutation-checked in a scratch copy (the rule deleted from
+// `ReduceAir::eval`, the test run alone: VERIFIED), recorded in the Task 5 report.
+
+/// `CLK` is carried along a pow run. An all-zero run whose middle rows (K = 1..L − 2) claim the next
+/// clock: their bit reads move to `16·(clk + 1) + 0`, which the RAM log carries (no other access
+/// touches those cells after the run), and the first row (the `POW` message) and the last (the
+/// output write) keep the dispatch clock. Only `n(CLK) = CLK` along the run refuses it.
+#[test]
+fn a_pow_run_moving_its_clock_mid_run_is_rejected_by_the_clock_carry() {
+    use reduce_table::col::*;
+    let p = common::pow_program(&[0; 64], POW_OFF, POW_LEN as u64, pow_g(), F::GENERATOR);
+    let (m, mut exec, mut red, lh) = pow_parts(&p);
+    let (w, first) = (WIDTH, pow_first_row(&red));
+    for k in 1..POW_LEN - 1 {
+        red.values[(first + k) * w + CLK] += F::ONE;
+        let addr = 400 + POW_OFF + POW_LEN as u64 - 1 - k as u64;
+        pow_read(&mut exec, addr).ts += 16;
+    }
+    assert!(pow_refused(&m, &p, &exec, red, lh), "a pow run that moved its clock mid-run VERIFIED");
+}
+
+/// `P_OFF` is carried along a pow run: an all-zero run whose middle rows (K = 1..L − 2) read at
+/// `off + 20` — cells 426–434, stored zeros no other row reads — while the first row (the range
+/// lookup and the `POW` message) and the last (the length rule) keep the dispatched offset. The
+/// reads move in the event log; only `n(P_OFF) = P_OFF` refuses it.
+#[test]
+fn a_pow_run_moving_its_offset_mid_run_is_rejected_by_the_offset_carry() {
+    use reduce_table::col::*;
+    let p = common::pow_program(&[0; 64], POW_OFF, POW_LEN as u64, pow_g(), F::GENERATOR);
+    let (m, mut exec, mut red, lh) = pow_parts(&p);
+    let (w, first) = (WIDTH, pow_first_row(&red));
+    for k in 1..POW_LEN - 1 {
+        red.values[(first + k) * w + P_OFF] += F::from_u64(20);
+        let addr = 400 + POW_OFF + POW_LEN as u64 - 1 - k as u64;
+        pow_read(&mut exec, addr).addr += 20;
+    }
+    assert!(pow_refused(&m, &p, &exec, red, lh), "a pow run that moved its offset mid-run VERIFIED");
+}
+
+/// `P_L` is carried along a pow run: the same move by the length instead (`L + 20` on the middle
+/// rows; the bit address is `buf + off + L − 1 − K`). The last row keeps `L`, so the length rule
+/// `P_LAST ⇒ K = L − 1` holds; only `n(P_L) = P_L` refuses it.
+#[test]
+fn a_pow_run_changing_its_length_mid_run_is_rejected_by_the_length_carry() {
+    use reduce_table::col::*;
+    let p = common::pow_program(&[0; 64], POW_OFF, POW_LEN as u64, pow_g(), F::GENERATOR);
+    let (m, mut exec, mut red, lh) = pow_parts(&p);
+    let (w, first) = (WIDTH, pow_first_row(&red));
+    for k in 1..POW_LEN - 1 {
+        red.values[(first + k) * w + P_L] += F::from_u64(20);
+        let addr = 400 + POW_OFF + POW_LEN as u64 - 1 - k as u64;
+        pow_read(&mut exec, addr).addr += 20;
+    }
+    assert!(pow_refused(&m, &p, &exec, red, lh), "a pow run that changed its length mid-run VERIFIED");
+}
+
+/// A run starts at `K = 0`: an all-zero run that starts at `K = 1` instead runs `L − 1` rows
+/// (K = 1..L − 1), so it never reads row 0's bit (cell 415, the highest) and its ladder starts at
+/// the dispatched `G` one row late. Over all-zero bits the product is `base` whatever the ladder,
+/// so the output is the honest one; the dropped read leaves the event log and the run's last row
+/// becomes padding. The `POW` message, the range lookups, the carries, the steps and the length
+/// rule (the last row is `K = L − 1`) all hold; only `P_FIRST·P_K = 0` refuses it.
+#[test]
+fn a_pow_run_starting_past_k_zero_is_rejected_by_the_first_index_rule() {
+    use reduce_table::col::*;
+    let p = common::pow_program(&[0; 64], POW_OFF, POW_LEN as u64, pow_g(), F::GENERATOR);
+    let (m, mut exec, mut red, lh) = pow_parts(&p);
+    let (w, first) = (WIDTH, pow_first_row(&red));
+    let mut g = pow_g();
+    for j in 0..POW_LEN - 1 {
+        let r = &mut red.values[(first + j) * w..(first + j + 1) * w];
+        r[P_K] = F::from_u64(j as u64 + 1);
+        r[P_G] = g;
+        r[P_LAST] = F::from_bool(j == POW_LEN - 2);
+        r[P_OUT] = if j == POW_LEN - 2 { F::GENERATOR } else { F::ZERO };
+        g = g.square();
+    }
+    for c in IS_POW..WIDTH {
+        red.values[(first + POW_LEN - 1) * w + c] = F::ZERO;
+    }
+    red.values[(first + POW_LEN - 1) * w + CLK] = F::ZERO;
+    let e = exec.events.iter_mut().find(|e| e.instr.op == Op::Pow).unwrap();
+    e.mem.retain(|a| a.is_write || a.addr != 400 + POW_OFF + POW_LEN as u64 - 1);
+    assert!(pow_refused(&m, &p, &exec, red, lh), "a pow run starting at K = 1 VERIFIED, never reading its highest bit");
+}
+
+/// The table's first row, if it is a pow row, starts a run (the transition rules see no row
+/// before it). A program with only a `POW` puts its run at row 0; here a headless one-row run
+/// (`P_LAST`, no `P_FIRST`, so no `POW` message: buffer 600, off 0, L 1, `G = 1`, `S = 777`, the
+/// bit read from the fresh cell 600) takes row 0 and writes 777 to cell 664 at the honest run's
+/// clock; the honest run follows from row 1 (its columns moved down one row; no provider
+/// multiplicity is non-zero in a pow-only program, so nothing else moves). The RAM log is given the
+/// read and the write. Only the first-row rule `IS_POW ⇒ P_FIRST` refuses it.
+#[test]
+fn a_headless_pow_row_at_the_tables_first_row_is_rejected() {
+    use reduce_table::col::*;
+    let p = common::pow_program(&pow_bits(61), POW_OFF, POW_LEN as u64, pow_g(), F::GENERATOR);
+    let (m, exec, mut red, lh) = pow_parts(&p);
+    let w = WIDTH;
+    assert_eq!(pow_first_row(&red), 0, "a pow-only program's run starts at row 0");
+    assert!(POW_LEN < red.height() - 1, "room for one more row before the padding");
+    assert!((0..red.height()).all(|r| red.values[r * w + MULT] == F::ZERO && red.values[r * w + MULT_C] == F::ZERO));
+    let clk = red.values[CLK];
+    for row in (1..=POW_LEN).rev() {
+        for c in [CLK].into_iter().chain(IS_POW..WIDTH) {
+            red.values[row * w + c] = red.values[(row - 1) * w + c];
+        }
+    }
+    let r = &mut red.values[0..w];
+    for c in [CLK].into_iter().chain(IS_POW..WIDTH) {
+        r[c] = F::ZERO;
+    }
+    r[IS_POW] = F::ONE;
+    r[P_LAST] = F::ONE;
+    r[CLK] = clk;
+    r[P_BASE] = F::from_u64(600);
+    r[P_L] = F::ONE;
+    r[P_G] = F::ONE;
+    r[P_S] = F::from_u64(777);
+    r[P_OUT] = F::from_u64(777);
+    let reg = cpu::register_accesses(&exec.events);
+    let mut ram = cpu::ram_accesses(&exec.events);
+    let ts = clk.as_canonical_u64() as u32 * 16;
+    ram.push(MemAccess { addr: 600, ts, value: F::ZERO, is_write: false });
+    ram.push(MemAccess { addr: 664, ts: ts + 15, value: F::from_u64(777), is_write: true });
+    let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a headless pow row at the table's first row VERIFIED, writing 777 to cell 664");
 }

@@ -498,7 +498,9 @@ pub fn reduce_trace(
     let n_rows = reduce_rows(events) + fold_rows(folds) + pow_rows(pows);
     assert!(
         n_rows < height && provider_rows(layout) <= height,
-        "reduce table: {n_rows} rows, {} layout entries, height {height}",
+        "reduce table: {n_rows} rows plus one padding row, and a provider region of {} rows ({} layout entries, the \
+         {FOLD_COEFF_ROWS}-row coefficient table), against height {height}",
+        provider_rows(layout),
         layout.len()
     );
     let mut v = F::zero_vec(height * WIDTH);

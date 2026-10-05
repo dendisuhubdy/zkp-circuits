@@ -191,7 +191,8 @@ struct PtrSlot {
     delta: i64,
     /// The holder's compile-time value: the `FADDI` immediate `alloc` materialised it with.
     /// Every `Ptr` descends from `alloc` (through `offset`), so every pointer's absolute
-    /// address is a compile-time constant — which is what `reduce` writes into a descriptor.
+    /// address is a compile-time constant — which is what `reduce` registers in a layout entry
+    /// (Cut D: the preprocessed `Program::reduce_layout`, never a runtime descriptor).
     base_value: u64,
 }
 
@@ -737,6 +738,10 @@ impl Builder {
     /// One `POW` (Cut F): `base·g^{rev(bits, L)}` from the `len` bits at cells `off..off+len` of
     /// the 65-cell bits buffer `bits` (`DslChallenger::sample_bits_mem`), by the reduce chip's
     /// pow run; the result is loaded from cell 64. `(g, base)` ride as one extension pair in `rd`.
+    /// `len` is at least 1: a run has one chip row per bit and its first row is the one that
+    /// receives the dispatch, so an empty run has nothing to receive it — the same shape
+    /// `machine::check_instr` (`DecodeError::PowShape`) and the emulator (`ExecError::PowShape`)
+    /// refuse (`index_power` always asks for `log_rev ≥ 1` bits).
     pub fn pow_run(&mut self, bits: Ptr, off: usize, len: usize, g: F, base: F) -> Felt {
         assert!(len >= 1 && off + len <= 64, "POW: {len} bits at {off} leave the 64-bit buffer");
         let gb = self.ext_constant(EF::from_basis_coefficients_slice(&[g, base]).expect("two coefficients"));
@@ -1484,15 +1489,24 @@ impl Builder {
         stats.span_names = span_names;
         stats.pc_span = pc_span;
         stats.pc_kind = pc_kind;
-        // Cut D: a carrying entry's REDUCE is followed by its continuation's on the next pc.
+        // Cut D: a carrying entry's REDUCE is followed by its continuation's on the next pc. Only
+        // `Builder::reduce` emits `REDUCE`, with ids it registered, so the two asserts below name
+        // a builder bug, not a program's (Task 5 sweep: they were opaque index panics).
         let mut reduce_pc = vec![u32::MAX; layout.len()];
         for (pc, ins) in out.iter().enumerate() {
             if ins.op == Op::Reduce {
-                reduce_pc[ins.b.as_canonical_u64() as usize] = pc as u32;
+                let id = ins.b.as_canonical_u64();
+                assert!(
+                    (id as usize) < layout.len(),
+                    "REDUCE at pc {pc} names layout entry {id}, but the builder registered {} entries",
+                    layout.len()
+                );
+                reduce_pc[id as usize] = pc as u32;
             }
         }
         for (k, e) in layout.iter().enumerate() {
             if e.carry {
+                assert!(k + 1 < layout.len(), "reduce layout entry {k} carries, but it is the last entry");
                 assert_eq!(reduce_pc[k + 1], reduce_pc[k] + 1, "reduce chain entries {k} and {} are not consecutive", k + 1);
             }
         }

@@ -347,9 +347,15 @@ fn the_own_slot_check_agrees_on_and_off_at_every_slot() {
     for la in 1..=3usize {
         let a = 1usize << la;
         let row: Vec<EF> = (0..a).map(|_| common::random_ext(&mut rng)).collect();
+        // The cases (Task 5 sweep: lane 1 and a right value in the wrong slot, beside lane 0):
+        // honest; the folded value off in its low lane; off in its high lane; and exactly the value
+        // of another slot of the same row — a check that read the wrong offset would accept it.
+        let lane1 = EF::from_basis_coefficients_slice(&[F::ZERO, F::ONE]).unwrap();
         for idx in 0..a {
-            for honest in [true, false] {
-                let folded = if honest { row[idx] } else { row[idx] + EF::ONE };
+            let other = row[(idx + 1) % a];
+            assert_ne!(other, row[idx], "the random row's slots are distinct");
+            for (case, folded) in [("honest", row[idx]), ("lane 0", row[idx] + EF::ONE), ("lane 1", row[idx] + lane1), ("other slot", other)] {
+                let honest = case == "honest";
                 let run = |pc: Precompiles| -> Result<(), String> {
                     let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, pc);
                     let msg = b.alloc(2 * a as u64);
@@ -372,8 +378,8 @@ fn the_own_slot_check_agrees_on_and_off_at_every_slot() {
                     }
                 };
                 let (on, off) = (run(Precompiles::On), run(Precompiles::Off));
-                assert_eq!(on, off, "la {la}, idx {idx}, honest {honest}");
-                assert_eq!(on, if honest { Ok(()) } else { Err("own slot".to_string()) }, "la {la}, idx {idx}");
+                assert_eq!(on, off, "la {la}, idx {idx}, {case}");
+                assert_eq!(on, if honest { Ok(()) } else { Err("own slot".to_string()) }, "la {la}, idx {idx}, {case}");
             }
         }
     }
@@ -460,9 +466,14 @@ fn fold_via_the_chip_matches_the_compiled_fold() {
     }
 }
 
-/// Cut F: POW equals the compiled ladder for random bits, offsets and lengths.
+/// Cut F: POW equals the closed form `base·Π_k g^{2^{L−1−k}·bit_{off+k}}` for random bits,
+/// offsets and lengths. (Renamed in the Task 5 sweep: this checks the formula, not the compiled
+/// `bit_selected_power`. The On/Off differential against that ladder is
+/// `fold_via_the_chip_matches_the_compiled_fold`'s `cells = Some` case, where `On` takes `s` from a
+/// `POW` and `Off` from `bit_selected_power`, and the fixture acceptance and tamper tables, which
+/// run both builds over real proofs.)
 #[test]
-fn pow_matches_the_bit_selected_ladder() {
+fn pow_matches_the_closed_form_index_power() {
     use p3_field::TwoAdicField;
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(31);
     let m = Machine::new(FriProfile::Test);

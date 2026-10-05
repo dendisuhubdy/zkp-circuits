@@ -84,8 +84,34 @@ fn the_reduce_layout_is_absorbed_into_the_digest_only_when_present() {
     let p = Program { instrs: vec![instr(Op::Faddi, 1, 0, 7), instr(Op::Halt, 0, 0, 0)], checkpoints: vec![], reduce_layout: vec![] };
     let e = ReduceEntry { vals: 100, row: 120, len: 3, key: 210, alpha: 212, res: 214, chain_start: true, carry: false };
     let q = Program { reduce_layout: vec![e], ..p.clone() };
-    let r = Program { reduce_layout: vec![ReduceEntry { res: 216, ..e }], ..p.clone() };
     assert_ne!(p.digest(), q.digest(), "a layout changes the digest");
-    assert_ne!(q.digest(), r.digest(), "every layout field is bound");
+    // Every field is bound, each on its own (Task 5 sweep: the flags and the length too, not only
+    // `res`): changing any one of the eight gives a digest distinct from the honest one and from
+    // every other single change — including `chain_start` against `carry`, which share one word.
+    let variants = [
+        ("vals", ReduceEntry { vals: 102, ..e }),
+        ("row", ReduceEntry { row: 121, ..e }),
+        ("len", ReduceEntry { len: 2, ..e }),
+        ("key", ReduceEntry { key: 216, ..e }),
+        ("alpha", ReduceEntry { alpha: 218, ..e }),
+        ("res", ReduceEntry { res: 216, ..e }),
+        ("chain_start", ReduceEntry { chain_start: false, ..e }),
+        ("carry", ReduceEntry { carry: true, ..e }),
+        ("both flags", ReduceEntry { chain_start: false, carry: true, ..e }),
+    ];
+    let mut seen = vec![("honest", q.digest())];
+    for (name, v) in variants {
+        let d = Program { reduce_layout: vec![v], ..p.clone() }.digest();
+        for (other, od) in &seen {
+            assert_ne!(d, *od, "changing `{name}` collides with {other}");
+        }
+        seen.push((name, d));
+    }
+    // And the entry count and order: two entries, and the same two swapped.
+    let f = ReduceEntry { vals: 300, row: 320, len: 1, key: 330, alpha: 212, res: 340, chain_start: false, carry: false };
+    let two = Program { reduce_layout: vec![e, f], ..p.clone() };
+    let swapped = Program { reduce_layout: vec![f, e], ..p.clone() };
+    assert_ne!(two.digest(), q.digest(), "a second entry changes the digest");
+    assert_ne!(two.digest(), swapped.digest(), "the layout's order is bound");
     assert_eq!(q.digest_rows(), 2 + 2, "two permutations per layout entry");
 }

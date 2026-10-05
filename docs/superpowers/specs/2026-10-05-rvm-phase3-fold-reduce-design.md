@@ -138,8 +138,12 @@ about 3 cpu rows per call. Expected: −25 000 to −50 000 cpu rows. Opcode 29 
 |---|---:|---:|---:|---:|
 | phase 2 (measured) | 893 606 | 2 147 159 → 2^22 | 2 213 181 → 2^22 | 20 |
 | D | 660 000–770 000 | ≈ 1 830 000 → 2^21 | ≈ 1 960 000 → 2^21 | 20 |
-| D + E1 + E2 | 540 000–700 000 (E1 measured −46 080 (band −35 120 ± 15 % missed low: the leaf sponged in place also drops commit_root 129 600 → 120 640)) | | | 20 or 19 |
+| D + E1 + E2 | 540 000–700 000 (E1 measured −46 080 (band −35 120 ± 15 % missed low: the leaf sponged in place also drops commit_root 129 600 → 120 640); **ruling (controller, 2026-10-05): accepted as E1's landing point — the band's model omitted a saving the cut itself causes; E2's band re-derived from the measured 703 766**) | | | 20 or 19 |
 | D + E + F | 490 000–650 000 | | | 19 if ≤ 524 287 |
+
+Measured (`recursion/docs/06-phase3-fold-reduce.md` §4): D 749 846 (REG 1 785 559, RAM 1 913 981, both
+2^21), E1 703 766, E2 664 886, F **585 686** (REG 1 290 039, RAM 1 903 581) — tier 20, 61 399 rows above
+524 287. The paragraph below applies: the phase stopped at the measured point (docs/06 §7 names the next lever).
 
 If D + E + F measured lands above 524 287, the phase stops at the measured point, the memory heights (already
 met at D) are the delivered result, and the residual is reported with the next lever (the REDUCE chip reading

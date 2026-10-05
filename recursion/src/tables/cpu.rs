@@ -126,8 +126,9 @@ impl Sels {
     /// the mirror image, is in `EXT_WRITE_RD`: it *writes* the pair, from its two RAM reads, so
     /// both of its lanes were always bound. STOREE's second RAM write carries `D1`, and before
     /// this set existed no message read `rd + 1` into it — `D1` was a free witness column, so
-    /// the high lane of every extension value written to memory (every REDUCE descriptor, every
-    /// register-allocator spill of an extension value) was the prover's choice. `FOLD` (Cut E2)
+    /// the high lane of every extension value written to memory (every runtime REDUCE descriptor
+    /// of the build before phase 3's Cut D made the layout preprocessed, every register-allocator
+    /// spill of an extension value) was the prover's choice. `FOLD` (Cut E2)
     /// reads the whole `rd` pair: the fold point `u` it dispatches; `POW` (Cut F) likewise its
     /// `(G, base)`.
     const EXT_READ_RD: &'static [Op] = &[Op::Storee, Op::Fold, Op::Pow];

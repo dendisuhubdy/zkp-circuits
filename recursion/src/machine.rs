@@ -701,7 +701,9 @@ pub fn max_constraint_degrees(program: &Program, tier: Tier) -> Vec<usize> {
 /// batch, reduce last) or not. R4's width/degree pin (the 2026-09-27 rVM review) found the pinned
 /// test never built the reduce chip — `max_constraint_degrees` always passed a reduce height of
 /// `0` — so the chip's degree, and with it its quotient-chunk count, was pinned by nothing. The
-/// declared height is the floor, as everywhere else here: the symbolic degree is height-invariant.
+/// declared height is the smallest that holds one run and the provider region (the program's
+/// layout and, since Cut E2, the 14-row fold coefficient table: `reduce_log_height(1,
+/// provider_rows(..))`), not the bare floor; the symbolic degree is height-invariant either way.
 pub fn max_constraint_degrees_declaring(program: &Program, tier: Tier, reduce: bool) -> Vec<usize> {
     let machine = Machine::new(FriProfile::Test);
     let key_cfg = key_config(machine.profile);

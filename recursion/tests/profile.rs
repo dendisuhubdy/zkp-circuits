@@ -71,7 +71,7 @@ fn profile(profile: FriProfile) {
         by[s][vp.stats.pc_kind[e.pc as usize] as usize] += 1;
         ops[s][e.instr.op as usize] += 1;
     }
-    println!("-- rows per call site (executed; reloads and spills inside it; per query; top opcodes)");
+    println!("-- rows per call site (executed; reloads and spills inside it; per query; every opcode, most frequent first)");
     for (s, name) in names.iter().enumerate() {
         let total: usize = by[s].iter().sum();
         if total == 0 {
@@ -79,7 +79,9 @@ fn profile(profile: FriProfile) {
         }
         let mut top: Vec<(usize, usize)> = ops[s].iter().copied().enumerate().filter(|(_, n)| *n > 0).collect();
         top.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
-        let top: Vec<String> = top.iter().take(6).map(|&(o, n)| format!("{} {n}", Op::ALL[o].mnemonic())).collect();
+        // Every opcode the span executed, not a top six (Task 5 sweep): the band formulas read
+        // opcodes below the sixth (Cut D's EINV and FSUB inside `reduce`), so the list is whole.
+        let top: Vec<String> = top.iter().map(|&(o, n)| format!("{} {n}", Op::ALL[o].mnemonic())).collect();
         println!("   {total:>9}  {:5.1}%  {name:<20} reload {:>7} spill {:>6}  /query {:>8.1}  [{}]",
             100.0 * total as f64 / rows as f64, by[s][1], by[s][2], total as f64 / shape.num_queries as f64, top.join(", "));
     }

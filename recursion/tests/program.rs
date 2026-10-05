@@ -40,7 +40,8 @@ fn event(clk: u32, pc: u32) -> Event {
         mem: vec![],
         perm: None,
         reduce: None,
-        fold: None, pow: None,
+        fold: None,
+        pow: None,
     }
 }
 
@@ -119,5 +120,42 @@ fn a_layout_entry_whose_addresses_wrap_is_illegal_at_registration() {
         let slot = [&mut e.vals, &mut e.row, &mut e.key, &mut e.alpha, &mut e.res];
         *slot.into_iter().nth(v).unwrap() = recursion::isa::MEM_LIMIT;
         assert_eq!(recursion::machine::Machine::check_program(&q), Err(DecodeError::Layout { entry: 0 }), "{field} at 2^24");
+    }
+}
+
+/// Task 5 sweep (Task 1a review): the legal side of the bound. Each address field of an entry put
+/// so that its top cell is exactly `2^24 − 1` — `vals + 2·len − 1`, `row + len − 1`, `key + 1`,
+/// `alpha + 1`, `res + 1` — is accepted at registration and by the emulator, which reads and
+/// writes those cells; one cell further is refused by both, at the same entry. (The wrap test
+/// above covers the bases at `2^24` and the `u64::MAX` sums.)
+#[test]
+fn a_layout_entry_whose_top_cell_is_the_last_one_is_legal_and_one_more_is_not() {
+    use recursion::emulator::{execute, ExecError};
+    use recursion::isa::{DecodeError, ReduceEntry, MEM_LIMIT};
+    let top = MEM_LIMIT - 1;
+    let at_top = |field: usize, past: u64| -> recursion::isa::Program {
+        let mut q = common::reduce_chain_program(false);
+        let e: &mut ReduceEntry = &mut q.reduce_layout[0];
+        let len = e.len as u64;
+        match field {
+            0 => e.vals = top + 1 - 2 * len + past,
+            1 => e.row = top + 1 - len + past,
+            2 => e.key = top - 1 + past,
+            3 => e.alpha = top - 1 + past,
+            _ => e.res = top - 1 + past,
+        }
+        q
+    };
+    for (field, name) in ["vals", "row", "key", "alpha", "res"].iter().enumerate() {
+        let legal = at_top(field, 0);
+        assert!(recursion::isa::layout_entry_in_bounds(&legal.reduce_layout[0]), "{name}: top cell 2^24 − 1 is in bounds");
+        assert_eq!(recursion::machine::Machine::check_program(&legal), Ok(()), "{name}: top cell 2^24 − 1 registers");
+        assert!(execute(&legal, &[], 10_000).is_ok(), "{name}: top cell 2^24 − 1 runs");
+        let past = at_top(field, 1);
+        assert_eq!(recursion::machine::Machine::check_program(&past), Err(DecodeError::Layout { entry: 0 }), "{name}: top cell 2^24");
+        assert!(
+            matches!(execute(&past, &[], 10_000), Err(ExecError::ReduceLayout { entry: 0, .. })),
+            "{name}: the emulator refuses top cell 2^24 at the same entry"
+        );
     }
 }

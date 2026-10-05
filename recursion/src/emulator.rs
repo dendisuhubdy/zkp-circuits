@@ -195,8 +195,9 @@ pub enum ExecError {
     InverseOfZero { pc: u32 },
     HintExhausted { pc: u32 },
     OutOfCycles(usize),
-    /// A `REDUCE` descriptor declared a zero-length run: there is nothing to reduce, and a
-    /// `REDUCE` of zero columns is a build-time mistake (the program must not emit it).
+    /// A `REDUCE` layout entry declared a zero-length run: there is nothing to reduce, and a
+    /// `REDUCE` of zero columns is a build-time mistake (the program must not register it;
+    /// `machine::check_layout` refuses it at registration too).
     ReduceZeroLength { pc: u32 },
     /// A `REDUCE` naming no entry of the program's layout, or an entry naming a cell outside the
     /// `2^24`-cell address space (`isa::layout_entry_in_bounds`, the registration check's bound).
