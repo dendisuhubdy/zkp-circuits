@@ -191,6 +191,10 @@ fn the_cycle_budget_per_inner_proof_is_pinned() {
     assert_eq!(r.mem_accesses, p.mem_accesses);
     assert_eq!(r.witness_words, p.witness_words);
     assert_eq!(r.program_instrs, p.program_instrs);
+    // Phase 3 (Task 0): the register table's access count — the memory target is under 2^21 after
+    // Cut D, and it is pinned like the RAM count.
+    assert_eq!(recursion::tables::cpu::register_accesses(&exec.events).len(), common::phase3_attribution().reg_accesses,
+               "the REG access count");
     // The spike counted 43 562 permutations for this workload; the program must be in that region
     // (it hashes ~46 extra compressions per query because it walks restored per-query paths).
     assert!(r.permutations >= 43_562 && r.permutations < 60_000, "{r:?}");

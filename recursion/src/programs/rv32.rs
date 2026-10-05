@@ -634,11 +634,11 @@ fn emit_query<S: VerifierShape>(
     // ── every input round, Merkle-verified against its commitment before any arithmetic reads the
     // openings (`open_inputs` authenticates first, for the same reason).
     for (ri, mats) in opened.rounds.iter().enumerate() {
-        emit_input_round_root(b, log_global, mats, &groups[ri], paths[ri], index_bits, &metas[ri]);
+        b.span("input_root", |b| emit_input_round_root(b, log_global, mats, &groups[ri], paths[ri], index_bits, &metas[ri]));
     }
 
     // ── the batch-opening reduction.
-    let ros = emit_reduced_openings(b, shape, index_bits, fri_alpha, opened, &rows);
+    let ros = b.span("reduce", |b| emit_reduced_openings(b, shape, index_bits, fri_alpha, opened, &rows));
 
     // ── the fold chain (`fold_query`, verifier.rs:523-671).
     let mut ros: BTreeMap<usize, Ext> = ros.into_iter().collect();
@@ -658,51 +658,58 @@ fn emit_query<S: VerifierShape>(
         // lands at position `j` is `siblings[j − (j > index_in_group)]`; the indicators are
         // one-hot, so `[index_in_group < j]` is a prefix sum.
         let sibs = commit_openings[r];
-        let ind: Vec<Felt> = (0..arity).map(|v| bit_indicator(b, own, v)).collect();
-        let mut evals = Vec::with_capacity(arity);
-        for j in 0..arity {
-            // `[index_in_group < j]`; empty prefix sums to zero.
-            let mut gt: Option<Felt> = None;
-            for &i in &ind[..j] {
-                gt = Some(match gt {
-                    None => i,
-                    Some(g) => b.add(g, i),
-                });
+        let evals = b.span("select", |b| {
+            let ind: Vec<Felt> = (0..arity).map(|v| bit_indicator(b, own, v)).collect();
+            let mut evals = Vec::with_capacity(arity);
+            for j in 0..arity {
+                // `[index_in_group < j]`; empty prefix sums to zero.
+                let mut gt: Option<Felt> = None;
+                for &i in &ind[..j] {
+                    gt = Some(match gt {
+                        None => i,
+                        Some(g) => b.add(g, i),
+                    });
+                }
+                let gt = gt.unwrap_or_else(|| b.zero());
+                // The two candidates: `siblings[j]` when `j <= index_in_group`, `siblings[j − 1]`
+                // when `j > index_in_group`. For `j == arity − 1 == index_in_group` the first
+                // candidate does not exist — the value read in its place is masked to zero below.
+                let sj = b.load_ext(sibs.base, (2 * j.min(arity - 2)) as i64);
+                let sj1 = if j == 0 { sj } else { b.load_ext(sibs.base, (2 * (j - 1)) as i64) };
+                // `B = sj + gt·(sj1 − sj)`, then `eval = B + ind_j·(folded − B)`.
+                let d = b.ext_sub(sj1, sj);
+                let t = b.ext_mul_base(d, gt);
+                let candidate = b.ext_add(sj, t);
+                let d = b.ext_sub(folded, candidate);
+                let t = b.ext_mul_base(d, ind[j]);
+                evals.push(b.ext_add(candidate, t));
             }
-            let gt = gt.unwrap_or_else(|| b.zero());
-            // The two candidates: `siblings[j]` when `j <= index_in_group`, `siblings[j − 1]`
-            // when `j > index_in_group`. For `j == arity − 1 == index_in_group` the first
-            // candidate does not exist — the value read in its place is masked to zero below.
-            let sj = b.load_ext(sibs.base, (2 * j.min(arity - 2)) as i64);
-            let sj1 = if j == 0 { sj } else { b.load_ext(sibs.base, (2 * (j - 1)) as i64) };
-            // `B = sj + gt·(sj1 − sj)`, then `eval = B + ind_j·(folded − B)`.
-            let d = b.ext_sub(sj1, sj);
-            let t = b.ext_mul_base(d, gt);
-            let candidate = b.ext_add(sj, t);
-            let d = b.ext_sub(folded, candidate);
-            let t = b.ext_mul_base(d, ind[j]);
-            evals.push(b.ext_add(candidate, t));
-        }
+            evals
+        });
 
         // The parent node's index bits, then the fold itself.
         shift += la;
         let group_bits = &index_bits[shift..shift + log_folded];
-        folded = emit_fold_round(b, log_folded, la, group_bits, betas[r], &evals);
+        folded = b.span("fold_round", |b| emit_fold_round(b, log_folded, la, group_bits, betas[r], &evals));
 
         // Authenticate the reconstructed row against the round's commitment.
-        emit_commit_root(b, &evals, sibs, commit_paths[r], &index_bits[shift..], fri_caps[r],
-                         &format!("commit phase root[{r}]"));
+        b.span("commit_root", |b| {
+            emit_commit_root(b, &evals, sibs, commit_paths[r], &index_bits[shift..], fri_caps[r],
+                             &format!("commit phase root[{r}]"))
+        });
 
         // Roll in a reduced opening landing at the folded height: `beta^(2^log_arity) · ro`
         // (`verifier.rs:620-626`). The arity schedule is derived to land on every distinct input
         // height exactly once, which is what makes the map empty at the end.
         if let Some(ro) = ros.remove(&log_folded) {
-            let mut beta_pow = betas[r];
-            for _ in 0..la {
-                beta_pow = b.ext_mul(beta_pow, beta_pow);
-            }
-            let t = b.ext_mul(beta_pow, ro);
-            folded = b.ext_add(folded, t);
+            folded = b.span("roll_in", |b| {
+                let mut beta_pow = betas[r];
+                for _ in 0..la {
+                    beta_pow = b.ext_mul(beta_pow, beta_pow);
+                }
+                let t = b.ext_mul(beta_pow, ro);
+                b.ext_add(folded, t)
+            });
         }
     }
     debug_assert!(ros.is_empty(), "the arity schedule rolls every input height in");
@@ -1040,15 +1047,17 @@ fn bit_selected_power(
     index_bits: &[Felt],
     base: F,
 ) -> Felt {
-    let mut x = b.constant(base);
-    for (k, &bit) in index_bits.iter().enumerate() {
-        let c = g.exp_u64(1u64 << (log_rev - 1 - k));
-        let cm1 = b.constant(c - F::ONE);
-        let t = b.mul(bit, cm1);
-        let sel = b.add_const(t, F::ONE);
-        x = b.mul(x, sel);
-    }
-    x
+    b.span("bit_selected_power", |b| {
+        let mut x = b.constant(base);
+        for (k, &bit) in index_bits.iter().enumerate() {
+            let c = g.exp_u64(1u64 << (log_rev - 1 - k));
+            let cm1 = b.constant(c - F::ONE);
+            let t = b.mul(bit, cm1);
+            let sel = b.add_const(t, F::ONE);
+            x = b.mul(x, sel);
+        }
+        x
+    })
 }
 
 // ───────────────────────────────────────────────────────────── the measurement

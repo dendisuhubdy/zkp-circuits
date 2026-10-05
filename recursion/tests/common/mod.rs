@@ -246,6 +246,11 @@ pub fn aggregate_pins() -> AggregatePins {
         measure_aggregate(2, FriProfile::Test),
         measure_aggregate(3, FriProfile::Test),
     ];
+    // Phase 3 Task 0: the hand-written `phase3_attribution` block survives a re-measure.
+    let block = s.find("\"phase3_attribution\"").map(|at| {
+        let close = at + s[at..].find('}').expect("the attribution block closes");
+        s[at..=close].to_string()
+    });
     let mut json = format!(
         "{{\n  \"cpu_rows\": {},\n  \"permutations\": {},\n  \"mem_accesses\": {},\n  \
          \"witness_words\": {},\n  \"program_instrs\": {},\n",
@@ -254,12 +259,15 @@ pub fn aggregate_pins() -> AggregatePins {
     );
     for (i, r) in rs.iter().enumerate() {
         let n = i + 1;
-        let comma = if n == 3 { "" } else { "," };
+        let comma = if n == 3 && block.is_none() { "" } else { "," };
         json += &format!(
             "  \"aggregate_test_n{n}_cpu_rows\": {},\n  \"aggregate_test_n{n}_permutations\": {},\n  \
              \"aggregate_test_n{n}_mem_accesses\": {},\n  \"aggregate_test_n{n}_witness_words\": {}{comma}\n",
             r.cpu_rows, r.permutations, r.mem_accesses, r.witness_words
         );
+    }
+    if let Some(b) = &block {
+        json += &format!("  {b}\n");
     }
     json += "}\n";
     std::fs::write(&path, json).expect("the pin file is writable");
@@ -697,4 +705,30 @@ pub fn eval_full(
         SymbolicExpr::Neg { x, .. } => -eval_full(x, cur, next, pre, public),
         SymbolicExpr::Mul { x, y, .. } => eval_full(x, cur, next, pre, public) * eval_full(y, cur, next, pre, public),
     }
+}
+
+/// Phase 3 Task 0: `tests/pins.json`'s `phase3_attribution` block — the REG access count and
+/// the executed rows per call site, measured by `tests/profile.rs` on the production fixture.
+#[allow(dead_code)]
+pub struct Phase3Attribution {
+    pub reg_accesses: usize,
+    pub rows: Vec<(String, usize)>,
+}
+
+#[allow(dead_code)]
+pub fn phase3_attribution() -> Phase3Attribution {
+    let s = std::fs::read_to_string(pins_path()).expect("tests/pins.json");
+    let at = s.find("\"phase3_attribution\"").expect("Task 0 wrote the phase3_attribution block");
+    let block = &s[at..at + s[at..].find('}').expect("the block closes")];
+    let mut out = Phase3Attribution { reg_accesses: 0, rows: Vec::new() };
+    for line in block.lines().skip(1) {
+        let Some((k, v)) = line.trim().trim_end_matches(',').split_once(": ") else { continue };
+        let (k, v) = (k.trim_matches('"').to_string(), v.parse::<usize>().expect("a numeric field"));
+        if k == "reg_accesses" {
+            out.reg_accesses = v
+        } else {
+            out.rows.push((k, v))
+        }
+    }
+    out
 }

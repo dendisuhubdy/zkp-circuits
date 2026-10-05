@@ -15,5 +15,16 @@
   "aggregate_test_n3_cpu_rows": 692854,
   "aggregate_test_n3_permutations": 35571,
   "aggregate_test_n3_mem_accesses": 1512194,
-  "aggregate_test_n3_witness_words": 137706
+  "aggregate_test_n3_witness_words": 137706,
+  "phase3_attribution": {
+    "reg_accesses": 2147159,
+    "rows_reduce": 163601,
+    "rows_select": 50960,
+    "rows_fold_round": 36640,
+    "rows_bit_selected_power": 87920,
+    "rows_commit_root": 129600,
+    "rows_sample_bits": 57276,
+    "reloads": 218283,
+    "spills": 14906
+  }
 }

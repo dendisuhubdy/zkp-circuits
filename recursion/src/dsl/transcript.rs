@@ -158,39 +158,41 @@ impl DslChallenger {
     /// fix is liveness in the allocator, not a rewrite here. Task 6's measurement and Task 7's
     /// precompile decision both need to know this.
     pub fn sample_bits(&mut self, b: &mut Builder, bits: usize) -> Vec<Felt> {
-        assert!(bits <= 32, "sample_bits({bits}): p3 requires 2^bits < |F|, and a query index space \
-                             wider than 2^32 does not exist on this machine");
-        let x = self.sample(b);
-        let zero = b.zero();
+        b.span("sample_bits", |b| {
+            assert!(bits <= 32, "sample_bits({bits}): p3 requires 2^bits < |F|, and a query index space \
+                                 wider than 2^32 does not exist on this machine");
+            let x = self.sample(b);
+            let zero = b.zero();
 
-        // The sixty-four bits first, so the tape's segment is one contiguous run.
-        let bit: Vec<Felt> = (0..64).map(|_| b.hint()).collect();
-        for (k, &bk) in bit.iter().enumerate() {
-            let less_one = b.add_const(bk, F::NEG_ONE);
-            let p = b.mul(bk, less_one);
-            b.assert_eq(p, zero, &format!("sample_bits bit {k}"));
-        }
+            // The sixty-four bits first, so the tape's segment is one contiguous run.
+            let bit: Vec<Felt> = (0..64).map(|_| b.hint()).collect();
+            for (k, &bk) in bit.iter().enumerate() {
+                let less_one = b.add_const(bk, F::NEG_ONE);
+                let p = b.mul(bk, less_one);
+                b.assert_eq(p, zero, &format!("sample_bits bit {k}"));
+            }
 
-        let lo = horner(b, &bit[..32]);
-        let hi = horner(b, &bit[32..]);
-        let mut all_hi = bit[32];
-        for &bk in &bit[33..] {
-            all_hi = b.mul(all_hi, bk);
-        }
+            let lo = horner(b, &bit[..32]);
+            let hi = horner(b, &bit[32..]);
+            let mut all_hi = bit[32];
+            for &bk in &bit[33..] {
+                all_hi = b.mul(all_hi, bk);
+            }
 
-        // Canonicality, before the decomposition is tied to `x` — see the note above.
-        let t = b.hint();
-        let lo_t = b.mul(lo, t);
-        let back = b.mul(lo, lo_t);
-        b.assert_eq(back, lo, "sample_bits canonicality");
-        let non_canonical = b.mul(all_hi, lo_t);
-        b.assert_eq(non_canonical, zero, "sample_bits canonicality");
+            // Canonicality, before the decomposition is tied to `x` — see the note above.
+            let t = b.hint();
+            let lo_t = b.mul(lo, t);
+            let back = b.mul(lo, lo_t);
+            b.assert_eq(back, lo, "sample_bits canonicality");
+            let non_canonical = b.mul(all_hi, lo_t);
+            b.assert_eq(non_canonical, zero, "sample_bits canonicality");
 
-        let shifted = b.mul_const(hi, F::from_u64(1 << 32));
-        let sum = b.add(lo, shifted);
-        b.assert_eq(sum, x, "sample_bits decomposition");
+            let shifted = b.mul_const(hi, F::from_u64(1 << 32));
+            let sum = b.add(lo, shifted);
+            b.assert_eq(sum, x, "sample_bits decomposition");
 
-        bit[..bits].to_vec()
+            bit[..bits].to_vec()
+        })
     }
 
     /// `GrindingChallenger::check_witness`: observe the witness, then assert the low `bits` bits of

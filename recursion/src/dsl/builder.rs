@@ -76,6 +76,11 @@ pub enum Precompiles {
     On,
 }
 
+/// [`Stats::pc_kind`]'s values.
+pub const PC_INSTR: u8 = 0;
+pub const PC_RELOAD: u8 = 1;
+pub const PC_SPILL: u8 = 2;
+
 /// What a built program cost. `cells` counts the memory cells the program reserves: the spill
 /// arena's peak concurrent usage plus everything [`Builder::alloc`] handed out. `phase_rows` is
 /// the final instruction count per [`Builder::note_phase`] section, spill and reload insertions
@@ -92,6 +97,12 @@ pub struct Stats {
     /// ever creates".
     pub live_max: usize,
     pub phase_rows: Vec<(&'static str, usize)>,
+    /// Phase 3 Task 0: per emitted instruction, the innermost open [`Builder::span`] (an index
+    /// into `span_names`; 0 is `"(none)"`) and the row's kind (`PC_INSTR`, `PC_RELOAD`,
+    /// `PC_SPILL`). What `tests/profile.rs` attributes executed rows with.
+    pub span_names: Vec<&'static str>,
+    pub pc_span: Vec<u16>,
+    pub pc_kind: Vec<u8>,
 }
 
 // ------------------------------------------------------------------ the buffered operations
@@ -157,6 +168,9 @@ enum Op2 {
     /// A phase boundary for `Stats::phase_rows`: the replay counts emitted instructions between
     /// consecutive markers.
     Phase { name: &'static str },
+    /// A [`Builder::span`]'s open and close markers: emit nothing, move no liveness.
+    SpanOpen { name: &'static str },
+    SpanClose,
 }
 
 struct Slot {
@@ -241,6 +255,18 @@ impl Builder {
     /// Mark a phase boundary for `Stats::phase_rows`.
     pub fn note_phase(&mut self, name: &'static str) {
         self.ops.push(Op2::Phase { name });
+    }
+
+    /// Attribute every instruction `body` emits, spill and reload insertions included, to
+    /// `name`; the innermost open span wins. Markers emit nothing and wrap whole builder calls, so
+    /// they never sit between a `Def` and its defining instruction: a build with spans is the
+    /// build without them, instruction for instruction. A closure rather than a guard, because the
+    /// body needs the builder and a guard holding `&mut self` would lock it.
+    pub fn span<R>(&mut self, name: &'static str, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.ops.push(Op2::SpanOpen { name });
+        let r = body(self);
+        self.ops.push(Op2::SpanClose);
+        r
     }
 
     /// The precompile policy this builder emits with.
@@ -1091,7 +1117,13 @@ impl Builder {
                     let top = loop_stack.pop().expect("unbalanced loop markers");
                     loops.push((top, i as u32));
                 }
-                Op2::Group | Op2::TakeScratch { .. } | Op2::Phase { .. } | Op2::BranchTop | Op2::BranchEnd => {}
+                Op2::Group
+                | Op2::TakeScratch { .. }
+                | Op2::Phase { .. }
+                | Op2::BranchTop
+                | Op2::BranchEnd
+                | Op2::SpanOpen { .. }
+                | Op2::SpanClose => {}
             }
         }
         for &(top, end) in &loops {
@@ -1177,6 +1209,10 @@ impl Builder {
         let mut live_max = 0usize;
         let mut phase_rows: Vec<(&'static str, usize)> = Vec::new();
         let mut phase_mark = 0usize;
+        let mut span_names: Vec<&'static str> = vec!["(none)"];
+        let mut span_stack: Vec<u16> = Vec::new();
+        let mut pc_span: Vec<u16> = Vec::new();
+        let mut pc_kind: Vec<u8> = Vec::new();
         let mut stats = self.stats;
         let mut loop_snap: Vec<(u32, Vec<Option<u8>>, Vec<Option<u64>>)> = Vec::new();
         let mut branch_snap: Vec<(Vec<Option<u8>>, Vec<Option<u64>>)> = Vec::new();
@@ -1310,6 +1346,16 @@ impl Builder {
                     phase_rows.push((name, out.len() - phase_mark));
                     phase_mark = out.len();
                 }
+                Op2::SpanOpen { name } => {
+                    let id = span_names.iter().position(|n| *n == *name).unwrap_or_else(|| {
+                        span_names.push(name);
+                        span_names.len() - 1
+                    });
+                    span_stack.push(id as u16);
+                }
+                Op2::SpanClose => {
+                    span_stack.pop().expect("unbalanced span markers");
+                }
                 Op2::LoopEnd { id } => {
                     let (want_id, was_home, was_cells) = loop_snap.pop().expect("unbalanced LoopEnd");
                     assert_eq!(*id, want_id, "unbalanced loop markers");
@@ -1326,6 +1372,16 @@ impl Builder {
                     }
                 }
             }
+            // Phase 3 Task 0: tag what this buffer entry emitted. A `Mat` emits only reloads,
+            // a `Def` only the spills its claim evicts, an `Instr` itself.
+            let kind = match op {
+                Op2::Mat { .. } => PC_RELOAD,
+                Op2::Def { .. } => PC_SPILL,
+                _ => PC_INSTR,
+            };
+            let tag = span_stack.last().copied().unwrap_or(0);
+            pc_span.resize(out.len(), tag);
+            pc_kind.resize(out.len(), kind);
             // Free the handles whose last use this was (liveness only). A handle dies *after* the
             // instruction that last reads it, so eviction candidates see it through this index.
             if live {
@@ -1368,6 +1424,10 @@ impl Builder {
         stats.live_max = live_max;
         stats.cells += arena_peak;
         stats.phase_rows = phase_rows;
+        assert!(span_stack.is_empty(), "a span was left open");
+        stats.span_names = span_names;
+        stats.pc_span = pc_span;
+        stats.pc_kind = pc_kind;
         (Program { instrs: out, checkpoints }, stats)
     }
 }

@@ -409,3 +409,31 @@ fn the_staged_absorb_is_the_host_sponge_at_every_length() {
         assert_eq!(run(b, &words), public_digest(&words).to_vec(), "length {len}");
     }
 }
+
+/// Phase 3 Task 0: every emitted instruction is attributed to the innermost open span.
+#[test]
+fn spans_attribute_every_emitted_row_to_the_innermost_open_span() {
+    use p3_field::PrimeCharacteristicRing;
+    use recursion::dsl::{Builder, Checkpoints};
+    use recursion::isa::{Op, F};
+    let mut b = Builder::new(Checkpoints::Off);
+    let x = b.constant(F::from_u64(3));
+    let y = b.span("outer", |b| {
+        let t = b.add(x, x);
+        b.span("inner", |b| b.mul(t, t))
+    });
+    b.public(y);
+    for _ in 0..3 {
+        let z = b.zero();
+        b.public(z);
+    }
+    let (p, stats) = b.finish_stats();
+    assert_eq!(stats.pc_span.len(), p.instrs.len(), "one span tag per emitted instruction");
+    assert_eq!(stats.pc_kind.len(), p.instrs.len(), "one kind tag per emitted instruction");
+    let name = |pc: usize| stats.span_names[stats.pc_span[pc] as usize];
+    let tagged: Vec<(Op, &str)> = p.instrs.iter().enumerate().map(|(pc, i)| (i.op, name(pc))).collect();
+    assert!(tagged.contains(&(Op::Fadd, "outer")), "{tagged:?}");
+    assert!(tagged.contains(&(Op::Fmul, "inner")), "{tagged:?}");
+    assert!(tagged.contains(&(Op::Faddi, "(none)")), "{tagged:?}");
+    assert_eq!(name(p.instrs.len() - 1), "(none)", "HALT is emitted outside every span");
+}
