@@ -16,7 +16,7 @@
 
 mod common;
 
-use common::{host, STAGES};
+use common::{host, launder, STAGES};
 use evm2rv::emit::{translate, Options, Stage};
 use evm_core::abi::{run_call_with, Workspace};
 use rand_zkvm::evm::{EvmCall, HostRef, SparseTree};
@@ -311,51 +311,6 @@ const CASES: &[(&str, &str, &str, u32, u64, &str)] = &[
         "",
     ),
 ];
-
-/// `code` with every push laundered (Task 8 review, Important 1): after each `PUSHn`,
-/// `CALLDATASIZE DUP1 XOR XOR` (x ^ (cs ^ cs) = x, as `gen::launder` does), so the word is known
-/// only at run time. Stage two folds a directed case's constant operands away at translation; its
-/// laundered twin reaches the runtime (`u256.c`, the jump dispatch) through stage two's emitter.
-/// A push whose value is a `JUMPDEST`'s pc is moved to that `JUMPDEST`'s new pc, so a valid jump
-/// stays valid.
-fn launder(code: &[u8]) -> Vec<u8> {
-    let jds = evm2rv::blocks::jumpdests(code);
-    let mut out = Vec::new();
-    let mut new_pc = vec![0usize; code.len() + 1];
-    let mut pushes: Vec<(usize, usize, usize)> = Vec::new(); // (new offset of the immediate, n, old pc)
-    let mut i = 0;
-    while i < code.len() {
-        new_pc[i] = out.len();
-        let op = code[i];
-        out.push(op);
-        if (0x5f..=0x7f).contains(&op) {
-            let n = (op - 0x5f) as usize;
-            pushes.push((out.len(), n, i));
-            for k in 0..n {
-                out.push(code.get(i + 1 + k).copied().unwrap_or(0));
-            }
-            out.extend_from_slice(&[0x36, 0x80, 0x18, 0x18]);
-            i += 1 + n;
-        } else {
-            i += 1;
-        }
-    }
-    for (at, n, _) in pushes {
-        if n == 0 || n > 8 {
-            continue;
-        }
-        let v = out[at..at + n].iter().fold(0u64, |v, &b| v << 8 | b as u64) as usize;
-        if jds.binary_search(&v).is_ok() {
-            let t = new_pc[v] as u64;
-            if n == 8 || t < 1 << (8 * n) {
-                for k in 0..n {
-                    out[at + k] = (t >> (8 * (n - 1 - k))) as u8;
-                }
-            }
-        }
-    }
-    out
-}
 
 /// The runtime call a laundered case must reach under stage two, by its name's first word.
 fn runtime_call(name: &str) -> Option<&'static str> {
