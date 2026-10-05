@@ -231,12 +231,16 @@ the constraint evaluation recomposes the quotient from the same per-chunk slices
 
 ## Testing
 
-- **`tests/quotient_layout.rs`** (new, 6 tests): `the_machine_pins_the_per_instance_layout`;
+- **`tests/quotient_layout.rs`** (new, 8 tests): `the_machine_pins_the_per_instance_layout`;
   `a_per_instance_proof_has_one_quotient_matrix_per_instance_and_verifies`;
   `a_per_instance_proof_survives_postcard`; `a_flipped_quotient_chunk_value_is_refused`;
   `a_flipped_quotient_random_hint_is_refused`;
   `a_proof_made_under_upstreams_layout_is_refused_not_panicked` (a `PerChunk` proof of the same
-  traces, refused by `Machine::verify` by name).
+  traces, refused by `Machine::verify` by name: `HidingRandomOpeningMatrixCountMismatch { round: 2,
+  expected: 7, got: 52 }`); `a_per_instance_proof_is_refused_by_a_per_chunk_verifier_by_name` (the
+  reverse direction through `Machine::verify_with_layout`, `expected: 52, got: 7`);
+  `a_reduce_carrying_proof_has_one_quotient_matrix_per_instance` (eight instances, the reduce row
+  `16 · DIMENSION + 4` wide). The last two came with the final review (`5ff7676`).
 - **The fork's unit tests** (`vendor/p3-batch-stark/src/prover.rs`, `mod layout_tests`):
   `concat_lays_data_columns_side_by_side_and_keeps_the_first_chunks_salts_once`,
   `concat_without_salt_columns_is_a_plain_horizontal_join`. `cargo +1.98.1 test --release` inside
@@ -244,8 +248,9 @@ the constraint evaluation recomposes the quotient from the same per-chunk slices
 - **`tests/self_verify.rs`**: the self-verifier accepts real rVM proofs under the new layout at the
   toy and busy shapes, refuses the thirteen tampered proofs, and its pins are re-recorded (above).
 - **The suite** (`cargo test --release --no-fail-fast -- --skip a_one_proof_aggregate_round_trips`,
-  2026-10-05): **214 passed, 0 failed, 20 ignored, 1 skipped** (the tier-18 round trip) across 28
-  test binaries; docs/04's count was 208, and the six new tests are the difference.
+  2026-10-05): **216 passed, 0 failed, 20 ignored, 1 skipped** (the tier-18 round trip) across 28
+  test binaries at `5ff7676` (214 before the final review's two tests); docs/04's count was 208,
+  and the eight new tests are the difference.
 
 ## Out of scope, recorded
 
