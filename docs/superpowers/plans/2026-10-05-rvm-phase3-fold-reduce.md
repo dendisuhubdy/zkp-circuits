@@ -4,7 +4,7 @@
 
 **Goal:** Bring one verified production inner proof from 893 606 cpu rows (tier 20) to under 2^19 − 1 = 524 287 (tier 19), and both memory tables from 2^22 to 2^21, by moving the REDUCE descriptor build, the sibling select, the FRI fold and (only if the gate needs it) the index powers into the REDUCE chip. Each cut is measured against a band that Task 0 sets.
 
-**Architecture:** Task 0 instruments the builder with call-site spans, measures where the rows go, and checks the fold identity (DFT + Horner = `fold_row`). Cut D (Tasks 1a and 1b) gives the reduce chip a **preprocessed provider region**: the program's reduce layout, plus a `MULT` column, in the `ProgramAir` pattern. Each run looks up its layout row on its first row. The cpu dispatches one `REDUCE` row per entry with the entry id as an immediate, and a height chain carries `ACC`/`APOW` inside the chip across consecutive dispatches. Cut E1 (Task 2) hints each committed row whole and checks the query's own slot with one register-addressed `LOADE`. Cut E2 (Task 3) adds the `FOLD` row kind: a run of 2a rows (inverse DFT, then Horner) whose coefficients come from a 14-row preprocessed table. Cut F (Task 4) runs only if E2 lands above the gate; it adds the `POW` row kind. Task 5 re-pins everything and writes `docs/05`.
+**Architecture:** Task 0 instruments the builder with call-site spans, measures where the rows go, and checks the fold identity (DFT + Horner = `fold_row`). Cut D (Tasks 1a and 1b) gives the reduce chip a **preprocessed provider region**: the program's reduce layout, plus a `MULT` column, in the `ProgramAir` pattern. Each run looks up its layout row on its first row. The cpu dispatches one `REDUCE` row per entry with the entry id as an immediate, and a height chain carries `ACC`/`APOW` inside the chip across consecutive dispatches. Cut E1 (Task 2) hints each committed row whole and checks the query's own slot with one register-addressed `LOADE`. Cut E2 (Task 3) adds the `FOLD` row kind: a run of 2a rows (inverse DFT, then Horner) whose coefficients come from a 14-row preprocessed table. Cut F (Task 4) runs only if E2 lands above the gate; it adds the `POW` row kind. Task 5 re-pins everything and writes `docs/06`.
 
 **Tech Stack:** Rust 1.98.1 (pinned by `recursion/rust-toolchain.toml`), Plonky3 0.7.0 (`p3-*` exact pins; `p3-fri`/`p3-merkle-tree` patched from `../vendor/`), the `recursion` crate's own DSL/emulator/AIR tables. Tests are `cargo test` with real bundle-proof fixtures.
 
@@ -30,7 +30,7 @@
 - **Opcodes 0–27 never move** (`src/isa.rs` doc comment). New opcodes are appended: `Fold = 28` (Task 3), and `Pow = 29` only if Task 4 runs.
 - **`Precompiles::Off` stays buildable and correct after every task.** It is the differential reference: it keeps the compiled reduction, the compiled fold and the compiled index powers. Nothing compiled is deleted.
 - **AGENTS.md invariants** (`research/AGENTS.md`, binding for `recursion/`): (1) every bus message's address and value columns are constrained on every row kind that sends it; (2) every send count is a selector expression, zero on rows that do not perform the access. The emulator is the reference semantics: if an AIR and the emulator disagree, the AIR is wrong.
-- **The measurement gate (spec §6 ruling 1, phase 2's ±15 %):** after each cut, run `cargo test --release --test profile -- --ignored --nocapture` and compare the production cpu rows with that cut's band in `docs/05-phase3-fold-reduce.md` §2 (set by Task 0). If the result is outside the band, stop, write the correction into spec §2.5 and docs/05 §2, then continue. **The gate is not widened** (spec §6 ruling 6): if D + E (+ F) land above 524 287, the phase reports the measured point.
+- **The measurement gate (spec §6 ruling 1, phase 2's ±15 %):** after each cut, run `cargo test --release --test profile -- --ignored --nocapture` and compare the production cpu rows with that cut's band in `docs/06-phase3-fold-reduce.md` §2 (set by Task 0). If the result is outside the band, stop, write the correction into spec §2.5 and docs/06 §2, then continue. **The gate is not widened** (spec §6 ruling 6): if D + E (+ F) land above 524 287, the phase reports the measured point.
 - Commit after every task, in the repository's voice (what moved and the measured number). End every commit message with exactly these two lines:
   `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`
   `Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP`
@@ -85,7 +85,7 @@ Each line names an input or condition the spec implies but that no existing test
 - Modify: `src/programs/rv32.rs`: `emit_query` (:604-700), `bit_selected_power` (:1024-1042)
 - Modify: `src/dsl/transcript.rs`: `sample_bits` (:160-197)
 - Modify: `tests/profile.rs` (whole file), `tests/common/mod.rs` (`aggregate_pins` writer :224-275; new `phase3_attribution`), `tests/exit.rs` (`the_cycle_budget_per_inner_proof_is_pinned` :168-210), `tests/dsl.rs` (one test), `tests/pins.json`
-- Create: `docs/05-phase3-fold-reduce.md` (the skeleton, under `recursion/docs/`)
+- Create: `docs/06-phase3-fold-reduce.md` (the skeleton, under `recursion/docs/`)
 
 **Interfaces:**
 - Produces: `Builder::span<R>(&mut self, name: &'static str, body: impl FnOnce(&mut Self) -> R) -> R`.
@@ -457,9 +457,9 @@ In `tests/exit.rs`'s `the_cycle_budget_per_inner_proof_is_pinned`, after `assert
 Run: `cargo test --release --test exit the_cycle_budget_per_inner_proof_is_pinned -- --ignored`
 Expected: pass.
 
-- [ ] **Step 13: Write the `docs/05` skeleton with the measured attribution and the bands**
+- [ ] **Step 13: Write the `docs/06` skeleton with the measured attribution and the bands**
 
-Create `docs/05-phase3-fold-reduce.md` with these sections. Fill every `<…>` from Step 10, and compute each band with the formula given.
+Create `docs/06-phase3-fold-reduce.md` with these sections. Fill every `<…>` from Step 10, and compute each band with the formula given.
 
 ````markdown
 # 05 — Phase 3: the REDUCE chip takes the descriptor layout, the fold and the index powers
@@ -500,12 +500,12 @@ Memory targets: REG <reg accesses> → under 2 097 152 (needs −<reg − 2 097 
 
 ```bash
 git add tests/fold_identity.rs src/dsl/builder.rs src/dsl/mod.rs src/dsl/transcript.rs src/programs/rv32.rs \
-        tests/profile.rs tests/common/mod.rs tests/exit.rs tests/dsl.rs tests/pins.json docs/05-phase3-fold-reduce.md
+        tests/profile.rs tests/common/mod.rs tests/exit.rs tests/dsl.rs tests/pins.json docs/06-phase3-fold-reduce.md
 git commit -m "recursion: phase 3 Task 0 — call-site spans, the REG count, the fold identity; <cpu rows> rows attributed
 
 reduce <rows_reduce>, select <rows_select>, fold_round <rows_fold_round>, bit_selected_power <rows_bsp>,
 reloads <reloads>; log_arities <list>; REG <reg>. The DFT + Horner fold equals fold_row at a = 2, 4, 8
-(256 random inputs each). Bands in docs/05 §2. No instruction moved: every digest pin unchanged.
+(256 random inputs each). Bands in docs/06 §2. No instruction moved: every digest pin unchanged.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
@@ -1745,7 +1745,7 @@ Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
 **Files:**
 - Modify: `src/programs/rv32.rs`: `emit_reduced_openings` (:837-880) is split into `emit_reduced_openings_compiled` (the `Off` body) and `emit_reduced_openings_layout` (`On`); the dispatcher keeps the old name and signature
 - Test: `tests/verifier.rs` (one test), `tests/memprofile.rs` (run only), `tests/pins.json` and the Re-pin Procedure's files
-- Modify: `docs/05-phase3-fold-reduce.md` §3, §4
+- Modify: `docs/06-phase3-fold-reduce.md` §3, §4
 
 **Interfaces:**
 - Consumes: `Builder::reduce(&[ReduceRun], alpha: Ptr, res: Ptr)` and `ReduceRun` (Task 1a); `emit_query_point`, `Builder::ext_inv_checked`.
@@ -1878,24 +1878,24 @@ Expected: every acceptance and tamper-table test passes, including `the_shipped_
 - [ ] **Step 4: Measure and check the band**
 
 Run: `cargo test --release --test profile -- --ignored --nocapture 2>&1 | grep -v warning | tee target/phase3-profile-D.txt`
-Read the Production cpu rows, reg accesses and mem accesses. Compare the rows with docs/05 §2's D band (derived projection: 660 000–770 000). Expected: REG and RAM accesses both under 2 097 152 (2^21), so the cpu proof's memory tables declare 2^21. If REG or RAM is still ≥ 2^21, that is outside the cut's design target: stop and record it as the band rule says.
+Read the Production cpu rows, reg accesses and mem accesses. Compare the rows with docs/06 §2's D band (derived projection: 660 000–770 000). Expected: REG and RAM accesses both under 2 097 152 (2^21), so the cpu proof's memory tables declare 2^21. If REG or RAM is still ≥ 2^21, that is outside the cut's design target: stop and record it as the band rule says.
 
 - [ ] **Step 5: The memory re-measure (spec §3)**
 
-Run: `RECURSION_FIXTURES=$HOME/rand-agg-512-results/out/fixtures /usr/bin/time -l cargo test --release --test memprofile tier19_exit_twin -- --ignored --nocapture 2>&1 | tee target/phase3-memprofile-D.txt`. The test is the exit twin, now proved at tier 18. Read the peak live heap per phase and the tier from the `==` lines. If the process is killed, record the last phase line printed and the kill. Write the table into docs/05 §3, next to docs/04 §"Live heap"'s pre-cut numbers. State what changed: the declared reg/ram heights and the projection to production N = 1.
+Run: `RECURSION_FIXTURES=$HOME/rand-agg-512-results/out/fixtures /usr/bin/time -l cargo test --release --test memprofile tier19_exit_twin -- --ignored --nocapture 2>&1 | tee target/phase3-memprofile-D.txt`. The test is the exit twin, now proved at tier 18. Read the peak live heap per phase and the tier from the `==` lines. If the process is killed, record the last phase line printed and the kill. Write the table into docs/06 §3, next to docs/04 §"Live heap"'s pre-cut numbers. State what changed: the declared reg/ram heights and the projection to production N = 1.
 
 - [ ] **Step 6: Re-pin**
 
-Run the Re-pin Procedure, P1–P7. Append to docs/05 §4 the D row (measured rows, Δ, band, in band yes/no) and the `== profile Production` line.
+Run the Re-pin Procedure, P1–P7. Append to docs/06 §4 the D row (measured rows, Δ, band, in band yes/no) and the `== profile Production` line.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/programs/rv32.rs tests/ src/programs/verify_rv32.digest docs/05-phase3-fold-reduce.md
+git add src/programs/rv32.rs tests/ src/programs/verify_rv32.digest docs/06-phase3-fold-reduce.md
 git commit -m "recursion: Cut D (program) — one key buffer and one chain per height per query; <rows> rows, REG <reg>, RAM <ram>
 
 <the == profile Production line>; band <lo–hi>: <in/out>. Reg and RAM tables 2^22 → 2^21.
-Twin live heap <GB> (docs/05 §3).
+Twin live heap <GB> (docs/06 §3).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
@@ -2181,14 +2181,14 @@ Expected: `the_own_slot_check_agrees_on_and_off_at_every_slot`, `a_committed_row
 - [ ] **Step 6: Measure and check the band**
 
 Run: `cargo test --release --test profile -- --ignored --nocapture 2>&1 | grep -v warning | tee target/phase3-profile-E1.txt`
-Compare with the E1 band (docs/05 §2: T_D − Δ_E1 ± 15 %; derived Δ ≈ 35 000–40 000). The `select` span is now Q·Σ(2·la + 5) rows. Re-read `rows(fold_round)` and recompute Δ_E2 in docs/05 §2: E1 moved the row loads into `fold_round`.
+Compare with the E1 band (docs/06 §2: T_D − Δ_E1 ± 15 %; derived Δ ≈ 35 000–40 000). The `select` span is now Q·Σ(2·la + 5) rows. Re-read `rows(fold_round)` and recompute Δ_E2 in docs/06 §2: E1 moved the row loads into `fold_round`.
 
 - [ ] **Step 7: Re-pin and commit**
 
-Run the Re-pin Procedure, P1–P7, and append the E1 row to docs/05 §4.
+Run the Re-pin Procedure, P1–P7, and append the E1 row to docs/06 §4.
 
 ```bash
-git add src/witness.rs src/programs/ src/dsl/builder.rs tests/ src/programs/verify_rv32.digest docs/05-phase3-fold-reduce.md
+git add src/witness.rs src/programs/ src/dsl/builder.rs tests/ src/programs/verify_rv32.digest docs/06-phase3-fold-reduce.md
 git commit -m "recursion: Cut E1 — the committed row hinted whole, its own slot checked by one register-addressed LOADE; <rows> rows
 
 <the == profile Production line>; band <lo–hi>: <in/out>. Tape: CommitPhaseOpenings carries 2a words
@@ -2897,14 +2897,14 @@ Expected: the differential passes. Acceptance and tamper tests pass. Digest and 
 - [ ] **Step 8: Measure and check the band**
 
 Run: `cargo test --release --test profile -- --ignored --nocapture 2>&1 | grep -v warning | tee target/phase3-profile-E2.txt`
-Compare with the E2 band in docs/05 §2. Expected `fold_round`: 4·Q·R rows plus its `bit_selected_power` (counted in its own span). **Read the Production cpu rows against 524 287.** If they are ≤ 524 287, Task 4 is skipped (record "Cut F not built: E2 landed at <rows>" in docs/05 §4). If they are > 524 287, Task 4 runs.
+Compare with the E2 band in docs/06 §2. Expected `fold_round`: 4·Q·R rows plus its `bit_selected_power` (counted in its own span). **Read the Production cpu rows against 524 287.** If they are ≤ 524 287, Task 4 is skipped (record "Cut F not built: E2 landed at <rows>" in docs/06 §4). If they are > 524 287, Task 4 runs.
 
 - [ ] **Step 9: Re-pin and commit**
 
-Run the Re-pin Procedure, P1–P7, and append the E2 row to docs/05 §4.
+Run the Re-pin Procedure, P1–P7, and append the E2 row to docs/06 §4.
 
 ```bash
-git add src/ tests/ docs/05-phase3-fold-reduce.md
+git add src/ tests/ docs/06-phase3-fold-reduce.md
 git commit -m "recursion: Cut E2 — FOLD (opcode 28), the fold as an inverse DFT then Horner in a 2a-row reduce-chip run; <rows> rows, tier <t>
 
 <the == profile Production line>; band <lo–hi>: <in/out>. cpu 82 → 83, reduce 30 → 70 (pre 9 → 20),
@@ -2918,7 +2918,7 @@ Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
 
 ### Task 4 (conditional): Cut F — `POW`, one chip row per index bit (opcode 29)
 
-**Run this task only if Task 3 Step 8 measured production cpu rows above 524 287.** Otherwise skip to Task 5. Opcode 29 stays unassigned, and docs/05 records why.
+**Run this task only if Task 3 Step 8 measured production cpu rows above 524 287.** Otherwise skip to Task 5. Opcode 29 stays unassigned, and docs/06 records why.
 
 **Files:**
 - Modify: `src/isa.rs` (`Op::Pow`, `COUNT = 30`), `src/emulator.rs` (`PowEvent`, `Event::pow`, `ExecError::PowShape`, `TS_POW_BIT`/`TS_POW_OUT`, the arm), `src/machine.rs` (`check_instr`; `build_traces` passes `&mut counts` to `reduce_trace`)
@@ -3248,10 +3248,10 @@ Expected: pass. Pin the reduce degree measured (≤ 8, asserted).
 
 - [ ] **Step 7: Acceptance, measure, re-pin, commit**
 
-Run: `cargo test --release --test verifier --test exit --test aggregate --test self_verify 2>&1 | grep -E '^test result|FAILED|panicked'` (acceptance and tamper tables green; pins re-pinned next). Run the profile and compare with the F band (docs/05 §2). Then run the Re-pin Procedure, P1–P7, and append the F row to docs/05 §4.
+Run: `cargo test --release --test verifier --test exit --test aggregate --test self_verify 2>&1 | grep -E '^test result|FAILED|panicked'` (acceptance and tamper tables green; pins re-pinned next). Run the profile and compare with the F band (docs/06 §2). Then run the Re-pin Procedure, P1–P7, and append the F row to docs/06 §4.
 
 ```bash
-git add src/ tests/ docs/05-phase3-fold-reduce.md
+git add src/ tests/ docs/06-phase3-fold-reduce.md
 git commit -m "recursion: Cut F — POW (opcode 29), the index powers as one reduce-chip row per bit; <rows> rows, tier <t>
 
 <the == profile Production line>; band <lo–hi>: <in/out>. cpu 83 → 84, reduce 70 → 81, bus POW.
@@ -3262,16 +3262,16 @@ Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
 
 ---
 
-### Task 5: The landing — every pin, the collateral corrections, docs/05 in full, the suite
+### Task 5: The landing — every pin, the collateral corrections, docs/06 in full, the suite
 
 **Files:**
 - Modify: `tests/exit.rs` (`the_cycle_budget_per_inner_proof_is_pinned`'s `> 1 << 19` assertion :192-204)
 - Modify: `src/isa.rs` (the "Deliberately absent: FRIFOLD, EXPBITS" paragraph :36-39)
-- Modify: `docs/00-recursion-vm.md` (:47 and the "The precompile decision" section :314-344), `docs/01-rvm-machine.md` (table rows :23 and :29, the buses line :33, the measured table :55-75), `docs/02-aggregate.md` (a "Phase 3" section after "Phase 2: the three row cuts" :135, the N-economics :276-331), `docs/03-gpu-and-self-recursion.md` (the self-verifier's measured cost :102-160), `docs/05-phase3-fold-reduce.md` (§5, §6, the conclusion)
+- Modify: `docs/00-recursion-vm.md` (:47 and the "The precompile decision" section :314-344), `docs/01-rvm-machine.md` (table rows :23 and :29, the buses line :33, the measured table :55-75), `docs/02-aggregate.md` (a "Phase 3" section after "Phase 2: the three row cuts" :135, the N-economics :276-331), `docs/03-gpu-and-self-recursion.md` (the self-verifier's measured cost :102-160), `docs/06-phase3-fold-reduce.md` (§5, §6, the conclusion)
 - Test: the full suite
 
 **Interfaces:**
-- Consumes: every measured number from Tasks 1b–4 (`target/phase3-profile-*.txt`, docs/05 §4) and the Re-pin Procedure's final values.
+- Consumes: every measured number from Tasks 1b–4 (`target/phase3-profile-*.txt`, docs/06 §4) and the Re-pin Procedure's final values.
 
 - [ ] **Step 1: Confirm every pin from spec §4 is current**
 
@@ -3291,7 +3291,7 @@ Expected: green. Spec §4's list, checked one by one: `tests/pins.json` (rows, p
 In `tests/exit.rs`, replace the `assert!(r.cpu_rows > 1 << 19, …)` block and its comment. If the gate is met:
 
 ```rust
-    // Phase 3 (2026-10-05, docs/05): the inner verification is under 2^19 − 1 = 524 287 cpu rows —
+    // Phase 3 (2026-10-05, docs/06): the inner verification is under 2^19 − 1 = 524 287 cpu rows —
     // tier 19, the milestone's gate. The descriptor layout, the fold and (if built) the index powers
     // are in the reduce chip now; docs/00's precompile decision records why M5.1 declined them at
     // 5.25 M rows and why they paid at 893 606.
@@ -3301,9 +3301,9 @@ In `tests/exit.rs`, replace the `assert!(r.cpu_rows > 1 << 19, …)` block and i
 If the gate is not met (spec §2.5: the phase stops at the measured point):
 
 ```rust
-    // Phase 3 (2026-10-05, docs/05): D + E (+ F) landed at <rows>, above 2^19 − 1; the memory
-    // heights (2^21) are the delivered result, and docs/05 names the next lever.
-    assert!(r.cpu_rows > (1 << 19) - 1, "above the phase-3 gate: docs/05's residual must be re-decided");
+    // Phase 3 (2026-10-05, docs/06): D + E (+ F) landed at <rows>, above 2^19 − 1; the memory
+    // heights (2^21) are the delivered result, and docs/06 names the next lever.
+    assert!(r.cpu_rows > (1 << 19) - 1, "above the phase-3 gate: docs/06's residual must be re-decided");
 ```
 
 - [ ] **Step 3: Correct the collateral**
@@ -3312,28 +3312,28 @@ If the gate is not met (spec §2.5: the phase stops at the measured point):
 
 ```rust
 /// Precompiles are added when the measurement asks for one (`docs/00`'s decision, re-taken in
-/// `docs/05`): `COMPRESS` for one Merkle level (Cut C, measured at 33 rows a level), and in phase 3
+/// `docs/06`): `COMPRESS` for one Merkle level (Cut C, measured at 33 rows a level), and in phase 3
 /// `FOLD` for one FRI fold round (the reduce chip's fold run) [and `POW` for the index powers] —
 /// declined at 5.25 M rows, where they were ~3 % of the program, and taken at 893 606, where the
 /// query bookkeeping they replace was <measured share> %.
 ```
 
-Drop the bracketed `POW` clause if Task 4 did not run. In `docs/00-recursion-vm.md`, line 47's "Deliberately absent" line becomes a pointer to the rewritten decision. Append to §"The precompile decision" a dated paragraph: what the 2026-09 decision measured (≈ 100 k + 64 k rows of 5.68 M), what docs/05 §1 measured at 893 606 (the `fold_round`, `select`, `bit_selected_power` and `reduce` spans), what was built, and the landed rows. In `docs/01-rvm-machine.md`: the cpu row (:23) becomes 83/84 wide with 29/30 selectors and the `FOLD`/`POW` sends; the reduce row (:29) becomes width 70/81, preprocessed 20, **degree <measured>** (it was listed as 3; it was 8, `tests/tables.rs:219`, and is now the measured value), with the row kinds run, fold and pow; the buses line (:33) gains `REDUCE_LAYOUT`, `FOLD`, `FOLD_COEFF` and `POW`, and `REDUCE [clk, entry]`; the opcodes table gains `FOLD = 28` (and `POW = 29`); the measured-numbers table (:55-75) gets the new rows, heights and tier. `docs/02-aggregate.md`: a "Phase 3" section (the new aggregate digests and N = 1/2/3 rows from the pins), and the N-economics tables at the new tiers with the memory model from docs/05 §3. `docs/03`: the self-verifier's measured cost (the P5 values).
+Drop the bracketed `POW` clause if Task 4 did not run. In `docs/00-recursion-vm.md`, line 47's "Deliberately absent" line becomes a pointer to the rewritten decision. Append to §"The precompile decision" a dated paragraph: what the 2026-09 decision measured (≈ 100 k + 64 k rows of 5.68 M), what docs/06 §1 measured at 893 606 (the `fold_round`, `select`, `bit_selected_power` and `reduce` spans), what was built, and the landed rows. In `docs/01-rvm-machine.md`: the cpu row (:23) becomes 83/84 wide with 29/30 selectors and the `FOLD`/`POW` sends; the reduce row (:29) becomes width 70/81, preprocessed 20, **degree <measured>** (it was listed as 3; it was 8, `tests/tables.rs:219`, and is now the measured value), with the row kinds run, fold and pow; the buses line (:33) gains `REDUCE_LAYOUT`, `FOLD`, `FOLD_COEFF` and `POW`, and `REDUCE [clk, entry]`; the opcodes table gains `FOLD = 28` (and `POW = 29`); the measured-numbers table (:55-75) gets the new rows, heights and tier. `docs/02-aggregate.md`: a "Phase 3" section (the new aggregate digests and N = 1/2/3 rows from the pins), and the N-economics tables at the new tiers with the memory model from docs/06 §3. `docs/03`: the self-verifier's measured cost (the P5 values).
 
-- [ ] **Step 4: Write docs/05 in full**
+- [ ] **Step 4: Write docs/06 in full**
 
 Fill §4 (one row per cut: measured rows, Δ, the band, in band, REG, RAM, tier) and §5 (the "What moved" table in docs/04's format: every pin old → new, the cpu and reduce widths, the buses, the opcodes, the tape's `CommitPhaseOpenings` layout). Fill §6, the suite count, from Step 5. Add a conclusion that says whether the gate was met (spec §2.5's last paragraph if not: the residual and the next lever).
 
 - [ ] **Step 5: The suite**
 
 Run: `cargo test --release --no-fail-fast -- --skip a_one_proof_aggregate_round_trips --skip two_test_profile_bundle_proofs_aggregate_and_verify_natively 2>&1 | tee target/phase3-suite.txt | grep -E '^test result|FAILED'`
-Expected: 0 failed. Record the passed / ignored / skipped counts in docs/05 §6 (phase 2's was 208 / 20 / 1).
+Expected: 0 failed. Record the passed / ignored / skipped counts in docs/06 §6 (phase 2's was 208 / 20 / 1).
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add tests/exit.rs src/isa.rs docs/
-git commit -m "recursion docs: phase 3 landed — <rows> rows per inner proof, tier <t>, reg and RAM tables 2^21; docs/05 records the cuts
+git commit -m "recursion docs: phase 3 landed — <rows> rows per inner proof, tier <t>, reg and RAM tables 2^21; docs/06 records the cuts
 
 The regime assertion flips (tier 19 <met / not met>); isa.rs and docs/00 record why FOLD is present
 now; docs/01's reduce degree corrected (listed 3, was 8, now <measured>). Suite: <passed> passed,
@@ -3349,8 +3349,8 @@ Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
 
 - **Controller review (2026-10-05):** the reduce-to-fold boundary constraint `is_last · n(IS_FOLD) · (1 − n(F_FIRST)) = 0` was missing (a headless fold run after the reduce rows could write a forged result); added to Task 3's eval with `a_headless_fold_run_after_the_reduce_rows_is_rejected`. The spec's §2.1/§2.3 were amended to the plan's R1–R9.
 
-- **Spec coverage.** §1 → Task 0 (the attribution, REG, `log_arities`, `degree_bits`, spans; the `phase3_attribution` block; docs/05 §1–2). §2.1 → Tasks 1a and 1b, with R1–R6 recording where the code departs from the spec's wording and why. §2.2 → Task 2. §2.3 → Task 3, plus Task 0's identity test. §2.4 → Task 4, gated on Task 3 Step 8. §2.5 → every cut's band check and the Re-pin Procedure; Task 5 Step 2's two branches. §3 → Task 1b Step 5. §4 → the Re-pin Procedure and Task 5 Step 1's checklist. §5: precompile differentials in Tasks 1a, 2, 3 and 4; the spec's named forgeries in Task 1a (wrong CARRY, an address off the layout, a tampered chain result), Task 3 (tampered B_m, a u that differs, a run cut short) and Task 4 (a non-boolean bit); width and degree pins in Tasks 1a, 3 and 4; the suite in Task 5. §6 rulings: 1 (row kinds, not an instance) in Tasks 3 and 4; 2 (one REDUCE row per entry) in Task 1a; 3 (never hinted) in R1 and `check_layout`; 4 (DFT + Horner) in Tasks 0 and 3; 5 (profile unchanged) in Global Constraints; 6 (gate not widened) in Global Constraints and Task 5 Step 2.
-- **Placeholder scan.** `grep -nE 'TBD|TODO|similar to|add validation' <this file>` returns nothing. Angle-bracket slots (`<rows>`, `<measured>`) appear only in commit messages, docs/05 text and the P2 script's capitalised names. Each one is a measured number that the step around it says how to read off.
+- **Spec coverage.** §1 → Task 0 (the attribution, REG, `log_arities`, `degree_bits`, spans; the `phase3_attribution` block; docs/06 §1–2). §2.1 → Tasks 1a and 1b, with R1–R6 recording where the code departs from the spec's wording and why. §2.2 → Task 2. §2.3 → Task 3, plus Task 0's identity test. §2.4 → Task 4, gated on Task 3 Step 8. §2.5 → every cut's band check and the Re-pin Procedure; Task 5 Step 2's two branches. §3 → Task 1b Step 5. §4 → the Re-pin Procedure and Task 5 Step 1's checklist. §5: precompile differentials in Tasks 1a, 2, 3 and 4; the spec's named forgeries in Task 1a (wrong CARRY, an address off the layout, a tampered chain result), Task 3 (tampered B_m, a u that differs, a run cut short) and Task 4 (a non-boolean bit); width and degree pins in Tasks 1a, 3 and 4; the suite in Task 5. §6 rulings: 1 (row kinds, not an instance) in Tasks 3 and 4; 2 (one REDUCE row per entry) in Task 1a; 3 (never hinted) in R1 and `check_layout`; 4 (DFT + Horner) in Tasks 0 and 3; 5 (profile unchanged) in Global Constraints; 6 (gate not widened) in Global Constraints and Task 5 Step 2.
+- **Placeholder scan.** `grep -nE 'TBD|TODO|similar to|add validation' <this file>` returns nothing. Angle-bracket slots (`<rows>`, `<measured>`) appear only in commit messages, docs/06 text and the P2 script's capitalised names. Each one is a measured number that the step around it says how to read off.
 - **Type consistency.** `ReduceEntry` (Task 1a) is used by the builder, the chip, `check_layout` and the tests with the same eight fields. `ReduceRun { vals, row, key }` and `Builder::reduce(&[ReduceRun], alpha, res)` match between Tasks 1a and 1b. `reduce_trace` grows `(layout, events)` in 1a, then `folds` in 3, then `pows` and `counts` in 4, and each task states the new signature and updates its callers. The cpu columns shift in Task 3 (`A0 = 36`, `WIDTH = 83`) and again in Task 4 (`A0 = 37`, `WIDTH = 84`); each task lists the full set. `fold_eval` is named `emit_fold_dispatch` in Task 2 (private) and renamed to `fold_eval` (public) in Task 3; Task 4 adds `cells`.
 - **Review Focus pinned to tests.** 1 → Task 1a Step 8 `the_self_verifier_accepts_a_proof_carrying_the_reduce_layout`. 2 → Task 1a Step 8 `a_reduce_chain_inside_a_counted_loop_proves_with_mult_n`. 3 → Task 1a Step 8 `one_column_entries_at_chain_start_and_end_prove_and_verify`. 4 → Task 2 Step 1 `the_own_slot_check_agrees_on_and_off_at_every_slot`. 5 → Task 3 Step 3 `fold_runs_of_every_arity_back_to_back_prove_and_verify`.
 - **Length.** About 3 300 lines, against the 1 000–1 600 asked. Every task carries full code for the AIRs, the emulator arms and the rewritten program functions, because the spec's row-aligned layout does not survive the aggregate's counted loop (R1), so the code had to be designed here rather than transcribed. Cut F (Task 4) is the shortest code-complete form of a conditional task.

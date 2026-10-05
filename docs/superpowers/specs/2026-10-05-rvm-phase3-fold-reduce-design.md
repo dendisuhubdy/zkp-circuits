@@ -45,7 +45,7 @@ POW row kind is held in reserve for the gate.
 printed), and rows per call site (a `Builder` span stack keyed by the emitting function: `reduce`, `select`,
 `fold_round`, `bit_selected_power`, `commit_root`, `sample_bits`, `reload`). Its output fixes the per-cut landing
 bands in `tests/pins.json` (a `phase3_attribution` block) and the numbers in §1 are replaced by measured ones in
-docs/05 before Cut D starts. No cut lands against the derived table above.
+docs/06 before Cut D starts. No cut lands against the derived table above.
 
 ## 2. The cuts (in order; each is one task, one review, one re-pin)
 
@@ -191,7 +191,7 @@ layout — already keyed by `(tier, program digest, reduce)`, so the program dig
 function of the shape), `emulator.rs` (REDUCE semantics, FOLD, POW events), `dsl/builder.rs` (`reduce` signature
 takes an entry id; `fold_run`, `pow_run`), `programs/rv32.rs` (every query), `verify_rv32.digest`, every pin in
 `tests/pins.json`, the fixture-shape and production aggregate program digests, the self-verifier digest
-(`rv32r` verifies an rVM proof whose chip widened), `docs/00/01/02/03` tables, and a new `docs/05`.
+(`rv32r` verifies an rVM proof whose chip widened), `docs/00/01/02/03` tables, and a new `docs/06`.
 
 Does not move: the inner RV32 machine, the fixture proofs (`$RECURSION_FIXTURES` stays warm), `inner_vk_digest`,
 the interface list, the Poseidon2 chip, the memory AIR, degree pins (`[2, 8, 4, 4, 4, 2, 2]`, reduce 8), the
@@ -216,8 +216,8 @@ lists the reduce chip's degree as 3 (it is 8, `tests/tables.rs:219`).
   per-cut attribution), `verify_rv32.digest`, `tests/{aggregate,verifier,self_verify,exit}.rs` literals, re-run
   through `the_cycle_budget_per_inner_proof_is_pinned` after each cut on the production fixture.
 - The suite at each landing: `cargo test --release -p recursion` with the two tier-18+ aggregate round trips
-  skipped as in phase 2, counts recorded in docs/05.
-- Memory: `tests/memprofile.rs` tier-18 twin after Cut D, recorded in docs/05 §3.
+  skipped as in phase 2, counts recorded in docs/06.
+- Memory: `tests/memprofile.rs` tier-18 twin after Cut D, recorded in docs/06 §3.
 
 ## 6. Rulings
 
