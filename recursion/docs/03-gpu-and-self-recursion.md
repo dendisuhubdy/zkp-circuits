@@ -90,10 +90,10 @@ in `ProverData`), so tier 21 → ≥ 64 GB, 22 → ≥ 128 GB, 23 → ≥ 160 GB
 `docs/04-phase2-row-cuts.md`; and since phase 2's row cuts every proof sits one tier lower at
 equal N — production exit/N=1 tier 20, N=2 tier 21, N=3/N=4 tier 22 — so the device model's
 rows above apply one rung down; the cpu table is 82 columns, 86 salted. 2026-10-05: since
-phase 3, `docs/06-phase3-fold-reduce.md`, the production N=3 aggregate is tier 21 as well, both
-register table is one height shorter at every production N and the RAM table at production N=1, 2
-and 4 (N=3 stays at `2^23`; at the test profile RAM does not move, and REG only at N=1 and 2), and
-the cpu table is 84 columns, 88 salted.)
+phase 3, `docs/06-phase3-fold-reduce.md`, the production N=3 aggregate is tier 21 as well; the
+register table is one height shorter at every production N and at the test profile's N=1 and 2;
+the RAM table is one height shorter at production N=1, 2 and 4 only (production N=3 stays at
+`2^23`, and at the test profile RAM does not move); and the cpu table is 84 columns, 88 salted.)
 
 ## The tier-23 rung (Task 2, landed)
 

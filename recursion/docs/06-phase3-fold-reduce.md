@@ -141,6 +141,31 @@ reduce at `2^18` (196 480 rows: 173 120 run rows, 6 080 fold rows, 17 280 pow ro
 (the twin's shape): REG **411 319** → `2^19` (it was 582 743 → `2^20` before Cut D), RAM
 **442 445** → `2^19`, cpu 169 366 rows → tier 18, reduce `2^16` (39 296 rows).
 
+**The reduce chip's N ceiling (the final fix wave, 2026-10-06).** The reduce rows are a
+compile-time function of the program (`tables::reduce::program_rows`: a layout entry's length a
+`REDUCE`, `2a` a `FOLD`, `L` a `POW`), and an N-proof aggregate runs them N times. With
+`REDUCE_MAX_LOG_HEIGHT = 20` — **not raised in this phase** — an aggregate is verifiable only
+while `N × rows + 1 ≤ 2^20`:
+
+| profile | reduce rows a proof | canonical reduce height by N | N ceiling |
+|---|---:|---|---:|
+| production | 196 480 | `2^18` (N=1), `2^19` (N=2), `2^20` (N=3–5) | **N ≤ 5** |
+| test | 39 296 | `2^16` (N=1), `2^17` (N=2–3), `2^18` (N=4–6), `2^19` (N=7–13), `2^20` (N=14–26) | **N ≤ 26** |
+
+Phase 3 moved the production ceiling down by one: the reduction's 173 120 run rows alone
+would hold N ≤ 6 (the review's "was N ≥ 7"), and the fold and pow row kinds (Cuts E2 and F) add
+6 080 + 17 280 = 23 360 rows a proof.
+Production N=6 and N=7 still fit tier 22 by cpu rows (§"N-economics" in docs/02: tier 22 holds
+N ≤ 7), so **the ceiling inside tier 22 is the reduce chip's, not the tier's** — the node's
+admission range for tier 22 (N=4–7) has to stop at 5 until the constant is raised (a key-shape
+change for a later phase: one more rung of `REDUCE_MAX_LOG_HEIGHT` doubles the N range).
+`Machine::prove` now refuses a run past the ceiling before any trace is built
+(`ProveError::ReduceRows`), and `aggregate` refuses the N before the tape
+(`AggregateError::TooManyProofs`); before this fix a prover would have produced a proof `verify`
+refuses. `tests/aggregate.rs` pins both rows, both ceilings and the canonical heights, and checks
+the static count against emulated runs (the single-proof program, the test N=1 and N=2
+aggregates).
+
 **The exit twin at tier 18** (`tests/memprofile.rs::tier19_exit_twin`, run alone, `--features
 parallel`, 16 threads, this 48 GB box). The first column is docs/05 §"The exit twin at tier 18"
 (`docs/measurements/2026-10-05-tier18-twin-memprofile.log`); the second is Cut D's run (Task 1b,
@@ -520,6 +545,25 @@ Notes on the table:
   `REDUCE`, `FOLD` and `POW`; the reduce chip receives them and provides its own `REDUCE_LAYOUT`
   and `FOLD_COEFF` regions.
 
+**The verifier's reduce height is canonical (the final fix wave, 2026-10-06; the whole-branch
+review's Important 2, INTERFACE-4 / AGG-3).** The verifier key is built at the proof's reduce
+height (the preprocessed region is committed there), and until this fix `Machine::verify` took
+that height from the proof: any value in `4..=20` with room for the provider region was a fresh
+key build — 30–70 s at production — and a slot in the node's 64-entry key cache. Now
+`Machine::verify_n(program, proof, n)` recomputes the one honest height,
+`machine::canonical_reduce_log_height(program, n)` (= `build_traces`' rule at `n ×
+program_rows(program)`), and refuses any other declared height as
+`VerifyError::ReduceHeightNotCanonical { declared, canonical }` before any key work.
+`Machine::verify` is `n = 1`; `aggregate::verify_aggregate` passes the N of its digest-bound
+list. `program_rows` reads the program the key already commits — no new `Program` field, no
+digest change. It is exact for programs that run each `REDUCE`/`FOLD`/`POW` once per inner proof:
+the single-proof program (straight-line) and the aggregate program, all of whose such
+instructions sit in the N-loop's body. **What the node must do:** verify through
+`verify_aggregate` (or `verify_n` with the proof's N) — its DoS guard reduces to that signature,
+since a `(program, tier, N)` now admits exactly one reduce height (three at production N ≤ 5:
+`2^18`, `2^19`, `2^20`); its startup warm loop warms `canonical_reduce_log_height(program, N)` for
+each admitted N instead of guessing heights; and it admits production N ≤ 5 only (§3's ceiling).
+
 **The tape.** `CommitPhaseOpenings` carries each round's committed row **whole**: `2·a` words a
 round (was `2·(a − 1)`, the siblings only), then the four salts, so `open_stride = Σ (2^a·2 +
 4)` and witness words rise 210 763 → 212 203. The program hints each row into a buffer padded by
@@ -543,7 +587,8 @@ acceptance and tamper tables run both builds, and `Precompiles::On` refuses no f
 
 The fullnode re-vendors this tree and re-pins `admitted_shapes[].aggregate_program_digest`
 (`dc350ecf…8ba0` at the production bundle shape) and the rVM verifier keys (the reduce chip's
-preprocessed region is new) at the next chain cut. No running chain has aggregation enabled.
+preprocessed region is new) at the next chain cut, and adopts the canonical-height verify and
+the N ≤ 5 production ceiling above. No running chain has aggregation enabled.
 
 ## 6. The suite, and the proofs run and not run (Task 5, 2026-10-06)
 
@@ -613,6 +658,40 @@ So the test N=3 aggregate's tier assertion (19) is exercised by its emulation an
 (`n3_aggregate_publishes_the_host_interface_digest`, `tests/pins.json`) but by no proof until a
 large host runs it — the cost the Task-5 ruling named.
 
+**The final fix wave (2026-10-06, after the whole-branch review).** The review returned "ready
+after fixes": the fold kind's structure rules and the reduce kind's in-run `ROW_END` carry were
+pinned by no test (fourteen single-rule deletions left `cheating` and `tables` green), the
+verifier key followed the proof's declared reduce height, and the N ceiling had moved down
+undocumented. Eleven isolating forgeries (`tests/cheating.rs`, the "Final fix wave" block), each
+mutation-checked as above:
+
+| rule deleted | test | with the rule deleted |
+|---|---|---|
+| `F_MSG` in the fold run carry | `a_fold_run_moving_its_row_base_mid_run_is_rejected_by_the_base_carry` | FAILED: "… VERIFIED, writing its result 20 cells away" |
+| `CLK` in the fold run carry | `a_fold_run_moving_its_clock_mid_run_is_rejected_by_the_clock_carry` | FAILED: "… VERIFIED" |
+| `F_A` in the fold run carry | `a_fold_run_changing_its_arity_mid_run_is_rejected_by_the_arity_carry` | FAILED: "… VERIFIED, ending two rows early in the salt cells" |
+| `U0` / `U1` in the fold run carry | `a_fold_run_moving_u0_mid_run_…_u0_carry` / `…_u1_…_u1_carry` | FAILED: "… VERIFIED" (each) |
+| `F_FIRST·D = 0` | `a_fold_run_starting_with_a_dirty_accumulator_is_rejected_by_the_zero_start_rule` | FAILED: "… VERIFIED, writing 3 for the zero row's 0" (the review's example) |
+| `F_FIRST·K = 0` | `a_fold_run_starting_past_k_zero_is_rejected_by_the_first_index_rule` | FAILED: "… VERIFIED, never reading y_0" |
+| `n(K) = K + 1` | `a_fold_run_skipping_an_index_is_rejected_by_the_index_step` | FAILED: "… VERIFIED, never reading y_1" |
+| `F_LAST·(K − 2a + 1)` | `a_fold_run_ending_before_k_two_a_minus_one_is_rejected_by_the_end_rule` | FAILED: "… VERIFIED, one Horner step short" |
+| the fold must-continue rule | `a_fold_run_stopping_before_its_last_row_is_rejected_by_the_must_continue_rule` | FAILED: "… VERIFIED, never writing its result" |
+| `ROW_END` in the reduce run carry | `a_reduce_run_ending_early_is_rejected_by_the_row_end_carry` | FAILED: "… VERIFIED, publishing 51 against an honest 267" |
+
+`a_fold_run_cut_short_is_rejected` became `…_by_its_missing_result_write`: with the must-continue
+rule deleted it is still refused (the `RAM` bus). `tests/tables.rs`'s carry rule, which had been
+narrowed to the reduce kind's 30 columns, now runs per kind — reduce (with `ROW_END`), fold
+(`CLK`, `F_MSG`, `F_A`, `F_K`, `U0`, `U1`, on phase-2 rows so the switch does not mask the K
+step) and pow (`CLK`, `P_BASE`, `P_OFF`, `P_L`, `P_K`) — and goes red under each fold carry and
+step deletion, the `ROW_END` deletion, and the pow `P_K` step, `P_BASE` and `CLK` deletions. The
+reduce kind's `ENTRY`/`CARRY` carries and the fold phase-1-prefix rule are recorded as redundant
+in `ReduceAir::eval` (for in-order programs, and with the `FOLD_COEFF` lookup); no forgery
+isolates them. The canonical-height refusal (§5) and the prove-side ceiling (§3) came with five
+tests (`tests/cheating.rs` two, `tests/aggregate.rs` three); with the canonical check deleted the
+one-above forgery reaches the batch verifier, past the key build. The suite after the wave (the same
+invocation): **294 passed, 0 failed, 20 ignored, 1 skipped** — the 278 above plus the sixteen new
+tests; no AIR, program or pin moved.
+
 ## 7. Still ahead (recorded, not in this phase)
 
 The phase ends at the measured point (spec §2.5): 585 686 rows, **61 399 above the tier-19
@@ -666,7 +745,10 @@ gate**. In order of leverage:
    it), the production exit and N=1 aggregate (≈ 110–130 GB), and the production N≥2
    aggregates. They want a ≥ 128 GB host for the test shapes and ≥ 160 GB for production N=1;
    the projections in §3 become measurements there.
-5. **`Precompiles::Off` byte-stability** (the E2 ruling's deferred question): the Off replay's
+5. **The reduce chip's N ceiling** (§3, the final fix wave): `REDUCE_MAX_LOG_HEIGHT = 20` caps
+   production at N ≤ 5 — inside tier 22, which holds cpu rows to N = 7. Raising it one rung
+   (N ≤ 10) is a verifier-key shape change for a later phase, with the node's admission range.
+6. **`Precompiles::Off` byte-stability** (the E2 ruling's deferred question): the Off replay's
    digest moved at E2 because both builds share the fold-result cells after each committed row.
    Off's arithmetic is unchanged; if the replay tripwire is meant to catch layout drift as well
    as arithmetic, the padding should become `On`-only. Not needed for soundness.

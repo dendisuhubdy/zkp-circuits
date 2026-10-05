@@ -219,7 +219,14 @@ derivation and the model's ±10 % calibration):
 | 3 | production | **21** | 1 757 062 | 340 089 | 21 / 22 / 23 / 18 / 20 / 20 | ≈ 290–340 GB |
 | 4 | production | **22** | 2 342 613 | 1 851 690 | 22 / 23 / 23 / 18 / 20 / 20 | ≈ 410–490 GB |
 
-Tier 22 now holds up to N=7 (4 099 266 rows) and tier 23, the top rung, up to N=14 (8 198 123).
+Tier 22 now holds up to N=7 (4 099 266 rows) and tier 23, the top rung, up to N=14 (8 198 123)
+by cpu rows — **but the reduce chip caps what verifies first**: 196 480 reduce rows a production
+proof against `REDUCE_MAX_LOG_HEIGHT = 20` admit **production N ≤ 5** (canonical reduce heights
+`2^18` / `2^19` / `2^20` at N = 1 / 2 / 3–5), and 39 296 a test proof admit **test N ≤ 26**
+(docs/06 §3, the final fix wave). Production N=6 and N=7 fit tier 22's cpu rows and have no
+verifiable reduce height; `prove` and `aggregate` refuse them before any trace or tape
+(`ProveError::ReduceRows`, `AggregateError::TooManyProofs`), and `verify` refuses any reduce height
+but the canonical one for the program and N (docs/06 §5) — the constant is not raised in phase 3.
 At equal N the production rungs are where phase 2 left them except N=3, one lower; what phase 3
 bought is memory-table height — the register table one height shorter at every production N and at test N=1 and 2 (test N=3
 stays at `2^21`), the RAM table one height shorter at production N=1, 2 and 4 (production N=3 stays
