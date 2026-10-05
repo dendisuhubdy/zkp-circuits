@@ -335,3 +335,46 @@ fn merkle_walk_via_compress_matches_the_compiled_walk() {
         }
     }
 }
+
+/// Cut E1 (Review Focus 4): the own-slot check agrees On and Off at every slot of every arity,
+/// accepting the honest value and refusing any other at the same named step.
+#[test]
+fn the_own_slot_check_agrees_on_and_off_at_every_slot() {
+    use recursion::dsl::Liveness;
+    use recursion::dsl::Felt;
+    use recursion::programs::{own_slot_check, Precompiles};
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(28);
+    for la in 1..=3usize {
+        let a = 1usize << la;
+        let row: Vec<EF> = (0..a).map(|_| common::random_ext(&mut rng)).collect();
+        for idx in 0..a {
+            for honest in [true, false] {
+                let folded = if honest { row[idx] } else { row[idx] + EF::ONE };
+                let run = |pc: Precompiles| -> Result<(), String> {
+                    let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, pc);
+                    let msg = b.alloc(2 * a as u64);
+                    for (j, v) in row.iter().enumerate() {
+                        let c = b.ext_constant(*v);
+                        b.store_ext(msg, 2 * j as i64, c);
+                    }
+                    let own: Vec<Felt> = (0..la).map(|k| b.constant(F::from_u64(((idx >> k) & 1) as u64))).collect();
+                    let f = b.ext_constant(folded);
+                    own_slot_check(&mut b, msg, &own, f, "own slot");
+                    for _ in 0..4 {
+                        let z = b.zero();
+                        b.public(z);
+                    }
+                    let p = b.finish();
+                    match execute(&p, &[], 100_000) {
+                        Ok(_) => Ok(()),
+                        Err(ExecError::InverseOfZero { pc }) => Err(p.checkpoint_at(pc).unwrap_or("?").to_string()),
+                        Err(e) => Err(format!("{e:?}")),
+                    }
+                };
+                let (on, off) = (run(Precompiles::On), run(Precompiles::Off));
+                assert_eq!(on, off, "la {la}, idx {idx}, honest {honest}");
+                assert_eq!(on, if honest { Ok(()) } else { Err("own slot".to_string()) }, "la {la}, idx {idx}");
+            }
+        }
+    }
+}

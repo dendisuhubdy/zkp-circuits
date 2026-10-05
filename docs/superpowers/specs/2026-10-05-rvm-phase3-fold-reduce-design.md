@@ -138,7 +138,7 @@ about 3 cpu rows per call. Expected: −25 000 to −50 000 cpu rows. Opcode 29 
 |---|---:|---:|---:|---:|
 | phase 2 (measured) | 893 606 | 2 147 159 → 2^22 | 2 213 181 → 2^22 | 20 |
 | D | 660 000–770 000 | ≈ 1 830 000 → 2^21 | ≈ 1 960 000 → 2^21 | 20 |
-| D + E1 + E2 | 540 000–700 000 | | | 20 or 19 |
+| D + E1 + E2 | 540 000–700 000 (E1 measured −46 080 (band −35 120 ± 15 % missed low: the leaf sponged in place also drops commit_root 129 600 → 120 640)) | | | 20 or 19 |
 | D + E + F | 490 000–650 000 | | | 19 if ≤ 524 287 |
 
 If D + E + F measured lands above 524 287, the phase stops at the measured point, the memory heights (already

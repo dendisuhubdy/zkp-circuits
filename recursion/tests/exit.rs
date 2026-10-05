@@ -77,8 +77,9 @@ fn fifty_production_profile_bundle_proofs_are_accepted() {
 ///   `InvalidPowWitness`; the other two are its input-opening `CapMismatch`, caught here one
 ///   binding earlier.
 /// - `Header` and `CommitPhaseOpenings` are not statically nameable at all: the tampered offset
-///   `k % len` lands on different header words / different commit-phase rounds as `k` varies, so
-///   the expected name is computed from the offset (`CommitPhasePaths` and both `Input*` segments
+///   `k % len` lands on different header words / different commit-phase rounds (and, since Cut
+///   E1, on the query's own slot or a sibling) as `k` varies, so the expected name is computed
+///   from the offset and the replay's query index (`CommitPhasePaths` and both `Input*` segments
 ///   stay static: their per-round runs are wide enough that every `k % len` in these tests lands
 ///   in round 0).
 fn tamper_table() -> Vec<(Segment, &'static str)> {
@@ -101,25 +102,33 @@ fn tamper_table() -> Vec<(Segment, &'static str)> {
 
 /// The refusal step expected for a tamper of `seg` at segment offset `off`, given the shape.
 /// The two dynamic cases from the table above.
-fn expected_step(seg: Segment, off: usize, shape: &InnerShape) -> String {
+fn expected_step(seg: Segment, off: usize, shape: &InnerShape, samples: &[u64]) -> String {
     match seg {
         Segment::Header => format!("header word {off}"),
         Segment::CommitPhaseOpenings => {
-            // The segment is query-major; within a query's run, round `r` occupies
-            // `((1 << log_arities[r]) - 1) * 2 + 4` words. The tampered salt or sibling breaks
-            // that round's reconstructed leaf, so the refusal names that round's root.
-            let strides: Vec<usize> = shape
-                .log_arities
+            // The segment is query-major; within a query's run, round `r` occupies the whole row
+            // (`2·arity` words, Cut E1) then its four salts. A tampered word at the query's own
+            // slot (`index_in_group`, the index's bits `shift..shift + la`) is refused by the
+            // own-slot equality; a sibling or a salt breaks the round's leaf, so its root.
+            let strides: Vec<usize> = shape.log_arities
                 .iter()
-                .map(|&la| ((1usize << la) - 1) * 2 + recursion::witness::SALT_ELEMS)
+                .map(|&la| (1usize << la) * 2 + recursion::witness::SALT_ELEMS)
                 .collect();
             let query_stride: usize = strides.iter().sum();
+            let index = samples[off / query_stride] as usize;
             let mut at = off % query_stride;
-            for (r, &s) in strides.iter().enumerate() {
+            let mut shift = 0usize;
+            for (r, (&s, &la)) in strides.iter().zip(shape.log_arities.iter()).enumerate() {
                 if at < s {
-                    return format!("commit phase root[{r}]");
+                    let own = (index >> shift) & ((1usize << la) - 1);
+                    return if at / 2 == own {
+                        format!("commit phase own slot[{r}]")
+                    } else {
+                        format!("commit phase root[{r}]")
+                    };
                 }
                 at -= s;
+                shift += la;
             }
             unreachable!("the offset is inside a query's run");
         }
@@ -142,7 +151,8 @@ fn refuse_all(profile: FriProfile, n: usize) {
         let (_, start, len) = *tape.segments.iter().find(|(s, _, _)| *s == seg).unwrap();
         assert!(len > 0, "{seg:?} is empty");
         let off = k % len;
-        let want_step = expected_step(seg, off, &shape);
+        let samples = recursion::reference::replay(profile, &shape, &key, &p.proof).unwrap().index_samples;
+        let want_step = expected_step(seg, off, &shape, &samples);
         tape.words[start + off] += F::ONE;
         match execute(&vp.program, &tape.words, MAX_CYCLES) {
             Err(ExecError::InverseOfZero { pc }) => assert_eq!(
@@ -312,7 +322,7 @@ fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_ver
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 202_198, "the twin proves the post-cut program as measured (phase 3's Cut D: the N=1 aggregate pin 202 472 less the 274-row loop overhead; 230 950 after phase 2's row cuts; 461 988 at tier 19 in constraint set 8, 461 082 in constraint set 7 with VERIFIER-1, 441 643 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 192_982, "the twin proves the post-cut program as measured (phase 3's Cut E1: the N=1 aggregate pin 193 256 less the 274-row loop overhead; 202 198 after Cut D; 230 950 after phase 2's row cuts; 461 988 at tier 19 in constraint set 8, 461 082 in constraint set 7 with VERIFIER-1, 441 643 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(18));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();
@@ -356,7 +366,7 @@ fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 749_846, "the exit proves the post-cut program as measured (phase 3's Cut D, `tests/pins.json`; 893 606 after phase 2's row cuts; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 703_766, "the exit proves the post-cut program as measured (phase 3's Cut E1, `tests/pins.json`; 749 846 after Cut D; 893 606 after phase 2's row cuts; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(20));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();
@@ -374,4 +384,34 @@ fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_
         matches!(m.prove(&vp.program, &bad_tape, None), Err(recursion::machine::ProveError::Exec(_))),
         "a tampered inner proof traps the program — no proof exists"
     );
+}
+
+/// Cut E1: the tape hints the committed row whole, and the program refuses a row whose own slot
+/// is not the query's folded value — before the Merkle walk, at its own named step.
+#[test]
+fn a_committed_row_whose_own_slot_differs_is_refused_at_the_own_slot_step() {
+    use recursion::emulator::ExecError;
+    use recursion::witness::Segment;
+    let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
+    let shape = InnerShape::of(FriProfile::Test, p.proof.tier, p.proof.program_log_height, p.proof.input_log_height,
+        p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height, p.proof.mem_log_height);
+    let key = InnerKey::of(FriProfile::Test, &shape);
+    let r = recursion::reference::replay(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let mut tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let opens = tape.segments.iter().find(|(s, _, _)| *s == Segment::CommitPhaseOpenings).unwrap().1;
+    // Query 0, round 0: index_in_group is the sampled index's low log_arity bits.
+    let idx = (r.index_samples[0] as usize) & ((1usize << shape.log_arities[0]) - 1);
+    tape.words[opens + 2 * idx] += F::ONE;
+    match execute(&vp.program, &tape.words, MAX_CYCLES) {
+        Err(ExecError::InverseOfZero { pc }) => assert_eq!(vp.program.checkpoint_at(pc), Some("commit phase own slot[0]")),
+        other => panic!("expected the own-slot refusal, got {other:?}"),
+    }
+    // The same tape under `Precompiles::Off` (the indicator dot product): the same named step.
+    let off = recursion::programs::verify_rv32_with(&shape, &key, Checkpoints::Off, recursion::dsl::Liveness::On,
+        recursion::programs::Precompiles::Off);
+    match execute(&off.program, &tape.words, MAX_CYCLES) {
+        Err(ExecError::InverseOfZero { pc }) => assert_eq!(off.program.checkpoint_at(pc), Some("commit phase own slot[0]")),
+        other => panic!("Off: expected the own-slot refusal, got {other:?}"),
+    }
 }

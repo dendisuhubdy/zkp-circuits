@@ -130,8 +130,10 @@ fn the_self_program_digest_is_deterministic_and_distinct() {
     // The quotient-layout fork (2026-10-05, docs/05): the rVM proof's quotient round is one matrix per instance, so the program's round reader changed shape (was 18514c2a…).
     // Phase 3's Cut D (2026-10-05, docs/06): the shared pipeline reduces through `REDUCE` chains,
     // and the program opens the reduce chip's preprocessed layout (was 91e50e14…).
+    // Phase 3's Cut E1 (2026-10-05, docs/06): the committed FRI row is hinted whole and its own
+    // slot checked by one register-addressed `LOADE` (was 40eb7077…).
     let hex: String = d1.iter().map(|w| format!("{:016x}", p3_field::PrimeField64::as_canonical_u64(w))).collect();
-    assert_eq!(hex, "40eb7077f9b5365cb4a8410095fab86dafd9b850b84bc0f46e4f5a1416eb8487",
+    assert_eq!(hex, "f60f0f5c7476d93af91544cc91aec400dc5a7b8c3f7191e6e213ea8f7a0f579b",
                "the self-verifier's digest at the toy fixture shape");
 
     // And it is not the single-proof RV32-machine verifier's digest for the same profile: build
@@ -177,22 +179,33 @@ fn tamper_table() -> Vec<(Segment, &'static str)> {
 
 /// The refusal step expected for a tamper of `seg` at segment offset `off`, given the rVM
 /// shape — `tests/exit.rs`'s, verbatim, over `RvmShape`'s own arity schedule.
-fn expected_step(seg: Segment, off: usize, shape: &RvmShape) -> String {
+fn expected_step(seg: Segment, off: usize, shape: &RvmShape, samples: &[u64]) -> String {
     match seg {
         Segment::Header => format!("header word {off}"),
         Segment::CommitPhaseOpenings => {
-            let strides: Vec<usize> = shape
-                .log_arities()
+            // The segment is query-major; within a query's run, round `r` occupies the whole row
+            // (`2·arity` words, Cut E1) then its four salts. A tampered word at the query's own
+            // slot (`index_in_group`, the index's bits `shift..shift + la`) is refused by the
+            // own-slot equality; a sibling or a salt breaks the round's leaf, so its root.
+            let strides: Vec<usize> = shape.log_arities()
                 .iter()
-                .map(|&la| ((1usize << la) - 1) * 2 + recursion::witness::SALT_ELEMS)
+                .map(|&la| (1usize << la) * 2 + recursion::witness::SALT_ELEMS)
                 .collect();
             let query_stride: usize = strides.iter().sum();
+            let index = samples[off / query_stride] as usize;
             let mut at = off % query_stride;
-            for (r, &s) in strides.iter().enumerate() {
+            let mut shift = 0usize;
+            for (r, (&s, &la)) in strides.iter().zip(shape.log_arities().iter()).enumerate() {
                 if at < s {
-                    return format!("commit phase root[{r}]");
+                    let own = (index >> shift) & ((1usize << la) - 1);
+                    return if at / 2 == own {
+                        format!("commit phase own slot[{r}]")
+                    } else {
+                        format!("commit phase root[{r}]")
+                    };
                 }
                 at -= s;
+                shift += la;
             }
             unreachable!("the offset is inside a query's run");
         }
@@ -215,7 +228,8 @@ fn thirteen_tampered_rvm_proofs_are_refused_at_the_named_steps() {
             .unwrap_or_else(|| panic!("the tape has a {seg:?} segment"));
         assert!(r.len > 0, "{seg:?} is empty");
         let off = k % r.len;
-        let want_step = expected_step(*seg, off, &shape);
+        let samples = recursion::reference::replay(FriProfile::Test, &shape, &key, &proof).unwrap().index_samples;
+        let want_step = expected_step(*seg, off, &shape, &samples);
         tape.words[r.start + off] += F::ONE;
         match execute(&vp.program, &tape.words, MAX_CYCLES) {
             Err(ExecError::InverseOfZero { pc }) => assert_eq!(
@@ -354,14 +368,18 @@ fn the_self_verifiers_measured_cost_at_two_fixture_shapes() {
     // the self-verifier opens the reduce chip's preprocessed layout and its wider trace (Task 1a):
     // toy 131 739 → 120 955 rows, busy 167 746 → 156 466 (was
     // (131739, 6130, 276847, 133587, 24135) and (167746, 7780, 320075, 169858, 29967)).
+    // Phase 3's Cut E1 (2026-10-05): the committed FRI row is hinted whole (two more tape words a
+    // round) and its own slot is one register-addressed `LOADE` and an equality, replacing the
+    // arithmetic sibling select: toy 120 955 → 114 955 rows, busy 156 466 → 146 626 (was
+    // (120955, 6130, 254575, 122803, 24135) and (156466, 7780, 297259, 158578, 29967)).
     assert_eq!(
         (r.cpu_rows, r.permutations, r.mem_accesses, r.program_instrs, r.witness_words),
-        (120955, 6130, 254575, 122803, 24135),
+        (114955, 6130, 251855, 116963, 24295),
         "the tier-8 toy fixture's CycleReport, pinned"
     );
     assert_eq!(
         (rb.cpu_rows, rb.permutations, rb.mem_accesses, rb.program_instrs, rb.witness_words),
-        (156466, 7780, 297259, 158578, 29967),
+        (146626, 7780, 292843, 149026, 30255),
         "the busy fixture's CycleReport, pinned"
     );
 
@@ -379,7 +397,7 @@ fn the_self_verifiers_measured_cost_at_two_fixture_shapes() {
     // poseidon2 chip's third row kind (`IS_COMPRESS`, `BIT`, its twelve RAM messages).
     // The quotient-layout fork (2026-10-05) left phase 5 unchanged at 7 845 / 8 125, measured:
     // the constraint evaluation recomposes the quotient from the same per-chunk slices, and only
-    // the opening round's matrix grouping moved. Phase 3's Cut D left it there too, measured.
+    // the opening round's matrix grouping moved. Phase 3's Cuts D and E1 left it there too, measured.
     let p5a: usize = vp.phase5.iter().map(|c| c.instrs).sum();
     let p5b: usize = vp_b.phase5.iter().map(|c| c.instrs).sum();
     assert_eq!((p5a, p5b), (7845, 8125), "phase 5 varies with the degree bits, measured");

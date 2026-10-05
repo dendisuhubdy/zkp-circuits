@@ -555,6 +555,19 @@ impl Builder {
         Ext(id)
     }
 
+    /// `Ed = mem[addr_of(base) + off .. + 2]` with `off` a *runtime* cell offset (Cut E1: the
+    /// committed row's own slot, `2·index_in_group`): one `LOADE` whose address register is the
+    /// offset and whose immediate is the base's absolute address. The cpu row range-checks the
+    /// sum like any `LOADE`.
+    pub fn load_ext_offset(&mut self, base: Ptr, off: Felt) -> Ext {
+        self.begin();
+        let ro = self.materialise(off.0);
+        let at = F::from_u64(self.addr_of(base));
+        let (id, rd) = self.new_handle(2);
+        self.emit(Op::Loade, rd, ro, BRef::Imm(at));
+        Ext(id)
+    }
+
     pub fn store_ext(&mut self, p: Ptr, off: i64, v: Ext) {
         self.begin();
         let rv = self.materialise(v.0);
