@@ -15,10 +15,12 @@ numbers in `tests/pins.json` (`tests/aggregate.rs::the_per_n_cycle_budget_is_pin
 differential and the tamper table in the same file, the stub vectors in
 `the_admission_stub_vectors`. Estimates are labelled with their derivation.
 
-**Current numbers (2026-10-03): phase 2's row cuts, "Phase 2" below and
-`docs/04-phase2-row-cuts.md`.** Every rung is one tier lower at equal N — production N=1 at
-tier 20 (893 880 rows), N=2 at 21, N=3 and N=4 at 22 — and the aggregate program digest moved.
-The sections in between are the record of how the earlier numbers were arrived at.
+**Current numbers (2026-10-05): phase 3, "Phase 3" below and `docs/06-phase3-fold-reduce.md`.**
+Production N=1 at tier 20 (585 960 rows), N=2 and N=3 at 21, N=4 at 22; the test N=1/2/3 at
+18 / 19 / 19; both memory tables one height shorter at every N; the aggregate program digest moved
+again. Phase 2's row cuts (2026-10-03, "Phase 2" below and `docs/04-phase2-row-cuts.md`) made
+every rung one tier lower at equal N (production N=1 at tier 20, 893 880 rows). The sections in
+between are the record of how the earlier numbers were arrived at.
 
 ## AGG-2: the aggregate binding (audit v3, amended 2026-09-25)
 

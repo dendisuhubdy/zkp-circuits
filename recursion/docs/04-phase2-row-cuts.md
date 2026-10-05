@@ -158,7 +158,9 @@ is the next phase's question.
    160 dispatches a proof.
 2. **The fold-chain sibling select**, ≈ 64 000 rows: arity ≤ 8, about 800 rows a query.
 3. **The inner FRI profile**: rate ¼ with about 40 queries halves everything in the query phase,
-   at the wallet's expense. This is `compute-optimization.md` §4.4's measured decision.
+   at the wallet's expense. This is `compute-optimization.md` §4.4's measured decision. (Correction, 2026-10-06: the count is wrong. 40 is the
+   *conjectured* count at rate ¼; at the proven security the production profile keeps, rate ¼
+   needs ~120 queries — 1.5× the query phase, not half. `docs/06-phase3-fold-reduce.md` §7.)
 4. **The per-level `FADDI` that `compress_step` pays for the sibling pointer's delta** (flagged by
    the Task-3 implementer). `ptr_reg` folds a delta-carrying sibling `Ptr` into a register with
    one `FADDI` before each `COMPRESS`. FADDI rose by exactly the 16 240 `COMPRESS` rows at Cut C.

@@ -1,0 +1,939 @@
+warning: unused import: `ShapeKey`
+  --> src/witness.rs:24:54
+   |
+24 | use crate::shape::{InnerKey, InnerShape, ProofBatch, ShapeKey, VerifierShape, CAP_HEIGHT};
+   |                                                      ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `recursion` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/memprofile.rs (/Users/dendisuhubdy/rand-worktrees/circuits-phase2/recursion/target/release/deps/memprofile-6ffc05c01acc214b)
+
+running 1 test
+fixture loaded, program built: live 0.01 GB
+[      0.1s] + with_zero_cols                             live    0.57 GB  peak    0.57 GB
+[      0.1s] - with_zero_cols                             live    0.59 GB  peak    0.59 GB  Δlive   +0.02 GB       0.0 s
+[      0.1s] + with_zero_cols                             live    0.58 GB  peak    0.59 GB
+[      0.1s] - with_zero_cols                             live    0.58 GB  peak    0.59 GB  Δlive   +0.00 GB       0.0 s
+[      0.1s] + with_zero_cols                             live    0.58 GB  peak    0.59 GB
+[      0.1s] - with_zero_cols                             live    0.60 GB  peak    0.60 GB  Δlive   +0.02 GB       0.0 s
+[      0.1s] + coset_lde_batch_with_transform             live    0.59 GB  peak    0.60 GB
+[      0.1s]   + reverse_matrix_index_bits                  live    0.59 GB  peak    0.60 GB
+[      0.1s]   - reverse_matrix_index_bits                  live    0.59 GB  peak    0.60 GB  Δlive   +0.00 GB       0.0 s
+[      0.1s]   + first_half                                 live    0.59 GB  peak    0.60 GB
+[      0.1s]   - first_half                                 live    0.59 GB  peak    0.60 GB  Δlive   +0.00 GB       0.0 s
+[      0.1s]   + reverse_matrix_index_bits                  live    0.59 GB  peak    0.60 GB
+[      0.1s]   - reverse_matrix_index_bits                  live    0.59 GB  peak    0.60 GB  Δlive   +0.00 GB       0.0 s
+[      0.1s]   + second_half                                live    0.59 GB  peak    0.60 GB
+[      0.1s]   - second_half                                live    0.59 GB  peak    0.60 GB  Δlive   +0.00 GB       0.0 s
+[      0.1s]   + reserve_exact                              live    0.59 GB  peak    0.60 GB
+[      0.1s]   - reserve_exact                              live    0.71 GB  peak    0.71 GB  Δlive   +0.12 GB       0.0 s
+[      0.1s]   + coset_dft_oop                              live    0.71 GB  peak    0.71 GB
+[      0.1s]   - coset_dft_oop                              live    0.71 GB  peak    0.71 GB  Δlive   +0.00 GB       0.0 s
+[      0.1s]   + coset_dft_oop                              live    0.71 GB  peak    0.71 GB
+[      0.2s]   - coset_dft_oop                              live    0.72 GB  peak    0.72 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.72 GB  peak    0.72 GB
+[      0.2s]   - coset_dft_oop                              live    0.72 GB  peak    0.72 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.72 GB  peak    0.72 GB
+[      0.2s]   - coset_dft_oop                              live    0.73 GB  peak    0.73 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.73 GB  peak    0.73 GB
+[      0.2s]   - coset_dft_oop                              live    0.73 GB  peak    0.73 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.73 GB  peak    0.73 GB
+[      0.2s]   - coset_dft_oop                              live    0.73 GB  peak    0.73 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.73 GB  peak    0.73 GB
+[      0.2s]   - coset_dft_oop                              live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft                                  live    0.74 GB  peak    0.74 GB
+[      0.2s]   - coset_dft                                  live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s] - coset_lde_batch_with_transform             live    0.74 GB  peak    0.74 GB  Δlive   +0.16 GB       0.0 s
+[      0.2s] + coset_lde_batch_with_transform             live    0.74 GB  peak    0.74 GB
+[      0.2s]   + reverse_matrix_index_bits                  live    0.74 GB  peak    0.74 GB
+[      0.2s]   - reverse_matrix_index_bits                  live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + first_half                                 live    0.74 GB  peak    0.74 GB
+[      0.2s]   - first_half                                 live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + reverse_matrix_index_bits                  live    0.74 GB  peak    0.74 GB
+[      0.2s]   - reverse_matrix_index_bits                  live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + second_half                                live    0.74 GB  peak    0.74 GB
+[      0.2s]   - second_half                                live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + reserve_exact                              live    0.74 GB  peak    0.74 GB
+[      0.2s]   - reserve_exact                              live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.74 GB  peak    0.74 GB
+[      0.2s]   - coset_dft_oop                              live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.74 GB  peak    0.74 GB
+[      0.2s]   - coset_dft_oop                              live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.74 GB  peak    0.74 GB
+[      0.2s]   - coset_dft_oop                              live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.74 GB  peak    0.74 GB
+[      0.2s]   - coset_dft_oop                              live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.74 GB  peak    0.74 GB
+[      0.2s]   - coset_dft_oop                              live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.74 GB  peak    0.74 GB
+[      0.2s]   - coset_dft_oop                              live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.74 GB  peak    0.74 GB
+[      0.2s]   - coset_dft_oop                              live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft                                  live    0.74 GB  peak    0.74 GB
+[      0.2s]   - coset_dft                                  live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s] - coset_lde_batch_with_transform             live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s] + coset_lde_batch_with_transform             live    0.74 GB  peak    0.74 GB
+[      0.2s]   + reverse_matrix_index_bits                  live    0.74 GB  peak    0.74 GB
+[      0.2s]   - reverse_matrix_index_bits                  live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + first_half                                 live    0.74 GB  peak    0.74 GB
+[      0.2s]   - first_half                                 live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + reverse_matrix_index_bits                  live    0.74 GB  peak    0.74 GB
+[      0.2s]   - reverse_matrix_index_bits                  live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + second_half                                live    0.74 GB  peak    0.74 GB
+[      0.2s]   - second_half                                live    0.74 GB  peak    0.74 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + reserve_exact                              live    0.74 GB  peak    0.74 GB
+[      0.2s]   - reserve_exact                              live    0.89 GB  peak    0.89 GB  Δlive   +0.15 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.89 GB  peak    0.89 GB
+[      0.2s]   - coset_dft_oop                              live    0.89 GB  peak    0.89 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.89 GB  peak    0.89 GB
+[      0.2s]   - coset_dft_oop                              live    0.89 GB  peak    0.89 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.89 GB  peak    0.89 GB
+[      0.2s]   - coset_dft_oop                              live    0.89 GB  peak    0.89 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.89 GB  peak    0.89 GB
+[      0.2s]   - coset_dft_oop                              live    0.89 GB  peak    0.89 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.89 GB  peak    0.89 GB
+[      0.2s]   - coset_dft_oop                              live    0.90 GB  peak    0.90 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.90 GB  peak    0.90 GB
+[      0.2s]   - coset_dft_oop                              live    0.90 GB  peak    0.90 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft_oop                              live    0.90 GB  peak    0.90 GB
+[      0.2s]   - coset_dft_oop                              live    0.90 GB  peak    0.90 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s]   + coset_dft                                  live    0.90 GB  peak    0.90 GB
+[      0.2s]   - coset_dft                                  live    0.90 GB  peak    0.90 GB  Δlive   +0.00 GB       0.0 s
+[      0.2s] - coset_lde_batch_with_transform             live    0.90 GB  peak    0.90 GB  Δlive   +0.16 GB       0.0 s
+[      5.5s] + build merkle tree                          live    1.07 GB  peak    1.07 GB
+[      5.5s]   + first digest layer                         live    1.07 GB  peak    1.07 GB
+[      5.8s]   - first digest layer                         live    1.20 GB  peak    1.20 GB  Δlive   +0.13 GB       0.3 s
+[      6.3s] - build merkle tree                          live    1.34 GB  peak    1.34 GB  Δlive   +0.27 GB       0.8 s
+[      6.3s] + infer constraint degree                    live    1.34 GB  peak    1.34 GB
+[      6.3s]   + evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB
+[      6.3s]   - evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] - infer constraint degree                    live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] + infer constraint degree                    live    1.34 GB  peak    1.34 GB
+[      6.3s]   + evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB
+[      6.3s]   - evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] - infer constraint degree                    live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] + infer constraint degree                    live    1.34 GB  peak    1.34 GB
+[      6.3s]   + evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB
+[      6.3s]   - evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] - infer constraint degree                    live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] + infer constraint degree                    live    1.34 GB  peak    1.34 GB
+[      6.3s]   + evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB
+[      6.3s]   - evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] - infer constraint degree                    live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] + infer constraint degree                    live    1.34 GB  peak    1.34 GB
+[      6.3s]   + evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB
+[      6.3s]   - evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] - infer constraint degree                    live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] + infer constraint degree                    live    1.34 GB  peak    1.34 GB
+[      6.3s]   + evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB
+[      6.3s]   - evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] - infer constraint degree                    live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] + infer constraint degree                    live    1.34 GB  peak    1.34 GB
+[      6.3s]   + evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB
+[      6.3s]   - evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] - infer constraint degree                    live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] + infer constraint degree                    live    1.34 GB  peak    1.34 GB
+[      6.3s]   + evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB
+[      6.3s]   - evaluate constraints symbolically          live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] - infer constraint degree                    live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s] + prove_batch                                live    1.34 GB  peak    1.34 GB
+[      6.3s]   + infer log of constraint degree             live    1.34 GB  peak    1.34 GB
+[      6.3s]   - infer log of constraint degree             live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s]   + infer log of constraint degree             live    1.34 GB  peak    1.34 GB
+[      6.3s]   - infer log of constraint degree             live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s]   + infer log of constraint degree             live    1.34 GB  peak    1.34 GB
+[      6.3s]   - infer log of constraint degree             live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s]   + infer log of constraint degree             live    1.34 GB  peak    1.34 GB
+[      6.3s]   - infer log of constraint degree             live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s]   + infer log of constraint degree             live    1.34 GB  peak    1.34 GB
+[      6.3s]   - infer log of constraint degree             live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s]   + infer log of constraint degree             live    1.34 GB  peak    1.34 GB
+[      6.3s]   - infer log of constraint degree             live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s]   + infer log of constraint degree             live    1.34 GB  peak    1.34 GB
+[      6.3s]   - infer log of constraint degree             live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s]   + infer log of constraint degree             live    1.34 GB  peak    1.34 GB
+[      6.3s]   - infer log of constraint degree             live    1.34 GB  peak    1.34 GB  Δlive   +0.00 GB       0.0 s
+[      6.3s]   + randomize polys                            live    1.70 GB  peak    1.70 GB
+[     10.0s] # sample  live    2.09 GB  peak    2.09 GB  rss    2.24 GB
+[     13.2s]     - with_random_cols                           live    2.09 GB  peak    2.09 GB  Δlive   +0.37 GB       6.1 s
+[     15.7s]     - with_random_cols                           live    2.04 GB  peak    2.09 GB  Δlive   +0.13 GB       2.5 s
+[     18.2s]     - with_random_cols                           live    2.12 GB  peak    2.12 GB  Δlive   +0.13 GB       2.5 s
+[     19.7s]     - with_random_cols                           live    2.16 GB  peak    2.16 GB  Δlive   +0.09 GB       1.5 s
+[     20.0s] # sample  live    2.21 GB  peak    2.21 GB  rss    2.46 GB
+[     21.2s]     - with_random_cols                           live    2.21 GB  peak    2.21 GB  Δlive   +0.09 GB       1.5 s
+[     21.2s]   - randomize polys                            live    2.17 GB  peak    2.21 GB  Δlive   +0.47 GB      14.9 s
+[     21.2s]   + coset_lde_batch_with_transform             live    2.17 GB  peak    2.21 GB
+[     21.2s]   - coset_lde_batch_with_transform             live    2.41 GB  peak    2.41 GB  Δlive   +0.24 GB       0.1 s
+[     21.2s]   + coset_lde_batch_with_transform             live    2.41 GB  peak    2.41 GB
+[     21.6s]   - coset_lde_batch_with_transform             live    4.99 GB  peak    4.99 GB  Δlive   +2.58 GB       0.4 s
+[     21.6s]   + coset_lde_batch_with_transform             live    4.99 GB  peak    4.99 GB
+[     21.8s]   - coset_lde_batch_with_transform             live    5.95 GB  peak    5.95 GB  Δlive   +0.96 GB       0.2 s
+[     21.8s]   + coset_lde_batch_with_transform             live    5.95 GB  peak    5.95 GB
+[     21.9s]   - coset_lde_batch_with_transform             live    6.83 GB  peak    6.83 GB  Δlive   +0.88 GB       0.2 s
+[     21.9s]   + coset_lde_batch_with_transform             live    6.83 GB  peak    6.83 GB
+[     22.0s]   - coset_lde_batch_with_transform             live    7.47 GB  peak    7.47 GB  Δlive   +0.64 GB       0.1 s
+[     22.0s]   + coset_lde_batch_with_transform             live    7.47 GB  peak    7.47 GB
+[     22.0s]   - coset_lde_batch_with_transform             live    7.47 GB  peak    7.47 GB  Δlive   +0.00 GB       0.0 s
+[     22.0s]   + coset_lde_batch_with_transform             live    7.47 GB  peak    7.47 GB
+[     22.0s]   - coset_lde_batch_with_transform             live    7.47 GB  peak    7.47 GB  Δlive   +0.00 GB       0.0 s
+[     22.0s]   + coset_lde_batch_with_transform             live    7.47 GB  peak    7.47 GB
+[     22.1s]   - coset_lde_batch_with_transform             live    8.10 GB  peak    8.10 GB  Δlive   +0.63 GB       0.1 s
+[     22.5s]   + build merkle tree                          live    8.95 GB  peak    8.95 GB
+[     25.7s]     - first digest layer                         live    9.22 GB  peak    9.22 GB  Δlive   +0.27 GB       3.2 s
+[     30.0s] # sample  live    9.35 GB  peak    9.35 GB  rss   10.01 GB
+[     32.3s]   - build merkle tree                          live    9.49 GB  peak    9.49 GB  Δlive   +0.54 GB       9.8 s
+[     32.3s]   + generate lookup permutation                live    9.49 GB  peak    9.49 GB
+[     32.3s]   - generate lookup permutation                live    9.50 GB  peak    9.51 GB  Δlive   +0.01 GB       0.0 s
+[     32.3s]   + generate lookup permutation                live    9.49 GB  peak    9.51 GB
+[     32.3s]   - generate lookup permutation                live    9.56 GB  peak    9.60 GB  Δlive   +0.06 GB       0.0 s
+[     32.3s]   + generate lookup permutation                live    9.56 GB  peak    9.60 GB
+[     32.3s]   - generate lookup permutation                live    9.59 GB  peak    9.60 GB  Δlive   +0.03 GB       0.0 s
+[     32.3s]   + generate lookup permutation                live    9.59 GB  peak    9.60 GB
+[     32.3s]   - generate lookup permutation                live    9.62 GB  peak    9.64 GB  Δlive   +0.03 GB       0.0 s
+[     32.3s]   + generate lookup permutation                live    9.62 GB  peak    9.64 GB
+[     32.3s]   - generate lookup permutation                live    9.63 GB  peak    9.65 GB  Δlive   +0.01 GB       0.0 s
+[     32.3s]   + generate lookup permutation                live    9.63 GB  peak    9.65 GB
+[     32.3s]   - generate lookup permutation                live    9.63 GB  peak    9.65 GB  Δlive   +0.00 GB       0.0 s
+[     32.3s]   + generate lookup permutation                live    9.63 GB  peak    9.65 GB
+[     32.3s]   - generate lookup permutation                live    9.63 GB  peak    9.65 GB  Δlive   +0.00 GB       0.0 s
+[     32.3s]   + generate lookup permutation                live    9.64 GB  peak    9.65 GB
+[     32.3s]   - generate lookup permutation                live    9.65 GB  peak    9.67 GB  Δlive   +0.01 GB       0.0 s
+[     32.3s]   + randomize polys                            live    9.64 GB  peak    9.67 GB
+[     35.8s]     - with_random_cols                           live    9.81 GB  peak    9.81 GB  Δlive   +0.14 GB       2.7 s
+[     38.1s]     - with_random_cols                           live    9.85 GB  peak    9.85 GB  Δlive   +0.10 GB       2.2 s
+[     40.1s] # sample  live    9.91 GB  peak    9.91 GB  rss   10.28 GB
+[     40.3s]     - with_random_cols                           live    9.91 GB  peak    9.91 GB  Δlive   +0.10 GB       2.2 s
+[     41.0s]   - randomize polys                            live    9.90 GB  peak    9.91 GB  Δlive   +0.26 GB       8.7 s
+[     41.0s]   + coset_lde_batch_with_transform             live    9.90 GB  peak    9.91 GB
+[     41.0s]   - coset_lde_batch_with_transform             live   10.14 GB  peak   10.14 GB  Δlive   +0.23 GB       0.0 s
+[     41.0s]   + coset_lde_batch_with_transform             live   10.14 GB  peak   10.14 GB
+[     41.2s]   - coset_lde_batch_with_transform             live   11.14 GB  peak   11.14 GB  Δlive   +1.00 GB       0.2 s
+[     41.2s]   + coset_lde_batch_with_transform             live   11.14 GB  peak   11.14 GB
+[     41.3s]   - coset_lde_batch_with_transform             live   11.84 GB  peak   11.84 GB  Δlive   +0.70 GB       0.1 s
+[     41.3s]   + coset_lde_batch_with_transform             live   11.84 GB  peak   11.84 GB
+[     41.5s]   - coset_lde_batch_with_transform             live   12.54 GB  peak   12.54 GB  Δlive   +0.70 GB       0.1 s
+[     41.5s]   + coset_lde_batch_with_transform             live   12.54 GB  peak   12.54 GB
+[     41.5s]   - coset_lde_batch_with_transform             live   12.64 GB  peak   12.64 GB  Δlive   +0.09 GB       0.0 s
+[     41.5s]   + coset_lde_batch_with_transform             live   12.64 GB  peak   12.64 GB
+[     41.5s]   - coset_lde_batch_with_transform             live   12.64 GB  peak   12.64 GB  Δlive   +0.00 GB       0.0 s
+[     41.5s]   + coset_lde_batch_with_transform             live   12.64 GB  peak   12.64 GB
+[     41.5s]   - coset_lde_batch_with_transform             live   12.64 GB  peak   12.64 GB  Δlive   +0.00 GB       0.0 s
+[     41.5s]   + coset_lde_batch_with_transform             live   12.64 GB  peak   12.64 GB
+[     41.5s]   - coset_lde_batch_with_transform             live   12.81 GB  peak   12.81 GB  Δlive   +0.18 GB       0.0 s
+[     41.9s]   + build merkle tree                          live   13.66 GB  peak   13.66 GB
+[     44.5s]     - first digest layer                         live   13.93 GB  peak   13.93 GB  Δlive   +0.27 GB       2.6 s
+[     47.6s]   - build merkle tree                          live   14.20 GB  peak   14.20 GB  Δlive   +0.54 GB       5.6 s
+[     47.6s]   + compute quotient                           live   14.20 GB  peak   14.20 GB
+[     50.1s] # sample  live   14.36 GB  peak   14.36 GB  rss   14.72 GB
+[     53.7s]                                 - compute quotient polynomial                live   14.40 GB  peak   14.41 GB  Δlive   +0.14 GB       6.1 s
+[     53.7s]                                       - Compute Selectors                          live   14.69 GB  peak   14.70 GB  Δlive   +0.49 GB       6.2 s
+[     54.2s]                                         - compute quotient polynomial                live   14.72 GB  peak   14.75 GB  Δlive   +0.52 GB       6.7 s
+[     54.3s]                               - compute quotient polynomial                live   14.75 GB  peak   14.85 GB  Δlive   +0.47 GB       6.7 s
+[     54.3s]                             - compute quotient                           live   14.70 GB  peak   14.85 GB  Δlive   +0.43 GB       6.7 s
+[     54.3s]                           - Compute Selectors                          live   14.70 GB  peak   14.85 GB  Δlive   +0.47 GB       6.8 s
+[     54.7s]                         - Compute Selectors                          live   14.78 GB  peak   14.85 GB  Δlive   +0.58 GB       7.2 s
+[     54.7s]                       - Compute Selectors                          live   14.85 GB  peak   14.85 GB  Δlive   +0.65 GB       7.2 s
+test tier19_exit_twin has been running for over 60 seconds
+[     60.1s] # sample  live   16.45 GB  peak   16.45 GB  rss   16.93 GB
+[     61.6s]                 - compute quotient                           live   16.48 GB  peak   17.28 GB  Δlive   +2.22 GB      14.0 s
+[     61.7s]               - compute quotient                           live   15.67 GB  peak   17.28 GB  Δlive   +1.48 GB      14.1 s
+[     70.2s] # sample  live   15.67 GB  peak   17.28 GB  rss   18.14 GB
+[     80.2s] # sample  live   15.67 GB  peak   17.28 GB  rss   18.20 GB
+[     90.2s] # sample  live   15.67 GB  peak   17.28 GB  rss   18.26 GB
+[     96.1s]             - compute quotient polynomial                live   15.54 GB  peak   17.28 GB  Δlive   +1.34 GB      48.5 s
+[     96.1s]           - compute quotient polynomial                live   15.36 GB  peak   17.28 GB  Δlive   +1.17 GB      48.5 s
+[     96.1s]         - compute quotient polynomial                live   15.30 GB  peak   17.28 GB  Δlive   +1.07 GB      48.5 s
+[    100.3s] # sample  live   15.69 GB  peak   17.28 GB  rss   18.46 GB
+[    110.3s] # sample  live   23.11 GB  peak   23.11 GB  rss   12.93 GB
+[    111.0s]                 - first_half_general_oop                     live   23.11 GB  peak   23.11 GB  Δlive   +0.00 GB       1.1 s
+[    111.1s]           - coset_dft_oop                              live   23.11 GB  peak   23.11 GB  Δlive   +0.00 GB       1.2 s
+[    111.2s]         - coset_lde_batch_with_transform             live   23.11 GB  peak   23.11 GB  Δlive   +1.00 GB       1.7 s
+[    112.9s]             - compute quotient                           live   22.04 GB  peak   26.88 GB  Δlive   +7.84 GB      65.4 s
+[    112.9s]           - compute quotient                           live   20.43 GB  peak   26.88 GB  Δlive   +6.23 GB      65.4 s
+[    114.3s]   - compute quotient                           live   19.16 GB  peak   26.88 GB  Δlive   +4.93 GB      66.8 s
+[    114.7s]   + build merkle tree                          live   20.01 GB  peak   26.88 GB
+[    118.6s]     - first digest layer                         live   20.28 GB  peak   26.88 GB  Δlive   +0.27 GB       3.9 s
+[    120.7s] # sample  live   20.41 GB  peak   26.88 GB  rss   17.13 GB
+[    122.1s]   - build merkle tree                          live   20.55 GB  peak   26.88 GB  Δlive   +0.54 GB       7.4 s
+[    127.5s]   + coset_lde_batch_with_transform             live   20.70 GB  peak   26.88 GB
+[    127.5s]   - coset_lde_batch_with_transform             live   20.88 GB  peak   26.88 GB  Δlive   +0.18 GB       0.0 s
+[    127.5s]   + coset_lde_batch_with_transform             live   20.88 GB  peak   26.88 GB
+[    127.6s]   - coset_lde_batch_with_transform             live   21.06 GB  peak   26.88 GB  Δlive   +0.18 GB       0.0 s
+[    127.6s]   + coset_lde_batch_with_transform             live   21.06 GB  peak   26.88 GB
+[    127.7s]   - coset_lde_batch_with_transform             live   21.41 GB  peak   26.88 GB  Δlive   +0.35 GB       0.1 s
+[    127.7s]   + coset_lde_batch_with_transform             live   21.41 GB  peak   26.88 GB
+[    127.7s]   - coset_lde_batch_with_transform             live   21.76 GB  peak   26.88 GB  Δlive   +0.35 GB       0.1 s
+[    127.7s]   + coset_lde_batch_with_transform             live   21.76 GB  peak   26.88 GB
+[    127.7s]   - coset_lde_batch_with_transform             live   21.77 GB  peak   26.88 GB  Δlive   +0.01 GB       0.0 s
+[    127.7s]   + coset_lde_batch_with_transform             live   21.77 GB  peak   26.88 GB
+[    127.7s]   - coset_lde_batch_with_transform             live   21.77 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    127.7s]   + coset_lde_batch_with_transform             live   21.77 GB  peak   26.88 GB
+[    127.7s]   - coset_lde_batch_with_transform             live   21.77 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    127.7s]   + coset_lde_batch_with_transform             live   21.77 GB  peak   26.88 GB
+[    127.8s]   - coset_lde_batch_with_transform             live   21.82 GB  peak   26.88 GB  Δlive   +0.04 GB       0.0 s
+[    128.2s]   + build merkle tree                          live   22.66 GB  peak   26.88 GB
+[    129.9s]     - first digest layer                         live   22.93 GB  peak   26.88 GB  Δlive   +0.27 GB       1.8 s
+[    130.7s] # sample  live   23.07 GB  peak   26.88 GB  rss   13.07 GB
+[    131.5s]   - build merkle tree                          live   23.20 GB  peak   26.88 GB  Δlive   +0.54 GB       3.3 s
+[    131.5s]   + compute_inverse_denominators               live   23.27 GB  peak   26.88 GB
+[    131.7s]   - compute_inverse_denominators               live   23.62 GB  peak   26.88 GB  Δlive   +0.36 GB       0.2 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.7s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.7s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.8s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.8s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    131.9s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    131.9s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.0s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.1 s
+[    132.0s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.0s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.0s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.0s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.0s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.0s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.0s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + evaluate matrix                            live   23.98 GB  peak   26.88 GB
+[    132.1s]   - evaluate matrix                            live   23.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + reduce matrix quotient                     live   23.98 GB  peak   26.88 GB
+[    132.1s]   - reduce matrix quotient                     live   24.05 GB  peak   26.88 GB  Δlive   +0.07 GB       0.0 s
+[    132.1s]   + reduce matrix quotient                     live   24.05 GB  peak   26.88 GB
+[    132.1s]   - reduce matrix quotient                     live   24.05 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.1s]   + reduce matrix quotient                     live   24.05 GB  peak   26.88 GB
+[    132.2s]   - reduce matrix quotient                     live   24.18 GB  peak   26.88 GB  Δlive   +0.13 GB       0.1 s
+[    132.2s]   + reduce matrix quotient                     live   24.18 GB  peak   26.88 GB
+[    132.2s]   - reduce matrix quotient                     live   24.18 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.2s]   + reduce matrix quotient                     live   24.18 GB  peak   26.88 GB
+[    132.2s]   - reduce matrix quotient                     live   24.19 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.2s]   + reduce matrix quotient                     live   24.19 GB  peak   26.88 GB
+[    132.2s]   - reduce matrix quotient                     live   24.19 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.2s]   + reduce matrix quotient                     live   24.19 GB  peak   26.88 GB
+[    132.2s]   - reduce matrix quotient                     live   24.19 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.2s]   + reduce matrix quotient                     live   24.19 GB  peak   26.88 GB
+[    132.2s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.02 GB       0.0 s
+[    132.2s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    132.2s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.1 s
+[    132.2s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    132.6s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.4 s
+[    132.6s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    132.7s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.1 s
+[    132.7s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    132.8s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.1 s
+[    132.8s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    132.8s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.1 s
+[    132.8s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    132.8s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.8s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    132.8s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.8s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    132.9s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.1 s
+[    132.9s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    132.9s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    132.9s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.0s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.0s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.0s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.0s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.0s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.0s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.0s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.0s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.0s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.0s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.0s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.0s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.0s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.0s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.1s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.1s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.1s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.1s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.1s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.1s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.1s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.1s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.2s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.1 s
+[    133.2s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.3s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.1 s
+[    133.3s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.3s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.1 s
+[    133.3s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.4s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.4s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.4s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.4s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.4s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.4s]   + reduce matrix quotient                     live   24.20 GB  peak   26.88 GB
+[    133.4s]   - reduce matrix quotient                     live   24.20 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    133.4s]   + FRI prover                                 live   24.20 GB  peak   26.88 GB
+[    140.7s] # sample  live   24.78 GB  peak   26.88 GB  rss   19.02 GB
+[    140.8s]     - commit phase                               live   24.80 GB  peak   26.88 GB  Δlive   +0.60 GB       7.4 s
+[    140.8s]   - FRI prover                                 live   23.98 GB  peak   26.88 GB  Δlive   -0.22 GB       7.4 s
+[    141.2s] - prove_batch                                live    1.79 GB  peak   26.88 GB  Δlive   +0.45 GB     134.9 s
+prove done: live 0.64 GB peak 26.88 GB rss 10.98 GB
+[    141.4s] + with_zero_cols                             live    0.66 GB  peak   26.88 GB
+[    141.4s] - with_zero_cols                             live    0.68 GB  peak   26.88 GB  Δlive   +0.02 GB       0.0 s
+[    141.4s] + with_zero_cols                             live    0.67 GB  peak   26.88 GB
+[    141.4s] - with_zero_cols                             live    0.67 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.4s] + with_zero_cols                             live    0.67 GB  peak   26.88 GB
+[    141.4s] - with_zero_cols                             live    0.69 GB  peak   26.88 GB  Δlive   +0.02 GB       0.0 s
+[    141.4s] + coset_lde_batch_with_transform             live    0.68 GB  peak   26.88 GB
+[    141.4s]   + reverse_matrix_index_bits                  live    0.68 GB  peak   26.88 GB
+[    141.4s]   - reverse_matrix_index_bits                  live    0.68 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.4s]   + first_half                                 live    0.68 GB  peak   26.88 GB
+[    141.4s]   - first_half                                 live    0.68 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.4s]   + reverse_matrix_index_bits                  live    0.68 GB  peak   26.88 GB
+[    141.4s]   - reverse_matrix_index_bits                  live    0.68 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.4s]   + second_half                                live    0.68 GB  peak   26.88 GB
+[    141.4s]   - second_half                                live    0.68 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.4s]   + reserve_exact                              live    0.68 GB  peak   26.88 GB
+[    141.4s]   - reserve_exact                              live    0.80 GB  peak   26.88 GB  Δlive   +0.12 GB       0.0 s
+[    141.4s]   + coset_dft_oop                              live    0.80 GB  peak   26.88 GB
+[    141.4s]   - coset_dft_oop                              live    0.80 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.4s]   + coset_dft_oop                              live    0.80 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.81 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.81 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.81 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.81 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.82 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.82 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.82 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.82 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft                                  live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft                                  live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s] - coset_lde_batch_with_transform             live    0.83 GB  peak   26.88 GB  Δlive   +0.16 GB       0.1 s
+[    141.5s] + coset_lde_batch_with_transform             live    0.83 GB  peak   26.88 GB
+[    141.5s]   + reverse_matrix_index_bits                  live    0.83 GB  peak   26.88 GB
+[    141.5s]   - reverse_matrix_index_bits                  live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + first_half                                 live    0.83 GB  peak   26.88 GB
+[    141.5s]   - first_half                                 live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + reverse_matrix_index_bits                  live    0.83 GB  peak   26.88 GB
+[    141.5s]   - reverse_matrix_index_bits                  live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + second_half                                live    0.83 GB  peak   26.88 GB
+[    141.5s]   - second_half                                live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + reserve_exact                              live    0.83 GB  peak   26.88 GB
+[    141.5s]   - reserve_exact                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft                                  live    0.83 GB  peak   26.88 GB
+[    141.5s]   - coset_dft                                  live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s] - coset_lde_batch_with_transform             live    0.83 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s] + coset_lde_batch_with_transform             live    0.83 GB  peak   26.88 GB
+[    141.5s]   + reverse_matrix_index_bits                  live    0.84 GB  peak   26.88 GB
+[    141.5s]   - reverse_matrix_index_bits                  live    0.84 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + first_half                                 live    0.84 GB  peak   26.88 GB
+[    141.5s]   - first_half                                 live    0.84 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + reverse_matrix_index_bits                  live    0.84 GB  peak   26.88 GB
+[    141.5s]   - reverse_matrix_index_bits                  live    0.84 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + second_half                                live    0.84 GB  peak   26.88 GB
+[    141.5s]   - second_half                                live    0.84 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + reserve_exact                              live    0.84 GB  peak   26.88 GB
+[    141.5s]   - reserve_exact                              live    0.98 GB  peak   26.88 GB  Δlive   +0.15 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.98 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.98 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.98 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.98 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.99 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.99 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.99 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.99 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.99 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.99 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.99 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft_oop                              live    0.99 GB  peak   26.88 GB
+[    141.5s]   - coset_dft_oop                              live    0.99 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s]   + coset_dft                                  live    0.99 GB  peak   26.88 GB
+[    141.5s]   - coset_dft                                  live    0.99 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    141.5s] - coset_lde_batch_with_transform             live    0.99 GB  peak   26.88 GB  Δlive   +0.16 GB       0.0 s
+[    147.2s] + build merkle tree                          live    1.16 GB  peak   26.88 GB
+[    147.2s]   + first digest layer                         live    1.16 GB  peak   26.88 GB
+[    147.5s]   - first digest layer                         live    1.29 GB  peak   26.88 GB  Δlive   +0.13 GB       0.3 s
+[    148.0s] - build merkle tree                          live    1.43 GB  peak   26.88 GB  Δlive   +0.27 GB       0.8 s
+[    148.0s] + infer constraint degree                    live    1.43 GB  peak   26.88 GB
+[    148.0s]   + evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB
+[    148.0s]   - evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] - infer constraint degree                    live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] + infer constraint degree                    live    1.43 GB  peak   26.88 GB
+[    148.0s]   + evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB
+[    148.0s]   - evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] - infer constraint degree                    live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] + infer constraint degree                    live    1.43 GB  peak   26.88 GB
+[    148.0s]   + evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB
+[    148.0s]   - evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] - infer constraint degree                    live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] + infer constraint degree                    live    1.43 GB  peak   26.88 GB
+[    148.0s]   + evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB
+[    148.0s]   - evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] - infer constraint degree                    live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] + infer constraint degree                    live    1.43 GB  peak   26.88 GB
+[    148.0s]   + evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB
+[    148.0s]   - evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] - infer constraint degree                    live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] + infer constraint degree                    live    1.43 GB  peak   26.88 GB
+[    148.0s]   + evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB
+[    148.0s]   - evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] - infer constraint degree                    live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] + infer constraint degree                    live    1.43 GB  peak   26.88 GB
+[    148.0s]   + evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB
+[    148.0s]   - evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] - infer constraint degree                    live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] + infer constraint degree                    live    1.43 GB  peak   26.88 GB
+[    148.0s]   + evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB
+[    148.0s]   - evaluate constraints symbolically          live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] - infer constraint degree                    live    1.43 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] + verify_batch                               live    0.64 GB  peak   26.88 GB
+[    148.0s]   + infer log of constraint degree             live    0.64 GB  peak   26.88 GB
+[    148.0s]   - infer log of constraint degree             live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + infer log of constraint degree             live    0.64 GB  peak   26.88 GB
+[    148.0s]   - infer log of constraint degree             live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + infer log of constraint degree             live    0.64 GB  peak   26.88 GB
+[    148.0s]   - infer log of constraint degree             live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + infer log of constraint degree             live    0.64 GB  peak   26.88 GB
+[    148.0s]   - infer log of constraint degree             live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + infer log of constraint degree             live    0.64 GB  peak   26.88 GB
+[    148.0s]   - infer log of constraint degree             live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + infer log of constraint degree             live    0.64 GB  peak   26.88 GB
+[    148.0s]   - infer log of constraint degree             live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + infer log of constraint degree             live    0.64 GB  peak   26.88 GB
+[    148.0s]   - infer log of constraint degree             live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + infer log of constraint degree             live    0.64 GB  peak   26.88 GB
+[    148.0s]   - infer log of constraint degree             live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB
+[    148.0s]   - batch_multiplicative_inverse               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + verify constraints                         live    0.64 GB  peak   26.88 GB
+[    148.0s]   - verify constraints                         live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + verify constraints                         live    0.64 GB  peak   26.88 GB
+[    148.0s]   - verify constraints                         live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + verify constraints                         live    0.64 GB  peak   26.88 GB
+[    148.0s]   - verify constraints                         live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + verify constraints                         live    0.64 GB  peak   26.88 GB
+[    148.0s]   - verify constraints                         live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + verify constraints                         live    0.64 GB  peak   26.88 GB
+[    148.0s]   - verify constraints                         live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + verify constraints                         live    0.64 GB  peak   26.88 GB
+[    148.0s]   - verify constraints                         live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + verify constraints                         live    0.64 GB  peak   26.88 GB
+[    148.0s]   - verify constraints                         live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s]   + verify constraints                         live    0.64 GB  peak   26.88 GB
+[    148.0s]   - verify constraints                         live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+[    148.0s] - verify_batch                               live    0.64 GB  peak   26.88 GB  Δlive   +0.00 GB       0.0 s
+verify 6.67 s
+== exit twin (tier 18): 169366 rows, tier 18, proof 268168 B, prove 141.3 s; peak live heap 26.88 GB, live now 0.64 GB, rss now 11.59 GB, wall 148.0 s
+test tier19_exit_twin ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 150.99s
+
+      151.58 real      1361.96 user        47.31 sys
+         24583815168  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             4549170  page reclaims
+                  93  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                  19  voluntary context switches
+              980791  involuntary context switches
+           716498810  instructions retired
+           219938940  cycles elapsed
+            33243760  peak memory footprint

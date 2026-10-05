@@ -208,17 +208,23 @@ fn the_cycle_budget_per_inner_proof_is_pinned() {
     // The spike counted 43 562 permutations for this workload; the program must be in that region
     // (it hashes ~46 extra compressions per query because it walks restored per-query paths).
     assert!(r.permutations >= 43_562 && r.permutations < 60_000, "{r:?}");
-    // Spec §7's decision point, measured: 5 250 623 cpu rows per inner proof — 10× over 2^19.
-    // Task 7's FRIFOLD/EXPBITS precompiles cannot close that gap: the fold rounds and the
-    // bit-selected exponentiations they replace are ~3% of the measured rows (the FRI
-    // batch-opening reduction dominates at ~60%, and the allocator's spill traffic is ~50% of
-    // arithmetic rows — neither precompile touches either), so their own exit assertion
-    // (≤ 2^19 with precompiles) is unreachable and Task 7 is not implemented. The decision and
-    // its arithmetic are recorded in `docs/00-recursion-vm.md`; this assertion pins the regime
-    // the decision was made in, so a future optimization that changes it must update both.
-    assert!(r.cpu_rows > 1 << 19,
-            "under the 2^19 decision point now: Task 7's precompiles must be reconsidered, and \
-             docs/00-recursion-vm.md's decision paragraph updated");
+    // Spec §7's decision point, measured in M5.1: 5 250 623 cpu rows per inner proof — 10× over
+    // 2^19 — where a fold and an exponentiation precompile were ~3 % of the rows and so not built
+    // (`docs/00-recursion-vm.md`, "The precompile decision"). Re-taken in phase 3 (2026-10-05,
+    // `docs/06-phase3-fold-reduce.md`) at 893 606 rows, where the fold, the index powers, the
+    // sibling select and the reduction's descriptor bookkeeping were 37.9 %: Cut D (the reduction
+    // layout preprocessed), E1 (the own slot by one LOADE), E2 (`FOLD` = 28) and F (`POW` = 29)
+    // landed in their bands (E1 below its band, accepted), at 585 686. The phase's gate was one inner verification in
+    // tier 19 (≤ 2^19 − 1 = 524 287 rows); it was **not** reached — 61 399 rows above it, since
+    // even Cut F's band floor (569 942) was above it — and it was not widened (the phase's
+    // ruling 6). The memory tables' 2^22 → 2^21 is the delivered result; what is left is the two
+    // Merkle spans (`input_root` 248 151 + `commit_root` 120 640 rows, 133 827 of them
+    // reloads), docs/06 §7's next lever. This pins the landed count and its tier, so a change to
+    // either — the next lever landing, or a regression — must update docs/06 and docs/00.
+    assert_eq!(r.cpu_rows, 585_686, "phase 3's landing: one production inner verification, 61 399 rows above the 2^19 − 1 gate");
+    assert_eq!(recursion::machine::Tier::for_cycles(r.cpu_rows), Some(recursion::machine::Tier(20)),
+               "tier 20: above the phase-3 gate (2^19 − 1), which was not reached and not widened — docs/06's residual must be re-decided");
+    assert!(r.cpu_rows > (1 << 19) - 1, "under the 2^19 − 1 gate now: docs/06 §7's residual and docs/00's decision paragraph must be updated");
     // The committed digest is the *production* shape's, so it is checked here rather than in the
     // in-suite reproducibility test (which builds the Test shape and would see a different one).
     // `digest_hex` is `[F; 4]` as 32 big-endian hex bytes, the spelling `Program::code_hash` uses.

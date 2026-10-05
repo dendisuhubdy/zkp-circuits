@@ -1,6 +1,30 @@
-# 05 — Phase 3: the REDUCE chip takes the descriptor layout, the fold and the index powers
+# 06 — Phase 3: the reduce chip takes the reduction layout, the fold and the index powers
 
-Design: `docs/superpowers/specs/2026-10-05-rvm-phase3-fold-reduce-design.md`. Plan: `docs/superpowers/plans/2026-10-05-rvm-phase3-fold-reduce.md`.
+Design: `docs/superpowers/specs/2026-10-05-rvm-phase3-fold-reduce-design.md`. Plan:
+`docs/superpowers/plans/2026-10-05-rvm-phase3-fold-reduce.md`. Branch `feat/rvm-phase3`, base
+`2c1f068`, rebased onto `origin/main` `40e4657` (the quotient-layout merge, which owns
+`docs/05-quotient-layout.md`; this record is docs/06 for that reason). Every row count here comes
+from the emulator's event log through `tests/profile.rs`
+(`cargo test --release -p recursion --test profile -- --ignored --nocapture`), run after each cut
+and again on the final tree for this record; every pin is in `tests/pins.json` or a test literal;
+the declared heights come from `machine::build_traces` over the same executions. Every figure in
+the memory section is a run of `tests/memprofile.rs` on this 48 GB box (16 cores,
+`--features parallel`, `RAYON_NUM_THREADS=16`; raw log of the final run:
+`docs/measurements/2026-10-06-tier18-twin-memprofile-phase3.log`) or is labelled as a projection
+with its derivation.
+
+**Result:** one verified production inner proof dropped from **893 606 to 585 686 cpu rows**
+(−34.5 %), each of the four cuts landing in its band or (E1) below it by a ruled margin. It stays
+at **tier 20**: the phase's gate — one inner verification in tier 19, `≤ 2^19 − 1 = 524 287`
+rows — was **not reached**, and it was not widened (spec §6 ruling 6). The landing is 61 399 rows
+above it; even Cut F's band floor (569 942) was. What the phase delivered in full is the memory
+half: **both production memory tables dropped from `2^22` to `2^21`** (REG 2 147 159 →
+1 290 039, RAM 2 213 181 → 1 903 581), and the tier-18 exit twin's peak live heap went
+33.27 → 24.86 GB at Cut D (26.88 GB at the phase's end, the reduce chip now 81 columns wide). The
+test profile dropped from 230 950 to 169 366 rows (tier 18), and the test N=3 aggregate from tier
+20 to 19; the production N=3 aggregate from tier 22 to 21. Poseidon2 permutations are unchanged
+at 54 515: the cuts removed bookkeeping around the chips, never hashing. The next lever, with its
+numbers, is §7: the two Merkle spans, 368 791 rows, 133 827 of them reloads.
 
 ## 1. Where the rows go (Task 0, measured 2026-10-05, production fixture)
 
@@ -31,8 +55,12 @@ K = 14 (1 120 EINV in `reduce` / 80 = inverse keys per query). Spec §1's derive
 - Fold chain (select + fold + roll-ins): 73 840 op-count minimum, up to ≈ 228 000 → `select` 50 960 + `fold_round`
   36 640 + `roll_in` 2 960 = 90 560 (1 132 per query).
 - Arity schedule: Σa = 38 over 9 rounds (3 × 2, 4 × 4, 2 × 8) → measured `[1, 1, 2, 2, 2, 1, 3, 3, 2]`, as derived.
-- `bit_selected_power`: ≈ 32 000–64 000 → 87 920 (1 099 per query, ≈ 274 bits per query at 4 rows per bit), 37 %
-  above the derived ceiling.
+- `bit_selected_power`: ≈ 32 000–64 000 → 87 920 (1 099 per query), 37 % above the derived ceiling. *Corrected
+  in Task 5 (the Task-0 review): the query asks for **216 bits**, not ≈ 274* — Σ L over its 16 calls, the seven
+  query-point heights and the nine rounds' `log_folded` (the same 216 Cut F measured as `POW` chip rows a query).
+  At 4 rows a bit plus one base constant a call that is 880 rows (`FADDI` 448 = 216 + 216 + 16, `FMUL` 432 = 2·216
+  a query, both exactly); the other 219 are **reload traffic** — one `LOAD` a bit, 216 a query (17 280), and 3
+  spills (`STOREE` 240). The overage over the ceiling is the allocator's, not more bits.
 - Allocator reloads 218 283 / spills 14 906 → 218 283 / 14 906, as derived; by site: `input_root` 97 987,
   `commit_root` 35 280, `(none)` 21 160, `reduce` 18 480, `bit_selected_power` 17 280, `sample_bits` 12 736,
   `select` 12 240, `fold_round` 1 840, `roll_in` 1 280.
@@ -84,43 +112,132 @@ reloads (`LOAD`), the `POW` and the output's `LOAD`, 16 calls a query (H + R = 7
 of 64 `HINT`s. Every other span is unchanged. **The phase ends here, above the gate: 585 686 − 524 287 = 61 399 rows
 short of tier 19** (controller ruling 6: F does not widen the gate). Cut F was the last cut the plan holds.
 
-Memory targets: REG 2 147 159 → under 2 097 152 (needs −50 008); RAM 2 213 181 → under 2 097 152.
+**The rulings, together.** (1) E1's band formula had a sign error (Δ 54 160 > the whole `select`
+span); the ruled Δ is 35 120 (Task 0's concern 1, the controller's ruling). (2) E1 landed **below**
+its band (703 766 against 709 458–719 994) and was **accepted** as its landing point: the band's
+model omitted a saving the cut itself causes (the in-place leaf sponge's `commit_root` −8 960), and
+the gate exists to catch over-promising; E2's band was re-derived from the measured 703 766 (spec
+§2.5 carries the ruling line). (3) E2 landed in band; its 664 886 is above 524 287, so **Cut F was
+built**, and its recomputed band's floor (569 942) was already above the gate. (4) F landed **in
+band** at 585 686. (5) **The gate was not reached** and, under spec §6 ruling 6, not widened: the
+phase stops at the measured point, the memory heights are the delivered result, and §7 names the
+next lever. (6) Two soundness rules the Cut-F implementer added beyond the brief — a pow row
+entered from a reduce or fold row must start a run, and the registration check `off + L ≤ 64` —
+were accepted as requirements the brief omitted. (7) Moving the Off replay's digest with the
+shared fold-result cells (E2) was accepted; whether `Precompiles::Off` should be byte-stable is §7's.
 
-## 3. Memory (Task 1b, measured 2026-10-05)
+Memory targets (spec §1): REG 2 147 159 → under 2 097 152 (needed −50 008); RAM 2 213 181 → under
+2 097 152. **Both met at Cut D** (1 785 559 and 1 913 981) and held through F (1 290 039 and
+1 903 581): F's `POW` added 15 440 RAM accesses (the bits buffer), 193 571 under the line.
 
-**The declared memory tables.** Both rVM memory tables are sized `pad_height(accesses + 1)` (`machine::build_traces`).
-Production, before → after Cut D: REG 2 147 159 → **1 785 559** accesses, RAM 2 213 181 → **1 913 981**. Both are now
-under 2 097 152, so both tables declare **2^21** (they were 2^22). The cpu table stays at 2^20 (749 846 rows, tier 20).
-Test profile (the twin's shape): REG **510 423** → 2^19, RAM **444 525** → 2^19, cpu 202 198 rows → tier 18. The twin's
-pre-cut REG count was never measured; its main-tree Δ halving (+1.07 → +0.54 GB below) is consistent with the tallest
-table, the reg table, going 2^20 → 2^19 (derived, not measured).
+## 3. Memory (measured 2026-10-05 and 2026-10-06)
 
-**The exit twin at tier 18** (`tests/memprofile.rs::tier19_exit_twin`, run alone, `--features parallel`, 16 threads,
-this 48 GB box). The before column is docs/05 §"The exit twin at tier 18" (230 950 rows,
-`docs/measurements/2026-10-05-tier18-twin-memprofile.log`).
+**The declared memory tables.** Both rVM memory tables are sized `pad_height(accesses + 1)`
+(`machine::build_traces`). Production, before → after the phase: REG 2 147 159 → **1 290 039**
+accesses, RAM 2 213 181 → **1 903 581**. Both are under 2 097 152, so both tables declare
+**2^21** (they were 2^22); Cut D made the drop, and E1–F kept it (§4's table has REG and RAM after
+each cut). The cpu and program tables stay at `2^20` (585 686 rows, tier 20), poseidon2 at `2^16`,
+reduce at `2^18` (196 480 rows: 173 120 run rows, 6 080 fold rows, 17 280 pow rows). Test profile
+(the twin's shape): REG **411 319** → `2^19` (it was 582 743 → `2^20` before Cut D), RAM
+**442 445** → `2^19`, cpu 169 366 rows → tier 18, reduce `2^16` (39 296 rows).
 
-| phase (Plonky3 span) | before: live after (ends at) | after Cut D: live after (ends at) |
-|---|---:|---:|
-| main trace `build merkle tree` | 10.78 GB (40.2 s), Δ +1.07 | **8.81 GB** (31.5 s), Δ +0.54 |
-| permutation `build merkle tree` | 16.95 GB (62.0 s), Δ +1.07 | **13.30 GB** (46.3 s), Δ +0.54 |
-| `compute quotient` (outermost close) | 23.65 GB (134.8 s), peak 30.09 | **18.27 GB** (107.3 s), peak **24.86** |
-| quotient `build merkle tree` | 25.84 GB (147.8 s) | **19.65 GB** (114.9 s) |
-| the next commit round's `build merkle tree` | 29.70 GB (162.7 s) | **22.31 GB** (124.4 s) |
-| `FRI prover` (commit phase) | 31.35 GB (184.8 s) | **23.09 GB** (133.1 s) |
-| **run peak** | **33.27 GB**, in the FRI commit phase | **24.86 GB** (−25 %), inside `compute quotient` (≈ 100–104 s) |
-| prove / verify / proof | 185.4 s / 5.46 s / 268 417 B | **133.2 s / 6.59 s / 259 720 B** |
-| outcome | proved | **proved** (`== exit twin (tier 18): 202198 rows, tier 18, proof 259720 B, prove 133.2 s; peak live heap 24.86 GB`) |
+**The exit twin at tier 18** (`tests/memprofile.rs::tier19_exit_twin`, run alone, `--features
+parallel`, 16 threads, this 48 GB box). The first column is docs/05 §"The exit twin at tier 18"
+(`docs/measurements/2026-10-05-tier18-twin-memprofile.log`); the second is Cut D's run (Task 1b,
+2026-10-05); the third is the phase's end (Task 5, 2026-10-06,
+`docs/measurements/2026-10-06-tier18-twin-memprofile-phase3.log`).
 
-macOS `maximum resident set size` for the run: 29.4 GB. As docs/04 says, that is not a memory number. The peak moved
-back into the quotient phase because every committed tree after it is now smaller.
+| phase (Plonky3 span) | before: live after (ends at) | after Cut D | after Cut F (the phase's end) |
+|---|---:|---:|---:|
+| main trace `build merkle tree` | 10.78 GB (40.2 s), Δ +1.07 | 8.81 GB (31.5 s), Δ +0.54 | **9.49 GB** (32.3 s), Δ +0.54 |
+| permutation `build merkle tree` | 16.95 GB (62.0 s), Δ +1.07 | 13.30 GB (46.3 s), Δ +0.54 | **14.20 GB** (47.6 s), Δ +0.54 |
+| `compute quotient` (outermost close) | 23.65 GB (134.8 s), peak 30.09 | 18.27 GB (107.3 s), peak 24.86 | **19.16 GB** (114.3 s), peak **26.88** |
+| quotient `build merkle tree` | 25.84 GB (147.8 s) | 19.65 GB (114.9 s) | **20.55 GB** (122.1 s) |
+| the next commit round's `build merkle tree` | 29.70 GB (162.7 s) | 22.31 GB (124.4 s) | **23.20 GB** (131.5 s) |
+| `FRI prover` (commit phase) | 31.35 GB (184.8 s) | 23.09 GB (133.1 s) | **23.98 GB** (140.8 s) |
+| **run peak** | **33.27 GB**, in the FRI commit phase | 24.86 GB (−25 %), inside `compute quotient` | **26.88 GB** (−19 % against before), inside `compute quotient` (between 96.1 s and 112.9 s) |
+| rows / tier | 230 950 / 18 | 202 198 / 18 | 169 366 / 18 |
+| prove / verify / proof | 185.4 s / 5.46 s / 268 417 B | 133.2 s / 6.59 s / 259 720 B | **141.3 s / 6.67 s / 268 168 B** |
+| outcome | proved | proved | **proved** (`== exit twin (tier 18): 169366 rows, tier 18, proof 268168 B, prove 141.3 s; peak live heap 26.88 GB`) |
 
-**Projection to production N = 1 (labelled; not measured).** docs/05 projected the production N = 1 aggregate (tier 20)
-at ≈ 170–175 GB with REG and RAM at 2^22. Cut D halves both memory tables at production, the same change the twin
-measures here (its tallest table halved, peak ×0.75). Applying ×0.75 gives **≈ 130 GB**. This is a projection until the
-tier-20 production proof runs on a large host.
+macOS `maximum resident set size` for the final run: 24.6 GB — as docs/04 says, not a memory
+number. **Why the end is 2.0 GB above Cut D with 32 832 fewer cpu rows:** the cpu table's height
+did not move (`2^18` throughout), nor did the memory tables' (`2^19` since Cut D); what grew is
+the reduce chip, `2^16` rows at 30 columns after Cut D and 81 after Cut F (the fold and pow row
+kinds), with its 16 quotient chunks, and the cpu by two selector columns. Every committed tree is
++0.7–0.9 GB against Cut D's, and the peak, a transient inside `compute quotient`, +2.0 GB.
 
+**The cell model, re-calibrated.** docs/04's projection weights each instance by its committed
+cells: `height × (width + 4 salts)` for the main trace plus, since docs/05, `height × (2·chunks + 4)`
+for its one quotient matrix (chunks after the ZK doubling: program 4, cpu 16, reg / ram /
+poseidon2 8, public / range 4, reduce 16). In units of `2^14` rows the twin weighs 6 299 before
+Cut D, 5 143 after it and 5 379 at the phase's end. Against the three measured peaks the model
+predicted the Cut-D step as ×0.82 (measured ×0.75) and the E+F step as ×1.046 (measured ×1.081):
+**within 10 %** either way, which is the error bar on every projection below. One unit is
+26.88 / 5 379 = 0.0050 GB at the end of the phase.
 
-## 4. The cuts, measured (each cut task appends its row and its `== profile` line)
+**Projections (labelled; not measured).** The derivation is the cell ratio against a measured or
+earlier-projected anchor, with the declared heights `build_traces` gives for each shape:
+
+| proof | tier | declared heights cpu / reg / ram / poseidon2 / reduce / program | units | projected peak live |
+|---|---:|---|---:|---|
+| exit twin = test N=1 aggregate (the anchor) | 18 | 18 / 19 / 19 / 14 / 16 / 18 | 5 379 | **26.88 GB measured** |
+| test N=2 aggregate | 19 | 19 / 20 / 20 / 15 / 17 / 18 | 10 454 | ≈ 52 GB |
+| test N=3 aggregate | 19 | 19 / 21 / 21 / 16 / 17 / 18 | 15 668 | ≈ 78 GB |
+| production exit / N=1 aggregate | 20 | 20 / 21 / 21 / 16 / 18 / 20 | 21 516 | **≈ 110–130 GB** |
+| production N=2 | 21 | 21 / 22 / 22 / 17 / 19 / 20 | 41 816 | ≈ 210–245 GB |
+| production N=3 | 21 | 21 / 22 / 23 / 18 / 20 / 20 | 57 584 | ≈ 290–340 GB |
+| production N=4 | 22 | 22 / 23 / 23 / 18 / 20 / 20 | 82 416 | ≈ 410–490 GB |
+
+The production range has two anchors. From the measured twin: 21 516 × 0.0050 = **108 GB**. From
+docs/05's own production projection (≈ 170–175 GB for the phase-2 shape, itself a ratio off the
+503 GB box's tier-21 run): that shape weighs 29 676 units (cpu `2^20` at 82 columns, REG and RAM
+`2^22`, reduce `2^18` at 39 columns), and 21 516 / 29 676 = 0.725 gives **123–127 GB**. The two
+disagree by about the model's own error bar, so the table carries both ends. **This replaces Task
+1b's "≈ 130 GB"**, which applied the twin's measured ×0.75 to production: at production the cpu
+and program tables do not halve (`2^20` before and after) while both memory tables do (at the twin
+only the register table did), so the production ratio for Cut D alone is ×0.69 by the same cells,
+not ×0.75 — and the reduce chip's widening then takes back +4.6 %. Every line above is a
+projection until the proof runs on a large host; the host classes they imply are in §6.
+
+## 4. The cuts, measured
+
+| stage | commit | cpu rows (prod.) | gate band (landing rows) | Δ measured | Δ projected | REG accesses | RAM accesses | reg / ram log-heights | instructions (prod.) | test rows | tier |
+|---|---|---:|---|---:|---:|---:|---:|---|---:|---:|---:|
+| before (phase 2 + the quotient layout; Task 0's spans) | `7b8d2cd` | 893 606 | — | — | — | 2 147 159 | 2 213 181 | 22 / 22 | 903 739 | 230 950 | 20 |
+| D: the reduction layout preprocessed | `bb8767f`, `a39582d` (machine), `47e9a45` (program) | 749 846 | 726 349–769 981 | −143 760 | −145 441 | 1 785 559 | 1 913 981 | **21 / 21** | 759 979 | 202 198 | 20 |
+| E1: the own slot by one `LOADE` | `637a37c` | 703 766 | 709 458–719 994 (**below**; accepted) | −46 080 | −35 120 | 1 612 439 | 1 891 821 | 21 / 21 | 715 339 | 192 982 | 20 |
+| E2: `FOLD` (opcode 28) | `7380c0d`, `0c3f671` (tests) | 664 886 | 656 846–669 086 | −38 880 | −40 800 | 1 477 239 | 1 888 141 | 21 / 21 | 676 459 | 185 206 | 20 |
+| F: `POW` (opcode 29) | `439ca7a` | **585 686** | 569 942–594 710 | −79 200 | −82 560 | 1 290 039 | 1 903 581 | 21 / 21 | 597 259 | 169 366 | **20** |
+| total | | | | **−307 920** | −303 921 | −857 120 | −309 600 | −1 / −1 | −306 480 | −61 584 | 0 |
+
+Every cut landed in its band but E1, which landed 5 692 rows *below* it (more rows removed than
+projected) and was accepted (§2). Against the projections the cuts delivered 99 % (D), 131 % (E1),
+95 % (E2) and 96 % (F), 101 % in all. The gate needed −369 319; the plan's cuts, as projected,
+held −303 921 of it, and the measured −307 920 leaves **61 399 rows** — the residual §7 prices.
+
+**The spans after each cut** (production, executed rows; spans nest and the innermost wins):
+
+| span | before | after D | after E1 | after E2 | after F | Δ phase |
+|---|---:|---:|---:|---:|---:|---:|
+| `(none)`: tape reads, preamble, phase 5 | 116 498 | 116 498 | 115 778 | 115 778 | 115 778 | −720 |
+| `sample_bits` | 57 276 | 57 276 | 57 276 | 57 276 | 58 076 | +800 |
+| `input_root` | 248 151 | 248 151 | 248 151 | 248 151 | 248 151 | 0 |
+| `reduce` | 163 601 | **20 001** | 20 001 | 20 001 | 20 001 | −143 600 |
+| `bit_selected_power` | 87 920 | 87 680 | 87 680 | 87 680 | **7 680** | −80 240 |
+| `select` | 50 960 | 50 960 | **7 680** | 7 680 | 7 680 | −43 280 |
+| `fold_round` | 36 640 | 36 720 | 43 680 | **5 040** | 5 040 | −31 600 |
+| `commit_root` | 129 600 | 129 600 | 120 640 | 120 640 | 120 640 | −8 960 |
+| `roll_in` | 2 960 | 2 960 | 2 880 | 2 640 | 2 640 | −320 |
+| **total** | **893 606** | **749 846** | **703 766** | **664 886** | **585 686** | **−307 920** |
+| reloads / spills | 218 283 / 14 906 | 201 323 / 12 186 | 194 443 / 12 106 | 191 003 / 10 746 | 176 283 / 10 826 | −42 000 / −4 080 |
+
+The four spans the phase targeted (`reduce`, `select`, `fold_round`, `bit_selected_power`)
+went from 339 121 rows to 40 401 (−88 %). The two Merkle spans did not move except for E1's
+in-place leaf sponge (`commit_root` −8 960) and are now 63 % of the program.
+
+The per-cut records follow, as each cut task wrote them (its `== profile` line, its span table,
+and every pin it re-measured).
 
 ### Cut D (Task 1a machine side, Task 1b program side)
 
@@ -319,6 +436,244 @@ Pins and literals re-measured (the Re-pin Procedure):
 - The reduce key (`WANT_REDUCE`) is unchanged: F adds no preprocessed column.
 - The exit twin is 185 206 → 169 366 rows at tier 18. The production exit is 664 886 → 585 686 rows at tier 20.
 
-## 5. What moved (Task 5)
+## 5. What moved
 
-## 6. The suite (Task 5)
+| pin | before (phase 2 + the quotient layout) | after (phase 3) | where |
+|---|---|---|---|
+| single-proof program digest, production shape | `723218da65a50f1f1581013f79fa5c5b1816b7ab46796dbaa4672c52bce2d0d1` | `cf5a350a62fa00bb6e84fa0de311a726aac7c610d23ce272b8c80795bac51788` | `src/programs/verify_rv32.digest` |
+| `aggregate_program_digest`, production bundle shape (what a chain's aggregation section pins) | `c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8` | `dc350ecf6b60af74f4bb032bdf607c3fa0fbd6317705f0b1077e71b455e38ba0` | `tests/aggregate.rs` (`the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead`, ignored, emulation only); `docs/02` |
+| `aggregate_program_digest`, test fixture shape | `5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df` | `df3a18b8d3294a591a2e8fd79f5430550cd9f09afcff6fc8aea89cc1bfaf1073` | `tests/verifier.rs` |
+| Off replay, production shape (`Liveness::Off`, `Precompiles::Off`) | `39bb6b8d94e62dd282001384d0b65294e7f024e6ef9b47381c8c96c6e1fd3352` | `c580415bdaccf7888e7602e793198874e39e0bda8951d11ef6e47ed029455e6c` | `tests/verifier.rs` (moved at E1 — the tape — and E2 — the fold-result cells; D and F are `On`-only) |
+| self-verifier digest, toy fixture shape | `91e50e140a8669385902e88bcbb18d5d9e5c270262d3f24bb2b67b4a469fbd13` | `e9c9720db4ea38438eee075c3cd5cd2362d60672b2c550d632519627e2724bb0` | `tests/self_verify.rs` |
+| self-verifier `CycleReport` (rows, perms, mem, instrs, words), toy | (131 739, 6 130, 276 847, 133 587, 24 135) | (101 460, 6 168, 250 619, 103 468, 24 415) | `tests/self_verify.rs` |
+| the same, busy fixture | (167 746, 7 780, 320 075, 169 858, 29 967) | (127 322, 7 802, 296 262, 129 722, 30 375) | `tests/self_verify.rs` |
+| self-verifier phase 5, toy / busy | 7 845 / 8 125 | 7 933 / 8 213 | `tests/self_verify.rs` |
+| the rVM verifier key with the reduce chip declared (`WANT_REDUCE`, a tier-8 cap) | = `WANT` (`dd11c3f0…`; the chip had no preprocessed columns) | `1465f60a95152d43, 208336379a094499, …` (Cut D's layout region `1136b74d…`, then E2's coefficient table) | `tests/verifier_key.rs`; `WANT` (no reduce chip) unchanged |
+| `pins.json` production rows / perms / mem / instrs / words | 893 606 / 54 515 / 2 213 181 / 903 739 / 210 763 | 585 686 / 54 515 / 1 903 581 / 597 259 / 212 203 | `tests/pins.json` |
+| `pins.json` `phase3_attribution` (new in Task 0): REG; `reduce` / `select` / `fold_round` / `bit_selected_power` / `commit_root` / `sample_bits`; reloads / spills | 2 147 159; 163 601 / 50 960 / 36 640 / 87 920 / 129 600 / 57 276; 218 283 / 14 906 | 1 290 039; 20 001 / 7 680 / 5 040 / 7 680 / 120 640 / 58 076; 176 283 / 10 826 | `tests/pins.json` (REG asserted by the budget test) |
+| `pins.json` aggregate test N=1/2/3 cpu rows | 231 224 / 462 039 / 692 854 | 169 640 / 338 871 / 508 102 | `tests/pins.json` |
+| `pins.json` aggregate test N=1/2/3 mem accesses | 504 514 / 1 008 354 / 1 512 194 | 442 594 / 884 514 / 1 326 434 | `tests/pins.json` |
+| `pins.json` aggregate test N=1/2/3 witness words | 45 908 / 91 807 / 137 706 | 46 196 / 92 383 / 138 570 | `tests/pins.json` (E1's whole committed row) |
+| `LOOP_OVERHEAD` (test and production) | 274 | 274 (unchanged) | `tests/aggregate.rs` |
+| `N3_ROWS`; the test aggregates' tier asserts N=1/2/3 | 692 854; 18 / 19 / 20 | 508 102; 18 / 19 / **19** | `tests/aggregate.rs` |
+| the production N=3 aggregate's tier (prove and B3 emulation, ignored) | 22 | **21** | `tests/aggregate.rs` |
+| twin rows / tier | 230 950 / 18 | 169 366 / 18 | `tests/exit.rs` |
+| exit rows / tier | 893 606 / 20 | 585 686 / 20 | `tests/exit.rs` |
+| the budget test's regime assertion | `cpu_rows > 2^19` (M5.1's decision regime) | `cpu_rows == 585 686`, `Tier::for_cycles == 20`, above `2^19 − 1` (the landing, the gate not reached) | `tests/exit.rs` (`the_cycle_budget_per_inner_proof_is_pinned`) |
+| `inner_vk_digest`, the admission stub vectors, the interface list | — | unchanged | the inner machine did not move |
+
+Notes on the table:
+
+- The self-verifier opens the rVM's own wider tables and shares the RV32 verifier's FRI
+  pipeline, so both the pipeline's cuts and the rVM's wider AIR reach its program and its
+  phase 5: its rows fell 23 % (toy) and 24 % (busy) against docs/05; its permutations rose by 38
+  and 22 (+3 at E2, +35 / +19 at F): the rVM's wider cpu and reduce rows cost more sponge blocks
+  where the self-verifier hashes them as opened rows.
+- Permutations (11 877 / 23 724 / 35 571) are unchanged in the aggregate pins.
+- The N=1 aggregate is 169 640 = 169 366 + 274 rows, and the production N=1 aggregate is
+  585 960 = 585 686 + 274 (`the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead`). The
+  cuts are inside the per-proof body; the loop around it did not move.
+
+**The machine.** The ISA appends two opcodes; 0–27 never move.
+
+- **`FOLD` = 28** (Cut E2): `rd` the pair holding `u = β·s⁻¹`, `ra` the committed row's base
+  (`2a` cells, then the row's four salts), `imm` the arity `a ∈ {2, 4, 8}`. The reduce chip's
+  fold run writes `Σ_m B_m·u^m` to the two cells after the salts. The emulator refuses another
+  arity (`ExecError::FoldArity`).
+- **`POW` = 29** (Cut F): `rd` the pair `(G, base)`, `ra` a 65-cell bits buffer, `imm = off +
+  256·L`. The reduce chip's pow run writes `base·Π_t (1 + bit_{off+L−1−t}·(G^{2^t} − 1))` to cell
+  64. The emulator refuses a non-boolean bit (`NonBooleanBit`) and a run leaving the buffer
+  (`PowShape`), and so does registration (`DecodeError::PowShape`, `off + L ≤ 64`, `L ≥ 1`).
+- **`REDUCE` = 24 changed meaning** (Cut D): its immediate names a **layout entry**, not a
+  descriptor pointer. `Program` carries `reduce_layout: Vec<ReduceEntry>` (`vals`, `row`, `len`,
+  `key`, `alpha`, `res`, `chain_start`, `carry`), absorbed into `Program::digest` after the
+  instructions (two permutations an entry; a program without a layout keeps its digest) and
+  committed by the verifier key. Registration checks it (`DecodeError::Layout`: every base and
+  the length below `2^24` before any sum, every top below `2^24`, the chain flags consistent);
+  the emulator refuses the same entries (`ExecError::ReduceLayout`) and a broken hand-over
+  (`ReduceChain`).
+
+`Op::COUNT` and `NUM_SELECTORS` go from 28 to 30.
+
+- **cpu width:** 82 → 83 (E2's selector) → **84** (F's selector). Every column after `SEL0`
+  moved (`A0` 35 → 37, `W0` 74 → 76); they are named constants. `FOLD` and `POW` read the whole
+  `rd` pair (`READ_RD`, `EXT_READ_RD`); the range groups check `A0 + 2B + 5` for `FOLD` and
+  `A0 + 64` for `POW`.
+- **reduce width:** 39 → **30** + 9 preprocessed (Cut D: the runtime descriptor and its
+  address-limb range columns replaced by the preprocessed layout and its lookup) → 70 + 20 (E2: the fold row kind, 40 columns, and the 11-column
+  coefficient table) → **81 + 20** (F: the pow row kind, 11 columns). **Three row kinds**, in
+  this order, then padding: run (`IS_REAL`), fold (`IS_FOLD`), pow (`IS_POW`); every boundary
+  between them is covered by a rule that forces the entered run to start (a headless run sends
+  no dispatch message, and would write at a clock of the prover's choosing). The preprocessed
+  region is a provider of `max(layout, 14)` rows with witness multiplicities `MULT` and `MULT_C`.
+- **Degree pins** are unchanged: `[2, 8, 4, 4, 4, 2, 2]`, reduce **8** (this config's ceiling;
+  docs/01's table listed the reduce chip as 3 — a misprint, corrected there). The pow product
+  step is degree 5 after gating.
+- **Buses: thirteen** — `REG`, `RAM`, `POSEIDON2`, `SPONGE`, `PROGRAM`, `RANGE8`, `PUBLIC`,
+  `REDUCE [clk, entry]` (was `[clk, descr_ptr]`), `COMPRESS`, and the new **`REDUCE_LAYOUT
+  [entry, vals, row, row_end, key, alpha, res, flags]`**, **`FOLD [clk, msg, u0, u1, a]`**,
+  **`FOLD_COEFF [a, k, c0..c7]`** and **`POW [clk, buf, off + 256·L, G, base]`**. The cpu sends
+  `REDUCE`, `FOLD` and `POW`; the reduce chip receives them and provides its own `REDUCE_LAYOUT`
+  and `FOLD_COEFF` regions.
+
+**The tape.** `CommitPhaseOpenings` carries each round's committed row **whole**: `2·a` words a
+round (was `2·(a − 1)`, the siblings only), then the four salts, so `open_stride = Σ (2^a·2 +
+4)` and witness words rise 210 763 → 212 203. The program hints each row into a buffer padded by
+two cells for the fold result (`Builder::hint_array_padded`), in both builds. Under `On`,
+`sample_bits` hints the 64 query bits into a 65-cell buffer (`sample_bits_mem`) the `POW`s read;
+under `Off` it keeps its 64 `HINT`s. The tape is the aggregator's private witness; its only
+contract is that the program and the tape agree, and the exit tests over real proofs check it.
+
+**`Precompiles::Off` stays buildable and is the reference**: the compiled reduction
+(`reduce_compiled`), the compiled barycentric fold and `bit_selected_power`. Every fixture's
+acceptance and tamper tables run both builds, and `Precompiles::On` refuses no fixture that
+`Off` accepts.
+
+**What did not move:**
+- the RV32 machine (constraint set 8) and its proofs;
+- the inner verifier key and `inner_vk_digest`;
+- the FRI profiles;
+- the hashing (54 515 permutations, the same sponges and compressions);
+- the aggregate's interface `[vk ‖ N ‖ B(8) ‖ 35·N]` and `verify_aggregate`'s API;
+- the chain's consensus rules.
+
+The fullnode re-vendors this tree and re-pins `admitted_shapes[].aggregate_program_digest`
+(`dc350ecf…8ba0` at the production bundle shape) and the rVM verifier keys (the reduce chip's
+preprocessed region is new) at the next chain cut. No running chain has aggregation enabled.
+
+## 6. The suite, and the proofs run and not run (Task 5, 2026-10-06)
+
+**The suite** (`cargo test --release --no-fail-fast -- --skip a_one_proof_aggregate_round_trips`,
+docs/04's invocation, on the final tree: `a337b12`, `7098629` and this record's `tests/exit.rs` pin): **278 passed, 0 failed, 20 ignored, 1
+skipped**, across 28 test binaries. Phase 2 ended at 208 / 20 / 1, the quotient layout at 216;
+Task 0 made it 210 and Cut F 269. Task 5's sweep added nine tests (six forgeries in
+`tests/cheating.rs`, one rule test in `tests/tables.rs`, the reload-in-span test in `tests/dsl.rs`,
+the top-cell legality test in `tests/program.rs`) and widened four (the layout digest's fields,
+the own-slot check's cases at the unit and the whole-program level, the padding rule's columns). The ignored tests that run on
+the cached fixtures, run alone after it, all green:
+
+- `exit the_cycle_budget_per_inner_proof_is_pinned` — the production pin, the REG count and the
+  landing pin (585 686, tier 20);
+- `aggregate the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead` — 585 960 rows and
+  the production `aggregate_program_digest`;
+- `aggregate production_n2_aggregate_emulates_within_bounds` and
+  `production_n3_aggregate_emulates_within_bounds` — 1 171 511 and 1 757 062 rows, both tier 21
+  (the N=3 pin moved 22 → 21 this task), max address 4 438 040, top timestamps 18 744 191 and
+  28 113 007;
+- `exit fifty_tampered_production_proofs_are_refused_at_the_same_step_as_the_native_verifier` —
+  every one of the fifty tampered production proofs refused at its named step;
+- `profile where_the_rows_go` — the `== profile` lines of §4's Cut F record, reproduced.
+
+**The forgeries' mutation evidence.** Each new forgery was checked in a `git archive` scratch copy
+of the tree, its rule deleted from `ReduceAir::eval` by an exact single-match edit, the one test
+run, and the file restored byte for byte:
+
+| rule deleted | test | with the rule deleted |
+|---|---|---|
+| `carry·(n(ENTRY) − ENTRY − 1)` | `a_carry_followed_by_the_wrong_entry_is_rejected_by_the_entry_step` | FAILED: "a carry from entry 0 into entry 2 VERIFIED, skipping entry 1" |
+| `CLK` in the pow run carry | `a_pow_run_moving_its_clock_mid_run_is_rejected_by_the_clock_carry` | FAILED: "… VERIFIED" |
+| `P_OFF` in the pow run carry | `a_pow_run_moving_its_offset_mid_run_is_rejected_by_the_offset_carry` | FAILED: "… VERIFIED" |
+| `P_L` in the pow run carry | `a_pow_run_changing_its_length_mid_run_is_rejected_by_the_length_carry` | FAILED: "… VERIFIED" |
+| `P_FIRST·P_K` | `a_pow_run_starting_past_k_zero_is_rejected_by_the_first_index_rule` | FAILED: "a pow run starting at K = 1 VERIFIED, never reading its highest bit" |
+| first row `IS_POW·(1 − P_FIRST)` | `a_headless_pow_row_at_the_tables_first_row_is_rejected` | FAILED: "… VERIFIED, writing 777 to cell 664" |
+| `MULT·(1 − L_IS_ENTRY)` | `a_multiplicity_off_the_layout_is_refused_by_the_provider_rule`; `no_admissible_padding_reduce_row_sends_a_message` | FAILED: no constraint violated; padding rows send |
+| `MULT_C·(1 − C_IS_ROW)` | the same two | FAILED, the same |
+
+The entry-step forgery's first draft did not isolate its rule (the relabelled `REDUCE` row's
+immediate operand was left at 1, and the cpu's `B0 = B` refused it first); with the operand
+carried it does, and the table's line is the corrected test's.
+
+**The proofs this box ran** (each alone, nothing else building, `--features parallel`, 16
+threads):
+
+| proof | command | result |
+|---|---|---|
+| the tier-18 exit twin under the heap profiler | `cargo test --release --features parallel --test memprofile tier19 -- --ignored --nocapture` | **proved**: 169 366 rows, tier 18, prove 141.3 s, verify 6.67 s, 268 168 B, **peak live heap 26.88 GB** (§3; `docs/measurements/2026-10-06-tier18-twin-memprofile-phase3.log`) |
+| the tier-18 exit twin (`tests/exit.rs`, its row and tier pins and R1 at full scale) | `cargo test --release --features parallel --test exit twin -- --ignored --nocapture` | **proved**: prove 92.3 s, verify 6.70 s, 270 760 B; the proof refused against a one-word-different program's key |
+| the suite's skipped test: the N=1 test aggregate round trip and its tampered variants (`a_one_proof_aggregate_round_trips_and_tampered_variants_are_refused`, the twin's shape plus the 274-row loop) | `cargo test --release --features parallel --test aggregate a_one_proof_aggregate_round_trips -- --nocapture` | **proved**: 105.2 s for the test binary (the round trip and its four tampered variants), 269 833 B, every variant refused — skipped in the suite on this box since docs/04 for memory (Task 0 found the `aggregate` binary OOM-killed with it), proved here alone |
+
+macOS's `maximum resident set size` for the three runs was 24.6, 30.7 and 26.2 GB; as docs/04
+says, not memory numbers — the live figure is the profiler's 26.88 GB.
+
+**The proofs it did not run**, each recorded with the model's figure (§3) and the host it needs:
+
+| proof | tier | why not here | projected peak live | host |
+|---|---:|---|---:|---|
+| test N=3 aggregate twin (`aggregate twin`; its tier assertion moved 20 → 19 this phase) | 19 | the model says it does not fit 48 GB | ≈ 78 GB | ≥ 128 GB |
+| test N=2 aggregate (`two_test_profile`) | 19 | the same | ≈ 52 GB | ≥ 64 GB, comfortably ≥ 128 GB |
+| the production exit (`exit exit_…`) and N=1 aggregate | 20 | the same | ≈ 110–130 GB | ≥ 160 GB |
+| production N=2 / N=3 aggregates | 21 | the same | ≈ 210–245 / 290–340 GB | ≥ 256 / ≥ 512 GB |
+
+So the test N=3 aggregate's tier assertion (19) is exercised by its emulation and pins
+(`n3_aggregate_publishes_the_host_interface_digest`, `tests/pins.json`) but by no proof until a
+large host runs it — the cost the Task-5 ruling named.
+
+## 7. Still ahead (recorded, not in this phase)
+
+The phase ends at the measured point (spec §2.5): 585 686 rows, **61 399 above the tier-19
+gate**. In order of leverage:
+
+1. **The Merkle spans — the next lever.** `input_root` (248 151 rows, 42.4 %) and `commit_root`
+   (120 640, 20.6 %) are **368 791 rows, 63 % of the program**, and **133 827** of them are the
+   allocator's reloads (97 987 and 35 840) — 36 % of the two spans, more than twice the residual.
+   Per query: `input_root` 3 101.9 rows over the seven opened heights (leaf sponges and walks),
+   `commit_root` 1 508 over the nine rounds. By opcode (production, Task 5's profile, which now
+   prints every opcode a span executed): `input_root` is `LOAD` 121 107 (97 987 of them reloads),
+   `FADDI` 41 521, `SPONGE` 33 520, `STORE` 24 723, `COMPRESS` 9 200 (115 levels a query) and
+   15 200 rows of field arithmetic; `commit_root` is `LOAD` 58 880 (35 840 reloads), 27 360 rows
+   of `FMUL`/`FADD`/`FSUB`, `STORE` 11 520, `FADDI` 10 720, `COMPRESS` 7 040 (88 levels a query)
+   and `SPONGE` 2 240. The two spans spend ≈ 23 rows for every `COMPRESS` row they issue. The spans
+   did not move in this phase except for E1's in-place leaf sponge, and phase 2's Cut C is their
+   last change (`COMPRESS`). Candidates, to be priced by the same span profile before any is
+   built: keep the walk's running digest and its pointers in registers across levels (most of
+   the spans' `LOAD`s are reloads — handles the walk re-reads level after level; the profile
+   does not split them further); `COMPRESS` with an
+   immediate-offset sibling (docs/04 item 4: one `FADDI` a level, ≈ 16 k rows); a path-level
+   precompile — a run of compress rows in the poseidon2 chip, one cpu row a path instead of one
+   a level — the `MERKLE` that docs/00 still leaves absent. Halving the two spans' reloads alone
+   (≈ −67 000) would cross the gate; whether any one candidate does is a measurement, not this
+   record's claim.
+2. **The inner FRI profile decision, with the query count corrected.** docs/04's item 3 read
+   "rate ¼ with about 40 queries halves everything in the query phase". The count is wrong. The
+   production profile is rate ⅛ (`log_blowup 3`), 80 queries and 20 PoW bits, chosen for its
+   *proven* bound (`research/src/machine.rs`, `FriProfile::Production`: ~86 proven bits at
+   q = 80, g = 20; consensus-facing, genesis-bound). The proven bound's per-query term scales
+   with `−log2 √ρ`, the Johnson radius — 1.5 at rate ⅛, 1.0 at rate ¼ (the ~86 bits at q = 80
+   are that term less the bound's slack) — so rate ¼ at the same proven security needs **~120
+   queries, not 40**: 1.5× the queries, not half. (40 is the *conjectured* count at rate ¼ —
+   `log2 1/ρ` = 2 bits a query, 40·2 + 20 = 100 bits — the trade the profile's own note, finding
+   ZM1, records rejecting at rate ⅛ for the proven floor.) For the rVM that is *more* rows, not
+   fewer: the query phase is ≈ 5 874 rows a query (585 686 less the 115 778
+   outside every per-query span, over 80), and each Merkle path is one level shorter at rate ¼, so
+   40 more queries cost ≈ +220 000 rows (≈ 800 000, still tier 20). The inner profile is
+   therefore a wallet-side lever (the inner prover's LDEs halve) paid for by the aggregator, and
+   a consensus decision for the paper and the node, not a row cut for this crate. The rVM's
+   *own* profile is a separate lever with the opposite sign for memory: `log_blowup 3 → 2` for
+   rVM proofs halves every LDE term of §3's table at ~1.5× the rVM's own queries (docs/04's
+   memory candidate 3) — the lever for §3's ≈ 110–130 GB, not for the cpu rows.
+3. **The rest of the program, for scale.** Outside the query spans: the tape reads, preamble and
+   phase 5 (`(none)`, 115 778 rows, 21 160 reloads) and `sample_bits` (58 076, 12 736 reloads).
+   The reduce chip's own "read `px` once for a matrix's two points" (spec §2.5) would cut chip
+   rows, not cpu rows: the `reduce` span is 20 001 cpu rows now, 3.4 %, and not a gate lever.
+4. **The proofs this box cannot run** (§6): the test N=2 and N=3 aggregates (≈ 52 and ≈ 78 GB
+   projected; the N=3 one's tier assertion moved 20 → 19 this phase and no proof has exercised
+   it), the production exit and N=1 aggregate (≈ 110–130 GB), and the production N≥2
+   aggregates. They want a ≥ 128 GB host for the test shapes and ≥ 160 GB for production N=1;
+   the projections in §3 become measurements there.
+5. **`Precompiles::Off` byte-stability** (the E2 ruling's deferred question): the Off replay's
+   digest moved at E2 because both builds share the fold-result cells after each committed row.
+   Off's arithmetic is unchanged; if the replay tripwire is meant to catch layout drift as well
+   as arithmetic, the padding should become `On`-only. Not needed for soundness.
+
+## Conclusion
+
+**The gate was not met.** Phase 3 built what its spec planned — the reduction's layout
+preprocessed in the reduce chip, the own slot checked by one `LOADE`, `FOLD` and `POW` as reduce-chip
+row kinds — and each cut landed in its band (E1 below it, accepted): 893 606 → **585 686** rows,
+−34.5 %, permutations unchanged. The inner proof stays at **tier 20, 61 399 rows above
+`2^19 − 1`**; spec §6 ruling 6 holds, and the gate is not widened. The memory half of the
+milestone is met in full: both production memory tables are `2^21`, the tier-18 twin proves on
+this 48 GB box at 26.88 GB live, and the production N=1 is projected at ≈ 110–130 GB where it was
+≈ 170–175 GB. The residual is the two Merkle spans — 368 791 rows, 133 827 of them reloads — and
+the inner FRI profile is not the row lever docs/04 took it for (rate ¼ needs ~120 queries, not
+40). Both go to a phase-4 decision with the numbers above.
