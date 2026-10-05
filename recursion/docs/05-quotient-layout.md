@@ -4,8 +4,9 @@ Design: `docs/superpowers/specs/2026-10-04-rvm-quotient-layout-design.md`. Plan:
 `docs/superpowers/plans/2026-10-05-rvm-quotient-layout.md`. Branch `feat/rvm-quotient-layout`,
 base `2899bdc`. Every figure in the measured sections is a 2026-10-05 run of
 `tests/memprofile.rs` on this 48 GB box (16 cores, `RAYON_NUM_THREADS=16`, `--features parallel`),
-kept under `docs/measurements/2026-10-05-*.log`, or a pin in a test file; every projection is
-labelled as one.
+kept under `docs/measurements/2026-10-05-*.log`, or the 2026-10-03 tier-19 record
+(`docs/measurements/2026-10-03-tier19-memprofile.log`, docs/04) that the before column cites, or a
+pin in a test file; every projection is labelled as one.
 
 `docs/04-phase2-row-cuts.md` §"The prover's live heap" found the quotient-chunk LDEs to be the
 largest single term of the rVM prover's heap: 29.7 GB of the tier-19 proof's 94 GB Linux peak,
@@ -96,8 +97,8 @@ The four properties the change rests on, each read at the source (spec §1.1; ve
   layout-mismatch refusals.
 - **The MMCS batch opening checks each opened row's width** against the committed dimensions
   before salting (`check_widths`, `vendor/p3-merkle-tree/src/hiding_mmcs.rs:189`, in
-  `verify_batch` at `:177-210`; the spec's citation was `:171-203`): a per-chunk proof fed to a per-instance verifier fails the width check or the
-  matrix-count check before any hashing.
+  `verify_batch` at `:177-210`; the spec's citation was `:171-203`): a per-chunk proof fed to a
+  per-instance verifier fails the width check or the matrix-count check before any hashing.
 
 A proof made under one layout and verified under the other is therefore refused by name, never
 accepted and never a panic; `tests/quotient_layout.rs` checks it (below).
@@ -113,8 +114,14 @@ accepted and never a panic; `tests/quotient_layout.rs` checks it (below).
 | exit twin, peak live / outcome | killed at 78.7 GB live (tier 19, 2026-10-03) | **proved: 33.27 GB peak, prove 185.4 s, verify 5.46 s, 268 417 B** (tier 18, 230 950 rows) | the same logs, `prove done` and `==` lines |
 
 The before column of the twin is a different tier: the tier-18 twin was never run before this cut
-(docs/04 projected it at ≈ 47–50 GB from the tier-19 trace). The only before/after pair at one
-shape is tier 16.
+(docs/04 §"What the cuts change" projected it at ≈ 50 GB from the tier-19 trace; the ≈ 47–50 GB
+range is the one `tests/memprofile.rs` and `tests/exit.rs` carried). The only before/after pair at
+one shape is tier 16.
+
+Spec §4's projections for this cut, against the measurement: the twin's peak ≈ 40 GB at tier 18,
+measured **33.27 GB**; live after `compute quotient` ≈ 44 GB at tier 19 (61.0 GB less the
+projected quotient saving), measured **23.65 GB** at tier 18 (a different tier, so the comparison
+is indicative, not like for like; the tier-16 phase table below is the same-shape check).
 
 ### Tier 16, phase by phase (the same program, before → after)
 
@@ -135,8 +142,11 @@ said it could not separate, is the one-salt-set-per-matrix saving: 1.78 → 0.21
 `p3-fri` patch so the dropped chunks' random columns are never LDE'd) was to be triggered if the
 discarded salt NTTs showed as a prove-wall rise above ~5 %. The wall fell 19 % (40.7 → 32.9 s):
 fewer committed matrices to hash and open. The quotient tree hashes 7 salted matrices instead of
-52 (7.0 → 2.2 s) and `compute quotient` itself got shorter (15.8 → 13.5 s): 7.1 s of the 7.8 s
-gain, with the discarded NTTs already inside the second figure, so **the `p3-fri` follow-up is not triggered.** (The two runs are one each;
+52 (7.0 → 2.2 s) — the same seven instances and chunk counts as the self-verifier fixtures (the
+synthetic declares no reduce table, and chunk counts depend on the constraint degree, not the
+height; no log line prints them) — and `compute quotient` itself got shorter (15.8 → 13.5 s):
+7.1 s of the 7.8 s gain, with the discarded NTTs already inside the second figure, so **the
+`p3-fri` follow-up is not triggered.** (The two runs are one each;
 docs/04's 36.4 s for the same benchmark on 2026-10-04 shows ~10 % run-to-run spread, so read the
 wall delta as "faster", not as a precise 19 %.)
 
@@ -180,8 +190,9 @@ that. The run's 33.27 GB peak is now in the FRI phase, not in the quotient.
   machine at 33.3 GB peak live, so a **64 GB host runs it with margin**. This replaces docs/04's
   ≈ 50 GB projection for that proof.
 - **Projection (labelled):** the production N=1 aggregate (tier 20) was projected at **≈ 240 GB**
-  in docs/04 (§"What the cuts change"). The two measured ratios this cut produced are ×0.705 (the
-  tier-16 peak, the one same-shape pair) and ×0.73 (the quotient phase across tiers, above).
+  in docs/04 (§"What the cuts change"). This cut gives one measured ratio, ×0.705 (the tier-16
+  peak, the one same-shape pair), and one derived, ×0.73 (the 16-thread tier-18 quotient phase
+  against the cell-scaled, single-threaded tier-19 figure, above).
   Applied to 240 GB: **≈ 170–175 GB**, against the spec's ≈ 190 GB model. This is a projection
   until the tier-20 production proof runs on a ≥ 256 GB host; until then the host class stays
   ≥ 256 GB, now with room rather than tight.
