@@ -770,7 +770,9 @@ fn phase_5s_assertions_are_all_named() {
 /// leave it where Cut A put it): `af772819…8425` → `39bb6b8d…3352`. Phase 3's Cut E1 re-recorded it
 /// (2026-10-05: the tape's `CommitPhaseOpenings` carries the whole committed row and the Off build
 /// checks the own slot by the indicator dot product — a change of the shared pipeline):
-/// `39bb6b8d…3352` → `af0c16e8…6c7b`.
+/// `39bb6b8d…3352` → `af0c16e8…6c7b`. Phase 3's Cut E2 re-recorded it (2026-10-06: each committed row's
+/// buffer gains the two fold-result cells after its salts, `hint_array_padded`, in both builds, so
+/// every later cell address moves): `af0c16e8…6c7b` → `c580415b…5e6c`.
 #[test]
 fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     use recursion::dsl::Liveness;
@@ -786,7 +788,7 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
-        "af0c16e81d237eaaa4f9c9b076e6804f317c89da471550cfb576c6b6008b6c7b",
+        "c580415bdaccf7888e7602e793198874e39e0bda8951d11ef6e47ed029455e6c",
         "the Off replay must reproduce the pre-Task-7 stream byte for byte (plus VERIFIER-1's \
          per-round assertions, and constraint set 7's and 8's inner changes)"
     );
@@ -829,14 +831,16 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// the batch-opening reduction becomes one key buffer and one `REDUCE` chain per height per query):
 /// `5f1f6901…12df` → `8a2d166f…8509`. Re-registered for phase 3's Cut E1 (the committed row hinted
 /// whole, its own slot checked by one register-addressed `LOADE`): `8a2d166f…8509` → `9a43596f…4aa9`.
+/// Re-registered for phase 3's Cut E2 (`FOLD`, the fold in the reduce chip): `9a43596f…4aa9` →
+/// `f66aa580…6f63`.
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "9a43596f5a5fdab4901155c487e61f23666c0a1c0285bd71beb6e86f71914aa9",
-        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 3's Cut E1"
+        "f66aa58037e82ea50733f825861df943241da17dc481bebac2120845e0086f63",
+        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 3's Cut E2"
     );
 }
 

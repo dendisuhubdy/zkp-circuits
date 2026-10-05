@@ -453,7 +453,13 @@ impl Builder {
     /// `n mod 8` tail — the tail stays compiled because a block always consumes eight words, and
     /// the tape has exactly `n`. `Precompiles::Off`: the pairs throughout (the reference).
     pub fn hint_array(&mut self, n: usize) -> Array<Felt> {
-        let base = self.alloc(n as u64);
+        self.hint_array_padded(n, 0)
+    }
+
+    /// [`Builder::hint_array`] into a buffer `extra` cells longer than the words it hints (Cut E2:
+    /// a committed row's fold-result cells after its salts). The extra cells are allocated only.
+    pub fn hint_array_padded(&mut self, n: usize, extra: usize) -> Array<Felt> {
+        let base = self.alloc((n + extra) as u64);
         let holder = self.ptrs[base.0 as usize].holder;
         self.begin();
         let rp = self.materialise(holder);
@@ -714,6 +720,18 @@ impl Builder {
         let rd = self.materialise(bit.0);
         self.emit(Op::Compress, rd, ra, bref_of(rb));
         self.stats.perms += 1;
+    }
+
+    /// One `FOLD` (Cut E2): the arity-`arity` fold of the committed row at `msg` (2·arity cells,
+    /// then the salts) at `u`, by the reduce chip's fold run; the result is loaded from the two
+    /// cells after the salts. `u` rides in the `rd` pair as a read, as `COMPRESS`'s bit does.
+    pub fn fold_run(&mut self, msg: Ptr, arity: usize, u: Ext) -> Ext {
+        assert!(matches!(arity, 2 | 4 | 8), "FOLD arity {arity}: the coefficient table holds 2, 4 and 8");
+        self.begin();
+        let ru = self.materialise(u.0);
+        let rm = self.ptr_reg(msg);
+        self.emit(Op::Fold, ru, rm, BRef::Imm(F::from_u64(arity as u64)));
+        self.load_ext(msg, 2 * arity as i64 + crate::isa::FOLD_SALT_CELLS as i64)
     }
 
     /// The register a `Ptr`'s address lives in, folding any compile-time delta in first. An

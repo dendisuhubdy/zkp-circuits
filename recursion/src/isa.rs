@@ -28,9 +28,11 @@ pub const MEM_LIMIT: u64 = 1 << 24;
 /// The hash domain of the rVM program digest. `rand_zkvm::notes::domain` is occupied through 14
 /// (`SBPF_OUT`) and both digests share one permutation, so this must not collide with it.
 pub const RVM_PROGRAM_DOMAIN: u64 = 15;
+/// Cut E2: the cells between a committed row and its fold result (the row's salts).
+pub const FOLD_SALT_CELLS: u64 = 4;
 
-/// The twenty-eight opcodes: the spec table's twenty-four in its reading order, then the
-/// appended ones (`REDUCE`, `SPONGE`, `HINTN`, `COMPRESS`), each at the next free number so no earlier
+/// The twenty-nine opcodes: the spec table's twenty-four in its reading order, then the
+/// appended ones (`REDUCE`, `SPONGE`, `HINTN`, `COMPRESS`, `FOLD`), each at the next free number so no earlier
 /// opcode — and so no earlier program's digest — ever moves.
 ///
 /// Deliberately absent: `FRIFOLD`, `EXPBITS`, `MERKLE` precompiles — the verifier's fold and
@@ -108,10 +110,15 @@ pub enum Op {
     /// The work is the poseidon2 chip's third row kind; a non-boolean bit is an emulator error.
     /// Cut C, opcode 27, appended; 0–26 never move.
     Compress,
+    /// one FRI fold round (phase 3, Cut E2): `rd` is the pair holding `u = β·s⁻¹`, `ra` the
+    /// committed row's base (`2a` cells), `imm` the arity `a ∈ {2, 4, 8}`; the reduce chip's fold
+    /// run (an inverse DFT then Horner, 2a rows) writes `Σ_m B_m·u^m` to the two cells after the
+    /// row's four salts. Opcode 28, appended; 0–27 never move.
+    Fold,
 }
 
 impl Op {
-    pub const COUNT: usize = 28;
+    pub const COUNT: usize = 29;
 
     /// Every opcode, at the index of its own discriminant (pinned by `tests/isa.rs`).
     pub const ALL: [Op; Self::COUNT] = [
@@ -143,6 +150,7 @@ impl Op {
         Op::Sponge,
         Op::Hintn,
         Op::Compress,
+        Op::Fold,
     ];
 
     pub fn from_u8(x: u8) -> Option<Self> {
@@ -179,6 +187,7 @@ impl Op {
             Op::Sponge => "SPONGE",
             Op::Hintn => "HINTN",
             Op::Compress => "COMPRESS",
+            Op::Fold => "FOLD",
         }
     }
 

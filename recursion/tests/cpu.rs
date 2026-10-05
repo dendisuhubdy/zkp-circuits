@@ -453,9 +453,10 @@ fn every_operand_a_dispatch_carries_is_read_from_a_register() {
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x43_5554_43);
     let (interactions, _) = common::symbolic_air(&cpu::CpuAir);
     let (msgs, _) = cpu_messages_and_constraints();
-    let dispatches = [bus::POSEIDON2.name(), bus::SPONGE.name(), bus::REDUCE.name(), bus::PUBLIC.name(), bus::COMPRESS.name()];
+    let dispatches = [bus::POSEIDON2.name(), bus::SPONGE.name(), bus::REDUCE.name(), bus::PUBLIC.name(), bus::COMPRESS.name(), bus::FOLD.name()];
     let mut failures = Vec::new();
     let mut seen_compress = false;
+    let mut seen_fold = false;
     for op in Op::ALL {
         let cur = row(Some(op), &mut rng);
         let next = row(None, &mut rng);
@@ -469,9 +470,11 @@ fn every_operand_a_dispatch_carries_is_read_from_a_register() {
                 continue;
             }
             seen_compress |= op == Op::Compress && i.bus_name == bus::COMPRESS.name();
+            seen_fold |= op == Op::Fold && i.bus_name == bus::FOLD.name();
             for f in &i.fields {
                 let col = as_column(f).unwrap_or_else(|| panic!("a {} field is one column", i.bus_name));
-                // B is the fetched instruction word (bound by the PROGRAM lookup): REDUCE's entry id (Cut D).
+                // B is the fetched instruction word (bound by the PROGRAM lookup): REDUCE's entry id (Cut D),
+                // FOLD's arity (Cut E2).
                 if col != CLK && col != PUB_IDX && col != B && !reg_reads.contains(&col) {
                     failures.push(format!("{}: {} carries {} and no REG read binds it", op.mnemonic(), i.bus_name, col_name(col)));
                 }
@@ -479,6 +482,7 @@ fn every_operand_a_dispatch_carries_is_read_from_a_register() {
         }
     }
     assert!(seen_compress, "COMPRESS rows dispatch on the COMPRESS bus");
+    assert!(seen_fold, "FOLD rows dispatch on the FOLD bus");
     assert!(failures.is_empty(), "dispatched operands the row never read:\n  {}", failures.join("\n  "));
 }
 

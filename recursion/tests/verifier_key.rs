@@ -39,12 +39,13 @@ const WANT: [&str; 16] = [
     "c6c360a80fcc32a3", "7aaca7245e6a835a", "259781276e93c195", "fbde180612a69b9c",
 ];
 
-/// The cap with the reduce chip declared at height 2^4 over an empty layout (Cut D).
+/// The cap with the reduce chip declared at height 2^4 over an empty layout (Cut D), its
+/// preprocessed region carrying the 14-row fold coefficient table (Cut E2; was `1136b74d…`).
 const WANT_REDUCE: [&str; 16] = [
-    "1136b74d8a91c107", "6258d923b5ea625f", "173ec4fd5207f709", "06778b2457b28d8a",
-    "21343da5240c9ac1", "a937ceb108825c66", "c4dce8f6b47785d9", "73d287b349af9df4",
-    "1be802bd479d578b", "4684eed2bfc90ca0", "e4336bb4cff37548", "a86e894c75054b0b",
-    "d100180542ecc455", "1dfe8e0aa5b002e9", "f4adcfaf2ed4d621", "f212c834ec31eb56",
+    "1465f60a95152d43", "208336379a094499", "722c10793b62814f", "c34998e19e1f0268",
+    "82a6530d27b003c5", "f17904c7c9f6dea9", "d2edca6121d2c3ce", "6f9a4fbc6515fd40",
+    "d556f6368a4e5713", "d019f54fd96d85d0", "23ae35c011151880", "a0380780419218fd",
+    "bd90119cc64badcf", "c2939a08d0f9e65f", "03933014272eec7c", "5bf5626b05094a95",
 ];
 
 #[test]

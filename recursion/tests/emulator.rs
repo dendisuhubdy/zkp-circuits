@@ -369,3 +369,32 @@ fn a_layout_entry_whose_addresses_wrap_is_refused() {
     let at = p.instrs.iter().position(|x| x.op == Op::Reduce).unwrap();
     assert_eq!(execute(&p, &[], 1000).unwrap_err(), ExecError::ReduceLayout { pc: at as u32, entry: 0 });
 }
+
+#[test]
+fn fold_reads_the_row_and_writes_the_fold_after_the_salts() {
+    use p3_field::BasedVectorSpace;
+    use recursion::isa::EF;
+    let ys: Vec<EF> = (1..=4u64).map(|k| EF::from_basis_coefficients_slice(&[F::from_u64(k), F::from_u64(10 * k)]).unwrap()).collect();
+    let u = EF::from_basis_coefficients_slice(&[F::from_u64(3), F::from_u64(5)]).unwrap();
+    let mut v = vec![];
+    for (k, y) in ys.iter().enumerate() {
+        for (l, w) in y.as_basis_coefficients_slice().iter().enumerate() {
+            v.push(Instr { op: Op::Faddi, rd: 1, ra: 0, b: *w });
+            v.push(i(Op::Store, 1, 0, 300 + 2 * k as u64 + l as u64));
+        }
+    }
+    v.extend([i(Op::Faddi, 2, 0, 3), i(Op::Faddi, 3, 0, 5), i(Op::Faddi, 4, 0, 300), i(Op::Fold, 2, 4, 4)]);
+    v.extend([i(Op::Loade, 6, 0, 300 + 8 + 4), i(Op::Public, 0, 6, 0), i(Op::Public, 0, 7, 0), i(Op::Halt, 0, 0, 0)]);
+    let exec = execute(&prog(v), &[], 1000).unwrap();
+    let want = recursion::emulator::fold_dft_horner(&ys, u);
+    assert_eq!(exec.public, want.as_basis_coefficients_slice().to_vec());
+    let ev = exec.events.iter().find(|e| e.instr.op == Op::Fold).unwrap();
+    assert_eq!(ev.mem.len(), 2 * 4 + 2, "two reads per value, two result writes");
+    assert_eq!(ev.d, [F::from_u64(3), F::from_u64(5)], "u is read from the rd pair");
+}
+
+#[test]
+fn fold_refuses_an_arity_outside_two_four_eight() {
+    let p = prog(vec![i(Op::Faddi, 4, 0, 300), i(Op::Fold, 2, 4, 3), i(Op::Halt, 0, 0, 0)]);
+    assert_eq!(execute(&p, &[], 100), Err(ExecError::FoldArity { pc: 1, arity: 3 }));
+}

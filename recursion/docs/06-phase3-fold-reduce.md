@@ -46,12 +46,12 @@ T₀ = 893 606. Each band is [T_prev − 1.15·Δ, T_prev − 0.85·Δ], with T_
 |---|---:|---|---|---:|---|
 | D | 145 441 | rows(reduce) − [EINV+MOV+FSUB in reduce] − Q·(E + H + K + 3) | 726 349–769 981 | 749 846 (Δ −143 760) | yes |
 | E1 | 35 120 (ruled; was 54 160) | rows(select) − Q·Σ_r(2·la_r + 5) − Q·Σ_r(a_r + 9) | 709 458–719 994 | 703 766 (Δ −46 080) | **no** (below; accepted) |
-| E2 | 40 800 (re-read after E1; was 33 760) | rows(fold_round, re-read after E1) − 4·Q·R | 656 846–669 086 (from E1's measured 703 766) | | |
-| F | 82 800 | rows(bit_selected_power) − 4·Q·(H + R) | relative to E2's measured | | |
+| E2 | 40 800 (re-read after E1; was 33 760) | rows(fold_round, re-read after E1) − 4·Q·R | 656 846–669 086 (from E1's measured 703 766) | 664 886 (Δ −38 880) | yes |
+| F | 82 560 (re-read after E2; was 82 800) | rows(bit_selected_power, re-read after E2) − 4·Q·(H + R) | 569 942–594 710 (from E2's measured 664 886) | | |
 
 Inputs: D = 163 601 − (1 120 + 4 480 + 1 120) − 80·(119 + 7 + 14 + 3); E1 = 50 960 − 80·79 − 80·119 (Σla = 17,
 Σa = 38); E2 = 43 680 − 4·80·9, with `fold_round` re-read after E1 (36 720 → 43 680: the row loads moved into it);
-F = 87 920 − 4·80·16.
+F = 87 680 − 4·80·16, with `bit_selected_power` re-read after E2 (87 680, unchanged since Cut D).
 
 **E1's sign (controller ruling, Task 2).** The plan wrote E1's last term with a `+`, which gave Δ_E1 = 54 160, more
 than the whole `select` span (50 960). The ruled formula subtracts it: Δ_E1 = 35 120 (spec §2.2's "−35 000 to
@@ -68,6 +68,14 @@ tape reads, HINTN +240, HINT −480, STORE −480), `roll_in` 2 960 → 2 880 (�
 row store and salt copy that sponging the leaf in place removes. That is an omission in the band's model, not an
 anomaly in the cut. The correctness evidence is the On/Off differential, the tamper tables and the own-slot refusal.
 The miss is recorded in spec §2.5. E2's band above (Δ 40 800, 656 846–669 086) stands.
+
+**E2 measured in band (Task 3).** Production lands at 664 886 rows (Δ −38 880 against a projected −40 800).
+`fold_round` 43 680 → 5 040 is 7 rows a round, not the formula's 4: `INV`, `EMULF`, `FOLD`, the result's `LOADE`,
+and three reloads (`LOAD` 1 440 + `LOADE` 720 = 2 160 reloads in the span). `roll_in` 2 880 → 2 640 (−240) moved with
+the allocator's schedule; every other span is unchanged. The F band is recomputed from the post-E2
+`bit_selected_power` span (87 680): Δ_F = 82 560, band 569 942–594 710. E2's 664 886 is above 524 287, so Cut F
+is built (Task 4). Even F's band floor (569 942) is above the 2^19 gate: reaching 524 287 needs Δ_F ≥ 140 599,
+58 039 more than F's projection.
 
 Memory targets: REG 2 147 159 → under 2 097 152 (needs −50 008); RAM 2 213 181 → under 2 097 152.
 
@@ -193,6 +201,55 @@ Re-pinned (the Re-pin Procedure, after the controller accepted the landing point
   292 843, 149 026, 30 255). Phase 5 7 845 / 8 125, unchanged.
 - The exit twin is 202 198 → 192 982 rows at tier 18. The production exit is 749 846 → 703 766 rows at tier 20.
 - The reduce key (`WANT_REDUCE`) is unchanged: E1 does not touch the reduce chip's preprocessed region.
+
+### Cut E2 (Task 3)
+
+| cut | measured cpu rows | Δ | band | in band | REG (≤ 2 097 151) | RAM (≤ 2 097 151) | `fold_round` span | FOLD dispatches | reduce chip |
+|---|---:|---:|---|---|---:|---:|---:|---:|---|
+| E2 | 664 886 | −38 880 (projected −40 800) | 656 846–669 086 | **yes** | 1 477 239, met | 1 888 141, met | 43 680 → **5 040** | 720 | width 30 → 70, preprocessed 9 → 20, degree 8 → 8 |
+
+```
+== profile Production: inner tier Tier(14), 664886 cpu rows, 54515 permutations, 1888141 mem accesses, 1477239 reg accesses, 212203 witness words, 676459 program instrs
+== profile Test: inner tier Tier(14), 185206 cpu rows, 11875 permutations, 439357 mem accesses, 448759 reg accesses, 46187 witness words, 187611 program instrs
+-- rows per call site (production)
+      115778   17.4%  (none)               reload   21160 spill   5429  /query   1447.2
+       57276    8.6%  sample_bits          reload   12736 spill   4993  /query    716.0
+      248151   37.3%  input_root           reload   97987 spill      3  /query   3101.9
+       20001    3.0%  reduce               reload    1520 spill    321  /query    250.0
+       87680   13.2%  bit_selected_power   reload   17280 spill      0  /query   1096.0
+        7680    1.2%  select               reload    1360 spill      0  /query     96.0
+        5040    0.8%  fold_round           reload    2160 spill      0  /query     63.0  [LOAD 1440, LOADE 1440, EMULF 720, INV 720, FOLD 720]
+      120640   18.1%  commit_root          reload   35840 spill      0  /query   1508.0
+        2640    0.4%  roll_in              reload    960 spill      0  /query     33.0
+-- reloads 191003, spills 10746; reduce dispatches 9520
+```
+
+Each fold round is now `s` from the index bits (`bit_selected_power`, its own span, unchanged), `u = β·s⁻¹` (one `INV`,
+one `EMULF`), one `FOLD` and the result's `LOADE`: 720 = 9 × 80 of each. The fold itself is a run of `2a` rows in the
+reduce chip (Σ 2a = 76 a query, 6 080 chip rows in production — the reduce table is not the tallest, so its height does
+not set the proof's). REG falls 1 612 439 → 1 477 239 (−135 200): the compiled barycentric fold's register traffic is
+gone. RAM falls 1 891 821 → 1 888 141: the row's `2a` value reads move from the cpu's `LOADE`s to the chip's slot-0/1
+reads, and the result is one write pair and one read pair. **Cut F is needed: 664 886 > 524 287.**
+
+Pins and literals re-measured (the Re-pin Procedure):
+- `tests/pins.json`: cpu rows 703 766 → 664 886; mem accesses 1 891 821 → 1 888 141; program instrs 715 339 → 676 459;
+  REG 1 612 439 → 1 477 239; spans fold_round 43 680 → 5 040; reloads 194 443 → 191 003, spills 12 106 → 10 746.
+  Permutations and witness words unchanged. Aggregate Test N = 1/2/3 cpu rows 193 256 / 386 103 / 578 950 →
+  185 480 / 370 551 / 555 622 (mem 440 242 / 879 810 / 1 319 378 → 439 506 / 878 338 / 1 317 170).
+- `LOOP_OVERHEAD` 274, unchanged (185 480 = 185 206 + 274). `N3_ROWS` 578 950 → 555 622. Aggregate tiers 18 / 19 / 20,
+  unchanged.
+- The production `verify_rv32` digest: `75576ad7…c8ba` → `5c30bf74…0d15`.
+- The aggregate digest at the Test shape: `9a43596f…4aa9` → `f66aa580…6f63`. At the production shape:
+  `9a619401…e649` → `b362024c…fc55`.
+- The Off replay moves: `af0c16e8…6c7b` → `c580415b…5e6c`. Each committed row's buffer gains the two fold-result cells
+  after its salts (`hint_array_padded`) in both builds, so every later cell address moves; the Off arithmetic is unchanged.
+- Self-verifier digest `f60f0f5c…579b` → `b475a9f9…c348`. Toy CycleReport (114 955, 6 130, 251 855, 116 963, 24 295) →
+  (105 485, 6 133, 246 774, 107 493, 24 355). Busy (146 626, 7 780, 292 843, 149 026, 30 255) → (139 267, 7 783,
+  292 273, 141 667, 30 315). Phase 5 7 845 / 8 125 → 7 889 / 8 169 (the cpu's 29th selector, its FOLD limbs and the
+  `FOLD` dispatch).
+- The reduce key (`WANT_REDUCE`) moves: the preprocessed region carries the 14-row coefficient table,
+  `1136b74d…` → `1465f60a…`. `WANT` (no reduce chip) is unchanged.
+- The exit twin is 192 982 → 185 206 rows at tier 18. The production exit is 703 766 → 664 886 rows at tier 20.
 
 ## 5. What moved (Task 5)
 

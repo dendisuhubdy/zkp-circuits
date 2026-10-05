@@ -1343,3 +1343,120 @@ fn a_padding_row_claiming_compress_is_rejected() {
     t.poseidon2.values[row * w + poseidon2::col::IS_COMPRESS] = F::ONE;
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
+
+// ── Cut E2: the fold row kind ─────────────────────────────────────────────────────────────────
+fn fold_setup() -> (Machine, Program, Traces) {
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(41);
+    let ys: Vec<EF> = (0..8).map(|_| common::random_ext(&mut rng)).collect();
+    let (p, _) = common::fold_program(&[(3, ys, common::random_ext(&mut rng))]);
+    let m = Machine::new(FriProfile::Test);
+    let exec = execute(&p, &[], 10_000).unwrap();
+    let t = build_traces(&p, &exec, Tier(8)).unwrap();
+    (m, p, t)
+}
+
+fn fold_first_row(t: &Traces) -> usize {
+    let w = reduce_table::col::WIDTH;
+    let r = t.reduce.as_ref().unwrap();
+    (0..r.height()).find(|k| r.values[k * w + reduce_table::col::F_FIRST] == F::ONE).unwrap()
+}
+
+#[test]
+fn honest_fold_traces_pass() {
+    let (m, p, t) = fold_setup();
+    prove_and_verify(&m, &p, &t).unwrap();
+}
+
+/// Spec §5: a FOLD run with a tampered B_m — the first phase-2 row's top accumulator.
+#[test]
+fn a_fold_run_with_a_tampered_coefficient_accumulator_is_rejected() {
+    let (m, p, mut t) = fold_setup();
+    let (w, row) = (reduce_table::col::WIDTH, fold_first_row(&t) + 8);
+    t.reduce.as_mut().unwrap().values[row * w + reduce_table::col::D0] += F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// Spec §5: a FOLD whose u differs from the cpu's — every row of the run (so the carry holds),
+/// leaving the FOLD dispatch unmatched.
+#[test]
+fn a_fold_whose_u_differs_from_the_dispatch_is_rejected() {
+    let (m, p, mut t) = fold_setup();
+    let (w, first) = (reduce_table::col::WIDTH, fold_first_row(&t));
+    let r = t.reduce.as_mut().unwrap();
+    for row in first..first + 16 {
+        r.values[row * w + reduce_table::col::U0] += F::ONE;
+    }
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// Spec §5: a FOLD run cut short — its last phase-2 row turned into padding.
+#[test]
+fn a_fold_run_cut_short_is_rejected() {
+    let (m, p, mut t) = fold_setup();
+    let (w, last) = (reduce_table::col::WIDTH, fold_first_row(&t) + 15);
+    let r = t.reduce.as_mut().unwrap();
+    for c in 0..w {
+        if c != reduce_table::col::MULT && c != reduce_table::col::MULT_C {
+            r.values[last * w + c] = F::ZERO;
+        }
+    }
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// A phase-1 row whose coefficients are not the table's.
+#[test]
+fn a_fold_row_with_a_coefficient_off_the_table_is_rejected() {
+    let (m, p, mut t) = fold_setup();
+    let (w, first) = (reduce_table::col::WIDTH, fold_first_row(&t));
+    t.reduce.as_mut().unwrap().values[first * w + reduce_table::col::C0] += F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// A fold run that begins right after the last reduce row without `F_FIRST` sends no `FOLD`
+/// message and would still write its result: the reduce-to-fold boundary must start a run.
+///
+/// The forgery is balanced on every bus, so only that boundary rule can refuse it: after the
+/// honest reduce run's last row (row 2), one headless phase-2 fold row (`K = 1`, `F_A = 1`,
+/// `F_LAST`) — no `F_FIRST`, so no `FOLD` message and no cpu dispatch; no phase-1 row, so no
+/// coefficient lookup and no read. The fold columns of the last reduce row are free witness, and
+/// the run carry from it (`F_MSG`, `F_A`, `U`, `CLK`, `K + 1`, the Horner step) makes the forged
+/// row write `(777, 0)` to cells 500–501 at the reduce row's clock. The RAM table is given those
+/// two writes, so `RAM` balances too. With the boundary constraint deleted this forgery verifies.
+#[test]
+fn a_headless_fold_run_after_the_reduce_rows_is_rejected() {
+    use reduce_table::col::*;
+    let p = reduce_run_program(false);
+    let m = Machine::new(FriProfile::Test);
+    let exec = execute(&p, &[], 1000).unwrap();
+    let honest = build_traces(&p, &exec, Tier(8)).unwrap();
+    let (mut red, lh) = (honest.reduce.clone().unwrap(), honest.reduce_log_height);
+    let w = WIDTH;
+    let (last, forged) = (2usize, 3usize);
+    assert_eq!(red.values[last * w + IS_LAST], F::ONE, "row 2 is the reduce run's last row");
+    assert_eq!(red.values[forged * w + IS_REAL], F::ZERO, "row 3 is padding");
+    let clk = red.values[last * w + CLK];
+    // The last reduce row's free fold columns: the carry's source.
+    red.values[last * w + F_K] = F::ZERO;
+    red.values[last * w + F_A] = F::ONE;
+    red.values[last * w + F_MSG] = F::from_u64(494); // 494 + 2·1 + 4 = 500
+    red.values[last * w + U0] = F::ONE;
+    red.values[last * w + D0] = F::from_u64(777);
+    // The headless row: phase 2, K = 1 = 2·F_A − 1, so it is its run's last row.
+    let r = &mut red.values[forged * w..(forged + 1) * w];
+    r[IS_FOLD] = F::ONE;
+    r[F_LAST] = F::ONE;
+    r[F_K] = F::ONE;
+    r[F_A] = F::ONE;
+    r[F_MSG] = F::from_u64(494);
+    r[CLK] = clk;
+    r[U0] = F::ONE;
+    r[FACC0] = F::from_u64(777); // the Horner step from row 2: 0·u + D_0
+    r[FOUT0] = F::from_u64(777); // FACC·u + D_0, with this row's D all zero
+    let reg = cpu::register_accesses(&exec.events);
+    let mut ram = cpu::ram_accesses(&exec.events);
+    let ts = clk.as_canonical_u64() as u32 * 16;
+    ram.push(MemAccess { addr: 500, ts: ts + 14, value: F::from_u64(777), is_write: true });
+    ram.push(MemAccess { addr: 501, ts: ts + 15, value: F::ZERO, is_write: true });
+    let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a headless fold run after the last reduce row VERIFIED, writing 777 to cell 500");
+}

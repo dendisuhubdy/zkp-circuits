@@ -587,14 +587,16 @@ fn read_input_paths(b: &mut Builder, opened: &QueryOpenings) -> Vec<Array<Felt>>
 }
 
 /// One query's run of `Segment::CommitPhaseOpenings`: per round, the whole committed row (Cut E1)
-/// and its four salts — hinted straight into the buffer the round's leaf sponge reads.
+/// and its four salts — hinted straight into the buffer the round's leaf sponge reads — and (Cut
+/// E2) two cells after them, allocated only, where `FOLD` writes the round's folded value.
 fn read_commit_openings<S: VerifierShape>(b: &mut Builder, shape: &S) -> Vec<Array<Felt>> {
     shape
         .log_arities()
         .iter()
-        .map(|&la| b.hint_array((1usize << la) * 2 + SALT_ELEMS))
+        .map(|&la| b.hint_array_padded((1usize << la) * 2 + SALT_ELEMS, 2))
         .collect()
 }
+const _: () = assert!(crate::isa::FOLD_SALT_CELLS as usize == SALT_ELEMS);
 
 /// One query's run of `Segment::CommitPhasePaths`: per round, the restored path's siblings.
 fn read_commit_paths<S: VerifierShape>(b: &mut Builder, shape: &S) -> Vec<Array<Felt>> {
@@ -652,7 +654,7 @@ fn emit_query<S: VerifierShape>(
         b.span("select", |b| own_slot_check(b, msg, own, folded, &format!("commit phase own slot[{r}]")));
         shift += la;
         let group_bits = &index_bits[shift..shift + log_folded];
-        folded = b.span("fold_round", |b| emit_fold_dispatch(b, log_folded, la, group_bits, betas[r], msg));
+        folded = b.span("fold_round", |b| fold_eval(b, log_folded, la, group_bits, betas[r], msg));
         b.span("commit_root", |b| {
             emit_commit_root(b, la, msg, commit_paths[r], &index_bits[shift..], fri_caps[r], &format!("commit phase root[{r}]"))
         });
@@ -711,11 +713,22 @@ pub fn own_slot_check(b: &mut Builder, msg: Ptr, own: &[Felt], folded: Ext, name
     b.assert_zero(d1, name);
 }
 
-/// One fold round over the committed row at `msg`. Until Cut E2: load the row and run the compiled
-/// barycentric fold, under both switches.
-fn emit_fold_dispatch(b: &mut Builder, log_folded: usize, la: usize, group_bits: &[Felt], beta: Ext, msg: Ptr) -> Ext {
-    let evals: Vec<Ext> = (0..1usize << la).map(|j| b.load_ext(msg, 2 * j as i64)).collect();
-    emit_fold_round(b, log_folded, la, group_bits, beta, &evals)
+/// One fold round over the committed row at `msg`. `Off` (the reference): load the row, run the
+/// compiled barycentric fold. `On` (Cut E2): `u = β·s⁻¹` on the cpu — `s` the coset's first point,
+/// one `INV`, one `EMULF` — and the inverse DFT plus Horner in the reduce chip's fold run.
+pub fn fold_eval(b: &mut Builder, log_folded: usize, la: usize, group_bits: &[Felt], beta: Ext, msg: Ptr) -> Ext {
+    match b.precompiles() {
+        Precompiles::Off => {
+            let evals: Vec<Ext> = (0..1usize << la).map(|j| b.load_ext(msg, 2 * j as i64)).collect();
+            emit_fold_round(b, log_folded, la, group_bits, beta, &evals)
+        }
+        Precompiles::On => {
+            let s = bit_selected_power(b, F::two_adic_generator(log_folded + la), log_folded, group_bits, F::ONE);
+            let s_inv = b.inv(s);
+            let u = b.ext_mul_base(beta, s_inv);
+            b.fold_run(msg, 1usize << la, u)
+        }
+    }
 }
 
 /// One input round's Merkle authentication, `verify_batch`'s loop with the pruned multiproof

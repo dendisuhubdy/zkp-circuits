@@ -10,9 +10,9 @@ pub mod reduce;
 pub type F = p3_goldilocks::Goldilocks;
 
 /// Bus catalogue. A bus is a name; the batch verifier checks every bus balances.
-/// Ten buses (Cut D adds `REDUCE_LAYOUT`; plan R7), not spec §5's four: the public table, the
-/// sponge and compress row kinds and the reduce chip each need their own channel, and `MEMORY`
-/// splits into `REG`/`RAM` (R4).
+/// Twelve buses (Cut D adds `REDUCE_LAYOUT`, Cut E2 `FOLD` and `FOLD_COEFF`; plan R7), not spec
+/// §5's four: the public table, the sponge and compress row kinds and the reduce chip each need
+/// their own channel, and `MEMORY` splits into `REG`/`RAM` (R4).
 pub mod bus {
     use p3_lookup::{LookupBus, PermutationCheckBus};
     /// cpu/chips ↔ register memory: (addr, ts, value, is_write), addr = 2^24 + idx, idx < 32.
@@ -43,6 +43,11 @@ pub mod bus {
     pub const REDUCE_LAYOUT: LookupBus<'static> = LookupBus::new("REDUCE_LAYOUT");
     /// cpu (COMPRESS rows) → poseidon2: (clk, state_ptr, sib_ptr, bit). Cut C: one Merkle level.
     pub const COMPRESS: LookupBus<'static> = LookupBus::new("COMPRESS");
+    /// cpu (FOLD rows) → reduce (Cut E2): (clk, msg, u0, u1, arity). One fold run per dispatch.
+    pub const FOLD: LookupBus<'static> = LookupBus::new("FOLD");
+    /// reduce → reduce (Cut E2): (arity, k, c0..c7). The preprocessed coefficient table provides
+    /// (14 rows: arity 2, 4, 8), each phase-1 fold row consumes its own.
+    pub const FOLD_COEFF: LookupBus<'static> = LookupBus::new("FOLD_COEFF");
 }
 
 /// Next power of two ≥ n, at least `min` — `research/src/tables/mod.rs`'s helper, verbatim.

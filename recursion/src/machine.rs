@@ -52,7 +52,7 @@ use crate::tables::poseidon2::{poseidon2_log_height, poseidon2_trace, Poseidon2A
 use crate::tables::program::{program_trace, ProgramAir};
 use crate::tables::public::{public_trace, PublicAir, NUM_PUBLIC_VALUES};
 use crate::tables::range::{range_trace, RangeAir, RangeCounts};
-use crate::tables::reduce::{provider_rows, reduce_events, reduce_log_height, reduce_rows, reduce_trace, ReduceAir};
+use crate::tables::reduce::{fold_events, fold_rows, provider_rows, reduce_events, reduce_log_height, reduce_rows, reduce_trace, ReduceAir};
 
 /// The labels of the rVM's `key_config` salt streams (HCS-1, constraint set 7) — `research`'s
 /// `key_derivation_v2::MMCS_LABEL`/`PCS_LABEL` role over a different artifact family, so different
@@ -401,7 +401,7 @@ fn check_instr(instr: &Instr) -> Result<(), DecodeError> {
     match instr.op {
         Op::Eadd | Op::Esub | Op::Emul => { pair(instr.rd, "rd")?; pair(instr.ra, "ra")?; pair(instr.rb(), "rb")?; }
         Op::Emulf | Op::Einv => { pair(instr.rd, "rd")?; pair(instr.ra, "ra")?; }
-        Op::Loade | Op::Storee | Op::Hinte => { pair(instr.rd, "rd")?; }
+        Op::Loade | Op::Storee | Op::Hinte | Op::Fold => { pair(instr.rd, "rd")?; }
         _ => {}
     }
     Ok(())
@@ -463,8 +463,9 @@ pub fn build_traces(program: &Program, exec: &Execution, tier: Tier) -> Result<T
     let program_t = program_trace(program, &exec.events, 1 << program_log_height(program.instrs.len()));
     let public = public_trace(&exec.public, crate::tables::public::HEIGHT);
     let reduce_evs = reduce_events(&exec.events);
-    let reduce_lh = reduce_log_height(reduce_rows(&reduce_evs), provider_rows(&program.reduce_layout));
-    let reduce = if reduce_lh == 0 { None } else { Some(reduce_trace(&program.reduce_layout, &reduce_evs, 1 << reduce_lh)) };
+    let fold_evs = fold_events(&exec.events);
+    let reduce_lh = reduce_log_height(reduce_rows(&reduce_evs) + fold_rows(&fold_evs), provider_rows(&program.reduce_layout));
+    let reduce = if reduce_lh == 0 { None } else { Some(reduce_trace(&program.reduce_layout, &reduce_evs, &fold_evs, 1 << reduce_lh)) };
     let range = range_trace(&counts);
     Ok(Traces {
         program: program_t,

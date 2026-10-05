@@ -35,6 +35,13 @@ pub const TS_RUN_PX: u32 = 13;
 pub const TS_RES0: u32 = 14;
 pub const TS_RES1: u32 = 15;
 
+/// A `FOLD` run's slots (Cut E2): every phase-1 row reads its value at slots 0–1 (distinct
+/// addresses per row), the last row writes the result at 14–15.
+pub const TS_FOLD_Y0: u32 = 0;
+pub const TS_FOLD_Y1: u32 = 1;
+pub const TS_FOLD_RES0: u32 = 14;
+pub const TS_FOLD_RES1: u32 = 15;
+
 /// One cell read or written, at the timestamp `16·clk + k` of its slot in the row.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct MemAccess {
@@ -81,6 +88,16 @@ pub struct ReduceEvent {
     pub apow_out: [F; 2],
 }
 
+/// One `FOLD` dispatch (Cut E2): the row it read, the point, the result.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FoldEvent {
+    pub msg: u64,
+    pub arity: u32,
+    pub u: [F; 2],
+    pub ys: [[F; 2]; 8],
+    pub out: [F; 2],
+}
+
 /// The state a carrying entry hands to the next row's `REDUCE`.
 #[derive(Clone, Copy)]
 struct ReduceCarry {
@@ -110,6 +127,7 @@ pub struct Event {
     pub mem: Vec<MemAccess>,
     pub perm: Option<PermEvent>,
     pub reduce: Option<ReduceEvent>,
+    pub fold: Option<FoldEvent>,
 }
 
 /// A completed run: the event log, the public values the program appended, the number of witness
@@ -173,6 +191,8 @@ pub enum ExecError {
     /// a program that hands it anything else is a build-time mistake (the chip's `BIT` is
     /// boolean, so the row would be unprovable anyway).
     NonBooleanBit { pc: u32 },
+    /// A FOLD whose immediate is not 2, 4 or 8.
+    FoldArity { pc: u32, arity: u64 },
 }
 
 /// Run `p` against `witness` for at most `max_cycles` instructions.
@@ -213,6 +233,7 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
         let mut mems: Vec<MemAccess> = Vec::new();
         let mut perm = None;
         let mut reduce = None;
+        let mut fold = None;
         let mut a = [F::ZERO; 2];
         let mut b_val = if op.b_is_register() { [F::ZERO; 2] } else { [instr.b, F::ZERO] };
         let mut d = [F::ZERO; 2];
@@ -476,13 +497,37 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
                 }
                 perm = Some(PermEvent { ptr, input, output, kind: PermKind::Compress { sib, bit } });
             }
+            Op::Fold => {
+                pair(instr.rd, "rd", pc)?;
+                a[0] = regs[ra];
+                d = [regs[rd], regs[rd + 1]];
+                let arity = instr.b.as_canonical_u64();
+                if !matches!(arity, 2 | 4 | 8) {
+                    return Err(ExecError::FoldArity { pc, arity });
+                }
+                let msg = a[0].as_canonical_u64();
+                let res = msg + 2 * arity + crate::isa::FOLD_SALT_CELLS;
+                bounded(pc, res + 1)?;
+                let mut ys = [[F::ZERO; 2]; 8];
+                for (k, y) in ys.iter_mut().enumerate().take(arity as usize) {
+                    *y = [
+                        read_at(&mem, &mut mems, clk, TS_FOLD_Y0, msg + 2 * k as u64),
+                        read_at(&mem, &mut mems, clk, TS_FOLD_Y1, msg + 2 * k as u64 + 1),
+                    ];
+                }
+                let yse: Vec<EF> = ys[..arity as usize].iter().map(|y| ext(*y)).collect();
+                let out = parts(fold_dft_horner(&yse, ext(d)));
+                write_at(&mut mem, &mut mems, clk, TS_FOLD_RES0, res, out[0]);
+                write_at(&mut mem, &mut mems, clk, TS_FOLD_RES1, res + 1, out[1]);
+                fold = Some(FoldEvent { msg, arity: arity as u32, u: d, ys, out });
+            }
             Op::Halt => next_pc = pc,
         }
 
         for access in &mems {
             run.max_addr = run.max_addr.max(access.addr);
         }
-        run.events.push(Event { clk, pc, next_pc, instr, a, b_val, d, mem: mems, perm, reduce });
+        run.events.push(Event { clk, pc, next_pc, instr, a, b_val, d, mem: mems, perm, reduce, fold });
         if op == Op::Halt {
             return Ok(run);
         }
@@ -511,6 +556,31 @@ fn ext(c: [F; 2]) -> EF {
 fn parts(x: EF) -> [F; 2] {
     let c = x.as_basis_coefficients_slice();
     [c[0], c[1]]
+}
+
+/// The fold run's coefficient table for one arity (Cut E2): row `k` (the row reading `y_k`),
+/// column `j` = `(1/a)·c_k^{−(a−1−j)}`, `c_k = g_a^{rev(k)}`, zero for `j ≥ a` — so after the
+/// phase-1 rows, accumulator `j` holds `B_{a−1−j}` (the inverse DFT, spec §2.3) and phase 2's
+/// Horner reads them top coefficient first.
+pub fn fold_coefficients(log_arity: usize) -> Vec<[F; 8]> {
+    use p3_field::TwoAdicField;
+    let a = 1usize << log_arity;
+    let g = F::two_adic_generator(log_arity);
+    let inv_a = F::from_usize(a).inverse();
+    (0..a)
+        .map(|k| {
+            let w = g.exp_u64(p3_util::reverse_bits_len(k, log_arity) as u64).inverse();
+            core::array::from_fn(|j| if j < a { inv_a * w.exp_u64((a - 1 - j) as u64) } else { F::ZERO })
+        })
+        .collect()
+}
+
+/// `Σ_m B_m·u^m` through [`fold_coefficients`] — the emulator's fold, and so the chip's
+/// reference. `tests/fold_identity.rs` pins it to `TwoAdicFriFolding::fold_row`.
+pub fn fold_dft_horner(ys: &[EF], u: EF) -> EF {
+    let c = fold_coefficients(ys.len().trailing_zeros() as usize);
+    let d: Vec<EF> = (0..ys.len()).map(|j| ys.iter().zip(&c).fold(EF::ZERO, |acc, (y, row)| acc + *y * row[j])).collect();
+    d.iter().fold(EF::ZERO, |acc, &dj| acc * u + dj)
 }
 
 fn reg(idx: u8, slot: &'static str, pc: u32) -> Result<u8, ExecError> {

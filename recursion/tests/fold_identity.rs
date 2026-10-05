@@ -47,3 +47,21 @@ fn the_fold_is_an_inverse_dft_then_horner_at_every_arity() {
         }
     }
 }
+
+/// Cut E2: the emulator's fold (the chip's coefficient table, then Horner) is `fold_row`.
+#[test]
+fn the_emulators_fold_is_fold_row() {
+    let folding: TwoAdicFriFolding<(), ()> = TwoAdicFriFolding(PhantomData);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x0f02d);
+    for la in 1..=3usize {
+        for _ in 0..256 {
+            let log_height = rng.random_range(1..=20usize);
+            let index = rng.random_range(0..1usize << log_height);
+            let beta = common::random_ext(&mut rng);
+            let ys: Vec<EF> = (0..1usize << la).map(|_| common::random_ext(&mut rng)).collect();
+            let s = F::two_adic_generator(log_height + la).exp_u64(reverse_bits_len(index, log_height) as u64);
+            let want = <TwoAdicFriFolding<(), ()> as FriFoldingStrategy<F, EF>>::fold_row(&folding, index, log_height, la, beta, ys.iter().copied());
+            assert_eq!(recursion::emulator::fold_dft_horner(&ys, beta * s.inverse()), want, "la {la}");
+        }
+    }
+}

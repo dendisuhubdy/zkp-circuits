@@ -378,3 +378,60 @@ fn the_own_slot_check_agrees_on_and_off_at_every_slot() {
         }
     }
 }
+
+/// Cut E2 (Review Focus 5): fold runs of every arity back to back in one table, and a run at
+/// u = 0, prove and verify — the K counter, the phase switch and the coefficient lookups across
+/// run boundaries.
+#[test]
+fn fold_runs_of_every_arity_back_to_back_prove_and_verify() {
+    use p3_field::Field;
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(29);
+    let mut runs = vec![];
+    for la in [1usize, 2, 3, 3, 1] {
+        runs.push((la, (0..1usize << la).map(|_| common::random_ext(&mut rng)).collect::<Vec<EF>>(), common::random_ext(&mut rng)));
+    }
+    runs[3].2 = EF::ZERO;
+    let (p, want) = common::fold_program(&runs);
+    let m = Machine::new(FriProfile::Test);
+    let (proof, exec) = m.prove(&p, &[], None).unwrap();
+    m.verify(&p, &proof).unwrap();
+    assert_eq!(exec.public[..2].to_vec(), want[0].as_basis_coefficients_slice().to_vec());
+    let b0 = runs[3].1.iter().fold(EF::ZERO, |acc, y| acc + *y) * F::from_u64(8).inverse();
+    assert_eq!(want[3], b0, "at u = 0 the fold is B_0, the row's mean");
+}
+
+/// Cut E2: the chip fold equals the compiled barycentric fold and `fold_row`, at every arity.
+#[test]
+fn fold_via_the_chip_matches_the_compiled_fold() {
+    use recursion::dsl::Liveness;
+    use recursion::programs::{fold_eval, Precompiles};
+    use p3_fri::{FriFoldingStrategy, TwoAdicFriFolding};
+    let folding: TwoAdicFriFolding<(), ()> = TwoAdicFriFolding(std::marker::PhantomData);
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(30);
+    for la in 1..=3usize {
+        for _ in 0..8 {
+            let log_folded = 6usize;
+            let index: usize = rand::RngExt::random_range(&mut rng, 0..1usize << log_folded);
+            let beta = common::random_ext(&mut rng);
+            let row: Vec<EF> = (0..1usize << la).map(|_| common::random_ext(&mut rng)).collect();
+            let want = <TwoAdicFriFolding<(), ()> as FriFoldingStrategy<F, EF>>::fold_row(&folding, index, log_folded, la, beta, row.iter().copied());
+            let run = |pc: Precompiles| {
+                let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, pc);
+                let msg = b.alloc(2 * (1 << la) + 6);
+                for (j, v) in row.iter().enumerate() {
+                    let c = b.ext_constant(*v);
+                    b.store_ext(msg, 2 * j as i64, c);
+                }
+                let bits: Vec<recursion::dsl::Felt> = (0..log_folded).map(|k| b.constant(F::from_u64(((index >> k) & 1) as u64))).collect();
+                let be = b.ext_constant(beta);
+                let out = fold_eval(&mut b, log_folded, la, &bits, be, msg);
+                b.public_ext(out);
+                b.public_ext(out);
+                let got = execute(&b.finish(), &[], 1_000_000).unwrap().public;
+                ef([got[0], got[1]])
+            };
+            assert_eq!(run(Precompiles::Off), want, "compiled, la {la}");
+            assert_eq!(run(Precompiles::On), want, "the chip, la {la}");
+        }
+    }
+}

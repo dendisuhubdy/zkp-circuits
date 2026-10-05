@@ -36,7 +36,8 @@ const MAX_CYCLES: usize = 1 << 24;
 /// permutation's four rows: 235 + 43 − 4 = 274. Phase 2's row cuts (2026-10-03) leave it at 274:
 /// the cuts are inside the per-proof pipeline, the loop scaffolding around it is unchanged
 /// (re-measured: N=1 231 224 = 230 950 + 274). Phase 3's Cut D leaves it at 274 for the same reason
-/// (re-measured: N=1 202 472 = 202 198 + 274), and Cut E1 too (re-measured: N=1 193 256 = 192 982 + 274).
+/// (re-measured: N=1 202 472 = 202 198 + 274), Cut E1 too (re-measured: N=1 193 256 = 192 982 + 274),
+/// and Cut E2 (re-measured: N=1 185 480 = 185 206 + 274).
 const LOOP_OVERHEAD: usize = 274;
 
 /// The N=3 total, measured on this tree. The per-N total is *not* a clean multiple of the
@@ -51,8 +52,9 @@ const LOOP_OVERHEAD: usize = 274;
 /// `docs/04-phase2-row-cuts.md`): 1 385 968 → 692 854, re-measured into `tests/pins.json`. Phase 3's
 /// Cut D (the reduce layout, one chain per height per query; `docs/06-phase3-fold-reduce.md`):
 /// 692 854 → 606 598, re-measured the same way. Cut E1 (the committed row hinted whole, its own
-/// slot checked by one register-addressed `LOADE`): 606 598 → 578 950.
-const N3_ROWS: usize = 578_950;
+/// slot checked by one register-addressed `LOADE`): 606 598 → 578 950. Cut E2 (`FOLD`, the fold in the
+/// reduce chip): 578 950 → 555 622.
+const N3_ROWS: usize = 555_622;
 
 fn shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
     let shape = InnerShape::of(
@@ -352,7 +354,7 @@ fn a_one_proof_aggregate_round_trips_and_tampered_variants_are_refused() {
     let m = RvmMachine::new(FriProfile::Test);
     let a = aggregate(&m, &vk, std::slice::from_ref(&p.proof), &common::TEST_BINDING, None)
         .expect("one real bundle proof aggregates");
-    assert_eq!(a.proof.tier, RvmTier(18), "the test-profile N=1 aggregate lands at tier 18 (193 256 rows since phase 3's Cut E1, 202 472 after Cut D, 231 224 before; tier 19 before phase 2's row cuts)");
+    assert_eq!(a.proof.tier, RvmTier(18), "the test-profile N=1 aggregate lands at tier 18 (185 480 rows since phase 3's Cut E2, 193 256 after Cut E1, 202 472 after Cut D, 231 224 before; tier 19 before phase 2's row cuts)");
     eprintln!("N=1 aggregate proof: {} bytes", a.proof.size());
     let program = aggregate_program(&vk);
     let outs = verify_aggregate(&m, &program, &a, &common::TEST_BINDING).expect("the aggregate verifies");
@@ -504,7 +506,7 @@ fn two_test_profile_bundle_proofs_aggregate_and_verify_natively() {
     let vk = inner_vk(&shape, &key);
     let m = RvmMachine::new(FriProfile::Test);
     let a = aggregate(&m, &vk, &proofs, &common::TEST_BINDING, None).expect("two real bundle proofs aggregate");
-    assert_eq!(a.proof.tier, RvmTier(19), "the test-profile N=2 aggregate lands at tier 19 (386 103 rows since phase 3's Cut E1, 404 535 after Cut D, 462 039 before; tier 20 before phase 2's row cuts)");
+    assert_eq!(a.proof.tier, RvmTier(19), "the test-profile N=2 aggregate lands at tier 19 (370 551 rows since phase 3's Cut E2, 386 103 after Cut E1, 404 535 after Cut D, 462 039 before; tier 20 before phase 2's row cuts)");
     eprintln!("N=2 aggregate proof: {} bytes", a.proof.size());
     let outs = verify_aggregate(&m, &aggregate_program(&vk), &a, &common::TEST_BINDING).expect("the aggregate verifies");
     assert_eq!(outs.len(), 2);
@@ -534,7 +536,7 @@ fn twin_three_test_profile_bundle_proofs_aggregate_and_verify_natively() {
     let t0 = std::time::Instant::now();
     let a = aggregate(&m, &vk, &proofs, &common::TEST_BINDING, None).expect("three real bundle proofs aggregate");
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(a.proof.tier, RvmTier(20), "the test-profile N=3 aggregate lands at tier 20 (578 950 rows since phase 3's Cut E1, 606 598 after Cut D, 692 854 before; tier 21 before phase 2's row cuts)");
+    assert_eq!(a.proof.tier, RvmTier(20), "the test-profile N=3 aggregate lands at tier 20 (555 622 rows since phase 3's Cut E2, 578 950 after Cut E1, 606 598 after Cut D, 692 854 before; tier 21 before phase 2's row cuts)");
     let t1 = std::time::Instant::now();
     let outs = verify_aggregate(&m, &aggregate_program(&vk), &a, &common::TEST_BINDING).expect("the aggregate verifies");
     let verify_s = t1.elapsed().as_secs_f64();
@@ -632,6 +634,8 @@ fn the_per_n_cycle_budget_is_pinned() {
 /// cuts: `1831f036…ddd7` → `c90b3f0a…74d8`. Re-registered for phase 3's Cut D (the reduce
 /// layout, `docs/06-phase3-fold-reduce.md`): `c90b3f0a…74d8` → `a183de6e…6637`. Re-registered for
 /// phase 3's Cut E1 (the committed row hinted whole): `a183de6e…6637` → `9a619401…e649`.
+/// Re-registered for phase 3's Cut E2 (`FOLD`, the fold in the reduce chip): `9a619401…e649` →
+/// `b362024c…fc55`.
 #[test]
 #[ignore = "a production-profile fixture proof plus a ~2M-row emulation: the M5.2 budget test's own cost class"]
 fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
@@ -655,7 +659,7 @@ fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
     assert_eq!(single_rows, common::pins().cpu_rows, "the M5.2 pin still holds");
     assert_eq!(
         recursion::programs::digest_hex(&verify_rv32n(&shape, &key, Checkpoints::Off).program),
-        "9a619401b2516850b9624d9ff2c6224084d79f324f3f48f396cf9662e4c0e649",
+        "b362024cd8ed4892d3e1f94610957fbe3594e2b8e263b25f0b759f640a94fc55",
         "the aggregate program's digest at the production bundle shape, as docs/02 and docs/04 state it"
     );
     let r = common::measure_aggregate(1, FriProfile::Production);

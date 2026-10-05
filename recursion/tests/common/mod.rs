@@ -577,6 +577,16 @@ pub fn every_chip_program() -> recursion::isa::Program {
     v.push(Instr { op: Op::Reduce, rd: 0, ra: 0, b: F::ZERO });
     v.push(Instr { op: Op::Faddi, rd: 7, ra: 0, b: F::from_u64(64) });
     v.push(Instr { op: Op::Poseidon2, rd: 0, ra: 7, b: F::ZERO });
+    // Cut E2: one arity-2 fold of the row (1, 0) (2, 0) at cells 300–303, u = 3 — the fold kind's
+    // result write (cells 308–309) is then covered by the write and padding rules too.
+    st(&mut v, 300, 1);
+    v.push(Instr { op: Op::Store, rd: 0, ra: 0, b: F::from_u64(301) });
+    st(&mut v, 302, 2);
+    v.push(Instr { op: Op::Store, rd: 0, ra: 0, b: F::from_u64(303) });
+    v.push(Instr { op: Op::Faddi, rd: 2, ra: 0, b: F::from_u64(3) });
+    v.push(Instr { op: Op::Faddi, rd: 3, ra: 0, b: F::ZERO });
+    v.push(Instr { op: Op::Faddi, rd: 4, ra: 0, b: F::from_u64(300) });
+    v.push(Instr { op: Op::Fold, rd: 2, ra: 4, b: F::from_u64(2) });
     for _ in 0..4 {
         v.push(Instr { op: Op::Public, rd: 0, ra: 0, b: F::ZERO });
     }
@@ -769,4 +779,34 @@ pub fn phase3_attribution() -> Phase3Attribution {
         }
     }
     out
+}
+
+/// Cut E2's honest fold program: each run's row stored at its own base, `u` in r2/r3, the base in
+/// r4, one `FOLD`; the first run's result published twice. Returns the program and every run's
+/// expected value (`emulator::fold_dft_horner`).
+#[allow(dead_code)]
+pub fn fold_program(runs: &[(usize, Vec<recursion::isa::EF>, recursion::isa::EF)]) -> (recursion::isa::Program, Vec<recursion::isa::EF>) {
+    use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
+    use recursion::isa::{Instr, Op, Program, F};
+    let i = |op: Op, rd: u8, ra: u8, b: F| Instr { op, rd, ra, b };
+    let (mut v, mut want, mut base, mut first_res) = (vec![], vec![], 300u64, 0u64);
+    for (la, ys, u) in runs {
+        let a = 1u64 << la;
+        for (k, y) in ys.iter().enumerate() {
+            for (l, w) in y.as_basis_coefficients_slice().iter().enumerate() {
+                v.push(i(Op::Faddi, 1, 0, *w));
+                v.push(i(Op::Store, 1, 0, F::from_u64(base + 2 * k as u64 + l as u64)));
+            }
+        }
+        let uc = u.as_basis_coefficients_slice();
+        v.extend([i(Op::Faddi, 2, 0, uc[0]), i(Op::Faddi, 3, 0, uc[1]), i(Op::Faddi, 4, 0, F::from_u64(base)), i(Op::Fold, 2, 4, F::from_u64(a))]);
+        want.push(recursion::emulator::fold_dft_horner(ys, *u));
+        if first_res == 0 {
+            first_res = base + 2 * a + 4;
+        }
+        base += 2 * a + 4 + 2 + 10;
+    }
+    v.extend([i(Op::Loade, 6, 0, F::from_u64(first_res)), i(Op::Public, 0, 6, F::ZERO), i(Op::Public, 0, 7, F::ZERO)]);
+    v.extend([i(Op::Public, 0, 6, F::ZERO), i(Op::Public, 0, 7, F::ZERO), i(Op::Halt, 0, 0, F::ZERO)]);
+    (Program { instrs: v, checkpoints: vec![], reduce_layout: vec![] }, want)
 }

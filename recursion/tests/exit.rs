@@ -322,7 +322,7 @@ fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_ver
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 192_982, "the twin proves the post-cut program as measured (phase 3's Cut E1: the N=1 aggregate pin 193 256 less the 274-row loop overhead; 202 198 after Cut D; 230 950 after phase 2's row cuts; 461 988 at tier 19 in constraint set 8, 461 082 in constraint set 7 with VERIFIER-1, 441 643 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 185_206, "the twin proves the post-cut program as measured (phase 3's Cut E2: the N=1 aggregate pin 185 480 less the 274-row loop overhead; 192 982 after Cut E1; 202 198 after Cut D; 230 950 after phase 2's row cuts; 461 988 at tier 19 in constraint set 8, 461 082 in constraint set 7 with VERIFIER-1, 441 643 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(18));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();
@@ -366,7 +366,7 @@ fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 703_766, "the exit proves the post-cut program as measured (phase 3's Cut E1, `tests/pins.json`; 749 846 after Cut D; 893 606 after phase 2's row cuts; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 664_886, "the exit proves the post-cut program as measured (phase 3's Cut E2, `tests/pins.json`; 703 766 after Cut E1; 749 846 after Cut D; 893 606 after phase 2's row cuts; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(20));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();
