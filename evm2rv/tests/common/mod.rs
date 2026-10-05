@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+pub mod directed;
 pub mod host;
 
 use std::path::{Path, PathBuf};
@@ -213,6 +214,51 @@ pub fn run_tier(image: &Path, inputs: &[u32]) -> ([u32; 8], usize, Option<u32>) 
         .find_map(|l| l.strip_prefix("tier "))
         .map(|t| t.parse().unwrap());
     (out, cycles, tier)
+}
+
+/// `code` with every push laundered (Task 8 review, Important 1): after each `PUSHn`,
+/// `CALLDATASIZE DUP1 XOR XOR` (x ^ (cs ^ cs) = x, as `gen::launder` does), so the word is known
+/// only at run time. Stage two folds a directed case's constant operands away at translation; its
+/// laundered twin reaches the runtime (`u256.c`, the jump dispatch) through stage two's emitter.
+/// A push whose value is a `JUMPDEST`'s pc is moved to that `JUMPDEST`'s new pc, so a valid jump
+/// stays valid.
+pub fn launder(code: &[u8]) -> Vec<u8> {
+    let jds = evm2rv::blocks::jumpdests(code);
+    let mut out = Vec::new();
+    let mut new_pc = vec![0usize; code.len() + 1];
+    let mut pushes: Vec<(usize, usize, usize)> = Vec::new(); // (new offset of the immediate, n, old pc)
+    let mut i = 0;
+    while i < code.len() {
+        new_pc[i] = out.len();
+        let op = code[i];
+        out.push(op);
+        if (0x5f..=0x7f).contains(&op) {
+            let n = (op - 0x5f) as usize;
+            pushes.push((out.len(), n, i));
+            for k in 0..n {
+                out.push(code.get(i + 1 + k).copied().unwrap_or(0));
+            }
+            out.extend_from_slice(&[0x36, 0x80, 0x18, 0x18]);
+            i += 1 + n;
+        } else {
+            i += 1;
+        }
+    }
+    for (at, n, _) in pushes {
+        if n == 0 || n > 8 {
+            continue;
+        }
+        let v = out[at..at + n].iter().fold(0u64, |v, &b| v << 8 | b as u64) as usize;
+        if jds.binary_search(&v).is_ok() {
+            let t = new_pc[v] as u64;
+            if n == 8 || t < 1 << (8 * n) {
+                for k in 0..n {
+                    out[at + k] = (t >> (8 * (n - 1 - k))) as u8;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The halt as the `emit-outcome` build encodes it: the `ffi.rs` code, a trap's opcode above it.
