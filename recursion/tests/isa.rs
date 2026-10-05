@@ -49,6 +49,7 @@ fn a_program_digest_is_one_permutation_per_instruction_and_binds_length() {
     let p = Program {
         instrs: vec![instr(Op::Faddi, 1, 0, 7), instr(Op::Halt, 0, 0, 0)],
         checkpoints: vec![],
+        reduce_layout: vec![],
     };
     assert_eq!(p.digest_rows(), 2);
 
@@ -63,8 +64,22 @@ fn a_program_digest_is_one_permutation_per_instruction_and_binds_length() {
     assert_eq!(p.digest(), <[F; 4]>::try_from(&state[..4]).unwrap());
 
     // A different length is a different digest even when the words agree on a prefix.
-    let q = Program { instrs: vec![instr(Op::Faddi, 1, 0, 7)], checkpoints: vec![] };
+    let q = Program { instrs: vec![instr(Op::Faddi, 1, 0, 7)], checkpoints: vec![], reduce_layout: vec![] };
     assert_ne!(p.digest(), q.digest());
     // The domain does not collide with any research domain (14 is the highest, SBPF_OUT).
     assert_eq!(RVM_PROGRAM_DOMAIN, 15);
+}
+
+/// Cut D: the reduce layout is part of the program's identity, absorbed after the instructions
+/// — and only when present, so a program without one keeps the digest it always had.
+#[test]
+fn the_reduce_layout_is_absorbed_into_the_digest_only_when_present() {
+    use recursion::isa::ReduceEntry;
+    let p = Program { instrs: vec![instr(Op::Faddi, 1, 0, 7), instr(Op::Halt, 0, 0, 0)], checkpoints: vec![], reduce_layout: vec![] };
+    let e = ReduceEntry { vals: 100, row: 120, len: 3, key: 210, alpha: 212, res: 214, chain_start: true, carry: false };
+    let q = Program { reduce_layout: vec![e], ..p.clone() };
+    let r = Program { reduce_layout: vec![ReduceEntry { res: 216, ..e }], ..p.clone() };
+    assert_ne!(p.digest(), q.digest(), "a layout changes the digest");
+    assert_ne!(q.digest(), r.digest(), "every layout field is bound");
+    assert_eq!(q.digest_rows(), 2 + 2, "two permutations per layout entry");
 }

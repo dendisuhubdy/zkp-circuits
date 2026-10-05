@@ -3,9 +3,9 @@
 //! refuse its malformed inputs at a named point.
 mod common;
 
-use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField64};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use rand::SeedableRng;
-use recursion::dsl::{Array, Builder, Checkpoints, Ext, Felt};
+use recursion::dsl::{Builder, Checkpoints};
 use recursion::emulator::{execute, ExecError};
 use recursion::isa::{EF, F};
 use recursion::programs::{reduce_compiled, run_reduce_sequence};
@@ -14,143 +14,157 @@ fn ef(c: [F; 2]) -> EF {
     EF::from_basis_coefficients_slice(&c).unwrap()
 }
 
-/// One `REDUCE` run through the DSL precompile, over hint-supplied arrays.
-fn reduce_via_precompile(vals: &[EF], row: &[F], inv: EF, acc: EF, apow: EF, alpha: EF) -> (EF, EF) {
-    let mut b = Builder::new(Checkpoints::Off);
-    let mut tape: Vec<F> = vec![];
-    let vals_a = b.hint_ext_array(vals.len());
-    for v in vals {
-        tape.extend_from_slice(v.as_basis_coefficients_slice());
-    }
-    let row_a = b.hint_array(row.len());
-    tape.extend_from_slice(row);
-    let inv = b.ext_constant(inv);
-    let acc = b.ext_constant(acc);
-    let apow = b.ext_constant(apow);
-    let alpha = b.ext_constant(alpha);
-    let (ro, ap) = b.reduce(vals_a, row_a, inv, acc, apow, alpha);
-    b.public_ext(ro);
-    b.public_ext(ap);
-    let (p, _) = b.finish_stats();
-    let got = execute(&p, &tape, 1_000_000).unwrap().public;
-    (ef([got[0], got[1]]), ef([got[2], got[3]]))
-}
+use recursion::machine::{FriProfile, Machine};
+use recursion::dsl::ReduceRun;
 
-/// The same run through the kept compiled loop (the differential reference).
-fn reduce_via_compiled(vals: &[EF], row: &[F], inv: EF, acc: EF, apow: EF, alpha: EF) -> (EF, EF) {
-    let mut b = Builder::new(Checkpoints::Off);
+/// A chain of runs through `Builder::reduce` (`On`) or the kept compiled loop (`Off`): the same
+/// hinted arrays, keys and alpha; the result published.
+fn reduce_chain(on: bool, runs: &[(Vec<EF>, Vec<F>, EF)], alpha: EF) -> (EF, recursion::isa::Program, Vec<F>) {
+    use recursion::dsl::Liveness;
+    use recursion::programs::Precompiles;
+    let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, if on { Precompiles::On } else { Precompiles::Off });
     let mut tape: Vec<F> = vec![];
-    let vals_a = b.hint_ext_array(vals.len());
-    for v in vals {
-        tape.extend_from_slice(v.as_basis_coefficients_slice());
+    let keys = b.alloc(2 + 2 * runs.len() as u64);
+    let res = b.alloc(2);
+    let a = b.ext_constant(alpha);
+    b.store_ext(keys, 0, a);
+    let mut arrays = vec![];
+    for (j, (vals, row, inv)) in runs.iter().enumerate() {
+        let va = b.hint_ext_array(vals.len());
+        for v in vals {
+            tape.extend_from_slice(v.as_basis_coefficients_slice());
+        }
+        let ra = b.hint_array(row.len());
+        tape.extend_from_slice(row);
+        let k = b.ext_constant(*inv);
+        b.store_ext(keys, 2 + 2 * j as i64, k);
+        arrays.push((va, ra));
     }
-    let row_a = b.hint_array(row.len());
-    tape.extend_from_slice(row);
-    let inv = b.ext_constant(inv);
-    let acc = b.ext_constant(acc);
-    let apow = b.ext_constant(apow);
-    let alpha = b.ext_constant(alpha);
-    let (ro, ap) = reduce_compiled(&mut b, vals_a, row_a, inv, acc, apow, alpha);
-    b.public_ext(ro);
-    b.public_ext(ap);
-    let (p, _) = b.finish_stats();
+    if on {
+        let chain: Vec<ReduceRun> = arrays.iter().enumerate().map(|(j, &(vals, row))| ReduceRun { vals, row, key: b.offset(keys, 2 + 2 * j as i64) }).collect();
+        b.reduce(&chain, keys, res);
+    } else {
+        let (mut acc, mut apow) = (b.ext_constant(EF::ZERO), b.ext_constant(EF::ONE));
+        for (j, &(vals, row)) in arrays.iter().enumerate() {
+            let inv = b.load_ext(keys, 2 + 2 * j as i64);
+            (acc, apow) = reduce_compiled(&mut b, vals, row, inv, acc, apow, a);
+        }
+        let _ = apow;
+        b.store_ext(res, 0, acc);
+    }
+    let out = b.load_ext(res, 0);
+    b.public_ext(out);
+    b.public_ext(out);
+    let p = b.finish();
     let got = execute(&p, &tape, 1_000_000).unwrap().public;
-    (ef([got[0], got[1]]), ef([got[2], got[3]]))
+    (ef([got[0], got[1]]), p, tape)
 }
 
 #[test]
 fn reduce_matches_the_compiled_sequence() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-    // Run lengths from one column to a wide committed row's worth, all point/height mixes the
-    // cs6 shape opens being structurally identical (`run.len` is the only run-to-run variable).
-    for len in [1usize, 2, 3, 7, 40, 121] {
-        for _ in 0..10 {
-            let vals: Vec<EF> = (0..len).map(|_| common::random_ext(&mut rng)).collect();
-            let row: Vec<F> = (0..len).map(|_| common::random_felt(&mut rng)).collect();
-            let inv = common::random_ext(&mut rng);
-            let acc = common::random_ext(&mut rng);
-            let apow = common::random_ext(&mut rng);
+    for lens in [vec![1usize], vec![3], vec![2, 1], vec![7, 40, 121], vec![1, 1, 1, 1]] {
+        for _ in 0..5 {
+            let runs: Vec<(Vec<EF>, Vec<F>, EF)> = lens
+                .iter()
+                .map(|&len| ((0..len).map(|_| common::random_ext(&mut rng)).collect(), (0..len).map(|_| common::random_felt(&mut rng)).collect(), common::random_ext(&mut rng)))
+                .collect();
             let alpha = common::random_ext(&mut rng);
-            let want = run_reduce_sequence(&vals, &row, inv, acc, apow, alpha);
-            assert_eq!(reduce_via_compiled(&vals, &row, inv, acc, apow, alpha), want,
-                       "the compiled loop must match the native reference (len {len})");
-            assert_eq!(reduce_via_precompile(&vals, &row, inv, acc, apow, alpha), want,
-                       "the REDUCE precompile must match the native reference (len {len})");
+            let (mut want, mut apow) = (EF::ZERO, EF::ONE);
+            for (vals, row, inv) in &runs {
+                (want, apow) = run_reduce_sequence(vals, row, *inv, want, apow, alpha);
+            }
+            assert_eq!(reduce_chain(false, &runs, alpha).0, want, "compiled, lens {lens:?}");
+            assert_eq!(reduce_chain(true, &runs, alpha).0, want, "the chain, lens {lens:?}");
         }
     }
 }
 
 #[test]
-fn reduce_refuses_a_zero_length_run() {
-    let mut b = Builder::new(Checkpoints::Off);
-    // Two zero-length arrays: the descriptor's `len` is 0, which is an emulator error, not a
-    // proof — the instruction-level twin of the named-checkpoint traps.
-    let vals_a = b.hint_ext_array(0);
-    let row_a = b.hint_array(0);
-    let one = b.ext_constant(EF::ONE);
-    let (ro, ap) = b.reduce(vals_a, row_a, one, one, one, one);
-    b.public_ext(ro);
-    b.public_ext(ap);
-    let (p, _) = b.finish_stats();
-    assert!(matches!(
-        execute(&p, &[], 1_000_000),
-        Err(ExecError::ReduceZeroLength { .. })
-    ));
-}
-
-// ── Task 8: the REDUCE precompile in proofs, and the keccak-pattern instance rule ─────────────
-use recursion::machine::{FriProfile, Machine};
-
-/// A small program with two chained `REDUCE` runs: the second's accumulator starts where the
-/// first's stopped (the descriptor write-back and the program's own chaining agree).
-fn two_run_program(vals1: &[EF], row1: &[F], vals2: &[EF], row2: &[F], inv: EF, alpha: EF) -> (recursion::isa::Program, Vec<F>) {
-    let mut b = Builder::new(Checkpoints::Off);
-    let mut tape: Vec<F> = vec![];
-    let vals1_a = b.hint_ext_array(vals1.len());
-    for v in vals1 {
-        tape.extend_from_slice(v.as_basis_coefficients_slice());
-    }
-    let row1_a = b.hint_array(row1.len());
-    tape.extend_from_slice(row1);
-    let vals2_a = b.hint_ext_array(vals2.len());
-    for v in vals2 {
-        tape.extend_from_slice(v.as_basis_coefficients_slice());
-    }
-    let row2_a = b.hint_array(row2.len());
-    tape.extend_from_slice(row2);
-    let inv = b.ext_constant(inv);
-    let zero = b.ext_constant(EF::ZERO);
-    let one = b.ext_constant(EF::ONE);
-    let alpha = b.ext_constant(alpha);
-    let (ro, ap) = b.reduce(vals1_a, row1_a, inv, zero, one, alpha);
-    let (ro, _ap) = b.reduce(vals2_a, row2_a, inv, ro, ap, alpha);
-    b.public_ext(ro);
-    b.public_ext(ro);
-    (b.finish(), tape)
+fn a_zero_length_layout_entry_is_an_emulator_error_and_illegal_at_registration() {
+    let mut p = common::reduce_chain_program(false);
+    p.reduce_layout[0].len = 0;
+    assert!(matches!(execute(&p, &[], 1_000), Err(ExecError::ReduceZeroLength { .. })));
+    assert_eq!(Machine::check_program(&p), Err(recursion::isa::DecodeError::Layout { entry: 0 }));
 }
 
 #[test]
 fn a_program_using_reduce_proves_and_verifies_with_the_chip_present() {
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(13);
-    let vals1: Vec<EF> = (0..7).map(|_| common::random_ext(&mut rng)).collect();
-    let row1: Vec<F> = (0..7).map(|_| common::random_felt(&mut rng)).collect();
-    let vals2: Vec<EF> = (0..3).map(|_| common::random_ext(&mut rng)).collect();
-    let row2: Vec<F> = (0..3).map(|_| common::random_felt(&mut rng)).collect();
-    let inv = common::random_ext(&mut rng);
+    let runs: Vec<(Vec<EF>, Vec<F>, EF)> = [7usize, 3]
+        .iter()
+        .map(|&len| ((0..len).map(|_| common::random_ext(&mut rng)).collect(), (0..len).map(|_| common::random_felt(&mut rng)).collect(), common::random_ext(&mut rng)))
+        .collect();
     let alpha = common::random_ext(&mut rng);
-    let (p, tape) = two_run_program(&vals1, &row1, &vals2, &row2, inv, alpha);
-
+    let (want, p, tape) = reduce_chain(true, &runs, alpha);
     let m = Machine::new(FriProfile::Test);
     let (proof, exec) = m.prove(&p, &tape, None).unwrap();
     assert!(proof.reduce_log_height > 0, "the reduce table is in this batch");
     m.verify(&p, &proof).unwrap();
+    assert_eq!(exec.public[..2].to_vec(), want.as_basis_coefficients_slice().to_vec());
+}
 
-    // And the value is the chained reduction, as the compiled sequence computes it.
-    let (want_ro, _) = {
-        let (ro, ap) = run_reduce_sequence(&vals1, &row1, inv, EF::ZERO, EF::ONE, alpha);
-        run_reduce_sequence(&vals2, &row2, inv, ro, ap, alpha)
-    };
-    assert_eq!(exec.public[..2].to_vec(), want_ro.as_basis_coefficients_slice().to_vec());
+/// Review Focus 3: one-column entries opening and closing a chain, and a lone one-column chain.
+#[test]
+fn one_column_entries_at_chain_start_and_end_prove_and_verify() {
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(14);
+    let m = Machine::new(FriProfile::Test);
+    for lens in [vec![1usize], vec![1, 4], vec![4, 1], vec![1, 1]] {
+        let runs: Vec<(Vec<EF>, Vec<F>, EF)> = lens
+            .iter()
+            .map(|&len| ((0..len).map(|_| common::random_ext(&mut rng)).collect(), (0..len).map(|_| common::random_felt(&mut rng)).collect(), common::random_ext(&mut rng)))
+            .collect();
+        let (_, p, tape) = reduce_chain(true, &runs, common::random_ext(&mut rng));
+        let (proof, _) = m.prove(&p, &tape, None).unwrap();
+        m.verify(&p, &proof).unwrap_or_else(|e| panic!("lens {lens:?}: {e:?}"));
+    }
+}
+
+/// Review Focus 2: a two-entry chain inside the aggregate's loop shape (`counted_loop_mem`, a tape
+/// count), run twice — every layout row's MULT is 2 and no carry crosses an iteration.
+#[test]
+fn a_reduce_chain_inside_a_counted_loop_proves_with_mult_n() {
+    use recursion::tables::reduce::col::MULT;
+    let mut b = Builder::new(Checkpoints::Off);
+    let n = b.hint();
+    let counter = b.alloc_absolute(1);
+    let keys = b.alloc_absolute(4);
+    let res = b.alloc_absolute(2);
+    let vals = b.alloc_absolute(6);
+    let row = b.alloc_absolute(3);
+    let acc_out = b.alloc_absolute(2);
+    b.counted_loop_mem(counter, n, |b| {
+        for k in 0..4 { let w = b.hint(); b.store(keys, k, w); }
+        for k in 0..6 { let w = b.hint(); b.store(vals, k, w); }
+        for k in 0..3 { let w = b.hint(); b.store(row, k, w); }
+        let va = recursion::dsl::Array::new(vals, 2, 2);
+        let ra = recursion::dsl::Array::new(row, 2, 1);
+        let vb = recursion::dsl::Array::new(b.offset(vals, 4), 1, 2);
+        let rb = recursion::dsl::Array::new(b.offset(row, 2), 1, 1);
+        let key = b.offset(keys, 2);
+        b.reduce(&[ReduceRun { vals: va, row: ra, key }, ReduceRun { vals: vb, row: rb, key }], keys, res);
+        let r = b.load_ext(res, 0);
+        let prev = b.load_ext(acc_out, 0);
+        let s = b.ext_add(prev, r);
+        b.store_ext(acc_out, 0, s);
+    });
+    let s = b.load_ext(acc_out, 0);
+    b.public_ext(s);
+    b.public_ext(s);
+    let p = b.finish();
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(15);
+    let mut tape = vec![F::from_u64(2)];
+    for _ in 0..2 {
+        tape.extend((0..13).map(|_| common::random_felt(&mut rng)));
+    }
+    let m = Machine::new(FriProfile::Test);
+    let (proof, exec) = m.prove(&p, &tape, None).unwrap();
+    m.verify(&p, &proof).unwrap();
+    let t = recursion::machine::build_traces(&p, &exec, proof.tier).unwrap();
+    let red = t.reduce.unwrap();
+    let w = recursion::tables::reduce::col::WIDTH;
+    assert_eq!(p.reduce_layout.len(), 2);
+    assert_eq!((red.values[MULT], red.values[w + MULT]), (F::TWO, F::TWO), "each entry ran once per iteration");
 }
 
 #[test]

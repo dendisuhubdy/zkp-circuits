@@ -341,7 +341,9 @@ where
         // ── the dispatched chips and the public interface ──
         bus::POSEIDON2.lookup_key(b, [v(CLK), v(A0)], Count::bounded(sel(Op::Poseidon2), 1));
         bus::SPONGE.lookup_key(b, [v(CLK), v(A0), v(B0)], Count::bounded(sel(Op::Sponge), 1));
-        bus::REDUCE.lookup_key(b, [v(CLK), v(A0)], Count::bounded(sel(Op::Reduce), 1));
+        // Cut D: the dispatch names a layout entry by the instruction's immediate (`B`, the fetched
+        // word the `PROGRAM` lookup binds) — no register carries an address.
+        bus::REDUCE.lookup_key(b, [v(CLK), v(B)], Count::bounded(sel(Op::Reduce), 1));
         // Cut C: the bit travels with the dispatch, so the chip's input order is the one `rd` held
         // (`D0`, bound by the `REG` read of `rd` above — `COMPRESS` is in `READ_RD`).
         bus::COMPRESS.lookup_key(b, [v(CLK), v(A0), v(B0), v(D0)], Count::bounded(sel(Op::Compress), 1));

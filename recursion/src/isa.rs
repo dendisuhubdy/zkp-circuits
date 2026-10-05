@@ -89,11 +89,10 @@ pub enum Op {
     Poseidon2,
     /// end the program
     Halt,
-    /// one run of the batch-opening reduction over the 11-cell descriptor at `ra`
-    /// (`[vals_base, row_base, len, inv(2), acc(2), apow(2), alpha(2)]`): `acc += Σ_k
-    /// apow·(vals_k − row_k)·inv` and `apow ·= alpha`, chained in and out through the
-    /// descriptor. The work is the `reduce` chip's; one cpu row per run. M5.2 Task 8, appended —
-    /// opcode 24; opcodes 0–23 never move.
+    /// one run of the batch-opening reduction: layout entry `imm` (Cut D, phase 3) — the chip
+    /// reads the run's columns, its inverse key, and at a chain start the batching challenge, all
+    /// at addresses the verifier key commits; a carrying entry hands its accumulator to entry
+    /// `imm + 1` on the next row, a closing one writes it to the entry's `res`. Opcode 24.
     Reduce,
     /// absorb the four cells at `rb..rb+4` into rate lanes 0..3 of the state at `ra..ra+8` and
     /// permute the state in place — one `PaddingFreeSponge` absorb block. The work is the
@@ -212,6 +211,8 @@ pub struct Instr {
 pub enum DecodeError {
     Opcode(u64),
     Register { slot: &'static str, value: u64 },
+    /// Cut D: a reduce-layout entry no run could have (zero length, a cell at or above 2^24, or a chain that does not hand over).
+    Layout { entry: u32 },
 }
 
 impl Instr {
@@ -248,6 +249,27 @@ fn reg(word: F, slot: &'static str) -> Result<u8, DecodeError> {
     Ok(value as u8)
 }
 
+/// One entry of a program's reduce layout (phase 3, Cut D): one run of the batch-opening
+/// reduction, every address a compile-time constant of the program. The reduce chip's
+/// preprocessed region holds the layout, so the verifier key commits it, and a `REDUCE`
+/// instruction names an entry by its index (the immediate) — a descriptor is never a witness
+/// value (spec §6 ruling 3). `vals` holds `len` extension values (2·len cells), `row` the `len`
+/// base cells, `key` the run's inverse key (2 cells), `alpha` the batching challenge (2 cells,
+/// read when `chain_start`), `res` the chain's result (2 cells, written when `!carry`).
+/// `carry` hands the accumulator and the running power to entry `id + 1`, dispatched on the very
+/// next cpu row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReduceEntry {
+    pub vals: u64,
+    pub row: u64,
+    pub len: u32,
+    pub key: u64,
+    pub alpha: u64,
+    pub res: u64,
+    pub chain_start: bool,
+    pub carry: bool,
+}
+
 /// A program: the instruction list, plus the builder's `pc -> name` table for the assertion
 /// traps, which is what makes "the program refused at *this* step" a checked claim.
 /// `checkpoints` is sorted by `pc` and carries no weight in the digest.
@@ -255,6 +277,8 @@ fn reg(word: F, slot: &'static str) -> Result<u8, DecodeError> {
 pub struct Program {
     pub instrs: Vec<Instr>,
     pub checkpoints: Vec<(u32, String)>,
+    /// Cut D: the reduce layout, committed by the verifier key and absorbed into [`Program::digest`].
+    pub reduce_layout: Vec<ReduceEntry>,
 }
 
 impl Program {
@@ -274,16 +298,29 @@ impl Program {
         let mut state = [F::ZERO; 8];
         state[4] = F::from_u64(RVM_PROGRAM_DOMAIN);
         state[5] = F::from_u64(self.instrs.len() as u64);
+        // Cut D: a program with a reduce layout absorbs its length into capacity lane 6 and then
+        // two blocks per entry after the instructions. A program without one keeps its digest.
+        if !self.reduce_layout.is_empty() {
+            state[6] = F::from_u64(self.reduce_layout.len() as u64);
+        }
         for instr in &self.instrs {
             state[..4].copy_from_slice(&instr.encode());
+            state = rand_zkvm::hash::permute_state(state);
+        }
+        for e in &self.reduce_layout {
+            state[..4].copy_from_slice(&[F::from_u64(e.vals), F::from_u64(e.row), F::from_u32(e.len), F::from_u64(e.key)]);
+            state = rand_zkvm::hash::permute_state(state);
+            let flags = e.chain_start as u64 + 2 * e.carry as u64;
+            state[..4].copy_from_slice(&[F::from_u64(e.alpha), F::from_u64(e.res), F::from_u64(flags), F::ZERO]);
             state = rand_zkvm::hash::permute_state(state);
         }
         [state[0], state[1], state[2], state[3]]
     }
 
-    /// The number of permutations [`Program::digest`] costs: one per instruction.
+    /// The number of permutations [`Program::digest`] costs: one per instruction, two per
+    /// reduce-layout entry (Cut D).
     pub fn digest_rows(&self) -> usize {
-        self.instrs.len()
+        self.instrs.len() + 2 * self.reduce_layout.len()
     }
 
     /// The name of the checkpoint at `pc`, if any — how `ExecError::InverseOfZero { pc }` from a

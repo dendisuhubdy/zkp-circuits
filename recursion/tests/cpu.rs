@@ -15,7 +15,7 @@ fn ir(op: Op, rd: u8, ra: u8, rb: u8) -> Instr {
     i(op, rd, ra, rb as u64)
 }
 fn prog(instrs: Vec<Instr>) -> Program {
-    Program { instrs, checkpoints: vec![] }
+    Program { instrs, checkpoints: vec![], reduce_layout: vec![] }
 }
 
 fn prove_and_verify(p: &Program, w: &[F]) -> (recursion::machine::Proof, recursion::emulator::Execution) {
@@ -449,7 +449,7 @@ fn every_value_the_cpu_row_writes_is_bound_on_every_opcode() {
 /// and `PUB_IDX` are the row chain's own, constrained by transitions, not operands.
 #[test]
 fn every_operand_a_dispatch_carries_is_read_from_a_register() {
-    use cpu::col::{CLK, PUB_IDX};
+    use cpu::col::{B, CLK, PUB_IDX};
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x43_5554_43);
     let (interactions, _) = common::symbolic_air(&cpu::CpuAir);
     let (msgs, _) = cpu_messages_and_constraints();
@@ -471,7 +471,8 @@ fn every_operand_a_dispatch_carries_is_read_from_a_register() {
             seen_compress |= op == Op::Compress && i.bus_name == bus::COMPRESS.name();
             for f in &i.fields {
                 let col = as_column(f).unwrap_or_else(|| panic!("a {} field is one column", i.bus_name));
-                if col != CLK && col != PUB_IDX && !reg_reads.contains(&col) {
+                // B is the fetched instruction word (bound by the PROGRAM lookup): REDUCE's entry id (Cut D).
+                if col != CLK && col != PUB_IDX && col != B && !reg_reads.contains(&col) {
                     failures.push(format!("{}: {} carries {} and no REG read binds it", op.mnemonic(), i.bus_name, col_name(col)));
                 }
             }

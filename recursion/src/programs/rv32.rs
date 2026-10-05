@@ -892,8 +892,8 @@ fn emit_reduced_openings<S: VerifierShape>(
                 (ro, alpha_pow) = match b.precompiles() {
                     // The compiled loop, kept as the precompile's differential reference.
                     Precompiles::Off => reduce_compiled(b, *vals, row, inv, ro, alpha_pow, fri_alpha),
-                    // Task 8: one `REDUCE` instruction for the whole run.
-                    Precompiles::On => b.reduce(*vals, row, inv, ro, alpha_pow, fri_alpha),
+                    // Cut D, Task 1a: the chip path is wired in Task 1b.
+                    Precompiles::On => reduce_compiled(b, *vals, row, inv, ro, alpha_pow, fri_alpha),
                 };
                 acc.insert(h, (alpha_pow, ro));
             }

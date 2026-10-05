@@ -21,17 +21,19 @@ use crate::isa::{DecodeError, Instr, Op, Program, EF, F, MEM_LIMIT, NUM_REGS};
 /// M5.2's `memory` table asks only for strict monotonicity, which `16·clk + k` gives.
 pub const TS_PER_ROW: u32 = 16;
 
-/// The `REDUCE` run's timestamp slots, shared with the `reduce` chip's memory messages (Task 8):
-/// the 11 descriptor cells at slots `0..11`, the per-column reads reusing slots `11..14`
-/// (distinct addresses per column, which is all the memory table's monotonicity asks), and the
-/// four write-backs at slots 14–15 (distinct addresses from the reads).
+/// The `REDUCE` run's timestamp slots, shared with the reduce chip's memory messages (Cut D): the
+/// entry's inverse key at slots 0–1, the chain's alpha at 2–3 (chain starts only), each column's
+/// three reads reusing slots 11–13 (distinct addresses per column, which is all the memory table's
+/// monotonicity asks), and the chain's result at 14–15.
+pub const TS_KEY0: u32 = 0;
+pub const TS_KEY1: u32 = 1;
+pub const TS_ALPHA0: u32 = 2;
+pub const TS_ALPHA1: u32 = 3;
 pub const TS_RUN_PZ0: u32 = 11;
 pub const TS_RUN_PZ1: u32 = 12;
 pub const TS_RUN_PX: u32 = 13;
-pub const TS_WB_ACC0: u32 = 14;
-pub const TS_WB_ACC1: u32 = 15;
-pub const TS_WB_APOW0: u32 = 14;
-pub const TS_WB_APOW1: u32 = 15;
+pub const TS_RES0: u32 = 14;
+pub const TS_RES1: u32 = 15;
 
 /// One cell read or written, at the timestamp `16·clk + k` of its slot in the row.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -65,19 +67,28 @@ pub enum PermKind {
     Compress { sib: u64, bit: bool },
 }
 
-/// One run of the batch-opening reduction a `REDUCE` row dispatches (Task 8): the descriptor
-/// the chip's first row reads, its run length, and the run constants. The accumulator and the
-/// running power are chained in and out through the descriptor in memory.
+/// One `REDUCE` dispatch (Cut D): the layout entry, its column count, the key and alpha it ran
+/// with, and the accumulator/running power on entry and on exit (equal at a chain's seam).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ReduceEvent {
-    pub descr_ptr: u64,
-    pub vals_base: u64,
-    pub row_base: u64,
+    pub entry: u32,
     pub len: u32,
     pub inv: [F; 2],
-    pub acc: [F; 2],
-    pub apow: [F; 2],
     pub alpha: [F; 2],
+    pub acc_in: [F; 2],
+    pub apow_in: [F; 2],
+    pub acc_out: [F; 2],
+    pub apow_out: [F; 2],
+}
+
+/// The state a carrying entry hands to the next row's `REDUCE`.
+#[derive(Clone, Copy)]
+struct ReduceCarry {
+    entry: u32,
+    clk: u32,
+    acc: [F; 2],
+    apow: [F; 2],
+    alpha: [F; 2],
 }
 
 /// One executed instruction.
@@ -152,6 +163,11 @@ pub enum ExecError {
     /// A `REDUCE` descriptor declared a zero-length run: there is nothing to reduce, and a
     /// `REDUCE` of zero columns is a build-time mistake (the program must not emit it).
     ReduceZeroLength { pc: u32 },
+    /// A `REDUCE` naming no entry of the program's layout.
+    ReduceLayout { pc: u32, entry: u64 },
+    /// A chain's hand-over broken: a carrying entry not followed, on the very next row, by a
+    /// `REDUCE` of the next entry; or a continuation entry dispatched without that carry.
+    ReduceChain { pc: u32, entry: u64 },
     /// A `COMPRESS` whose `rd` is neither 0 nor 1: the index bit of a Merkle level is a bit, and
     /// a program that hands it anything else is a build-time mistake (the chip's `BIT` is
     /// boolean, so the row would be unprovable anyway).
@@ -169,6 +185,7 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
     let mut mem: HashMap<u64, F> = HashMap::new();
     let mut run = Execution { events: Vec::new(), public: Vec::new(), hints_read: 0, max_addr: 0 };
     let mut pc: u32 = 0;
+    let mut chain: Option<ReduceCarry> = None;
 
     loop {
         let clk = run.events.len();
@@ -186,6 +203,11 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
         let rd = reg(instr.rd, "rd", pc)? as usize;
         let ra = reg(instr.ra, "ra", pc)? as usize;
         let op = instr.op;
+        if let Some(c) = &chain {
+            if op != Op::Reduce {
+                return Err(ExecError::ReduceChain { pc, entry: c.entry as u64 });
+            }
+        }
 
         let mut mems: Vec<MemAccess> = Vec::new();
         let mut perm = None;
@@ -338,49 +360,47 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
             }
             Op::Reduce => {
                 a[0] = regs[ra];
-                let descr = a[0].as_canonical_u64();
-                for k in 0..11u64 {
-                    bounded(pc, descr + k)?;
-                }
-                let mut d = [F::ZERO; 11];
-                for (k, c) in d.iter_mut().enumerate() {
-                    *c = read_at(&mem, &mut mems, clk, k as u32, descr + k as u64);
-                }
-                let vals_base = d[0].as_canonical_u64();
-                let row_base = d[1].as_canonical_u64();
-                let len = d[2].as_canonical_u64() as usize;
-                if len == 0 {
+                let id = instr.b.as_canonical_u64();
+                let le = *p.reduce_layout.get(id as usize).ok_or(ExecError::ReduceLayout { pc, entry: id })?;
+                if le.len == 0 {
                     return Err(ExecError::ReduceZeroLength { pc });
                 }
-                bounded(pc, vals_base + 2 * len as u64 - 1)?;
-                bounded(pc, row_base + len as u64 - 1)?;
-                let (inv, mut acc, mut apow, alpha) = ([d[3], d[4]], [d[5], d[6]], [d[7], d[8]], [d[9], d[10]]);
-                for k in 0..len as u64 {
+                let len = le.len as u64;
+                for top in [le.vals + 2 * len - 1, le.row + len - 1, le.key + 1, le.alpha + 1, le.res + 1] {
+                    bounded(pc, top)?;
+                }
+                let inv = [read_at(&mem, &mut mems, clk, TS_KEY0, le.key), read_at(&mem, &mut mems, clk, TS_KEY1, le.key + 1)];
+                let (mut acc, mut apow, alpha) = if le.chain_start {
+                    if chain.is_some() {
+                        return Err(ExecError::ReduceChain { pc, entry: id });
+                    }
+                    let alpha = [read_at(&mem, &mut mems, clk, TS_ALPHA0, le.alpha), read_at(&mem, &mut mems, clk, TS_ALPHA1, le.alpha + 1)];
+                    ([F::ZERO; 2], [F::ONE, F::ZERO], alpha)
+                } else {
+                    match chain.take() {
+                        Some(c) if c.entry as u64 == id && c.clk + 1 == clk => (c.acc, c.apow, c.alpha),
+                        _ => return Err(ExecError::ReduceChain { pc, entry: id }),
+                    }
+                };
+                let (acc_in, apow_in) = (acc, apow);
+                for k in 0..len {
                     let pz = [
-                        read_at(&mem, &mut mems, clk, TS_RUN_PZ0, vals_base + 2 * k),
-                        read_at(&mem, &mut mems, clk, TS_RUN_PZ1, vals_base + 2 * k + 1),
+                        read_at(&mem, &mut mems, clk, TS_RUN_PZ0, le.vals + 2 * k),
+                        read_at(&mem, &mut mems, clk, TS_RUN_PZ1, le.vals + 2 * k + 1),
                     ];
-                    let px = read_at(&mem, &mut mems, clk, TS_RUN_PX, row_base + k);
-                    let diff = ext([pz[0], pz[1]]) - px;
-                    let t = ext(apow) * diff;
-                    let t = t * ext(inv);
+                    let px = read_at(&mem, &mut mems, clk, TS_RUN_PX, le.row + k);
+                    let diff = ext(pz) - px;
+                    let t = ext(apow) * diff * ext(inv);
                     acc = parts(ext(acc) + t);
                     apow = parts(ext(apow) * ext(alpha));
                 }
-                write_at(&mut mem, &mut mems, clk, TS_WB_ACC0, descr + 5, acc[0]);
-                write_at(&mut mem, &mut mems, clk, TS_WB_ACC1, descr + 6, acc[1]);
-                write_at(&mut mem, &mut mems, clk, TS_WB_APOW0, descr + 7, apow[0]);
-                write_at(&mut mem, &mut mems, clk, TS_WB_APOW1, descr + 8, apow[1]);
-                reduce = Some(ReduceEvent {
-                    descr_ptr: descr,
-                    vals_base,
-                    row_base,
-                    len: len as u32,
-                    inv,
-                    acc: [d[5], d[6]],
-                    apow: [d[7], d[8]],
-                    alpha,
-                });
+                if le.carry {
+                    chain = Some(ReduceCarry { entry: id as u32 + 1, clk, acc, apow, alpha });
+                } else {
+                    write_at(&mut mem, &mut mems, clk, TS_RES0, le.res, acc[0]);
+                    write_at(&mut mem, &mut mems, clk, TS_RES1, le.res + 1, acc[1]);
+                }
+                reduce = Some(ReduceEvent { entry: id as u32, len: le.len, inv, alpha, acc_in, apow_in, acc_out: acc, apow_out: apow });
             }
             Op::Sponge => {
                 a[0] = regs[ra];

@@ -918,7 +918,7 @@ impl RvmShape {
             poseidon2_log_height,
             reduce_log_height,
         );
-        let common = m.verifier_key(program, tier, reduce_log_height != 0);
+        let common = m.verifier_key(program, tier, reduce_log_height);
 
         let widths: Vec<usize> = airs.iter().map(BaseAir::<Val>::width).collect();
         let num_public_values: Vec<usize> =
@@ -1008,13 +1008,13 @@ impl RvmShape {
     }
 
     /// The batch's `CommonData` (the lookup contexts and the preprocessed commitment), a pure
-    /// function of `(program, tier, reduce)` — `InnerShape::common_data`'s role.
+    /// function of `(program, tier, reduce_log_height)` — `InnerShape::common_data`'s role.
     #[doc(hidden)]
     pub fn common_data(&self) -> std::sync::Arc<p3_batch_stark::CommonData<Config>> {
         rvm_machine(self.profile).verifier_key(
             &self.program,
             crate::machine::Tier(self.tier),
-            self.reduce_log_height != 0,
+            self.reduce_log_height,
         )
     }
 

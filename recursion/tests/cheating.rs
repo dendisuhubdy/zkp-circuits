@@ -43,6 +43,7 @@ fn setup() -> (Machine, Program, Traces) {
             i(Op::Halt, 0, 0, 0),           // 16
         ],
         checkpoints: vec![],
+        reduce_layout: vec![],
     };
     let m = Machine::new(FriProfile::Test);
     let exec = execute(&p, &[], 10_000).unwrap();
@@ -205,34 +206,14 @@ use p3_field::BasedVectorSpace;
 use recursion::isa::EF;
 use recursion::tables::reduce as reduce_table;
 
-/// An honest setup with one four-column `REDUCE` run, for the tranche.
+/// An honest setup: Cut D's split chain (`common::reduce_chain_program(true)`): entry 0's two
+/// rows carrying into entry 1's one row, 267 published.
 fn reduce_setup() -> (Machine, Program, Traces, Vec<F>) {
-    use recursion::dsl::{Builder, Checkpoints};
-    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(31);
-    let vals: Vec<EF> = (0..4).map(|_| common::random_ext(&mut rng)).collect();
-    let row: Vec<F> = (0..4).map(|_| common::random_felt(&mut rng)).collect();
-    let inv = common::random_ext(&mut rng);
-    let alpha = common::random_ext(&mut rng);
-    let mut b = Builder::new(Checkpoints::Off);
-    let mut tape: Vec<F> = vec![];
-    let vals_a = b.hint_ext_array(4);
-    for v in &vals {
-        tape.extend_from_slice(v.as_basis_coefficients_slice());
-    }
-    let row_a = b.hint_array(4);
-    tape.extend_from_slice(&row);
-    let inv_h = b.ext_constant(inv);
-    let zero = b.ext_constant(EF::ZERO);
-    let one = b.ext_constant(EF::ONE);
-    let alpha_h = b.ext_constant(alpha);
-    let (ro, _ap) = b.reduce(vals_a, row_a, inv_h, zero, one, alpha_h);
-    b.public_ext(ro);
-    b.public_ext(ro);
-    let p = b.finish();
+    let p = common::reduce_chain_program(true);
     let m = Machine::new(FriProfile::Test);
-    let exec = execute(&p, &tape, 10_000).unwrap();
+    let exec = execute(&p, &[], 10_000).unwrap();
     let t = build_traces(&p, &exec, Tier(8)).unwrap();
-    (m, p, t, tape)
+    (m, p, t, vec![])
 }
 
 fn reduce_verify(m: &Machine, p: &Program, t: &Traces) -> Result<(), recursion::machine::VerifyError> {
@@ -257,25 +238,62 @@ fn a_wrong_accumulated_value_in_the_reduction_is_rejected() {
     assert!(rejects(|| reduce_verify(&m, &p, &t)));
 }
 
+/// R5: a run claiming its last row early (row 0, ADDR_R ≠ ROW_END).
 #[test]
 fn a_dropped_column_in_the_reduction_is_rejected() {
     let (m, p, mut t, _) = reduce_setup();
-    let w = reduce_table::col::WIDTH;
     let r = t.reduce.as_mut().unwrap();
-    // Claim the run ends a column early: IS_LAST on the LEN=2 row — the is-one gadget refuses it.
-    let len2 = (0..r.height()).find(|i| r.values[i * w + reduce_table::col::LEN] == F::TWO).unwrap();
-    r.values[len2 * w + reduce_table::col::IS_LAST] = F::ONE;
+    r.values[reduce_table::col::IS_LAST] = F::ONE;
     assert!(rejects(|| reduce_verify(&m, &p, &t)));
 }
 
+/// Spec §5: a run whose address differs from the preprocessed layout's — the vals pointer moved by
+/// one extension cell on every row of entry 0 (so the in-entry chain still holds): the
+/// REDUCE_LAYOUT lookup has no provider, and the moved reads have no writes.
 #[test]
-fn a_forged_descriptor_field_in_the_reduction_is_rejected() {
+fn a_run_whose_address_differs_from_the_layout_is_rejected() {
     let (m, p, mut t, _) = reduce_setup();
     let w = reduce_table::col::WIDTH;
     let r = t.reduce.as_mut().unwrap();
-    // The descriptor's `inv`, forged on the chip's first row: the RAM message's value no longer
-    // matches the read the memory table holds.
-    r.values[reduce_table::col::INV0] += F::ONE;
+    for row in 0..2 {
+        r.values[row * w + reduce_table::col::ADDR_V] += F::TWO;
+    }
+    assert!(rejects(|| reduce_verify(&m, &p, &t)));
+}
+
+/// Spec §5: a wrong CARRY — entry 0's last row claims to close the chain. Its CARRY no longer
+/// matches the layout's flags, and entry 1's first row (CHAIN_START = 0) is entered without a carry.
+#[test]
+fn a_wrong_carry_is_rejected() {
+    let (m, p, mut t, _) = reduce_setup();
+    let w = reduce_table::col::WIDTH;
+    let r = t.reduce.as_mut().unwrap();
+    for row in 0..2 {
+        r.values[row * w + reduce_table::col::CARRY] = F::ZERO;
+    }
+    r.values[w + reduce_table::col::WRITES] = F::ONE;
+    assert!(rejects(|| reduce_verify(&m, &p, &t)));
+}
+
+/// Spec §5: a chain result tampered — the continuation entry starts from an accumulator other than
+/// the one carried (and the forged result's write follows from it).
+#[test]
+fn a_chain_continuation_starting_from_a_forged_accumulator_is_rejected() {
+    let (m, p, mut t, _) = reduce_setup();
+    let w = reduce_table::col::WIDTH;
+    let r = t.reduce.as_mut().unwrap();
+    r.values[2 * w + reduce_table::col::ACC0] += F::ONE;
+    r.values[2 * w + reduce_table::col::OUT0] += F::ONE;
+    assert!(rejects(|| reduce_verify(&m, &p, &t)));
+}
+
+/// The provider region: a multiplicity on a row past the layout provides an all-zero entry.
+#[test]
+fn a_multiplicity_off_the_layout_is_rejected() {
+    let (m, p, mut t, _) = reduce_setup();
+    let w = reduce_table::col::WIDTH;
+    let r = t.reduce.as_mut().unwrap();
+    r.values[5 * w + reduce_table::col::MULT] = F::ONE;
     assert!(rejects(|| reduce_verify(&m, &p, &t)));
 }
 
@@ -388,7 +406,7 @@ fn hintn_setup() -> (Machine, Program, Traces) {
         i(Op::Public, 0, 0, 0),
         i(Op::Public, 0, 0, 0),
         i(Op::Halt, 0, 0, 0),
-    ], checkpoints: vec![] };
+    ], checkpoints: vec![], reduce_layout: vec![] };
     let tape: Vec<F> = (1..=8).map(F::from_u64).collect();
     let m = Machine::new(FriProfile::Test);
     let exec = execute(&p, &tape, 100).unwrap();
@@ -521,6 +539,7 @@ fn storee_program() -> Program {
             i(Op::Halt, 0, 0, 0),     // 9
         ],
         checkpoints: vec![],
+        reduce_layout: vec![],
     }
 }
 
@@ -630,16 +649,6 @@ fn traces_from_parts(
     let ram = memory_trace_unchecked(ram_acc, 1 << ram_lh, &mut counts);
     let perms = cpu::perm_events(&exec.events);
     let p2 = poseidon2::poseidon2_log_height(perms.len());
-    // The reduce chip's own range lookups (ZKQ-3: six three-byte address checks on each run's
-    // first row) go into the same counts, exactly as `build_traces` counts them.
-    if let Some((red, _)) = &reduce {
-        use reduce_table::col::{DESCR_LIMB0, IS_FIRST, WIDTH};
-        for row in red.values.chunks(WIDTH).filter(|r| r[IS_FIRST] == F::ONE) {
-            for &limb in &row[DESCR_LIMB0..DESCR_LIMB0 + 18] {
-                counts.range8(limb.as_canonical_u64() as u32);
-            }
-        }
-    }
     Traces {
         program: program_table::program_trace(p, &exec.events, 1 << program_log_height(p.instrs.len())),
         cpu: cpu_t,
@@ -801,10 +810,10 @@ fn a_forged_loade_high_lane_is_rejected() {
 // ── The reduce chip's run rules (the 2026-09-27 zk scan: OPCODES-1/TABLES-1, V-OPCODES-1, ZKR-4) ──
 //
 // One program for the whole tranche: a three-column REDUCE run over hand-stored cells, its
-// accumulator loaded back and published. vals (extension, two cells each) at 100..105 =
-// (10, 0), (20, 0), (30, 0); row at 120..122 = 4, 5, 6; the descriptor at 200..210 =
-// [vals 100, row 120, len 3, inv (1, 0), acc (0, 0), apow (1, 0), alpha (3, 0)] — so the honest
-// accumulator is (10 − 4)·1 + (20 − 5)·3 + (30 − 6)·9 = 267. With `stale_first`, column 1's
+// result loaded back and published. vals (extension, two cells each) at 100..105 =
+// (10, 0), (20, 0), (30, 0); row at 120..122 = 4, 5, 6; inv (1, 0) at 210, alpha (3, 0) at 212,
+// layout entry 0 (Cut D) writing the result to 214 — so the honest result is
+// (10 − 4)·1 + (20 − 5)·3 + (30 − 6)·9 = 267. With `stale_first`, column 1's
 // cells (102, 103, 121) first hold (7, 0) and 7 — a difference of zero — and a filler row marks
 // the clock at which those stale values were live.
 fn reduce_run_program(stale_first: bool) -> Program {
@@ -819,39 +828,30 @@ fn reduce_run_program(stale_first: bool) -> Program {
         st(&mut v, 121, 7);
         v.push(i(Op::Faddi, 9, 0, 0)); // the filler row: the stale-read clock
     }
-    st(&mut v, 100, 10);
-    st(&mut v, 101, 0);
-    st(&mut v, 102, 20);
-    st(&mut v, 103, 0);
-    st(&mut v, 104, 30);
-    st(&mut v, 105, 0);
-    st(&mut v, 120, 4);
-    st(&mut v, 121, 5);
-    st(&mut v, 122, 6);
-    for (k, val) in [100u64, 120, 3, 1, 0, 0, 0, 1, 0, 3, 0].iter().enumerate() {
-        st(&mut v, 200 + k as u64, *val);
+    for (addr, val) in [(100u64, 10u64), (101, 0), (102, 20), (103, 0), (104, 30), (105, 0), (120, 4), (121, 5), (122, 6), (210, 1), (211, 0), (212, 3), (213, 0)] {
+        st(&mut v, addr, val);
     }
-    v.push(i(Op::Faddi, 2, 0, 200));
-    v.push(i(Op::Reduce, 0, 2, 0));
-    v.push(i(Op::Load, 3, 0, 205));
-    v.push(i(Op::Load, 4, 0, 206));
+    v.push(i(Op::Reduce, 0, 0, 0));
+    v.push(i(Op::Load, 3, 0, 214));
+    v.push(i(Op::Load, 4, 0, 215));
     v.push(i(Op::Public, 0, 3, 0));
     v.push(i(Op::Public, 0, 4, 0));
     v.push(i(Op::Public, 0, 3, 0));
     v.push(i(Op::Public, 0, 4, 0));
     v.push(i(Op::Halt, 0, 0, 0));
-    Program { instrs: v, checkpoints: vec![] }
+    let reduce_layout = vec![recursion::isa::ReduceEntry { vals: 100, row: 120, len: 3, key: 210, alpha: 212, res: 214, chain_start: true, carry: false }];
+    Program { instrs: v, checkpoints: vec![], reduce_layout }
 }
 
 fn events_of(exec: &Execution, op: Op) -> Vec<usize> {
     exec.events.iter().enumerate().filter(|(_, e)| e.instr.op == op).map(|(k, _)| k).collect()
 }
 
-/// Rewrite what the cpu reads back from the accumulator cell (205) — the first LOAD and every
+/// Rewrite what the cpu reads back from the result cell (214) — the first LOAD and every
 /// PUBLIC of `r3` — to `acc0`, as a forged reduction implies.
 fn forge_accumulator_readback(exec: &mut Execution, acc0: F) {
     let l = events_of(exec, Op::Load)[0];
-    assert_eq!(exec.events[l].mem[0].addr, 205);
+    assert_eq!(exec.events[l].mem[0].addr, 214);
     exec.events[l].mem[0].value = acc0;
     exec.events[l].d[0] = acc0;
     for k in events_of(exec, Op::Public) {
@@ -893,15 +893,16 @@ fn a_reduce_row_reading_at_a_stale_clock_is_rejected() {
     let r = events_of(&exec, Op::Reduce)[0];
     {
         let e = &mut exec.events[r];
-        // The event's log: eleven descriptor reads, three reads per column, four write-backs.
+        // The event's log (Cut D): the key's two reads, alpha's two, three reads per column, the
+        // result's two writes.
         let stale = [F::from_u64(7), F::ZERO, F::from_u64(7)];
         for k in 0..3 {
-            let a = &mut e.mem[11 + 3 + k];
+            let a = &mut e.mem[4 + 3 + k];
             a.ts = filler * 16 + a.ts % 16;
             a.value = stale[k];
         }
-        // acc = (10 − 4)·1 + (7 − 7)·3 + (30 − 6)·9 = 222; the running power is unchanged.
-        e.mem[11 + 9].value = F::from_u64(222);
+        // acc = (10 − 4)·1 + (7 − 7)·3 + (30 − 6)·9 = 222.
+        e.mem[4 + 9].value = F::from_u64(222);
     }
     forge_accumulator_readback(&mut exec, F::from_u64(222));
     let mut t = build_traces(&p, &exec, Tier(8)).unwrap();
@@ -913,20 +914,20 @@ fn a_reduce_row_reading_at_a_stale_clock_is_rejected() {
     );
 }
 
-/// V-OPCODES-1's forged padding row: `IS_LAST = 1` with `LEN = LEN1 = 1` (so the is-one gadget
-/// holds) on the first padding row after the run, `CLK = clk_r + 1/16` — CLK is a field element,
-/// so `16·CLK + 14` is `16·clk_r + 15`, any timestamp at all — and the accumulator column set to
-/// `value`. Its four write-back messages land in the descriptor's acc/apow cells between the real
-/// write-back and the cpu's LOAD; the RAM log carries them (on the HALT event, which is where
+/// V-OPCODES-1's forged padding row: `IS_LAST = 1` with `ADDR_R = ROW_END` (so R5 holds) and
+/// `WRITES = 1` on the first padding row after the run, `CLK = clk_r + 1/16` — CLK is a field
+/// element, so `16·CLK + 14` is `16·clk_r + 15`, any timestamp at all — and the output column set
+/// to `value`. Its two result-write messages land in the result cells (214, 215) between the real
+/// write and the cpu's LOAD; the RAM log carries them (on the HALT event, which is where
 /// `ram_accesses` picks them up). [`padding_writeback_traces`]'s `first` also sets `IS_FIRST`, the
 /// variant that claims a whole one-row run on padding.
 fn forge_padding_writeback(exec: &mut Execution, value: F) {
     let r = events_of(exec, Op::Reduce)[0];
     let clk_r = exec.events[r].clk;
     let base = clk_r * 16;
-    // 205 ← value at 16·clk_r + 15, 206 ← 0 at + 16, 207 ← 0 at + 15, 208 ← 0 at + 16 (APOW = 0 on
-    // the forged row, so the step adds nothing and the power it writes back is zero).
-    let writes = [(205u64, base + 15, value), (206, base + 16, F::ZERO), (207, base + 15, F::ZERO), (208, base + 16, F::ZERO)];
+    // 214 ← value at 16·clk_r + 15, 215 ← 0 at + 16 (APOW = 0 on the forged row, so the step adds
+    // nothing to ACC0 = value).
+    let writes = [(214u64, base + 15, value), (215, base + 16, F::ZERO)];
     let h = events_of(exec, Op::Halt)[0];
     for (addr, ts, value) in writes {
         exec.events[h].mem.push(MemAccess { addr, ts, value, is_write: true });
@@ -946,12 +947,13 @@ fn padding_writeback_traces(p: &Program, value: F, first: bool) -> (Execution, T
     let rv = &mut red.values[row * w..(row + 1) * w];
     assert_eq!(rv[IS_REAL], F::ZERO, "row 3 is padding");
     rv[IS_LAST] = F::ONE;
-    rv[LEN] = F::ONE;
-    rv[LEN1] = F::ONE;
-    rv[LEN1_INV] = F::ZERO;
     rv[CLK] = F::from_u64(clk_r as u64) + F::from_u64(16).inverse();
-    rv[DESCR_PTR] = F::from_u64(200);
+    rv[RES] = F::from_u64(214);
+    rv[ADDR_R] = F::ZERO;
+    rv[ROW_END] = F::ZERO;
     rv[ACC0] = value;
+    rv[OUT0] = value;
+    rv[WRITES] = F::ONE;
     if first {
         rv[IS_FIRST] = F::ONE;
     }
@@ -1002,11 +1004,10 @@ fn a_reduce_run_that_never_reaches_its_last_row_is_rejected() {
         for c in 0..w {
             red.values[row * w + c] = F::ZERO;
         }
-        red.values[row * w + reduce_table::col::LEN1_INV] = F::NEG_ONE;
     }
     let r = events_of(&exec, Op::Reduce)[0];
-    // Keep the eleven descriptor reads and column 0's three; drop columns 1–2 and the write-backs.
-    exec.events[r].mem.truncate(14);
+    // Keep the key's and alpha's reads and column 0's three; drop columns 1–2 and the result write.
+    exec.events[r].mem.truncate(4 + 3);
     forge_accumulator_readback(&mut exec, F::ZERO);
     let reg = cpu::register_accesses(&exec.events);
     let ram = cpu::ram_accesses(&exec.events);
@@ -1035,6 +1036,7 @@ fn public_values_a_program_never_published_are_rejected() {
             i(Op::Halt, 0, 0, 0),
         ],
         checkpoints: vec![],
+        reduce_layout: vec![],
     };
     let m = Machine::new(FriProfile::Test);
     let mut exec = execute(&p, &[], 1000).unwrap();
@@ -1081,6 +1083,7 @@ fn an_extension_pair_starting_at_r31_is_rejected() {
             i(Op::Halt, 0, 0, 0),
         ],
         checkpoints: vec![],
+        reduce_layout: vec![],
     };
     let m = Machine::new(FriProfile::Test);
     let mut exec = execute(&p, &[], 1000).unwrap();

@@ -52,7 +52,7 @@ use crate::tables::poseidon2::{poseidon2_log_height, poseidon2_trace, Poseidon2A
 use crate::tables::program::{program_trace, ProgramAir};
 use crate::tables::public::{public_trace, PublicAir, NUM_PUBLIC_VALUES};
 use crate::tables::range::{range_trace, RangeAir, RangeCounts};
-use crate::tables::reduce::{reduce_events, reduce_log_height, reduce_trace, ReduceAir};
+use crate::tables::reduce::{provider_rows, reduce_events, reduce_log_height, reduce_rows, reduce_trace, ReduceAir};
 
 /// The labels of the rVM's `key_config` salt streams (HCS-1, constraint set 7) — `research`'s
 /// `key_derivation_v2::MMCS_LABEL`/`PCS_LABEL` role over a different artifact family, so different
@@ -294,20 +294,20 @@ impl Proof {
     pub fn size(&self) -> usize { self.to_bytes().len() }
 }
 
-/// Bound on the number of `(program, tier, reduce)` verifier keys kept in memory at once — the
+/// Bound on the number of `(program, tier, reduce_log_height)` verifier keys kept in memory at once — the
 /// RV32 cache's FIFO policy, over a program-keyed space instead (R6).
 const KEY_CACHE_CAPACITY: usize = 64;
 
 #[derive(Default)]
 struct KeyCache {
-    map: HashMap<(usize, [u64; 4], bool), Arc<CommonData<Config>>>,
-    order: VecDeque<(usize, [u64; 4], bool)>,
+    map: HashMap<(usize, [u64; 4], u8), Arc<CommonData<Config>>>,
+    order: VecDeque<(usize, [u64; 4], u8)>,
 }
 impl KeyCache {
-    fn get(&self, key: &(usize, [u64; 4], bool)) -> Option<Arc<CommonData<Config>>> {
+    fn get(&self, key: &(usize, [u64; 4], u8)) -> Option<Arc<CommonData<Config>>> {
         self.map.get(key).cloned()
     }
-    fn insert(&mut self, key: (usize, [u64; 4], bool), value: Arc<CommonData<Config>>) {
+    fn insert(&mut self, key: (usize, [u64; 4], u8), value: Arc<CommonData<Config>>) {
         if self.map.contains_key(&key) { return; }
         if self.map.len() >= KEY_CACHE_CAPACITY {
             if let Some(oldest) = self.order.pop_front() { self.map.remove(&oldest); }
@@ -324,25 +324,25 @@ impl Machine {
         Self { config: make_config(profile), profile, keys: Mutex::new(KeyCache::default()) }
     }
 
-    /// The preprocessed commitment for `(program, tier, reduce)` (R6), cached. The chip set
+    /// The preprocessed commitment for `(program, tier, reduce_log_height)` (R6), cached. The chip set
     /// grows per task toward the final eight-instance batch (Task 6); the cache key is already
     /// the final one, so no caller changes.
-    pub fn verifier_key(&self, program: &Program, tier: Tier, reduce: bool) -> Arc<CommonData<Config>> {
+    pub fn verifier_key(&self, program: &Program, tier: Tier, reduce_log_height: u8) -> Arc<CommonData<Config>> {
         let digest = program.digest();
-        let key = (tier.0, std::array::from_fn(|i| digest[i].as_canonical_u64()), reduce);
+        let key = (tier.0, std::array::from_fn(|i| digest[i].as_canonical_u64()), reduce_log_height);
         if let Some(hit) = self.keys.lock().unwrap().get(&key) { return hit; }
         let arc = Arc::new(program.clone());
-        let airs = chips(&arc, tier, if reduce { MIN_LOG_HEIGHT } else { 0 });
-        // The declared heights the key is built with are the *floors*: no table here but
-        // `program` and `range` has preprocessed columns, so `CommonData` is invariant to the
-        // declared heights — the RV32 `mem_log_height` argument, verbatim (R6).
-        let degrees = log_ext_degrees(program, tier, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, if reduce { MIN_LOG_HEIGHT } else { 0 });
+        let airs = chips(&arc, tier, reduce_log_height);
+        // The declared heights are the floors for every table without preprocessed columns; the
+        // reduce table is built at its own declared height, because its preprocessed region (Cut D:
+        // the program's reduce layout) is committed at that height.
+        let degrees = log_ext_degrees(program, tier, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, reduce_log_height);
         let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &airs, &degrees).common);
         self.keys.lock().unwrap().insert(key, common.clone());
         common
     }
 
-    /// Number of `(program, tier, reduce)` verifier keys currently cached.
+    /// Number of `(program, tier, reduce_log_height)` verifier keys currently cached.
     pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().map.len() }
 
     /// Registration-time legality (R1): the preprocessed program table commits to every word, so
@@ -354,8 +354,33 @@ impl Machine {
         for instr in &program.instrs {
             check_instr(instr)?;
         }
+        check_layout(&program.reduce_layout)?;
         Ok(())
     }
+}
+
+/// Cut D, registration-time legality of the reduce layout: every run non-empty and inside the
+/// `2^24`-cell address space (the chip range-checks nothing — the key commits these constants, so
+/// they are checked once, here), entry 0 a chain start, and every hand-over well formed.
+fn check_layout(layout: &[crate::isa::ReduceEntry]) -> Result<(), DecodeError> {
+    for (k, e) in layout.iter().enumerate() {
+        let bad = Err(DecodeError::Layout { entry: k as u32 });
+        if e.len == 0 {
+            return bad;
+        }
+        let len = e.len as u64;
+        if [e.vals + 2 * len - 1, e.row + len - 1, e.key + 1, e.alpha + 1, e.res + 1].iter().any(|&top| top >= crate::isa::MEM_LIMIT) {
+            return bad;
+        }
+        let continues = k > 0 && layout[k - 1].carry;
+        if e.chain_start == continues {
+            return bad;
+        }
+        if e.carry && (k + 1 == layout.len() || layout[k + 1].alpha != e.alpha || layout[k + 1].res != e.res) {
+            return bad;
+        }
+    }
+    Ok(())
 }
 
 fn check_instr(instr: &Instr) -> Result<(), DecodeError> {
@@ -437,11 +462,8 @@ pub fn build_traces(program: &Program, exec: &Execution, tier: Tier) -> Result<T
     let program_t = program_trace(program, &exec.events, 1 << program_log_height(program.instrs.len()));
     let public = public_trace(&exec.public, crate::tables::public::HEIGHT);
     let reduce_evs = reduce_events(&exec.events);
-    let reduce_rows: usize = reduce_evs.iter().map(|e| e.reduce.unwrap().len as usize).sum();
-    let reduce_lh = reduce_log_height(reduce_rows);
-    // Before the range table: since ZKQ-3 the reduce chip range-checks its run's addresses, so
-    // its lookups are counted into the same `RangeCounts` as every other table's.
-    let reduce = if reduce_lh == 0 { None } else { Some(reduce_trace(&reduce_evs, 1 << reduce_lh, &mut counts)) };
+    let reduce_lh = reduce_log_height(reduce_rows(&reduce_evs), provider_rows(&program.reduce_layout));
+    let reduce = if reduce_lh == 0 { None } else { Some(reduce_trace(&program.reduce_layout, &reduce_evs, 1 << reduce_lh)) };
     let range = range_trace(&counts);
     Ok(Traces {
         program: program_t,
@@ -629,6 +651,11 @@ impl Machine {
         Self::check_program(program).map_err(VerifyError::Program)?;
         // Every range check on the proof's declared shape, before anything is sized from it.
         check_declared_heights(proof.tier, proof.reg_log_height, proof.ram_log_height, proof.poseidon2_log_height, proof.reduce_log_height)?;
+        // Cut D: the reduce instance's preprocessed region is the program's layout; the declared
+        // height must hold it (the key is built at that height).
+        if proof.reduce_log_height != 0 && (1usize << proof.reduce_log_height) < crate::tables::reduce::provider_rows(&program.reduce_layout) {
+            return Err(VerifyError::ReduceHeight);
+        }
         // VERIFIER-1: the commit-phase PoW words, unobserved at zero bits, must be the honest
         // zero — a comparison per round, with the other cheap checks, before any key is built.
         check_commit_pow_witnesses(proof)?;
@@ -639,7 +666,7 @@ impl Machine {
         let airs = chips(&arc, proof.tier, proof.reduce_log_height);
         let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
         let pvs: Vec<Vec<Val>> = (0..airs.len()).map(|i| if i == PUBLIC_VALUES_INDEX { pv_vals.clone() } else { vec![] }).collect();
-        let common = self.verifier_key(program, proof.tier, proof.reduce_log_height != 0);
+        let common = self.verifier_key(program, proof.tier, proof.reduce_log_height);
         verify_batch_with_layout(&self.config, &airs, &proof.batch, &pvs, &common, layout).map_err(|e| VerifyError::Batch(format!("{e:?}")))
     }
 }
@@ -661,7 +688,7 @@ pub fn max_constraint_degrees_declaring(program: &Program, tier: Tier, reduce: b
     let machine = Machine::new(FriProfile::Test);
     let key_cfg = key_config(machine.profile);
     let arc = Arc::new(program.clone());
-    let reduce_log_height = if reduce { MIN_LOG_HEIGHT } else { 0 };
+    let reduce_log_height = if reduce { crate::tables::reduce::reduce_log_height(1, provider_rows(&program.reduce_layout)) } else { 0 };
     let airs = chips(&arc, tier, reduce_log_height);
     let is_zk = machine.config.is_zk();
     let ext_degrees = log_ext_degrees(program, tier, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, reduce_log_height);
@@ -701,7 +728,7 @@ pub fn chips(program: &Arc<Program>, _tier: Tier, reduce_log_height: u8) -> Vec<
     // instance at all, and the REDUCE bus then has no provider, so a `REDUCE` row cannot be
     // proved absent the table. Appended last, so it cannot disturb `PUBLIC_VALUES_INDEX`.
     if reduce_log_height != 0 {
-        v.push(Chip::Reduce(ReduceAir));
+        v.push(Chip::Reduce(ReduceAir::new(Arc::new(program.reduce_layout.clone()), 1 << reduce_log_height)));
     }
     v
 }

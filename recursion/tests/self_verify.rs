@@ -47,6 +47,7 @@ fn toy_program() -> Program {
             i(Op::Halt, 0, 0, 0),
         ],
         checkpoints: vec![],
+        reduce_layout: vec![],
     }
 }
 
@@ -272,7 +273,7 @@ fn busy_program() -> Program {
     instrs.push(i(Op::Public, 0, 1, 0));
     instrs.push(i(Op::Public, 0, 1, 0));
     instrs.push(i(Op::Halt, 0, 0, 0));
-    Program { instrs, checkpoints: vec![] }
+    Program { instrs, checkpoints: vec![], reduce_layout: vec![] }
 }
 
 fn busy_fixture() -> (Arc<Program>, recursion::machine::Proof, RvmShape, RvmKey) {
@@ -420,4 +421,23 @@ fn a_rewritten_commit_phase_pow_word_in_an_rvm_proof_is_refused() {
             other => panic!("round {round}: expected a refusal, got {:?}", other.map(|e| format!("acceptance, {} cpu rows", e.cpu_rows()))),
         }
     }
+}
+
+/// Review Focus 1 (phase 3, Cut D): no fixture proof carries a reduce table, so the
+/// self-verifier never opened the reduce instance's preprocessed region. Here it does: two
+/// preprocessed matrices of different heights in one round.
+#[test]
+fn the_self_verifier_accepts_a_proof_carrying_the_reduce_layout() {
+    let program = Arc::new(common::reduce_chain_program(true));
+    let m = Machine::new(FriProfile::Test);
+    let (proof, _exec) = m.prove(&program, &[], None).expect("the chain program proves");
+    assert!(proof.reduce_log_height > 0, "the batch declares the reduce instance");
+    let shape = RvmShape::of(FriProfile::Test, &program, proof.tier, proof.reg_log_height, proof.ram_log_height,
+        proof.poseidon2_log_height, proof.reduce_log_height);
+    let key = RvmKey::of(FriProfile::Test, &shape);
+    let vp = verify_rv32r(&shape, &key, Checkpoints::Off);
+    let tape = WitnessTape::build_for_with_binding(FriProfile::Test, &shape, &key, &proof, &common::TEST_BINDING).unwrap();
+    let exec = execute(&vp.program, &tape.words, MAX_CYCLES).expect("the self-verifier accepts a proof carrying the reduce layout");
+    let words = recursion::public_values::interface_words_bound(&shape, &key, &common::TEST_BINDING, &[proof.public_values.clone()]);
+    assert_eq!(exec.public, recursion::public_values::public_digest(&words).to_vec());
 }

@@ -215,6 +215,7 @@ fn tier8_toy() {
             i(Op::Halt, 0, 0, 0),
         ],
         checkpoints: vec![],
+        reduce_layout: vec![],
     };
     let t0 = install();
     let m = recursion::machine::Machine::new(rand_zkvm::machine::FriProfile::Test);

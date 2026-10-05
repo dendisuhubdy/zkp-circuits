@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
+use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField64};
 
 use super::{Array, Ext, Felt, Ptr};
 use crate::isa::{Instr, Op, Program, EF, F, MEM_LIMIT, NUM_REGS};
@@ -216,6 +216,17 @@ pub struct Builder {
     /// Instructions buffered so far — the incremental count `note_phase`'s callers measure with.
     buf_instrs: usize,
     stats: Stats,
+    /// Cut D: the reduce layout entries [`Builder::reduce`] registered, in entry-id order.
+    layout: Vec<crate::isa::ReduceEntry>,
+}
+
+/// One run of a reduction chain (Cut D): `vals.len` opened extension values against the first
+/// `vals.len` cells of `row`, with the inverse key in the two cells at `key`.
+#[derive(Clone, Copy, Debug)]
+pub struct ReduceRun {
+    pub vals: Array<Ext>,
+    pub row: Array<Felt>,
+    pub key: Ptr,
 }
 
 impl Builder {
@@ -243,6 +254,7 @@ impl Builder {
             next_loop: 0,
             buf_instrs: 0,
             stats: Stats::default(),
+            layout: Vec::new(),
         }
     }
 
@@ -635,36 +647,35 @@ impl Builder {
 
     // ---------------------------------------------------- the REDUCE precompile (Task 8)
 
-    /// One run of the batch-opening reduction over `vals.len == row.len` columns:
-    /// `acc += Σ_k alpha_pow·(vals_k − row_k)·inv` and `alpha_pow ·= alpha`, in one `REDUCE`
-    /// instruction — the precompile form of the compiled loop [`run_reduce_sequence`] replaces,
-    /// and differentially pinned to (`tests/precompiles.rs`). The 11-cell descriptor —
-    /// `[vals_base, row_base, len, inv, acc, alpha_pow, alpha]` — is built fresh per call; the
-    /// accumulator and running power are read back out of it, so a height group's runs chain
-    /// exactly like the compiled loop's.
-    pub fn reduce(&mut self, vals: Array<Ext>, row: Array<Felt>, inv: Ext, acc: Ext, alpha_pow: Ext, alpha: Ext) -> (Ext, Ext) {
-        assert!(
-            vals.len <= row.len,
-            "a reduction run covers `vals.len` columns of the opened row (the rest are salts and              the hiding wrapper's hidden values, hashed by the leaf sponge, not reduced)"
-        );
-        self.begin();
-        let descr = self.alloc(11);
-        let vb = self.constant(F::from_u64(self.addr_of(vals.base)));
-        self.store(descr, 0, vb);
-        let rb = self.constant(F::from_u64(self.addr_of(row.base)));
-        self.store(descr, 1, rb);
-        let ln = self.constant(F::from_u64(vals.len as u64));
-        self.store(descr, 2, ln);
-        self.store_ext(descr, 3, inv);
-        self.store_ext(descr, 5, acc);
-        self.store_ext(descr, 7, alpha_pow);
-        self.store_ext(descr, 9, alpha);
-        let holder = self.ptrs[descr.0 as usize].holder;
-        let ra = self.materialise(holder);
-        self.emit(Op::Reduce, RRef::Raw(0), ra, BRef::Imm(F::ZERO));
-        let acc_out = self.load_ext(descr, 5);
-        let apow_out = self.load_ext(descr, 7);
-        (acc_out, apow_out)
+    /// One height chain of the batch-opening reduction (Cut D): `acc = Σ_runs Σ_k
+    /// alpha^j·(vals_k − row_k)·inv_run` with `j` running across the whole chain, `alpha` read from
+    /// the two cells at `alpha`, the result written to the two cells at `res`. Registers one layout
+    /// entry per run and emits one `REDUCE` per run, **back to back** — no handle is touched, so
+    /// no spill or reload can land between them, which is what the chip's `CLK + 1` carry needs
+    /// (`replay` asserts it). Every address is a compile-time constant (`addr_of`).
+    pub fn reduce(&mut self, runs: &[ReduceRun], alpha: Ptr, res: Ptr) {
+        assert!(!runs.is_empty(), "a reduction chain has at least one run");
+        let (alpha_at, res_at) = (self.addr_of(alpha), self.addr_of(res));
+        for (j, r) in runs.iter().enumerate() {
+            assert!(r.vals.stride == 2 && r.row.stride == 1, "vals are extension cells, the row base cells");
+            assert!(
+                r.vals.len >= 1 && r.vals.len <= r.row.len,
+                "a reduction run covers 1..=row.len columns (the rest are salts and hidden values)"
+            );
+            let id = self.layout.len() as u64;
+            self.layout.push(crate::isa::ReduceEntry {
+                vals: self.addr_of(r.vals.base),
+                row: self.addr_of(r.row.base),
+                len: r.vals.len as u32,
+                key: self.addr_of(r.key),
+                alpha: alpha_at,
+                res: res_at,
+                chain_start: j == 0,
+                carry: j + 1 < runs.len(),
+            });
+            self.begin();
+            self.emit(Op::Reduce, RRef::Raw(0), RRef::Raw(0), BRef::Imm(F::from_u64(id)));
+        }
     }
 
     /// One `SPONGE` instruction (Task 9): absorb the four cells at `src` into rate lanes 0–3 of
@@ -1082,6 +1093,7 @@ impl Builder {
 
     fn replay(self) -> (Program, Stats) {
         let live = self.liveness == Liveness::On;
+        let layout = self.layout.clone();
         let n = self.ops.len();
 
         // ── pass 1: liveness. last_use[id] is the last buffer index whose instruction or
@@ -1428,7 +1440,19 @@ impl Builder {
         stats.span_names = span_names;
         stats.pc_span = pc_span;
         stats.pc_kind = pc_kind;
-        (Program { instrs: out, checkpoints }, stats)
+        // Cut D: a carrying entry's REDUCE is followed by its continuation's on the next pc.
+        let mut reduce_pc = vec![u32::MAX; layout.len()];
+        for (pc, ins) in out.iter().enumerate() {
+            if ins.op == Op::Reduce {
+                reduce_pc[ins.b.as_canonical_u64() as usize] = pc as u32;
+            }
+        }
+        for (k, e) in layout.iter().enumerate() {
+            if e.carry {
+                assert_eq!(reduce_pc[k + 1], reduce_pc[k] + 1, "reduce chain entries {k} and {} are not consecutive", k + 1);
+            }
+        }
+        (Program { instrs: out, checkpoints, reduce_layout: layout }, stats)
     }
 }
 

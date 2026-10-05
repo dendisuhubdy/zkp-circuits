@@ -5,7 +5,7 @@ use recursion::emulator::{execute, ExecError, PermKind};
 use recursion::isa::{Instr, Op, Program, F, MEM_LIMIT};
 
 fn prog(instrs: Vec<Instr>) -> Program {
-    Program { instrs, checkpoints: vec![] }
+    Program { instrs, checkpoints: vec![], reduce_layout: vec![] }
 }
 fn i(op: Op, rd: u8, ra: u8, b: u64) -> Instr {
     Instr { op, rd, ra, b: F::from_u64(b) }
@@ -236,7 +236,7 @@ fn hintn_writes_eight_witness_words_at_ra_plus_imm() {
         i(Op::Load, 2, 1, 4),               // r2 = mem[104]
         i(Op::Load, 3, 1, 11),              // r3 = mem[111]
         i(Op::Public, 0, 2, 0), i(Op::Public, 0, 3, 0), i(Op::Halt, 0, 0, 0),
-    ], checkpoints: vec![] };
+    ], checkpoints: vec![], reduce_layout: vec![] };
     let tape: Vec<F> = (1..=8).map(F::from_u64).collect();
     let exec = execute(&p, &tape, 100).unwrap();
     assert_eq!(exec.public, vec![F::from_u64(1), F::from_u64(8)]);
@@ -255,18 +255,18 @@ fn hintn_writes_eight_witness_words_at_ra_plus_imm() {
 
 #[test]
 fn hintn_with_seven_words_left_is_hint_exhausted() {
-    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 100), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![] };
+    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 100), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![], reduce_layout: vec![] };
     let tape: Vec<F> = (1..=7).map(F::from_u64).collect();
     assert_eq!(execute(&p, &tape, 100), Err(ExecError::HintExhausted { pc: 1 }));
 }
 
 #[test]
 fn hintn_whose_top_cell_is_at_two_to_the_twentyfour_is_refused() {
-    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, (1 << 24) - 7), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![] };
+    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, (1 << 24) - 7), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![], reduce_layout: vec![] };
     let tape: Vec<F> = (1..=8).map(F::from_u64).collect();
     assert_eq!(execute(&p, &tape, 100), Err(ExecError::AddressOutOfRange { pc: 1, addr: 1 << 24 }));
     // One lower is the last legal base.
-    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, (1 << 24) - 8), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![] };
+    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, (1 << 24) - 8), i(Op::Hintn, 0, 1, 0), i(Op::Halt, 0, 0, 0)], checkpoints: vec![], reduce_layout: vec![] };
     assert!(execute(&p, &tape, 100).is_ok());
 }
 
@@ -280,7 +280,7 @@ fn compress_orders_the_children_by_the_bit_and_keeps_four_lanes() {
         instrs.push(ir(Op::Compress, 3, 1, 2));
         for k in 0..4 { instrs.push(i(Op::Load, 5, 1, k)); instrs.push(i(Op::Public, 0, 5, 0)); }
         instrs.push(i(Op::Halt, 0, 0, 0));
-        execute(&Program { instrs, checkpoints: vec![] }, &[], 1000).unwrap()
+        execute(&Program { instrs, checkpoints: vec![], reduce_layout: vec![] }, &[], 1000).unwrap()
     };
     let want = |input: [F; 8]| rand_zkvm::hash::permute_state(input)[..4].to_vec();
     let ds: [F; 8] = core::array::from_fn(|k| if k < 4 { d[k] } else { s[k - 4] });
@@ -295,6 +295,67 @@ fn compress_orders_the_children_by_the_bit_and_keeps_four_lanes() {
 
 #[test]
 fn compress_refuses_a_non_boolean_bit() {
-    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 2, 0, 80), i(Op::Faddi, 3, 0, 2), ir(Op::Compress, 3, 1, 2), i(Op::Halt, 0, 0, 0)], checkpoints: vec![] };
+    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 2, 0, 80), i(Op::Faddi, 3, 0, 2), ir(Op::Compress, 3, 1, 2), i(Op::Halt, 0, 0, 0)], checkpoints: vec![], reduce_layout: vec![] };
     assert_eq!(execute(&p, &[], 100), Err(ExecError::NonBooleanBit { pc: 3 }));
+}
+
+use recursion::isa::ReduceEntry;
+
+/// Cut D's honest chain over `common`'s 267 fixture, inlined: vals (10,0) (20,0) (30,0) at 100,
+/// row 4 5 6 at 120, inv (1,0) at 210, alpha (3,0) at 212, the result at 214.
+fn chain(split: bool) -> Program {
+    let mut v = vec![];
+    for (addr, val) in [(100u64, 10u64), (101, 0), (102, 20), (103, 0), (104, 30), (105, 0), (120, 4), (121, 5), (122, 6), (210, 1), (211, 0), (212, 3), (213, 0)] {
+        v.push(i(Op::Faddi, 1, 0, val));
+        v.push(i(Op::Store, 1, 0, addr));
+    }
+    let e = ReduceEntry { vals: 100, row: 120, len: 3, key: 210, alpha: 212, res: 214, chain_start: true, carry: false };
+    let layout = if split {
+        vec![ReduceEntry { len: 2, carry: true, ..e }, ReduceEntry { vals: 104, row: 122, len: 1, chain_start: false, ..e }]
+    } else {
+        vec![e]
+    };
+    for id in 0..layout.len() as u64 {
+        v.push(i(Op::Reduce, 0, 0, id));
+    }
+    v.push(i(Op::Load, 3, 0, 214));
+    for _ in 0..4 {
+        v.push(i(Op::Public, 0, 3, 0));
+    }
+    v.push(i(Op::Halt, 0, 0, 0));
+    Program { instrs: v, checkpoints: vec![], reduce_layout: layout }
+}
+
+#[test]
+fn a_reduce_chain_accumulates_across_its_entries_and_writes_once() {
+    for split in [false, true] {
+        let exec = execute(&chain(split), &[], 1000).unwrap();
+        assert_eq!(exec.public[0], F::from_u64(267), "(10−4)·1 + (20−5)·3 + (30−6)·9, split {split}");
+        let writes: usize = exec.events.iter().filter(|e| e.reduce.is_some()).map(|e| e.mem.iter().filter(|m| m.is_write).count()).sum();
+        assert_eq!(writes, 2, "one result write per chain, split {split}");
+    }
+}
+
+#[test]
+fn a_carry_not_consumed_by_the_next_instruction_is_refused() {
+    let mut p = chain(true);
+    let at = p.instrs.iter().position(|x| x.op == Op::Reduce).unwrap();
+    p.instrs.insert(at + 1, i(Op::Faddi, 9, 0, 1));
+    assert!(matches!(execute(&p, &[], 1000), Err(ExecError::ReduceChain { entry: 1, .. })));
+}
+
+#[test]
+fn a_continuation_entry_dispatched_without_its_carry_is_refused() {
+    let mut p = chain(true);
+    let at = p.instrs.iter().position(|x| x.op == Op::Reduce).unwrap();
+    p.instrs.remove(at); // entry 0 never runs
+    assert!(matches!(execute(&p, &[], 1000), Err(ExecError::ReduceChain { entry: 1, .. })));
+}
+
+#[test]
+fn an_entry_id_past_the_layout_is_refused() {
+    let mut p = chain(false);
+    let at = p.instrs.iter().position(|x| x.op == Op::Reduce).unwrap();
+    p.instrs[at] = i(Op::Reduce, 0, 0, 5);
+    assert_eq!(execute(&p, &[], 1000).unwrap_err(), ExecError::ReduceLayout { pc: at as u32, entry: 5 });
 }

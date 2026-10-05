@@ -446,6 +446,8 @@ pub fn eval_at(e: &SymbolicExpression<recursion::isa::F>, cur: &[recursion::isa:
             BaseLeaf::Variable(v) => match v.entry {
                 BaseEntry::Main { offset: 0 } => cur[v.index],
                 BaseEntry::Main { offset: 1 } => next[v.index],
+                // A row outside every preprocessed region (the reduce chip's per-row rules are checked there).
+                BaseEntry::Preprocessed { .. } => F::ZERO,
                 other => panic!("a main-trace-only AIR read {other:?}"),
             },
             BaseLeaf::IsFirstRow | BaseLeaf::IsLastRow => F::ZERO,
@@ -551,30 +553,66 @@ pub fn eval_row(
 }
 
 /// A program that reaches every chip: registers and RAM (`STORE`, `LOAD`), a `POSEIDON2`
-/// dispatch, a three-row `REDUCE` run over a hand-written descriptor, the four `PUBLIC`s, `HALT`.
+/// dispatch, a three-row `REDUCE` run of layout entry 0 (Cut D), the four `PUBLIC`s, `HALT`.
 /// (`tests/tables.rs`' padding-row rule and `tests/binding.rs`' binding rule both run over it.)
 #[allow(dead_code)]
 pub fn every_chip_program() -> recursion::isa::Program {
     use p3_field::PrimeCharacteristicRing;
-    use recursion::isa::{Instr, Op, Program, F};
+    use recursion::isa::{Instr, Op, Program, ReduceEntry, F};
     let mut v = vec![];
+    // `reduce_chain_program(false)`'s thirteen cells. The key's and alpha's zero high lanes (211,
+    // 213) are stored straight from `r0`: 32 instructions (a 64-row program table) and a register
+    // table whose real rows stay clear of the padding row `tests/tables.rs` checks.
     let st = |v: &mut Vec<Instr>, addr: u64, val: u64| {
         v.push(Instr { op: Op::Faddi, rd: 1, ra: 0, b: F::from_u64(val) });
         v.push(Instr { op: Op::Store, rd: 1, ra: 0, b: F::from_u64(addr) });
     };
-    for (k, val) in [100u64, 120, 3, 1, 0, 0, 0, 1, 0, 3, 0].iter().enumerate() {
-        st(&mut v, 200 + k as u64, *val);
+    for (addr, val) in [(100u64, 10u64), (101, 0), (102, 20), (103, 0), (104, 30), (105, 0), (120, 4), (121, 5), (122, 6), (210, 1), (212, 3)] {
+        st(&mut v, addr, val);
     }
-    v.push(Instr { op: Op::Load, rd: 3, ra: 0, b: F::from_u64(201) });
-    v.push(Instr { op: Op::Faddi, rd: 2, ra: 0, b: F::from_u64(200) });
-    v.push(Instr { op: Op::Reduce, rd: 0, ra: 2, b: F::ZERO });
+    for addr in [211u64, 213] {
+        v.push(Instr { op: Op::Store, rd: 0, ra: 0, b: F::from_u64(addr) });
+    }
+    v.push(Instr { op: Op::Load, rd: 3, ra: 0, b: F::from_u64(121) });
+    v.push(Instr { op: Op::Reduce, rd: 0, ra: 0, b: F::ZERO });
     v.push(Instr { op: Op::Faddi, rd: 7, ra: 0, b: F::from_u64(64) });
     v.push(Instr { op: Op::Poseidon2, rd: 0, ra: 7, b: F::ZERO });
     for _ in 0..4 {
         v.push(Instr { op: Op::Public, rd: 0, ra: 0, b: F::ZERO });
     }
     v.push(Instr { op: Op::Halt, rd: 0, ra: 0, b: F::ZERO });
-    Program { instrs: v, checkpoints: vec![] }
+    let reduce_layout = vec![ReduceEntry { vals: 100, row: 120, len: 3, key: 210, alpha: 212, res: 214, chain_start: true, carry: false }];
+    Program { instrs: v, checkpoints: vec![], reduce_layout }
+}
+
+/// Cut D's honest reduce program (`tests/emulator.rs::chain`, shared): one chain over three
+/// columns, as one entry or (`split`) as a carrying two-column entry plus a one-column
+/// continuation. Publishes 267 = (10−4)·1 + (20−5)·3 + (30−6)·9 four times.
+#[allow(dead_code)]
+pub fn reduce_chain_program(split: bool) -> recursion::isa::Program {
+    use p3_field::PrimeCharacteristicRing;
+    use recursion::isa::{Instr, Op, Program, ReduceEntry, F};
+    let i = |op: Op, rd: u8, ra: u8, b: u64| Instr { op, rd, ra, b: F::from_u64(b) };
+    let mut v = vec![];
+    for (addr, val) in [(100u64, 10u64), (101, 0), (102, 20), (103, 0), (104, 30), (105, 0), (120, 4), (121, 5), (122, 6), (210, 1), (211, 0), (212, 3), (213, 0)] {
+        v.push(i(Op::Faddi, 1, 0, val));
+        v.push(i(Op::Store, 1, 0, addr));
+    }
+    let e = ReduceEntry { vals: 100, row: 120, len: 3, key: 210, alpha: 212, res: 214, chain_start: true, carry: false };
+    let layout = if split {
+        vec![ReduceEntry { len: 2, carry: true, ..e }, ReduceEntry { vals: 104, row: 122, len: 1, chain_start: false, ..e }]
+    } else {
+        vec![e]
+    };
+    for id in 0..layout.len() as u64 {
+        v.push(i(Op::Reduce, 0, 0, id));
+    }
+    v.push(i(Op::Load, 3, 0, 214));
+    for _ in 0..4 {
+        v.push(i(Op::Public, 0, 3, 0));
+    }
+    v.push(i(Op::Halt, 0, 0, 0));
+    Program { instrs: v, checkpoints: vec![], reduce_layout: layout }
 }
 
 /// Cut C's smallest honest `COMPRESS` program (`tests/emulator.rs`'s, reproduced for the chip and
@@ -600,7 +638,7 @@ pub fn compress_program(bit: u64) -> recursion::isa::Program {
         instrs.push(i(Op::Public, 0, 5, 0));
     }
     instrs.push(i(Op::Halt, 0, 0, 0));
-    Program { instrs, checkpoints: vec![] }
+    Program { instrs, checkpoints: vec![], reduce_layout: vec![] }
 }
 
 /// The main columns a table range-checks: the single-column fields of its `RANGE8` lookups.

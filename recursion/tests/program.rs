@@ -24,6 +24,7 @@ fn toy() -> Program {
             instr(Op::Halt, 0, 0, 0),
         ],
         checkpoints: vec![],
+        reduce_layout: vec![],
     }
 }
 
@@ -84,13 +85,13 @@ fn the_verifier_key_binds_the_program() {
     let mut b = toy();
     b.instrs[2] = instr(Op::Fsub, 3, 1, 2);
 
-    let ka = m.verifier_key(&a, Tier(8), false);
-    let kb = m.verifier_key(&b, Tier(8), false);
+    let ka = m.verifier_key(&a, Tier(8), 0);
+    let kb = m.verifier_key(&b, Tier(8), 0);
     let roots = |k: &p3_batch_stark::CommonData<recursion::machine::Config>| {
         k.preprocessed.as_ref().expect("the batch has preprocessed columns").commitment.roots().to_vec()
     };
     assert_ne!(roots(&ka), roots(&kb), "one word differs, so the preprocessed cap differs");
-    let ka2 = m.verifier_key(&a, Tier(8), false);
+    let ka2 = m.verifier_key(&a, Tier(8), 0);
     assert_eq!(roots(&ka), roots(&ka2), "the same program reproduces the same cap");
 }
 
