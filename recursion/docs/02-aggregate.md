@@ -17,8 +17,9 @@ differential and the tamper table in the same file, the stub vectors in
 
 **Current numbers (2026-10-05): phase 3, "Phase 3" below and `docs/06-phase3-fold-reduce.md`.**
 Production N=1 at tier 20 (585 960 rows), N=2 and N=3 at 21, N=4 at 22; the test N=1/2/3 at
-18 / 19 / 19; both memory tables one height shorter at every N; the aggregate program digest moved
-again. Phase 2's row cuts (2026-10-03, "Phase 2" below and `docs/04-phase2-row-cuts.md`) made
+18 / 19 / 19; the register table one height shorter at every production N and at test N=1 and 2 (test N=3
+stays at `2^21`), the RAM table one height shorter at production N=1, 2 and 4 (production N=3 stays
+at `2^23`) and at no test N; the aggregate program digest moved again. Phase 2's row cuts (2026-10-03, "Phase 2" below and `docs/04-phase2-row-cuts.md`) made
 every rung one tier lower at equal N (production N=1 at tier 20, 893 880 rows). The sections in
 between are the record of how the earlier numbers were arrived at.
 
@@ -220,7 +221,9 @@ derivation and the model's ±10 % calibration):
 
 Tier 22 now holds up to N=7 (4 099 266 rows) and tier 23, the top rung, up to N=14 (8 198 123).
 At equal N the production rungs are where phase 2 left them except N=3, one lower; what phase 3
-bought at every N is the memory tables' heights (REG and RAM one height shorter) and with them
+bought is memory-table height — the register table one height shorter at every production N and at test N=1 and 2 (test N=3
+stays at `2^21`), the RAM table one height shorter at production N=1, 2 and 4 (production N=3 stays
+at `2^23`) and at no test N (docs/04's tables against the heights above) — and with it
 roughly half the projected memory of phase 2's figures (≈ 240 / 475 / 950 GB at N=1 / 2 / 4).
 The test-profile N=2 and N=3 aggregates do not fit this 48 GB box by the model (≈ 52 and
 ≈ 78 GB); the N=1 shape does, measured (docs/06 §6).

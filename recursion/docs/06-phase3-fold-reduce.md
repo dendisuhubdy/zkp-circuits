@@ -128,7 +128,7 @@ shared fold-result cells (E2) was accepted; whether `Precompiles::Off` should be
 
 Memory targets (spec §1): REG 2 147 159 → under 2 097 152 (needed −50 008); RAM 2 213 181 → under
 2 097 152. **Both met at Cut D** (1 785 559 and 1 913 981) and held through F (1 290 039 and
-1 903 581): F's `POW` added 15 440 RAM accesses (the bits buffer), 193 571 under the line.
+1 903 581): F's `POW` added 15 440 RAM accesses (the bits buffer), 193 570 under the `≤ 2 097 151` line.
 
 ## 3. Memory (measured 2026-10-05 and 2026-10-06)
 
@@ -464,6 +464,10 @@ Pins and literals re-measured (the Re-pin Procedure):
 
 Notes on the table:
 
+- Commit `a337b12`'s subject says "isolating forgeries for five more rules"; the sweep added six
+  forgeries (the entry step and five pow rules — the run carry split into three) plus the
+  provider-rule test in `tests/tables.rs` (§6's table is the count). The history is left as it is.
+
 - The self-verifier opens the rVM's own wider tables and shares the RV32 verifier's FRI
   pipeline, so both the pipeline's cuts and the rVM's wider AIR reach its program and its
   phase 5: its rows fell 23 % (toy) and 24 % (busy) against docs/05; its permutations rose by 38
@@ -545,8 +549,9 @@ preprocessed region is new) at the next chain cut. No running chain has aggregat
 
 **The suite** (`cargo test --release --no-fail-fast -- --skip a_one_proof_aggregate_round_trips`,
 docs/04's invocation, on the final tree: `a337b12`, `7098629` and this record's `tests/exit.rs` pin): **278 passed, 0 failed, 20 ignored, 1
-skipped**, across 28 test binaries. Phase 2 ended at 208 / 20 / 1, the quotient layout at 216;
-Task 0 made it 210 and Cut F 269. Task 5's sweep added nine tests (six forgeries in
+skipped**, across 28 test binaries. Phase 2 ended at 208 / 20 / 1; Task 0 measured 210 on the
+pre-rebase tree (base `2c1f068`); the rebase onto main's quotient-layout merge brought in its
+216-test suite (docs/05), and the cuts took it to 269 at Cut F. Task 5's sweep added nine tests (six forgeries in
 `tests/cheating.rs`, one rule test in `tests/tables.rs`, the reload-in-span test in `tests/dsl.rs`,
 the top-cell legality test in `tests/program.rs`) and widened four (the layout digest's fields,
 the own-slot check's cases at the unit and the whole-program level, the padding rule's columns). The ignored tests that run on
@@ -619,10 +624,11 @@ gate**. In order of leverage:
    Per query: `input_root` 3 101.9 rows over the seven opened heights (leaf sponges and walks),
    `commit_root` 1 508 over the nine rounds. By opcode (production, Task 5's profile, which now
    prints every opcode a span executed): `input_root` is `LOAD` 121 107 (97 987 of them reloads),
-   `FADDI` 41 521, `SPONGE` 33 520, `STORE` 24 723, `COMPRESS` 9 200 (115 levels a query) and
-   15 200 rows of field arithmetic; `commit_root` is `LOAD` 58 880 (35 840 reloads), 27 360 rows
-   of `FMUL`/`FADD`/`FSUB`, `STORE` 11 520, `FADDI` 10 720, `COMPRESS` 7 040 (88 levels a query)
-   and `SPONGE` 2 240. The two spans spend ≈ 23 rows for every `COMPRESS` row they issue. The spans
+   `FADDI` 41 521, `SPONGE` 33 520, `STORE` 24 723, `COMPRESS` 9 200 (115 levels a query),
+   15 200 rows of field arithmetic, and 2 880 rows of other opcodes (`JEQ` 1 600, `POSEIDON2`
+   1 280); `commit_root` is `LOAD` 58 880 (35 840 reloads), 27 360 rows
+   of `FMUL`/`FADD`/`FSUB`, `STORE` 11 520, `FADDI` 10 720, `COMPRESS` 7 040 (88 levels a query),
+   `SPONGE` 2 240, and 2 880 rows of other opcodes (`JEQ`). The two spans spend ≈ 23 rows for every `COMPRESS` row they issue. The spans
    did not move in this phase except for E1's in-place leaf sponge, and phase 2's Cut C is their
    last change (`COMPRESS`). Candidates, to be priced by the same span profile before any is
    built: keep the walk's running digest and its pointers in registers across levels (most of
