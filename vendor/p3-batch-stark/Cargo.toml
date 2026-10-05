@@ -1,5 +1,5 @@
 # RandProtocol fork of Plonky3's p3-batch-stark 0.7.0 — see ../PROVENANCE.md. The crates.io manifest
-# inherits from Plonky3's workspace; this one spells the same values out. Upstream's tests and
+# inherits from Plonky3's workspace; this one spells the same values out. Upstream's integration tests and
 # benches are not carried (they need ten sibling crates as dev-dependencies); the fork's tests
 # live in ../../recursion/tests/quotient_layout.rs, against the machine that uses the patch.
 [package]
@@ -31,3 +31,14 @@ hashbrown = "0.17.1"
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 thiserror = { version = "2.0", default-features = false }
 tracing = { version = "0.1.44", default-features = false, features = ["attributes"] }
+
+# RandProtocol patch (2026-10-04): quotient layout. The dev-dependencies upstream's in-crate unit
+# tests (`check_constraints.rs`, `verifier/data.rs`) import — crates.io's manifest drops them as
+# workspace path dependencies — so `cargo test` compiles here and runs the fork's `layout_tests`.
+[dev-dependencies]
+p3-baby-bear = "=0.7.0"
+p3-dft = "=0.7.0"
+p3-fri = "=0.7.0"
+p3-merkle-tree = "=0.7.0"
+p3-symmetric = "=0.7.0"
+rand = { version = "0.10.1", default-features = false, features = ["std_rng"] }

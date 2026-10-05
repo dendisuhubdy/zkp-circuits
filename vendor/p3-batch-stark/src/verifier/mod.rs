@@ -127,6 +127,13 @@ where
     )
 }
 
+// RandProtocol patch (2026-10-04): quotient layout.
+/// Build the commitments and opening points the PCS verifies, with the quotient round laid out
+/// under `layout`: one `(domain, [(zeta, chunk values)])` entry per chunk under
+/// [`QuotientLayout::PerChunk`], or one entry per instance — every chunk's values concatenated in
+/// chunk order, at the first chunk's domain — under [`QuotientLayout::PerInstance`]. Every other
+/// round, and the returned quotient domains, are independent of the layout.
+/// [`commitments_with_opening_points`] is the `PerChunk` form, upstream's behaviour unchanged.
 #[expect(clippy::too_many_arguments)]
 pub fn commitments_with_opening_points_with_layout<SC, A>(
     config: &SC,
@@ -144,8 +151,6 @@ where
     SC: SGC,
     A: BaseAir<Val<SC>>,
 {
-    // RandProtocol patch (2026-10-04): quotient layout: the layout is used from the next task on.
-    let _ = layout;
     let pcs = config.pcs();
     let is_zk = config.is_zk();
     let mut coms_to_verify = vec![];
@@ -257,19 +262,39 @@ where
         .collect::<Vec<_>>();
 
     // Build the per-matrix openings for the aggregated quotient commitment.
+    // RandProtocol patch (2026-10-04): quotient layout. `PerChunk` is upstream: one matrix per
+    // chunk, instance-major. `PerInstance`: one matrix per instance whose claimed row is every
+    // chunk's values in chunk order, at the first chunk's domain (same size as all of them). A
+    // proof of the other layout fails inside the PCS — the hiding verifier's matrix-count check
+    // or the MMCS row-width check — and surfaces as `InvalidOpeningArgument`.
     let mut qc_round = Vec::new();
     for (i, domains) in randomized_quotient_chunks_domains.iter().enumerate() {
         let inst_qcs = &opened_values.instances[i]
             .base_opened_values
             .quotient_chunks;
-        for (d, vals) in zip_eq(
-            domains.iter(),
-            inst_qcs,
-            VerificationError::from(InvalidProofShapeError::QuotientDomainsCountMismatch {
-                air: i,
-            }),
-        )? {
-            qc_round.push((*d, vec![(zeta, vals.clone())]));
+        match layout {
+            QuotientLayout::PerChunk => {
+                for (d, vals) in zip_eq(
+                    domains.iter(),
+                    inst_qcs,
+                    VerificationError::from(InvalidProofShapeError::QuotientDomainsCountMismatch {
+                        air: i,
+                    }),
+                )? {
+                    qc_round.push((*d, vec![(zeta, vals.clone())]));
+                }
+            }
+            QuotientLayout::PerInstance => {
+                if inst_qcs.len() != domains.len() {
+                    return Err(VerificationError::from(
+                        InvalidProofShapeError::QuotientDomainsCountMismatch { air: i },
+                    )
+                    .into());
+                }
+                let row: Vec<Challenge<SC>> =
+                    inst_qcs.iter().flat_map(|chunk| chunk.iter().cloned()).collect();
+                qc_round.push((domains[0], vec![(zeta, row)]));
+            }
         }
     }
     coms_to_verify.push((commitments.quotient_chunks.clone(), qc_round));
@@ -370,7 +395,9 @@ where
     Ok((coms_to_verify, quotient_domains))
 }
 
-#[instrument(skip_all)]
+// RandProtocol patch (2026-10-04): quotient layout — the span is `verify_batch_with_layout`'s.
+/// Verify a batch STARK proof under upstream's quotient layout ([`QuotientLayout::PerChunk`]).
+/// See [`verify_batch_with_layout`].
 pub fn verify_batch<SC, A>(
     config: &SC,
     airs: &[A],
@@ -390,6 +417,13 @@ where
     verify_batch_with_layout(config, airs, proof, public_values, common, QuotientLayout::PerChunk)
 }
 
+// RandProtocol patch (2026-10-04): quotient layout.
+/// Verify a batch STARK proof whose quotient chunks were committed under `layout`: the layout
+/// decides how the quotient round's matrices are listed for the PCS (one per chunk under
+/// [`QuotientLayout::PerChunk`], one per instance under [`QuotientLayout::PerInstance`]); the
+/// proof does not carry it, so the caller pins it as a property of its machine, and a proof made
+/// under the other layout is refused by the PCS. [`verify_batch`] is the `PerChunk` form,
+/// upstream's behaviour unchanged.
 #[instrument(skip_all)]
 pub fn verify_batch_with_layout<SC, A>(
     config: &SC,

@@ -82,7 +82,7 @@ impl<'a, SC: SGC, A> StarkInstance<'a, SC, A> {
 
 /// Generate a batch STARK proof for all provided instances under upstream's quotient layout
 /// ([`QuotientLayout::PerChunk`]). See [`prove_batch_with_layout`].
-#[instrument(skip_all)]
+// RandProtocol patch (2026-10-04): quotient layout — the span is `prove_batch_with_layout`'s.
 pub fn prove_batch<
     SC,
     #[cfg(debug_assertions)] A: for<'a> Air<DebugConstraintBuilder<'a, Val<SC>, SC::Challenge>>
@@ -155,8 +155,6 @@ where
     <SC::Pcs as p3_commit::Pcs<SC::Challenge, SC::Challenger>>::ProverData: Sync,
     <SC::Pcs as p3_commit::Pcs<SC::Challenge, SC::Challenger>>::Commitment: Sync,
 {
-    // RandProtocol patch (2026-10-04): quotient layout: the layout is used from the next task on.
-    let _ = layout;
     let common = &prover_data.common;
     // TODO: Extend if additional lookup gadgets are added.
     let lookup_gadget = LogUpGadget::new();
@@ -474,7 +472,19 @@ where
             let evals = chunk_domains.iter().zip(chunk_mats).map(|(d, m)| (*d, m));
             let ldes = pcs.get_quotient_ldes(evals, n_chunks);
 
-            (chunk_domains, ldes)
+            // RandProtocol patch (2026-10-04): quotient layout. Under `PerInstance` the chunk LDEs
+            // become one matrix here, inside the instance's own step, so the per-chunk copies are
+            // dropped before the next instance is processed. The one stand-in domain is the first
+            // chunk's: every chunk domain of an instance has the same size, which is all the PCS
+            // reads of a committed matrix's domain.
+            match layout {
+                QuotientLayout::PerChunk => (chunk_domains, ldes),
+                QuotientLayout::PerInstance => {
+                    let wide = concat_chunk_rows(&ldes, SC::Challenge::DIMENSION);
+                    drop(ldes);
+                    (vec![chunk_domains[0]], vec![wide])
+                }
+            }
         })
         .collect();
 
@@ -660,12 +670,30 @@ where
         };
 
         // Quotient chunks: collect the zeta-point opening of each chunk.
-        let mut qcs = Vec::with_capacity(e - s);
-        for _ in s..e {
-            let mat_vals = quotient_openings_iter
-                .next()
-                .expect("chunk index in bounds");
-            qcs.push(mat_vals[0].clone());
+        // RandProtocol patch (2026-10-04): quotient layout. Under `PerInstance` the one matrix's
+        // row is every chunk's `DIMENSION` values in chunk order; the proof keeps upstream's
+        // per-chunk shape, so the verifier's recomposition does not know the layout.
+        let n_chunks_i = num_quotient_chunks[i];
+        let mut qcs = Vec::with_capacity(n_chunks_i);
+        match layout {
+            QuotientLayout::PerChunk => {
+                for _ in s..e {
+                    let mat_vals = quotient_openings_iter
+                        .next()
+                        .expect("chunk index in bounds");
+                    qcs.push(mat_vals[0].clone());
+                }
+            }
+            QuotientLayout::PerInstance => {
+                debug_assert_eq!(e - s, 1);
+                let mat_vals = quotient_openings_iter
+                    .next()
+                    .expect("one quotient matrix per instance");
+                let row = &mat_vals[0];
+                let d = SC::Challenge::DIMENSION;
+                assert_eq!(row.len(), n_chunks_i * d, "the wide row is every chunk's values");
+                qcs.extend(row.chunks_exact(d).map(|c| c.to_vec()));
+            }
         }
 
         // Preprocessed openings: local and optionally next row.
@@ -1011,4 +1039,67 @@ where
         );
 
     result
+}
+
+/// RandProtocol patch (2026-10-04): quotient layout. One instance's chunk LDEs, already
+/// bit-reversed at one height, laid side by side into one matrix: every chunk's first
+/// `data_width` columns in chunk order, then the **first** chunk's remaining columns — the hiding
+/// PCS's random codewords, kept once as the wide matrix's own (a non-hiding PCS has none, and then
+/// nothing is appended). The other chunks' random columns are dropped: they were LDE'd for a
+/// matrix that is no longer committed.
+///
+/// # Panics
+/// If the chunk matrices do not share one height and one width, or a width is below `data_width`.
+pub(crate) fn concat_chunk_rows<T: Clone + Default + Send + Sync>(
+    chunks: &[RowMajorMatrix<T>],
+    data_width: usize,
+) -> RowMajorMatrix<T> {
+    let n = chunks.len();
+    assert!(n >= 1, "an instance has at least one quotient chunk");
+    let h = chunks[0].height();
+    let w = chunks[0].width();
+    assert!(w >= data_width, "a chunk matrix carries at least its data columns");
+    for m in chunks {
+        assert_eq!((m.height(), m.width()), (h, w), "one instance's chunks share a shape");
+    }
+    let extra = w - data_width;
+    let out_w = n * data_width + extra;
+    let mut values = vec![T::default(); h * out_w];
+    values
+        .par_chunks_mut(out_w)
+        .enumerate()
+        .for_each(|(r, dst)| {
+            for (c, m) in chunks.iter().enumerate() {
+                dst[c * data_width..(c + 1) * data_width]
+                    .clone_from_slice(&m.values[r * w..r * w + data_width]);
+            }
+            dst[n * data_width..].clone_from_slice(&chunks[0].values[r * w + data_width..(r + 1) * w]);
+        });
+    RowMajorMatrix::new(values, out_w)
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn concat_lays_data_columns_side_by_side_and_keeps_the_first_chunks_salts_once() {
+        // Three chunks, two rows, data width 2, two "salt" columns each: rows are [d0 d1 s0 s1].
+        let c0 = RowMajorMatrix::new(vec![1u32, 2, 90, 91, 3, 4, 92, 93], 4);
+        let c1 = RowMajorMatrix::new(vec![5u32, 6, 80, 81, 7, 8, 82, 83], 4);
+        let c2 = RowMajorMatrix::new(vec![9u32, 10, 70, 71, 11, 12, 72, 73], 4);
+        let wide = concat_chunk_rows(&[c0, c1, c2], 2);
+        assert_eq!(wide.width(), 3 * 2 + 2);
+        assert_eq!(wide.height(), 2);
+        assert_eq!(wide.values, vec![1, 2, 5, 6, 9, 10, 90, 91, 3, 4, 7, 8, 11, 12, 92, 93]);
+    }
+
+    #[test]
+    fn concat_without_salt_columns_is_a_plain_horizontal_join() {
+        let c0 = RowMajorMatrix::new(vec![1u32, 2, 3, 4], 2);
+        let c1 = RowMajorMatrix::new(vec![5u32, 6, 7, 8], 2);
+        let wide = concat_chunk_rows(&[c0, c1], 2);
+        assert_eq!(wide.width(), 4);
+        assert_eq!(wide.values, vec![1, 2, 5, 6, 3, 4, 7, 8]);
+    }
 }
