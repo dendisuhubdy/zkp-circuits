@@ -2781,18 +2781,20 @@ fn a_fold_row_with_a_coefficient_off_the_table_is_rejected() {
 #[test]
 fn a_headless_fold_run_after_the_reduce_rows_is_rejected() {
     let (m, p, mut t) = fold_setup();
-    let r = fold_first_row(&t);
-    let w = reduce::col::WIDTH;
-    // Keep the honest run, and forge a second run's rows in the padding right after it: copy the
-    // honest run's rows, clear F_FIRST on the copy's first row, and point its result at the honest
-    // result cell one clock later.
-    let honest_len = 2 * t.reduce[r * w + reduce::col::F_A].as_canonical_u64() as usize;
-    let src: Vec<F> = t.reduce[r * w..(r + honest_len) * w].to_vec();
-    let dst = r + honest_len;
-    t.reduce[dst * w..(dst + honest_len) * w].copy_from_slice(&src);
-    t.reduce[dst * w + reduce::col::F_FIRST] = F::ZERO;
-    for k in 0..honest_len {
-        t.reduce[(dst + k) * w + reduce::col::CLK] += F::ONE;
+    let (w, first) = (reduce_table::col::WIDTH, fold_first_row(&t));
+    let r = t.reduce.as_mut().unwrap();
+    // Keep the honest run; forge a second one in the padding right after it: copy the honest
+    // rows, clear F_FIRST on the copy's first row, move the copy one clock later, and leave the
+    // provider multiplicities alone (they belong to the preprocessed rows, not the run).
+    let len = 2 * r.values[first * w + reduce_table::col::F_A].as_canonical_u64() as usize;
+    let src: Vec<F> = r.values[first * w..(first + len) * w].to_vec();
+    let dst = first + len;
+    r.values[dst * w..(dst + len) * w].copy_from_slice(&src);
+    r.values[dst * w + reduce_table::col::F_FIRST] = F::ZERO;
+    for k in 0..len {
+        r.values[(dst + k) * w + reduce_table::col::CLK] += F::ONE;
+        r.values[(dst + k) * w + reduce_table::col::MULT] = F::ZERO;
+        r.values[(dst + k) * w + reduce_table::col::MULT_C] = F::ZERO;
     }
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
