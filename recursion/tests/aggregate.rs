@@ -436,6 +436,87 @@ fn a_wrong_shape_proof_in_the_set_is_named_by_index_before_any_tape_work() {
     }
 }
 
+// ── The final fix wave (the whole-branch review's Important 2 and 3): the reduce height is
+// canonical in (program, N), and N has a ceiling ──────────────────────────────────────────────
+
+/// The reduce rows an emulated run sends to the chip: `build_traces`' own count.
+fn run_reduce_rows(exec: &recursion::emulator::Execution) -> u64 {
+    use recursion::tables::reduce::{fold_events, fold_rows, pow_events, pow_rows, reduce_events, reduce_rows};
+    (reduce_rows(&reduce_events(&exec.events)) + fold_rows(&fold_events(&exec.events)) + pow_rows(&pow_events(&exec.events))) as u64
+}
+
+/// The static count `program_rows` (what `Machine::verify_n` derives the canonical height from)
+/// is exactly what a run sends: the single-proof program's run, and the aggregate's at N = 1 and
+/// 2, emulated at the test profile — `N × program_rows`. So the canonical height is the height
+/// `build_traces` declares. Pinned: 39 296 rows a proof (`2^16` at N=1, docs/06 §3), and the
+/// ceiling at the current `REDUCE_MAX_LOG_HEIGHT = 20`: test N ≤ 26 (26 × 39 296 + 1 ≤ 2^20).
+#[test]
+fn the_reduce_height_is_canonical_in_the_program_and_n_at_the_test_profile() {
+    use recursion::machine::{canonical_reduce_log_height, max_reduce_n, REDUCE_MAX_LOG_HEIGHT};
+    use recursion::tables::reduce::{program_rows, provider_rows, reduce_log_height};
+    let proofs: Vec<Proof> = common::bundle_proofs(FriProfile::Test, 2).into_iter().map(|p| p.proof).collect();
+    let (shape, key) = shape_and_key(&proofs[0]);
+    let single = verify_rv32(&shape, &key, Checkpoints::Off).program;
+    let agg = verify_rv32n(&shape, &key, Checkpoints::Off).program;
+    let per = program_rows(&agg);
+    assert_eq!(per, 39_296, "the test-profile reduce rows per inner proof");
+    assert_eq!(program_rows(&single), per, "the loop body is the single-proof pipeline");
+    let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &proofs[0]).unwrap();
+    let exec = execute(&single, &tape.words, MAX_CYCLES).unwrap();
+    assert_eq!(run_reduce_rows(&exec), per, "the single-proof run sends exactly the static rows");
+    for n in 1..=2u64 {
+        let tape = WitnessTape::build_n(FriProfile::Test, &shape, &key, &proofs[..n as usize], &common::TEST_BINDING).unwrap();
+        let exec = execute(&agg, &tape.words, MAX_CYCLES).unwrap();
+        let rows = run_reduce_rows(&exec);
+        assert_eq!(rows, n * per, "the N={n} aggregate sends N × the static rows");
+        assert_eq!(
+            canonical_reduce_log_height(&agg, n),
+            Some(reduce_log_height(rows as usize, provider_rows(&agg.reduce_layout))),
+            "N={n}: the canonical height is the height build_traces declares"
+        );
+    }
+    assert_eq!(REDUCE_MAX_LOG_HEIGHT, 20, "the constant is not raised in phase 3");
+    assert_eq!(max_reduce_n(&agg), 26, "the test-profile N ceiling");
+    let heights: Vec<Option<u8>> = [1u64, 2, 3, 4, 7, 13, 14, 26, 27].iter().map(|&n| canonical_reduce_log_height(&agg, n)).collect();
+    assert_eq!(heights, [Some(16), Some(17), Some(17), Some(18), Some(19), Some(19), Some(20), Some(20), None]);
+}
+
+/// The same at the production profile, statically (the emulations are the ignored B3 tests):
+/// 196 480 reduce rows a proof (173 120 run + 6 080 fold + 17 280 pow, docs/06 §3), so the
+/// canonical heights are `2^18` at N=1, `2^19` at N=2, `2^20` at N=3–5 — three keys — and N ≥ 6 has
+/// no verifiable height at `REDUCE_MAX_LOG_HEIGHT = 20` (6 × 196 480 + 1 > 2^20), inside tier 22
+/// which holds cpu rows to N=7: the ceiling is the reduce chip's, not the tier's.
+#[test]
+fn the_production_reduce_heights_and_n_ceiling_are_pinned() {
+    use recursion::machine::{canonical_reduce_log_height, max_reduce_n};
+    use recursion::tables::reduce::program_rows;
+    let p = common::bundle_proofs(FriProfile::Production, 1).pop().unwrap();
+    let (shape, key) = production_shape_and_key(&p.proof);
+    let agg = verify_rv32n(&shape, &key, Checkpoints::Off).program;
+    assert_eq!(program_rows(&agg), 196_480, "the production reduce rows per inner proof");
+    assert_eq!(max_reduce_n(&agg), 5, "the production N ceiling");
+    let heights: Vec<Option<u8>> = (1..=7u64).map(|n| canonical_reduce_log_height(&agg, n)).collect();
+    assert_eq!(heights, [Some(18), Some(19), Some(20), Some(20), Some(20), None, None]);
+}
+
+/// `aggregate` refuses an N past the ceiling with a named error before any tape work (and so
+/// before any trace or prove): 27 copies of one test fixture proof, one over the test ceiling.
+/// At 26 the same set passes the check — shown by the refusal moving on, not by proving.
+#[test]
+fn an_aggregate_past_the_reduce_ceiling_is_refused_before_any_tape_work() {
+    let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
+    let (shape, key) = shape_and_key(&p.proof);
+    let vk = inner_vk(&shape, &key);
+    let bytes = postcard::to_allocvec(&p.proof).unwrap();
+    let set: Vec<Proof> = (0..27).map(|_| postcard::from_bytes(&bytes).unwrap()).collect();
+    let m = RvmMachine::new(FriProfile::Test);
+    match aggregate(&m, &vk, &set, &common::TEST_BINDING, None) {
+        Err(AggregateError::TooManyProofs { n, max }) => assert_eq!((n, max), (27, 26)),
+        Err(e) => panic!("expected TooManyProofs, got {e:?}"),
+        Ok(_) => panic!("an aggregate past the reduce ceiling was proved"),
+    }
+}
+
 // ── Task 4: the refusal suite, the in-suite aggregate, and the N=3 twin ──────────────────────
 
 /// (a) an inner proof tampered inside the set makes `aggregate` fail — never an aggregate. The

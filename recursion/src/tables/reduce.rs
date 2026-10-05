@@ -467,6 +467,36 @@ pub fn reduce_log_height(rows: usize, provider: usize) -> u8 {
     super::pad_height((rows + 1).max(provider), 1 << MIN_LOG_HEIGHT).trailing_zeros() as u8
 }
 
+/// The chip rows one pass over `program`'s instructions contributes — the static twin of
+/// `reduce_rows + fold_rows + pow_rows` over a run's events (the final fix wave, the whole-branch
+/// review's Important 2): a `REDUCE` its layout entry's length, a `FOLD` `2a`, a `POW` its `L`. All
+/// three are compile-time constants of the program the verifier key commits, so a verifier can
+/// recompute them from the program alone, with nothing the proof declares. An instruction no run
+/// can execute (an entry past the layout, an arity outside {2, 4, 8}) contributes nothing.
+///
+/// It equals the run's rows for a program that executes each of these instructions exactly once
+/// per inner proof: the straight-line single-proof program (`programs::verify_rv32`) and the
+/// aggregate program (`programs::verify_rv32n`), all of whose `REDUCE`/`FOLD`/`POW`s sit in the
+/// N-proof loop's body — so an N-proof run has `N ×` this many (`machine::canonical_reduce_log_height`;
+/// `tests/aggregate.rs` checks the equality against emulated runs).
+pub fn program_rows(program: &crate::isa::Program) -> u64 {
+    use crate::isa::Op;
+    use p3_field::PrimeField64;
+    program
+        .instrs
+        .iter()
+        .map(|x| {
+            let imm = x.b.as_canonical_u64();
+            match x.op {
+                Op::Reduce => usize::try_from(imm).ok().and_then(|k| program.reduce_layout.get(k)).map_or(0, |e| e.len as u64),
+                Op::Fold if matches!(imm, 2 | 4 | 8) => 2 * imm,
+                Op::Pow => imm / 256,
+                _ => 0,
+            }
+        })
+        .fold(0u64, u64::saturating_add)
+}
+
 /// The `REDUCE` events, in execution order.
 pub fn reduce_events(events: &[Event]) -> Vec<&Event> {
     events.iter().filter(|e| e.reduce.is_some()).collect()

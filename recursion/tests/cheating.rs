@@ -367,13 +367,93 @@ fn a_reduce_dispatch_with_no_chip_run_is_rejected() {
 fn a_reduce_proof_declaring_no_table_is_rejected() {
     let (m, p, t, _) = reduce_setup();
     // The keccak pattern's verify-side rule: a proof carrying a reduce instance cannot declare
-    // `reduce_log_height = 0` — the degree-bits vector's length mismatches the batch's.
+    // `reduce_log_height = 0`. Before the final fix wave the degree-bits vector's length
+    // mismatch refused it (`VerifyError::Tier`); now the canonical-height check, which runs
+    // first, does: the program's canonical height is the floor, 4.
     let mut proof = m.prove_traces(&p, &t, Tier(8));
     proof.reduce_log_height = 0;
     assert!(matches!(
         m.verify(&p, &proof),
-        Err(recursion::machine::VerifyError::Tier)
+        Err(recursion::machine::VerifyError::ReduceHeightNotCanonical { declared: 0, canonical: Some(4) })
     ));
+}
+
+/// The final fix wave (the whole-branch review's Important 2, INTERFACE-4 / AGG-3): the verifier
+/// key is built at the declared reduce height, so a proof that could declare any height in range
+/// could make a node build a fresh key per value. A proof declaring one height above the
+/// program's canonical one — its batch's degree bits declaring the same, so every shape check
+/// before the key agrees with it — is refused as `ReduceHeightNotCanonical` before any key is
+/// built (the cache count unchanged); the honest proof at the canonical height still verifies.
+/// (Red first: with the canonical check deleted in a scratch copy, the forged proof reaches
+/// `verifier_key` and the cache count moves — recorded in the final fix report.)
+#[test]
+fn a_declared_reduce_height_above_the_canonical_one_is_refused_before_any_key() {
+    let (m, p, t, _) = reduce_setup();
+    let canonical = recursion::machine::canonical_reduce_log_height(&p, 1);
+    assert_eq!(canonical, Some(t.reduce_log_height), "the honest prover declares the canonical height");
+    let proof = m.prove_traces(&p, &t, Tier(8));
+    m.verify(&p, &proof).expect("the canonical height verifies");
+    let mut forged: recursion::machine::Proof = postcard::from_bytes(&proof.to_bytes()).unwrap();
+    forged.reduce_log_height += 1;
+    *forged.batch.degree_bits.last_mut().unwrap() += 1; // the reduce instance's, kept consistent
+    let keys = m.cached_keys();
+    match m.verify(&p, &forged) {
+        Err(recursion::machine::VerifyError::ReduceHeightNotCanonical { declared, canonical: c }) => {
+            assert_eq!((declared, c), (t.reduce_log_height + 1, canonical), "the error names both heights")
+        }
+        other => panic!("a reduce height one above the canonical one must be refused as non-canonical, got {other:?}"),
+    }
+    assert_eq!(m.cached_keys(), keys, "no verifier key is built for a non-canonical reduce height");
+    // `verify_n` is the same check at another N: 100 000 passes of this program's three rows are
+    // 300 000 rows, canonical `2^19`, which the honest one-pass proof does not declare.
+    assert!(matches!(
+        m.verify_n(&p, &proof, 100_000),
+        Err(recursion::machine::VerifyError::ReduceHeightNotCanonical { declared: 4, canonical: Some(19) })
+    ));
+    assert_eq!(m.cached_keys(), keys);
+}
+
+/// The final fix wave (Important 3): `prove` refuses a run whose reduce-chip rows exceed
+/// `2^REDUCE_MAX_LOG_HEIGHT − 1` — a proof `verify` could never accept — after the emulation and
+/// before any trace is built. A counted loop of 16 385 `POW`s of 64 bits each (zero bits read from
+/// fresh cells) is 1 048 640 rows, 65 over the ceiling: refused as `ProveError::ReduceRows`, with
+/// no proving (the refusal returns before `build_traces`). One iteration fewer fits.
+#[test]
+fn a_run_past_the_reduce_ceiling_is_refused_before_any_trace() {
+    use recursion::machine::{max_reduce_n, ProveError, REDUCE_MAX_LOG_HEIGHT};
+    let looped = |n: u64| Program {
+        instrs: vec![
+            i(Op::Faddi, 4, 0, 400),          // 0: the bits buffer (cells 400–463, never written: zeros)
+            i(Op::Faddi, 5, 0, n),            // 1: the counter
+            i(Op::Pow, 2, 4, 256 * 64),       // 2: off 0, L 64
+            i(Op::Faddi, 5, 5, F::NEG_ONE.as_canonical_u64()), // 3
+            i(Op::Jne, 5, 0, 2),              // 4
+            i(Op::Public, 0, 0, 0),
+            i(Op::Public, 0, 0, 0),
+            i(Op::Public, 0, 0, 0),
+            i(Op::Public, 0, 0, 0),
+            i(Op::Halt, 0, 0, 0),
+        ],
+        checkpoints: vec![],
+        reduce_layout: vec![],
+    };
+    let max = (1usize << REDUCE_MAX_LOG_HEIGHT) - 1;
+    assert_eq!(max / 64, 16_383, "16 383 runs of 64 rows fit, 16 384 do not");
+    let m = Machine::new(FriProfile::Test);
+    match m.prove(&looped(16_385), &[], None) {
+        Err(ProveError::ReduceRows { rows, max: got }) => assert_eq!((rows, got), (16_385 * 64, max)),
+        Err(e) => panic!("expected ReduceRows, got {e:?}"),
+        Ok(_) => panic!("a run past the reduce ceiling was proved"),
+    }
+    let exec = execute(&looped(16_383), &[], 1 << 20).unwrap();
+    recursion::machine::check_reduce_rows(&exec).expect("16 383 runs of 64 rows fit the ceiling");
+    let exec = execute(&looped(16_384), &[], 1 << 20).unwrap();
+    assert!(matches!(recursion::machine::check_reduce_rows(&exec), Err(ProveError::ReduceRows { rows: 1_048_576, .. })));
+    // The static count is per pass, not per run: a looped program's canonical height is not its
+    // run's — `program_rows` is exact only for programs that execute each POW/FOLD/REDUCE once per
+    // proof (the verifier programs), which is why `max_reduce_n` is a property of those.
+    assert_eq!(recursion::tables::reduce::program_rows(&looped(16_385)), 64);
+    assert_eq!(max_reduce_n(&looped(1)), 16_383);
 }
 
 // ── Task 9: the poseidon2 chip's SPONGE row kind tranche ──────────────────────────────────────
