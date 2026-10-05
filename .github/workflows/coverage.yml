@@ -89,7 +89,8 @@ jobs:
         with:
           workspaces: ${{ matrix.crate }}
       - name: System dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang lld
+        # `llvm` for `llvm-ar`: cc-rs archives the C shims with it on the riscv32 target.
+        run: sudo apt-get update && sudo apt-get install -y clang lld llvm
       - name: Coverage
         run: cargo llvm-cov --lcov --output-path lcov.info ${{ matrix.args }}
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
