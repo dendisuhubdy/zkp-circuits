@@ -38,6 +38,7 @@ pub type OpeningArgumentWithQuotientDomains<SC> = (
     Vec<Vec<Domain<SC>>>,
 );
 
+// RandProtocol patch (2026-10-04): quotient layout — upstream's entry point, upstream's layout.
 /// Builds the `commitments_with_opening_points` a batch-STARK proof's PCS opening argument is
 /// checked against: one round per commitment (an optional ZK-randomization round, the trace
 /// round, the quotient-chunks round, an optional preprocessed round, an optional permutation
@@ -95,7 +96,7 @@ pub type OpeningArgumentWithQuotientDomains<SC> = (
 /// `(commitments_with_opening_points, quotient_domains)` — the second element is each
 /// instance's quotient-chunk domains, a byproduct of this construction that `verify_batch`
 /// also needs for its own post-opening constraint check.
-// RandProtocol patch (2026-10-04): quotient layout — upstream's entry point, upstream's layout.
+///
 /// [`commitments_with_opening_points_with_layout`] under [`QuotientLayout::PerChunk`].
 #[expect(clippy::too_many_arguments)]
 pub fn commitments_with_opening_points<SC, A>(
@@ -291,6 +292,17 @@ where
                     )
                     .into());
                 }
+                // RandProtocol patch (2026-10-04): quotient layout — every chunk's width checked
+                // here, not only by the caller: the concatenation is only unambiguous if each
+                // chunk is exactly one extension element.
+                for chunk in inst_qcs {
+                    if chunk.len() != Challenge::<SC>::DIMENSION {
+                        return Err(VerificationError::from(
+                            InvalidProofShapeError::QuotientChunkDimensionMismatch { air: i },
+                        )
+                        .into());
+                    }
+                }
                 let row: Vec<Challenge<SC>> =
                     inst_qcs.iter().flat_map(|chunk| chunk.iter().cloned()).collect();
                 qc_round.push((domains[0], vec![(zeta, row)]));
@@ -395,7 +407,8 @@ where
     Ok((coms_to_verify, quotient_domains))
 }
 
-// RandProtocol patch (2026-10-04): quotient layout — the span is `verify_batch_with_layout`'s.
+// RandProtocol patch (2026-10-04): quotient layout — the span lives on `verify_batch_with_layout`
+// and keeps upstream's name, `verify_batch`.
 /// Verify a batch STARK proof under upstream's quotient layout ([`QuotientLayout::PerChunk`]).
 /// See [`verify_batch_with_layout`].
 pub fn verify_batch<SC, A>(
@@ -424,7 +437,8 @@ where
 /// proof does not carry it, so the caller pins it as a property of its machine, and a proof made
 /// under the other layout is refused by the PCS. [`verify_batch`] is the `PerChunk` form,
 /// upstream's behaviour unchanged.
-#[instrument(skip_all)]
+// RandProtocol patch (2026-10-04): quotient layout — upstream's span name, for every caller.
+#[instrument(name = "verify_batch", skip_all)]
 pub fn verify_batch_with_layout<SC, A>(
     config: &SC,
     airs: &[A],

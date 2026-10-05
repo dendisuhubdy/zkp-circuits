@@ -1,13 +1,15 @@
 //! The quotient-layout fork (`docs/05-quotient-layout.md`): the rVM commits each instance's
 //! quotient chunks as one matrix. What this file pins: the machine's layout constant, the proof's
 //! quotient-round structure, the proof's survival of serialisation, and the refusals — a flipped
-//! chunk value, a flipped random hint, and a proof made under upstream's layout.
+//! chunk value, a flipped random hint, and a proof of either layout checked under the other —
+//! each refused by the hiding PCS's matrix-count check, by name — plus the structure at a
+//! reduce-carrying shape.
 mod common;
 
 use p3_batch_stark::QuotientLayout;
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use recursion::isa::{Instr, Op, Program, F};
-use recursion::machine::{Machine, Tier, VerifyError, QUOTIENT_LAYOUT};
+use recursion::machine::{build_traces, Machine, Tier, VerifyError, QUOTIENT_LAYOUT};
 use rand_zkvm::machine::FriProfile;
 
 fn instr(op: Op, rd: u8, ra: u8, b: u64) -> Instr {
@@ -126,11 +128,69 @@ fn a_proof_made_under_upstreams_layout_is_refused_not_panicked() {
     let per_chunk = m.prove_traces_with_layout(&p, &traces, tier, QuotientLayout::PerChunk);
     match m.verify(&p, &per_chunk) {
         Err(VerifyError::Batch(msg)) => {
+            // The quotient round (2): the verifier lists 7 matrices (one per instance), the proof
+            // carries 52 random-opening sets (one per chunk).
             assert!(
-                msg.contains("Mismatch") || msg.contains("InvalidOpeningArgument"),
+                msg.contains("HidingRandomOpeningMatrixCountMismatch { round: 2, expected: 7, got: 52 }"),
                 "the refusal names the layout disagreement: {msg}"
             );
         }
         other => panic!("a PerChunk proof must be refused by a PerInstance verifier, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_per_instance_proof_is_refused_by_a_per_chunk_verifier_by_name() {
+    let p = toy_program();
+    let m = Machine::new(FriProfile::Test);
+    let (proof, _) = m.prove(&p, &[], None).unwrap();
+    m.verify_with_layout(&p, &proof, QUOTIENT_LAYOUT).unwrap();
+    match m.verify_with_layout(&p, &proof, QuotientLayout::PerChunk) {
+        Err(VerifyError::Batch(msg)) => {
+            // The reverse: the per-chunk verifier lists 52 matrices, the proof carries 7.
+            assert!(
+                msg.contains("HidingRandomOpeningMatrixCountMismatch { round: 2, expected: 52, got: 7 }"),
+                "the refusal names the layout disagreement: {msg}"
+            );
+        }
+        other => panic!("a PerInstance proof must be refused by a PerChunk verifier, got {other:?}"),
+    }
+}
+
+/// `tests/cheating.rs::reduce_setup`'s batch (one four-column `REDUCE` run, eight instances):
+/// the reduce instance's chunks share one wide matrix like every other instance's.
+#[test]
+fn a_reduce_carrying_proof_has_one_quotient_matrix_per_instance() {
+    use recursion::dsl::{Builder, Checkpoints};
+    use recursion::isa::EF;
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(31);
+    let vals: Vec<EF> = (0..4).map(|_| common::random_ext(&mut rng)).collect();
+    let row: Vec<F> = (0..4).map(|_| common::random_felt(&mut rng)).collect();
+    let inv = common::random_ext(&mut rng);
+    let alpha = common::random_ext(&mut rng);
+    let mut b = Builder::new(Checkpoints::Off);
+    let mut tape: Vec<F> = vec![];
+    let vals_a = b.hint_ext_array(4);
+    vals.iter().for_each(|v| tape.extend_from_slice(v.as_basis_coefficients_slice()));
+    let row_a = b.hint_array(4);
+    tape.extend_from_slice(&row);
+    let (inv_h, zero, one, alpha_h) = (b.ext_constant(inv), b.ext_constant(EF::ZERO), b.ext_constant(EF::ONE), b.ext_constant(alpha));
+    let (ro, _) = b.reduce(vals_a, row_a, inv_h, zero, one, alpha_h);
+    b.public_ext(ro);
+    b.public_ext(ro);
+    let p = b.finish();
+    let m = Machine::new(FriProfile::Test);
+    let t = build_traces(&p, &recursion::emulator::execute(&p, &tape, 10_000).unwrap(), Tier(8)).unwrap();
+    assert!(t.reduce.is_some(), "the batch carries the reduce table");
+    let proof = m.prove_traces(&p, &t, Tier(8));
+    m.verify(&p, &proof).unwrap();
+    let n = proof.batch.degree_bits.len();
+    assert_eq!(n, 8, "the reduce table is the eighth instance");
+    assert_eq!(proof.batch.opening_proof.0[QUOTIENT_ROUND].len(), n, "one quotient matrix per instance");
+    let reduce = n - 1;
+    let chunks = proof.batch.opened_values.instances[reduce].base_opened_values.quotient_chunks.len();
+    assert_eq!(chunks, 16, "the reduce chip's chunk count under ZK");
+    for opened in &proof.batch.opening_proof.1.input_openings[QUOTIENT_ROUND].opened_values {
+        assert_eq!(opened[reduce].len(), chunks * DIMENSION + NUM_RANDOM_CODEWORDS);
     }
 }

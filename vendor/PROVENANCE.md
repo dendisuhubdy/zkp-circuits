@@ -25,8 +25,9 @@
 - Used by `recursion/` (its `[patch.crates-io]`). `research/` is not patched: the RV32 machine
   keeps crates.io's crate and the `PerChunk` layout.
 - Review: `diff -r --exclude Cargo.toml --exclude Cargo.lock --exclude tests --exclude benches
-  $(ls -d ~/.cargo/registry/src/*/p3-batch-stark-0.7.0) vendor/p3-batch-stark` shows exactly the
-  marked hunks.
+  --exclude .cargo-ok --exclude .cargo_vcs_info.json --exclude Cargo.toml.orig --exclude .gitignore
+  --exclude target $(ls -d ~/.cargo/registry/src/*/p3-batch-stark-0.7.0) vendor/p3-batch-stark`
+  shows exactly the marked hunks (and `Only in vendor/p3-batch-stark/src: layout.rs`, the new file).
 - Tests: the in-crate `layout_tests` (`src/prover.rs`) and `recursion/tests/quotient_layout.rs`.
   The manifest carries a marked `[dev-dependencies]` block (Plonky3 `=0.7.0` crates and `rand
   =0.10.2`, the recursion crate's pin) because upstream's own `#[cfg(test)]` modules need it;

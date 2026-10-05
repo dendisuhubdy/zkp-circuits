@@ -82,7 +82,8 @@ impl<'a, SC: SGC, A> StarkInstance<'a, SC, A> {
 
 /// Generate a batch STARK proof for all provided instances under upstream's quotient layout
 /// ([`QuotientLayout::PerChunk`]). See [`prove_batch_with_layout`].
-// RandProtocol patch (2026-10-04): quotient layout — the span is `prove_batch_with_layout`'s.
+// RandProtocol patch (2026-10-04): quotient layout — the span lives on `prove_batch_with_layout`
+// and keeps upstream's name, `prove_batch`.
 pub fn prove_batch<
     SC,
     #[cfg(debug_assertions)] A: for<'a> Air<DebugConstraintBuilder<'a, Val<SC>, SC::Challenge>>
@@ -130,7 +131,8 @@ where
 /// # Returns
 ///
 /// A self-contained batch proof that can be verified with `verify_batch`.
-#[instrument(skip_all)]
+// RandProtocol patch (2026-10-04): quotient layout — upstream's span name, for every caller.
+#[instrument(name = "prove_batch", skip_all)]
 pub fn prove_batch_with_layout<
     SC,
     #[cfg(debug_assertions)] A: for<'a> Air<DebugConstraintBuilder<'a, Val<SC>, SC::Challenge>>

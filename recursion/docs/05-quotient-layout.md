@@ -82,11 +82,19 @@ The four properties the change rests on, each read at the source (spec §1.1; ve
   `vendor/p3-fri/src/hiding_pcs.rs:236-245`), which maps every chunk to that one coset, and never
   again. All of an instance's chunk LDEs share a height, so they can be columns of one matrix. The
   verifier's per-chunk domains are `natural_domain_for_degree(size << is_zk)`
-  (`vendor/p3-batch-stark/src/verifier/mod.rs:259`): identical objects for one instance already.
+  (`vendor/p3-batch-stark/src/verifier/mod.rs:260`): identical objects for one instance already.
 - **Hiding is per committed matrix, and every committed matrix keeps its four random codewords.**
   The hiding PCS's argument (eprint 2024/1037 §4.2) needs each committed matrix to carry random
   columns so that a leaf row is unpredictable; the wide matrix carries four, as every matrix did.
-  The hiding MMCS salts each matrix's rows independently of this: one matrix, one salt row set.
+  Quantitatively: at an instance's quotient height the random-codeword columns drop from `4·nᵢ`
+  (four per chunk matrix, `nᵢ` chunks — 64 for a 16-chunk instance) to `4` (one wide matrix).
+  Four is upstream's per-matrix minimum, and the level its single-matrix rounds (main,
+  permutation, random) already run at: every such matrix, of any width, carries exactly four.
+  The hiding MMCS salts each matrix's rows independently of this: one salt of
+  `SALT_ELEMS = 4` field elements per committed matrix row (`RowMajorMatrix::rand(.., mat.height(),
+  SALT_ELEMS)`, `vendor/p3-merkle-tree/src/hiding_mmcs.rs:146`; the constant as
+  `recursion/src/witness.rs:33` mirrors it), so the wide matrix's row carries one salt where the
+  `nᵢ` chunk matrices' rows at that index carried `nᵢ`.
   The chunk randomisers `t_i` are untouched, so the quotient chunks' openings reveal nothing more
   than before. (Spec §8 records this as the property for the next audit to challenge.)
 - **The verifier's hidden-half merge nests by round → matrix → point**

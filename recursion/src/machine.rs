@@ -607,6 +607,13 @@ impl Machine {
     /// R6: the verifier holds the registered program; the preprocessed cap is the binding (there
     /// is no `hc` public value to check — that is what a preprocessed program table means).
     pub fn verify(&self, program: &Program, proof: &Proof) -> Result<(), VerifyError> {
+        self.verify_with_layout(program, proof, QUOTIENT_LAYOUT)
+    }
+
+    /// [`verify`](Self::verify) under an explicit quotient layout — the layout tests' entry
+    /// point, so a `PerInstance` proof can be shown refused by a `PerChunk` verifier. Every proof
+    /// this machine accepts is checked under `QUOTIENT_LAYOUT`.
+    pub fn verify_with_layout(&self, program: &Program, proof: &Proof, layout: QuotientLayout) -> Result<(), VerifyError> {
         if proof.public_values.len() != NUM_PUBLIC_VALUES { return Err(VerifyError::PublicValues); }
         // `public_values` is deserialized from untrusted bytes as raw `u64`s, and
         // `Val::from_u64` does not reduce: insist on the canonical representative so a proof has
@@ -633,7 +640,7 @@ impl Machine {
         let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
         let pvs: Vec<Vec<Val>> = (0..airs.len()).map(|i| if i == PUBLIC_VALUES_INDEX { pv_vals.clone() } else { vec![] }).collect();
         let common = self.verifier_key(program, proof.tier, proof.reduce_log_height != 0);
-        verify_batch_with_layout(&self.config, &airs, &proof.batch, &pvs, &common, QUOTIENT_LAYOUT).map_err(|e| VerifyError::Batch(format!("{e:?}")))
+        verify_batch_with_layout(&self.config, &airs, &proof.batch, &pvs, &common, layout).map_err(|e| VerifyError::Batch(format!("{e:?}")))
     }
 }
 
