@@ -2556,6 +2556,10 @@ Add `pub const FOLD_COEFF_ROWS: usize = 14;`, and make `provider_rows` return `l
             t.assert_zero(is_fold.clone() * (one.clone() - f_last.clone()) * (one.clone() - n(IS_FOLD)));
             t.assert_zero(is_fold.clone() * (one.clone() - f_last.clone()) * n(F_FIRST));
             t.assert_zero(f_last.clone() * n(IS_FOLD) * (one.clone() - n(F_FIRST)));
+            // A fold row entered from the last reduce row is a run's first row too — without
+            // this, a headless run (no F_FIRST, so no FOLD message) could still write a forged
+            // result at a clock of the prover's choosing (controller review, 2026-10-05).
+            t.assert_zero(is_last.clone() * n(IS_FOLD) * (one.clone() - n(F_FIRST)));
         }
         b.assert_zero(f_first.clone() * v(F_K));
         b.assert_zero(f_first.clone() * (one.clone() - f_ph1.clone()));
@@ -2769,6 +2773,27 @@ fn a_fold_row_with_a_coefficient_off_the_table_is_rejected() {
     let (m, p, mut t) = fold_setup();
     let (w, first) = (reduce_table::col::WIDTH, fold_first_row(&t));
     t.reduce.as_mut().unwrap().values[first * w + reduce_table::col::C0] += F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+/// A fold run that begins right after the last reduce row without `F_FIRST` sends no `FOLD`
+/// message and would still write its result: the reduce-to-fold boundary must start a run.
+#[test]
+fn a_headless_fold_run_after_the_reduce_rows_is_rejected() {
+    let (m, p, mut t) = fold_setup();
+    let r = fold_first_row(&t);
+    let w = reduce::col::WIDTH;
+    // Keep the honest run, and forge a second run's rows in the padding right after it: copy the
+    // honest run's rows, clear F_FIRST on the copy's first row, and point its result at the honest
+    // result cell one clock later.
+    let honest_len = 2 * t.reduce[r * w + reduce::col::F_A].as_canonical_u64() as usize;
+    let src: Vec<F> = t.reduce[r * w..(r + honest_len) * w].to_vec();
+    let dst = r + honest_len;
+    t.reduce[dst * w..(dst + honest_len) * w].copy_from_slice(&src);
+    t.reduce[dst * w + reduce::col::F_FIRST] = F::ZERO;
+    for k in 0..honest_len {
+        t.reduce[(dst + k) * w + reduce::col::CLK] += F::ONE;
+    }
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 ```
@@ -3319,6 +3344,8 @@ Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
 ---
 
 ## Self-review notes
+
+- **Controller review (2026-10-05):** the reduce-to-fold boundary constraint `is_last · n(IS_FOLD) · (1 − n(F_FIRST)) = 0` was missing (a headless fold run after the reduce rows could write a forged result); added to Task 3's eval with `a_headless_fold_run_after_the_reduce_rows_is_rejected`. The spec's §2.1/§2.3 were amended to the plan's R1–R9.
 
 - **Spec coverage.** §1 → Task 0 (the attribution, REG, `log_arities`, `degree_bits`, spans; the `phase3_attribution` block; docs/05 §1–2). §2.1 → Tasks 1a and 1b, with R1–R6 recording where the code departs from the spec's wording and why. §2.2 → Task 2. §2.3 → Task 3, plus Task 0's identity test. §2.4 → Task 4, gated on Task 3 Step 8. §2.5 → every cut's band check and the Re-pin Procedure; Task 5 Step 2's two branches. §3 → Task 1b Step 5. §4 → the Re-pin Procedure and Task 5 Step 1's checklist. §5: precompile differentials in Tasks 1a, 2, 3 and 4; the spec's named forgeries in Task 1a (wrong CARRY, an address off the layout, a tampered chain result), Task 3 (tampered B_m, a u that differs, a run cut short) and Task 4 (a non-boolean bit); width and degree pins in Tasks 1a, 3 and 4; the suite in Task 5. §6 rulings: 1 (row kinds, not an instance) in Tasks 3 and 4; 2 (one REDUCE row per entry) in Task 1a; 3 (never hinted) in R1 and `check_layout`; 4 (DFT + Horner) in Tasks 0 and 3; 5 (profile unchanged) in Global Constraints; 6 (gate not widened) in Global Constraints and Task 5 Step 2.
 - **Placeholder scan.** `grep -nE 'TBD|TODO|similar to|add validation' <this file>` returns nothing. Angle-bracket slots (`<rows>`, `<measured>`) appear only in commit messages, docs/05 text and the P2 script's capitalised names. Each one is a measured number that the step around it says how to read off.

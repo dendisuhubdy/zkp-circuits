@@ -145,6 +145,34 @@ If D + E + F measured lands above 524 287, the phase stops at the measured point
 met at D) are the delivered result, and the residual is reported with the next lever (the REDUCE chip reading
 `px` once for a matrix's two points; the inner FRI profile) for a phase 4 decision. The gate is not widened.
 
+### 2.6 Resolutions made while planning (binding; they correct §2.1 and §2.3 where the two differ)
+
+The plan (`docs/superpowers/plans/2026-10-05-rvm-phase3-fold-reduce.md`, "Design resolutions" R1–R9) found that
+§2.1 and §2.3 as written cannot be built, and resolved them as follows. Where this section and the earlier text
+differ, this section governs.
+
+- **R1 — the layout is looked up, not row-aligned.** The aggregate program runs every layout entry N times inside
+  a tape-counted loop (`rv32n.rs`), so preprocessed columns aligned to the chip's rows would need a height that
+  depends on N. The layout is a preprocessed *provider region* in `ProgramAir`'s pattern (rows plus a witness
+  `MULT`), consumed by each run's first row over a `REDUCE_LAYOUT` bus. Ruling 3 holds: no field is a witness.
+- **R2 — `KEY_SLOT` and `QUERY` are absolute addresses** (`KEY`, `ALPHA`, `RES` in the layout row).
+- **R3 — `INV` is read once per entry**, because a height chain interleaves `zeta` and `zeta_next` entries with
+  different keys; `ALPHA` is read once per chain and carried.
+- **R4 — a chain carries across consecutive dispatches** (`n(CLK) = CLK + 1`, `n(ENTRY) = ENTRY + 1`); the builder
+  emits a chain's REDUCE rows back to back and `replay` asserts it, which also keeps a chain inside one aggregate
+  loop iteration.
+- **R5 — `LEN`/`LEN1`/`LEN1_INV` become `ROW_END`/`END_INV`.**
+- **R6 — the layout is part of the program digest** (absorbed only when non-empty) and the verifier-key cache is
+  keyed by `(tier, digest, reduce_log_height)`.
+- **R7 — the FOLD dispatch is `[CLK, msg, u0, u1, a]`** with the arity as the immediate, the result at
+  `msg + 2a + 4`, and the DFT coefficients looked up from a 14-row preprocessed table on a `FOLD_COEFF` bus; phase 2
+  uses a shift register, not a one-hot.
+- **R8 — the POW dispatch is `[CLK, bits_ptr, off + 256·L, G, base]`** (Cut F only).
+- **R9 — new buses `REDUCE_LAYOUT`, `FOLD`, `FOLD_COEFF`, `POW`**, every message degree 1; the reduce chip's
+  packed-lookup degree is re-measured and pinned (≤ 8).
+- **Boundary rule (controller review):** the first fold row after the last reduce row must carry `F_FIRST`, so no
+  fold run exists without a dispatch; the same rule already holds for reduce runs and chain continuations.
+
 ## 3. Memory
 
 Cut D's −300 000 REG and −250 000 RAM accesses take both memory tables from 2^22 to 2^21, which docs/04 §"Live
