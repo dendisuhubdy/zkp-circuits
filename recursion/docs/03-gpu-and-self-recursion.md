@@ -89,7 +89,9 @@ in `ProverData`), so tier 21 → ≥ 64 GB, 22 → ≥ 128 GB, 23 → ≥ 160 GB
 (2026-10-03: those host classes are the withdrawn oracle model's — the measured live heap is
 `docs/04-phase2-row-cuts.md`; and since phase 2's row cuts every proof sits one tier lower at
 equal N — production exit/N=1 tier 20, N=2 tier 21, N=3/N=4 tier 22 — so the device model's
-rows above apply one rung down; the cpu table is 82 columns, 86 salted.)
+rows above apply one rung down; the cpu table is 82 columns, 86 salted. 2026-10-05: since
+phase 3, `docs/06-phase3-fold-reduce.md`, the production N=3 aggregate is tier 21 as well, both
+memory tables are one height shorter at every N, and the cpu table is 84 columns, 88 salted.)
 
 ## The tier-23 rung (Task 2, landed)
 
@@ -112,8 +114,23 @@ the Off-replay byte-for-byte pin and every differential re-ran green. `tests/sel
 acceptance with the exact interface digest, the wrong-shape refusal, digest determinism, and
 M5.1's thirteen-segment tamper table refused at the same named steps, verbatim.
 
-**The measured cost** (`the_self_verifiers_measured_cost_at_two_fixture_shapes`, pinned in the
-test): two test-profile fixtures, 16 queries each —
+**The measured cost, current** (phase 3, 2026-10-05; `the_self_verifiers_measured_cost_at_two_fixture_shapes`,
+pinned in the test): the self-verifier shares the RV32 verifier's FRI pipeline, so phase 3's
+reduction layout, own-slot check, `FOLD` and `POW` reach its program too, and its phase 5 grows
+with the rVM's wider cpu (30 selectors) and reduce chip:
+
+| fixture | cpu rows | permutations | mem accesses | program instrs | witness words | phase 5 |
+|---|---:|---:|---:|---:|---:|---:|
+| toy | 101 460 | 6 168 | 250 619 | 103 468 | 24 415 | 7 933 |
+| busy | 127 322 | 7 802 | 296 262 | 129 722 | 30 375 | 8 213 |
+
+The path there, toy / busy cpu rows: 152 527 / 188 390 after phase 2 (`docs/04`); 131 739 /
+167 746 after the quotient-layout fork (`docs/05`); then 120 955 / 156 466 (Cut D), 114 955 /
+146 626 (E1), 105 485 / 139 267 (E2) and 101 460 / 127 322 (F) — −33 % / −32 % over phase 2's
+end, each step in `docs/06` §4. Self-program digest (toy shape) `91e50e14…bd13` →
+`e9c9720db4ea38438eee075c3cd5cd2362d60672b2c550d632519627e2724bb0`.
+
+**The measured cost, at M5.4** (the record; two test-profile fixtures, 16 queries each) —
 
 | fixture | tier | cpu rows | permutations | mem accesses | program instrs | witness words | phase 5 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -138,8 +155,10 @@ so the phase grows with the declared heights. The query phase dominates either w
 with `queries ×` (opened columns `×` per-column cost `+` Merkle levels `×` per-level cost).
 
 (2026-10-03: this derivation predates phase 2's row cuts and the withdrawal of the oracle model —
-it is built on 1 968 619 rows and the 341-column chip; `docs/04-phase2-row-cuts.md` is the current
-record. Kept as derived history, not re-derived.)
+it is built on 1 968 619 rows and the 341-column chip; `docs/04-phase2-row-cuts.md` is the
+record of phase 2, and `docs/06-phase3-fold-reduce.md` of phase 3, after which the RV32 verifier
+is 585 686 rows at tier 20 and the self-verifier's measured rows fell another third at the
+fixture shapes. Kept as derived history, not re-derived.)
 
 **The production requirement, derived from measured anchors** (replacing the plan's R6
 estimate with the same arithmetic made concrete): the M5.2-exit shape is tier 21, production
@@ -182,7 +201,11 @@ T5/T6 changed only the last row.
 
 (2026-10-03: the tiers in this runbook are constraint set 8's; since phase 2's row cuts each row's
 proof is one tier lower — row 3 and row 6 tier 20, row 4 tier 19, row 5 tier 20, row 7 tier 21,
-row 8 tier 22 — with the projected memory in `docs/04-phase2-row-cuts.md`.)
+row 8 tier 22 — with the projected memory in `docs/04-phase2-row-cuts.md`. 2026-10-05: since
+phase 3 row 5 is tier 19 and row 8 tier 21, the rest unchanged; the projected memory is
+`docs/02-aggregate.md` §"Phase 3" and `docs/06` §3 — row 3/6 ≈ 110–130 GB, row 7 ≈ 210–245 GB,
+row 8 ≈ 290–340 GB, row 4/5 ≈ 52 / 78 GB — and the tier-18 test twin, the N=1 test shape,
+proves on the 48 GB laptop at 26.88 GB.)
 
 Rows 3–6 ran on 2026-09-30 on a 503 GB box (`docs/02-aggregate.md`, "Constraint set 8,
 proved"): the measured peaks are 4–8× the derived ones, so rows 7–8 want a host above 512 GB

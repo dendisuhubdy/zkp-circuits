@@ -44,7 +44,10 @@ operand: the pair `(r, r+1)`, value `c0 + c1·X`.
 | `POSEIDON2` | `ra` | permute the eight cells at `ra..ra+8` in place |
 | `HALT` | — | end |
 
-**Deliberately absent: `FRIFOLD`/`EXPBITS`/`MERKLE` precompiles** — see the decision below.
+**Precompiles are added when the measurement asks** — see the decision below. M5.1 declined a
+fold and an exponentiation precompile at 5.68 M rows; phase 3 took both at 893 606 as `FOLD` (28)
+and `POW` (29) (the decision's 2026-10-05 paragraph, `docs/06-phase3-fold-reduce.md`). There is
+still no `MERKLE`: a Merkle level is `COMPRESS` (27), the walk a compiled loop of them.
 
 **Encoding.** One instruction = 4 field elements `[opcode | rd | ra | rb-or-imm]`. Opcode
 numbering is the table's reading order, fixed by `Op as u8` (0 = `FADD` … 23 = `HALT`) and pinned
@@ -155,7 +158,20 @@ witness words — **tier 20**, 154 969 rows under `2^20`; the test profile 230 9
 Production program digest `454592b3…f2b3` →
 `723218da65a50f1f1581013f79fa5c5b1816b7ab46796dbaa4672c52bce2d0d1`. The tables in this
 document are the earlier measurements, kept for the history they explain; docs/04 has the
-current per-phase and per-opcode tables.
+per-phase and per-opcode tables at phase 2's end.
+
+**Phase 3 re-pin (2026-10-05, the fold and the reduction in the reduce chip —
+`docs/06-phase3-fold-reduce.md`).** The batch-opening reduction's layout is preprocessed (Cut D:
+one `REDUCE` row per layout entry, chains carried in the chip), the committed row is hinted whole
+and its own slot checked by one register-addressed `LOADE` (Cut E1), `FOLD` (opcode 28) folds one
+FRI round in a reduce-chip run (Cut E2), and `POW` (opcode 29) computes an index power one chip
+row a bit (Cut F). Production **585 686 cpu rows** (−34.5 % from 893 606), 54 515 permutations
+(unchanged), 1 903 581 RAM and 1 290 039 register accesses (both memory tables `2^21`, were
+`2^22`), 597 259 instructions, 212 203 witness words — **tier 20**, 462 889 rows under `2^20`,
+61 399 rows above the `2^19 − 1` gate the phase aimed at; the test profile 169 366 rows, tier 18.
+Production program digest `723218da…d0d1` →
+`cf5a350a62fa00bb6e84fa0de311a726aac7c610d23ce272b8c80795bac51788`. docs/06 has the current
+per-span table.
 
 **Constraint set 7 re-pin (chain 16).** The inner machine gained the LogUp blind (five columns
 and a `BLIND` bus interaction pair on every instance, `research/src/tables/blind.rs`), a `2^7`
@@ -220,7 +236,10 @@ tier 21: 1 968 619 < 2^21 = 2 097 152, with 6.1 % headroom** — the plan's targ
 
 ### Where the rows go
 
-**2026-10-03 — the current split is in `docs/04-phase2-row-cuts.md`**, re-taken by
+**2026-10-05 — the current split, by call site, is `docs/06-phase3-fold-reduce.md` §4** (585 686
+production rows after phase 3: `input_root` 248 151, `commit_root` 120 640, the tape reads and
+preamble 115 778, `sample_bits` 58 076, the reduction, own-slot check, fold and index powers
+40 401 between them, the roll-ins 2 640). **2026-10-03 — phase 2's split is in `docs/04-phase2-row-cuts.md`**, re-taken by
 `tests/profile.rs` (`cargo test --release -p recursion --test profile -- --ignored --nocapture`,
 emulation only) after each of phase 2's three cuts: 893 606 production rows, of which the query
 phase is 725 192 (80 %) and tape reads 50 235; `LOAD` (245 950, mostly the allocator's 218 283
@@ -331,6 +350,23 @@ protocol-level decision for M5.2, armed with the numbers above. The budget test 
 this decision was made in (`cpu_rows > 2^19`) so a future optimization that changes it is forced
 to revisit this paragraph.
 
+**Re-taken, 2026-10-05 (phase 3, `docs/06-phase3-fold-reduce.md`).** The 2026-09 decision measured
+the fold rounds at ≈ 100 k and the bit-selected exponentiations at ≈ 64 k of 5 682 847 rows
+(≈ 3 % together), against a reduction of ~2.8 M and spill traffic of ~50 % that neither touched.
+M5.2's `REDUCE`, `SPONGE` and liveness and phase 2's three cuts took those two away (893 606 rows,
+tier 20), and the call-site spans phase 3 added (`tests/profile.rs`) measured what was left
+around the fold: `fold_round` 36 640 rows, `bit_selected_power` 87 920, the sibling `select`
+50 960, and the reduction's descriptor bookkeeping (`reduce`) 163 601 — 339 121 rows, 37.9 % of
+the program. At that share the precompiles pay, and phase 3 built them, each gated on a measured
+band: the reduction's layout preprocessed in the reduce chip (Cut D, no new opcode: 749 846
+rows), the own slot by one `LOADE` (Cut E1: 703 766), **`FOLD` = 28** (Cut E2, the fold as an
+inverse DFT then Horner in a `2a`-row chip run: 664 886) and **`POW` = 29** (Cut F, one chip row
+per index bit: **585 686**). The 2^19 point was the phase's gate, and it was **not** reached: the
+landing is tier 20, 61 399 rows above `2^19 − 1`, and the gate was not widened (the phase's
+ruling 6). The budget test now pins the landed count and its tier rather than the old regime
+(`tests/exit.rs`), and docs/06 §7 names the next lever — the two Merkle spans, 368 791 rows with
+133 827 reloads.
+
 ## What M5.1 hands to M5.2
 
 - A frozen 24-instruction ISA with a pinned encoding and a program digest, and an emulator that
@@ -341,11 +377,14 @@ to revisit this paragraph.
 - Measured `cpu_rows`, `permutations`, `mem_accesses` and `witness_words` per inner proof
   (above), replacing spec §7's cost model: `TIERS`, `poseidon2_log_height` and the memory table's
   height are cut from these, and they say one inner proof wants ~2^23 cpu rows, not 2^19.
-- The precompile question answered with a measurement: not `FRIFOLD`/`EXPBITS`.
+- The precompile question answered with a measurement: not `FRIFOLD`/`EXPBITS` — at 5.68 M rows.
+  (Re-answered at 893 606 in phase 3: yes, as `FOLD` and `POW`; the decision's 2026-10-05
+  paragraph.)
 
 **Superseded (M5.2 built, 2026-09-15).** The machine this section hands to exists now: the ISA
 is at 26 instructions (`REDUCE` = 24, `SPONGE` = 25; 0–23 frozen), the program is three row cuts
-smaller (5 682 847 → 1 968 619, tier 21; 893 606 at tier 20 since phase 2's row cuts, `docs/04`), and the measured machine numbers — tables, buses,
+smaller (5 682 847 → 1 968 619, tier 21; 893 606 at tier 20 since phase 2's row cuts, `docs/04`;
+585 686, still tier 20, since phase 3, `docs/06`; the ISA is at 30 instructions), and the measured machine numbers — tables, buses,
 tiers, widths, degrees, the three cuts' deltas and gates, the test-profile twin's times and proof
 size, and the production exit's derived resource requirement — live in
 `docs/01-rvm-machine.md`. This section remains as the record of what M5.1 actually handed over.

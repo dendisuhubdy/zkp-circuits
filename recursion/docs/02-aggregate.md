@@ -161,6 +161,68 @@ the measured live-heap terms — production N=1 ≈ 190–240 GB (a 256 GB host)
 re-pins `admitted_shapes[].aggregate_program_digest` at the next chain cut; no running chain has
 aggregation enabled.
 
+## Phase 3: the fold and the reduction in the reduce chip (2026-10-05)
+
+Cut D (the reduction's layout preprocessed: one `REDUCE` row per layout entry, chains carried in
+the chip), Cut E1 (the committed row hinted whole, its own slot checked by one register-addressed
+`LOADE`; the tape's `CommitPhaseOpenings` carries `2·a` words a round, was `2·(a − 1)`), Cut E2
+(`FOLD`, opcode 28) and Cut F (`POW`, opcode 29) — the record, the bands, the per-cut span tables
+and the live heap are `docs/06-phase3-fold-reduce.md`. The interface `[vk ‖ N ‖ B(8) ‖ 35·N]`,
+the binding, `verify_aggregate`'s API, the `inner_vk_digest` (`346ee184…5fb9`) and the admission
+stub's list and digest do **not** move; the program does, and so does its key (the reduce chip's
+preprocessed region: the layout, and the 14-row fold coefficient table).
+
+| pin | phase 2 | phase 3 |
+|---|---|---|
+| `aggregate_program_digest`, production bundle shape (what a chain's aggregation section pins) | `c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8` | `dc350ecf6b60af74f4bb032bdf607c3fa0fbd6317705f0b1077e71b455e38ba0` |
+| `aggregate_program_digest`, test fixture shape (`tests/verifier.rs`) | `5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df` | `df3a18b8d3294a591a2e8fd79f5430550cd9f09afcff6fc8aea89cc1bfaf1073` |
+| single-proof program, production (`src/programs/verify_rv32.digest`) | `723218da65a50f1f1581013f79fa5c5b1816b7ab46796dbaa4672c52bce2d0d1` | `cf5a350a62fa00bb6e84fa0de311a726aac7c610d23ce272b8c80795bac51788` |
+| Off replay, production shape (`tests/verifier.rs`) | `39bb6b8d94e62dd282001384d0b65294e7f024e6ef9b47381c8c96c6e1fd3352` | `c580415bdaccf7888e7602e793198874e39e0bda8951d11ef6e47ed029455e6c` |
+| `pins.json` production cpu rows / permutations / instructions | 893 606 / 54 515 / 903 739 | 585 686 / 54 515 / 597 259 |
+| `pins.json` aggregate test N=1/2/3 cpu rows (tier) | 231 224 (18) / 462 039 (19) / 692 854 (20) | 169 640 (18) / 338 871 (19) / 508 102 (19) |
+| `pins.json` aggregate test N=1/2/3 mem accesses | 504 514 / 1 008 354 / 1 512 194 | 442 594 / 884 514 / 1 326 434 |
+| `LOOP_OVERHEAD` (test and production alike) | 274 | 274 |
+| production N=1 aggregate, cpu rows (tier) | 893 880 (20) | 585 960 (20; 462 615 under `2^20`) |
+| production N=2 aggregate (`production_n2_aggregate_emulates_within_bounds`) | 1 787 351 (21) | 1 171 511 (21; 925 640 under `2^21`) |
+| production N=3 aggregate (`production_n3_aggregate_emulates_within_bounds`) | 2 680 822 (22) | **1 757 062 (21; 340 089 under `2^21`)** |
+| production N=4 aggregate (one-off emulation, docs/06) | 3 574 293 (22) | 2 342 613 (22; 1 851 690 under `2^22`) |
+
+Every production number is an emulation over cached production fixtures on this tree
+(`build_traces` over the real executions, no proving; N=4 a one-off run for this record).
+Derivation check, as docs/04 did it: the per-proof body is (1 757 062 − 585 960) / 2 = 585 551,
+so N=2 = 585 960 + 585 551 = 1 171 511 and N=4 = 1 757 062 + 585 551 = 2 342 613 — both exactly
+what the emulations measured. The production N=3 aggregate now fits tier 21 (it needed 22), and
+the test N=3 aggregate tier 19 (it needed 20). The production N=2/N=3 emulations stay inside the
+bounds: max address 4 438 040 (was 4 540 120); top timestamps 18 744 191 and 28 113 007, under
+`2^27`; 109 004 and 163 491 permutations, 3 806 786 and 5 709 842 RAM accesses.
+
+### The N-economics at the phase-3 tiers
+
+Declared log-heights from `build_traces` (cpu / reg / ram / poseidon2 / reduce / program; public
+`2^3`, range `2^8`). The memory column is a projection: docs/04's cell model — each instance
+weighted by its committed cells, `height × (width + 4 salts)` for the main trace plus
+`height × (2·chunks + 4)` for its one quotient matrix (docs/05's layout) — scaled from the
+measured tier-18 twin (26.88 GB live, the test N=1 shape, docs/06 §3); the production column's
+upper figure is docs/05's own production projection scaled by the same cells (docs/06 §3 has the
+derivation and the model's ±10 % calibration):
+
+| N | profile | tier | cpu rows | headroom under the tier | declared log-heights | memory (projected; N=1 test measured) |
+|---:|---|---:|---:|---:|---|---|
+| 1 | test | 18 | 169 640 | 92 503 | 18 / 19 / 19 / 14 / 16 / 18 | **26.88 GB measured** (the twin) |
+| 2 | test | 19 | 338 871 | 185 416 | 19 / 20 / 20 / 15 / 17 / 18 | ≈ 52 GB |
+| 3 | test | 19 | 508 102 | 16 185 | 19 / 21 / 21 / 16 / 17 / 18 | ≈ 78 GB |
+| 1 | production | **20** | 585 960 | 462 615 | 20 / 21 / 21 / 16 / 18 / 20 | ≈ 110–130 GB |
+| 2 | production | **21** | 1 171 511 | 925 640 | 21 / 22 / 22 / 17 / 19 / 20 | ≈ 210–245 GB |
+| 3 | production | **21** | 1 757 062 | 340 089 | 21 / 22 / 23 / 18 / 20 / 20 | ≈ 290–340 GB |
+| 4 | production | **22** | 2 342 613 | 1 851 690 | 22 / 23 / 23 / 18 / 20 / 20 | ≈ 410–490 GB |
+
+Tier 22 now holds up to N=7 (4 099 266 rows) and tier 23, the top rung, up to N=14 (8 198 123).
+At equal N the production rungs are where phase 2 left them except N=3, one lower; what phase 3
+bought at every N is the memory tables' heights (REG and RAM one height shorter) and with them
+roughly half the projected memory of phase 2's figures (≈ 240 / 475 / 950 GB at N=1 / 2 / 4).
+The test-profile N=2 and N=3 aggregates do not fit this 48 GB box by the model (≈ 52 and
+≈ 78 GB); the N=1 shape does, measured (docs/06 §6).
+
 ## Constraint set 8, proved: the 512 GB run for fullnode #45 (2026-09-30)
 
 Every deferred rVM proof of the runbook (`docs/03`, rows 3–7) ran on one machine — a 64-vCPU
@@ -275,8 +337,9 @@ must open `D_in` in-program and assert `B_in == B_out`.
 
 ## The N-economics, measured (test profile)
 
-(Constraint set 6, 2026-09-15 — the record of the row model. Current: N=1/2/3 = 231 224 /
-462 039 / 692 854 rows at tiers 18 / 19 / 20, "Phase 2" above.)
+(Constraint set 6, 2026-09-15 — the record of the row model. Current: N=1/2/3 = 169 640 /
+338 871 / 508 102 rows at tiers 18 / 19 / 19, "Phase 3" above; 231 224 / 462 039 / 692 854 at
+18 / 19 / 20 after phase 2.)
 
 The shipped program (`Checkpoints::Off`, liveness and precompiles on) over the fixture shape;
 the tape is `1 + 43 344·N` words exactly. The program itself is 443 893 instructions — once,
@@ -306,8 +369,9 @@ once.
 
 ## The N-economics, derived (production)
 
-(Constraint set 6, 2026-09-15. Current: N=1 at tier 20, N=2 at 21, N=3 and N=4 at 22, all
-emulated — "Phase 2" above; the oracle-memory column below is the withdrawn model.)
+(Constraint set 6, 2026-09-15. Current: N=1 at tier 20, N=2 and N=3 at 21, N=4 at 22, all
+emulated — "Phase 3" above (phase 2 had N=3 at 22); the oracle-memory column below is the
+withdrawn model.)
 
 The production inner proof's rows are M5.2's pin (1 968 619 rows, 51 605 permutations); the
 per-N scaling is the measured test-profile law applied to the same structure. The loop overhead
@@ -466,10 +530,12 @@ A new, small fullnode-side function; no rVM vendoring in M5.3. Exactly:
 - the program the stub registers, `aggregate_program_digest` at the fixture (test) shape —
   phase 2's row cuts (2026-10-03) moved it from constraint set 8's
   `9eba73805fa23361708d9ca1c58d904ac830aeb6810470ec7788c4f36880193d` to
-  `5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df` (pinned in
+  `5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df`, and phase 3 (2026-10-05)
+  to `df3a18b8d3294a591a2e8fd79f5430550cd9f09afcff6fc8aea89cc1bfaf1073` (pinned in
   `tests/verifier.rs`); at the production bundle shape `1831f036…ddd7` →
-  `c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8`. The vk digest, the list
-  and its digest above do not move with it.
+  `c90b3f0a7758c7e306042f27a94cc1f123441b0284c7352cb3f426048c7a74d8` →
+  `dc350ecf6b60af74f4bb032bdf607c3fa0fbd6317705f0b1077e71b455e38ba0`. The vk digest, the list
+  and its digest above do not move with it (`the_admission_stub_vectors` passes unchanged).
 
 The fullnode session's stub must reproduce all three byte-for-byte before it is trusted with
 admission: the vk digest against the pinned constant, the list and digest against the recursion

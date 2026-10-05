@@ -35,10 +35,13 @@ pub const FOLD_SALT_CELLS: u64 = 4;
 /// appended ones (`REDUCE`, `SPONGE`, `HINTN`, `COMPRESS`, `FOLD`, `POW`), each at the next free number so no earlier
 /// opcode — and so no earlier program's digest — ever moves.
 ///
-/// Deliberately absent: `FRIFOLD`, `EXPBITS`, `MERKLE` precompiles — the verifier's fold and
-/// Merkle-path steps are compiled sequences of these, and a precompile is added only if the
-/// measurement asks for one. `COMPRESS` is that case for one Merkle *level* (Cut C, measured at
-/// 33 rows a level); the walk itself stays a compiled loop of them.
+/// Precompiles are added when the measurement asks for one (`docs/00`'s decision, re-taken in
+/// `docs/06`): `COMPRESS` for one Merkle level (Cut C, measured at 33 rows a level; the walk stays
+/// a compiled loop of them, and there is no `MERKLE`), and in phase 3 `FOLD` for one FRI fold
+/// round (the reduce chip's fold run) and `POW` for the index powers (its pow run) — declined at
+/// 5.68 M rows, where the fold rounds and the bit-selected powers were ≈ 164 k rows (≈ 3 %) of the
+/// program, and taken at 893 606, where they were 124 560 rows (13.9 %; `fold_round` 36 640 and
+/// `bit_selected_power` 87 920, docs/06 §1). Phase 3 landed at 585 686 rows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Op {

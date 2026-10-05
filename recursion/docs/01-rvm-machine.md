@@ -20,18 +20,22 @@ Seven instances in every batch, plus the reduce chip when the proof declares it 
 | instance | height rule | width (pinned) | max constraint degree (pinned) | role |
 |---|---|---:|---:|---|
 | `program` | `pad_height(len + 1, 4)` | 3 witness + 4 preprocessed | 2 | the encoded program, committed by the verifier key's preprocessed cap (R1 — no in-circuit `hc`) |
-| `cpu` | `2^tier` | 82 | 8 | fetch (from `program`), 28 one-hot decode selectors, base + extension ALU, the `INV`/`EINV` hint-and-check, control, the `REG`/`RAM`/`POSEIDON2`/`SPONGE`/`REDUCE`/`PUBLIC`/`COMPRESS` sends, `HINTN`'s eight tape-word columns `W0..W7` and their eight `RAM` writes, the 5-bit register-index and 3-byte address-limb range checks — both ends of every multi-cell access since ZKQ-3 (2026-09-27; 66 before ZKQ-3, 72 before phase 2's `HINTN` (+9) and `COMPRESS` (+1) selectors and words, 2026-10-03) |
+| `cpu` | `2^tier` | 84 | 8 | fetch (from `program`), 30 one-hot decode selectors, base + extension ALU, the `INV`/`EINV` hint-and-check, control, the `REG`/`RAM`/`POSEIDON2`/`SPONGE`/`REDUCE`/`PUBLIC`/`COMPRESS`/`FOLD`/`POW` sends (`FOLD` and `POW` read their whole `rd` pair: the fold point `u`, the `(G, base)` pair), `HINTN`'s eight tape-word columns `W0..W7` and their eight `RAM` writes, the 5-bit register-index and 3-byte address-limb range checks — both ends of every multi-cell access since ZKQ-3 (2026-09-27; 66 before ZKQ-3, 72 before phase 2's `HINTN` (+9) and `COMPRESS` (+1) selectors and words, 2026-10-03; 82 before phase 3's `FOLD` and `POW` selectors, +1 each, 2026-10-05) |
 | `reg_memory` | declared, `[4, 26]` | 11 | 4 | the register file as cells `2^24 + k`, `k < 32` (R4) — sorted `(addr, ts)`, read-after-write by transition |
 | `ram_memory` | declared, `[4, 26]` | 11 | 4 | RAM below `2^24`, same AIR on the `RAM` bus |
 | `poseidon2` | declared, `[4, 20]` | 343 | 4 | permutation-per-row, three row kinds (`IS_PERM`, `IS_SPONGE`, and since phase 2 `IS_COMPRESS` — one Merkle level: `BIT` orders `[digest ‖ sibling]`, `SRC_PTR` is the sibling, 4 + 4 reads and 4 writes), round constants baked into `eval` (R9); 341 wide before `IS_COMPRESS`/`BIT` |
 | `public` | fixed at 8 | 7 | 2 | one row per published word; owns the batch's 4 public values (R5, the interface digest) |
 | `range` | fixed at 256 | 1 witness + 1 preprocessed | 2 | the `RANGE8` provider |
-| `reduce` (optional) | declared, `[4, 20]` | 39 | 3 | the batch-opening reduction, one chip row per column, chained by the descriptor and the clock (Task 8; the clock chain, the real-row-only row kinds, the run-end rule and the 18 address-limb columns are the 2026-09-27 zk scan's — 21 wide before) |
+| `reduce` (optional) | declared, `[4, 20]` | 81 witness + 20 preprocessed | 8 | three row kinds, in this order then padding. **Run** rows (`IS_REAL`): the batch-opening reduction, one chip row per column; each run looks up its layout entry on its first row (`REDUCE_LAYOUT`, a preprocessed provider region with a witness `MULT`, committed by the verifier key — phase 3's Cut D), and a chain carries its accumulator across consecutive entries and clocks. **Fold** rows (`IS_FOLD`, Cut E2): one `FOLD` is a `2a`-row run — an inverse DFT whose coefficients are looked up from a 14-row preprocessed table (`FOLD_COEFF`), then Horner at `u`. **Pow** rows (`IS_POW`, Cut F): one `POW` is an `L`-row run, one index bit a row, squaring `G` and stepping the product. (Task 8 built it 21 wide; the 2026-09-27 zk scan's clock chain, row kinds, run-end rule and 18 address-limb columns made it 39; Cut D's preprocessed layout 30 + 9 preprocessed, Cut E2 70 + 20, Cut F 81 + 20. Its degree is 8 — this config's ceiling — and has been since Task 8: the table listed 3 until 2026-10-05, a misprint against `tests/tables.rs`'s pin) |
 
-**Buses (9; 8 under plan R7, `COMPRESS` added by phase 2):** `REG`, `RAM` (both `[addr, ts,
-value, is_write]`, multiset), `POSEIDON2 [clk, ptr]`, `SPONGE [clk, state_ptr, src_ptr]`,
-`PROGRAM [pc, w0..3]`, `RANGE8`, `PUBLIC [idx, value]`, `REDUCE [clk, descr_ptr]`,
-`COMPRESS [clk, state_ptr, sib_ptr, bit]`. Every send count is a selector expression forced
+**Buses (13; 8 under plan R7, `COMPRESS` added by phase 2, `REDUCE_LAYOUT`, `FOLD`, `FOLD_COEFF`
+and `POW` by phase 3):** `REG`, `RAM` (both `[addr, ts, value, is_write]`, multiset),
+`POSEIDON2 [clk, ptr]`, `SPONGE [clk, state_ptr, src_ptr]`, `PROGRAM [pc, w0..3]`, `RANGE8`,
+`PUBLIC [idx, value]`, `REDUCE [clk, entry]` (was `[clk, descr_ptr]` before Cut D),
+`REDUCE_LAYOUT [entry, vals, row, row_end, key, alpha, res, chain_start + 2·carry]` (the reduce
+chip's own provider region, looked up by each run's first row), `COMPRESS [clk, state_ptr,
+sib_ptr, bit]`, `FOLD [clk, msg, u0, u1, a]`, `FOLD_COEFF [a, k, c0..c7]` (the chip's own
+coefficient table) and `POW [clk, buf, off + 256·L, G, base]`. Every send count is a selector expression forced
 to zero on rows that do not perform the access (`research/AGENTS.md` invariant 2), and every
 message column is constrained on every row kind that sends it (invariant 1); `tests/cheating.rs`
 proves each one.
@@ -43,37 +47,60 @@ production N=3 aggregate rung**: host ≥ 160 GB (M5.3's derived ~127 GB oracle)
 class (`docs/03-gpu-and-self-recursion.md`'s device model). A rung no CPU-only box in this
 fleet has, pinned by `for_cycles`, not by a proof. Since phase 2's row cuts (2026-10-03,
 `docs/04-phase2-row-cuts.md`) every proof is one rung lower at equal N: the test twin is tier 18,
-the production exit and N=1 aggregate tier 20, production N=2 tier 21, N=3 and N=4 tier 22. The
-host classes quoted in this paragraph are the withdrawn oracle model's; docs/04 has the measured
-live heap.
+the production exit and N=1 aggregate tier 20, production N=2 tier 21, N=3 and N=4 tier 22. Since
+phase 3 (2026-10-05, `docs/06`) the production N=3 aggregate is tier 21 too (1 757 062 rows) and
+N=4 is tier 22; the test-profile N=3 aggregate is tier 19 (508 102 rows). The host classes quoted
+in this paragraph are the withdrawn oracle model's; docs/04 has the measured live heap and docs/06
+§3 its phase-3 figures.
+
+**Appended opcodes.** The M5.1 ISA's 24 instructions (`docs/00`) are frozen; every opcode since is
+appended at the next number, so no earlier program's digest moves (`tests/isa.rs`):
+
+| opcode | mnemonic | added | what it does |
+|---:|---|---|---|
+| 24 | `REDUCE` | M5.2 Task 8 | one run of the batch-opening reduction: layout entry `imm` (since phase 3's Cut D) |
+| 25 | `SPONGE` | M5.2 Task 9 | one absorb block of the leaf sponge, in the poseidon2 chip |
+| 26 | `HINTN` | phase 2, Cut B | eight tape words to `mem[ra + imm ..]` in one row |
+| 27 | `COMPRESS` | phase 2, Cut C | one Merkle level, in the poseidon2 chip |
+| 28 | `FOLD` | phase 3, Cut E2 | one FRI fold round of arity `imm ∈ {2, 4, 8}` at `u` (the `rd` pair), in the reduce chip |
+| 29 | `POW` | phase 3, Cut F | the index power `base·g^{rev(bits)}` from `L` bits of a 65-cell buffer, in the reduce chip |
+
+`Op::COUNT` = `NUM_SELECTORS` = 30.
 
 ## The measured numbers
 
-**Current (phase 2, 2026-10-03; `docs/04-phase2-row-cuts.md` has the per-stage record).** Per
-verified inner proof at constraint set 8 after the three row cuts, pinned in `tests/pins.json`
-(production digest `723218da65a50f1f1581013f79fa5c5b1816b7ab46796dbaa4672c52bce2d0d1`), declared
-heights from `machine::build_traces` over the same executions:
+**Current (phase 3, 2026-10-05; `docs/06-phase3-fold-reduce.md` has the per-cut record).** Per
+verified inner proof at constraint set 8 after phase 2's three row cuts and phase 3's four,
+pinned in `tests/pins.json` (production digest
+`cf5a350a62fa00bb6e84fa0de311a726aac7c610d23ce272b8c80795bac51788`), declared heights from
+`machine::build_traces` over the same executions:
 
 | | `FriProfile::Test` (16 q) | `FriProfile::Production` (80 q) |
 |---|---:|---:|
-| cpu rows | 230 950 | **893 606** |
+| cpu rows | 169 366 | **585 686** |
 | Poseidon2 permutations | 11 875 | 54 515 |
-| memory accesses (RAM) | 504 365 | 2 213 181 |
-| register accesses | 582 743 | 2 147 159 |
-| reduce-chip rows | 34 624 | 173 120 |
-| program instructions | 233 067 | 903 739 |
-| witness words | 45 899 | 210 763 |
-| **declared heights** | 18, 20, 19, 14, 16, 18 | 20, 22, 22, 16, 18, 20 |
+| memory accesses (RAM) | 442 445 | 1 903 581 |
+| register accesses | 411 319 | 1 290 039 |
+| reduce-chip rows (run + fold + pow) | 39 296 (34 624 + 1 216 + 3 456) | 196 480 (173 120 + 6 080 + 17 280) |
+| program instructions | 171 771 | 597 259 |
+| witness words | 46 187 | 212 203 |
+| **declared heights** | 18, 19, 19, 14, 16, 18 | 20, 21, 21, 16, 18, 20 |
 | tier | 18 | **20** |
 
 (Declared heights in `chips()` order: cpu / reg / ram / poseidon2 / reduce / program; public is
 fixed at 2^3 and range at 2^8.)
 
-Constraint set 8 before the cuts was 461 988 / 2 047 268 rows at tiers 19 / 21, declared heights
-19, 21, 20, 14, 16, 19 and 21, 23, 22, 16, 18, 21 (re-measured on the base tree for docs/04).
-The poseidon2 and reduce tables keep their heights through the cuts (same permutations, same
-reduce rows), and the production RAM table stays at `2^22` (2 213 181 accesses, 116 029 over
-`2^21`).
+Phase 2's end (`docs/04`) was 230 950 / 893 606 rows at tiers 18 / 20, declared heights
+18, 20, 19, 14, 16, 18 and 20, 22, 22, 16, 18, 20. Phase 3 lowered no tier — the production
+inner proof is 61 399 rows above the `2^19 − 1` gate — but **both production memory tables
+dropped from `2^22` to `2^21`** (and the test profile's register table from `2^20` to `2^19`): REG
+2 147 159 → 1 290 039 and RAM 2 213 181 → 1 903 581. The poseidon2 table keeps its height
+(same permutations); the reduce table keeps its height too, though it now also holds the fold
+and pow runs.
+
+Constraint set 8 before phase 2's cuts was 461 988 / 2 047 268 rows at tiers 19 / 21, declared
+heights 19, 21, 20, 14, 16, 19 and 21, 23, 22, 16, 18, 21 (re-measured on the base tree for
+docs/04).
 
 **History.** Final, per verified inner proof (one RV32 bundle proof at **constraint set 6**, **9 instances**),
 from the emulator's own event log and pinned in `tests/pins.json` (production digest
@@ -112,7 +139,8 @@ and range at 2^8.)
 
 ## The test-profile twin (Task 10's in-suite exit shape)
 
-(Since phase 2's row cuts the twin is 230 950 rows at **tier 18**, `tests/exit.rs`; the
+(Since phase 2's row cuts the twin is at **tier 18** — 230 950 rows then, 169 366 since phase 3,
+proved on this 48 GB box at 26.88 GB peak live, `docs/06` §3 — `tests/exit.rs`; the
 measurements below are the 2026-09-15 constraint-set-6 run at tier 19. Its "peak resident" row is
 macOS RSS, which excludes compressed and swapped pages — not a memory number; the same tier-19
 shape at constraint set 8 measured 94.2 GB on Linux and 78.7 GB live when killed on this box,
@@ -139,7 +167,10 @@ the FRI phases — and the other three are ~4× it. The measured record and the 
 `docs/04-phase2-row-cuts.md` §"The prover's live heap" (a tier-19 proof: 78.7 GB live when killed
 on a 48 GB box, 94.2 GB peak on Linux). Since phase 2's row cuts the exit is 893 606 rows at
 **tier 20**; docs/04 derives ≈ 190–240 GB for it from the measured terms — a ≥ 256 GB host,
-until it is proved.
+until it is proved. Since phase 3 (`docs/06-phase3-fold-reduce.md` §3) it is 585 686 rows, still
+tier 20, with both memory tables at `2^21`; the same cell-weighted model projects **≈ 110–130 GB**
+(108 GB anchored on the tier-18 twin measured at 26.88 GB live on this box, 123–127 GB anchored on
+docs/05's projection) — a ≥ 160 GB host, until it is proved.
 
 **Measured 2026-09-30 (constraint set 8, a 503 GB box, fullnode #45): the exit proves in
 8 164.8 s, verifies in 99.3 s, is 1 566 619 bytes, and peaks at 376.9 GB resident** — 7.8× the
