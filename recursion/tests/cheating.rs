@@ -297,6 +297,23 @@ fn a_multiplicity_off_the_layout_is_rejected() {
     assert!(rejects(|| reduce_verify(&m, &p, &t)));
 }
 
+/// Fix round 1 (Task 1a review): a declared layout whose entry's addresses wrap (`u64::MAX`
+/// bases) is refused by `verify` at the program check — before any key is built — whatever proof
+/// accompanies it.
+#[test]
+fn a_declared_layout_whose_addresses_wrap_is_refused_before_any_key() {
+    let (m, p, t, _) = reduce_setup();
+    let proof = m.prove_traces(&p, &t, Tier(8));
+    let mut forged = p.clone();
+    forged.reduce_layout[0] = recursion::isa::ReduceEntry { key: u64::MAX, vals: u64::MAX, len: 1, row: 0, alpha: 0, res: 2, chain_start: true, carry: false };
+    let keys = m.cached_keys();
+    assert!(matches!(
+        m.verify(&forged, &proof),
+        Err(recursion::machine::VerifyError::Program(recursion::isa::DecodeError::Layout { entry: 0 }))
+    ));
+    assert_eq!(m.cached_keys(), keys, "no verifier key is built for the forged layout");
+}
+
 #[test]
 fn a_reduce_dispatch_with_no_chip_run_is_rejected() {
     let (m, p, mut t, _) = reduce_setup();

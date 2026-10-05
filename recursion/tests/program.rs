@@ -102,3 +102,21 @@ fn program_log_height_pins_the_measured_sizes() {
     assert_eq!(program_log_height(5), 3);
     assert_eq!(program_log_height(0), 2, "an empty program still gets the floor");
 }
+
+/// Fix round 1 (Task 1a review): `check_layout` bounds every base and the length before it sums
+/// them — a `u64::MAX` key or vals base would otherwise wrap `+ 1` to 0 and pass, and the chip's
+/// preprocessed `L_KEY` (`F::from_u64(u64::MAX)`) would read cells the emulator never touches.
+#[test]
+fn a_layout_entry_whose_addresses_wrap_is_illegal_at_registration() {
+    use recursion::isa::{DecodeError, ReduceEntry};
+    let mut p = common::reduce_chain_program(false);
+    p.reduce_layout[0] = ReduceEntry { key: u64::MAX, vals: u64::MAX, len: 1, row: 0, alpha: 0, res: 2, chain_start: true, carry: false };
+    assert_eq!(recursion::machine::Machine::check_program(&p), Err(DecodeError::Layout { entry: 0 }));
+    for (field, v) in [("vals", 0), ("row", 1), ("key", 2), ("alpha", 3), ("res", 4)] {
+        let mut q = common::reduce_chain_program(false);
+        let e = &mut q.reduce_layout[0];
+        let slot = [&mut e.vals, &mut e.row, &mut e.key, &mut e.alpha, &mut e.res];
+        *slot.into_iter().nth(v).unwrap() = recursion::isa::MEM_LIMIT;
+        assert_eq!(recursion::machine::Machine::check_program(&q), Err(DecodeError::Layout { entry: 0 }), "{field} at 2^24");
+    }
+}

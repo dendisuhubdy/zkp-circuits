@@ -359,3 +359,13 @@ fn an_entry_id_past_the_layout_is_refused() {
     p.instrs[at] = i(Op::Reduce, 0, 0, 5);
     assert_eq!(execute(&p, &[], 1000).unwrap_err(), ExecError::ReduceLayout { pc: at as u32, entry: 5 });
 }
+
+/// Fix round 1 (Task 1a review): a hostile entry whose `u64::MAX` bases would wrap `base + 1` back
+/// into range is refused before any cell is read — the same bound `check_program` applies.
+#[test]
+fn a_layout_entry_whose_addresses_wrap_is_refused() {
+    let mut p = chain(false);
+    p.reduce_layout[0] = ReduceEntry { key: u64::MAX, vals: u64::MAX, len: 1, row: 0, alpha: 0, res: 2, chain_start: true, carry: false };
+    let at = p.instrs.iter().position(|x| x.op == Op::Reduce).unwrap();
+    assert_eq!(execute(&p, &[], 1000).unwrap_err(), ExecError::ReduceLayout { pc: at as u32, entry: 0 });
+}

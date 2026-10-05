@@ -270,6 +270,18 @@ pub struct ReduceEntry {
     pub carry: bool,
 }
 
+/// Whether every cell a layout entry names lies inside the `2^24`-cell address space (Cut D). The
+/// bases and the length are bounded first, so the tops are computed without wrapping: a hostile
+/// `u64::MAX` base must not wrap `base + 1` back into range. The one bound the registration check
+/// (`machine::check_layout`) and the emulator both apply — the reduce chip range-checks nothing.
+pub fn layout_entry_in_bounds(e: &ReduceEntry) -> bool {
+    if [e.vals, e.row, e.key, e.alpha, e.res, e.len as u64].iter().any(|&x| x >= MEM_LIMIT) {
+        return false;
+    }
+    let len = e.len as u64;
+    len == 0 || [e.vals + 2 * len - 1, e.row + len - 1, e.key + 1, e.alpha + 1, e.res + 1].iter().all(|&top| top < MEM_LIMIT)
+}
+
 /// A program: the instruction list, plus the builder's `pc -> name` table for the assertion
 /// traps, which is what makes "the program refused at *this* step" a checked claim.
 /// `checkpoints` is sorted by `pc` and carries no weight in the digest.

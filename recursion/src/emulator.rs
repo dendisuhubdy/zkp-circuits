@@ -163,7 +163,8 @@ pub enum ExecError {
     /// A `REDUCE` descriptor declared a zero-length run: there is nothing to reduce, and a
     /// `REDUCE` of zero columns is a build-time mistake (the program must not emit it).
     ReduceZeroLength { pc: u32 },
-    /// A `REDUCE` naming no entry of the program's layout.
+    /// A `REDUCE` naming no entry of the program's layout, or an entry naming a cell outside the
+    /// `2^24`-cell address space (`isa::layout_entry_in_bounds`, the registration check's bound).
     ReduceLayout { pc: u32, entry: u64 },
     /// A chain's hand-over broken: a carrying entry not followed, on the very next row, by a
     /// `REDUCE` of the next entry; or a continuation entry dispatched without that carry.
@@ -365,10 +366,13 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
                 if le.len == 0 {
                     return Err(ExecError::ReduceZeroLength { pc });
                 }
-                let len = le.len as u64;
-                for top in [le.vals + 2 * len - 1, le.row + len - 1, le.key + 1, le.alpha + 1, le.res + 1] {
-                    bounded(pc, top)?;
+                // The layout's own legality, exactly `machine::check_layout`'s: every base and the
+                // length inside the 2^24-cell space before any sum (so no top can wrap), then every
+                // top. An illegal entry is the layout's fault, not a run's: `ReduceLayout`.
+                if !crate::isa::layout_entry_in_bounds(&le) {
+                    return Err(ExecError::ReduceLayout { pc, entry: id });
                 }
+                let len = le.len as u64;
                 let inv = [read_at(&mem, &mut mems, clk, TS_KEY0, le.key), read_at(&mem, &mut mems, clk, TS_KEY1, le.key + 1)];
                 let (mut acc, mut apow, alpha) = if le.chain_start {
                     if chain.is_some() {

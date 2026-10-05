@@ -368,8 +368,9 @@ fn check_layout(layout: &[crate::isa::ReduceEntry]) -> Result<(), DecodeError> {
         if e.len == 0 {
             return bad;
         }
-        let len = e.len as u64;
-        if [e.vals + 2 * len - 1, e.row + len - 1, e.key + 1, e.alpha + 1, e.res + 1].iter().any(|&top| top >= crate::isa::MEM_LIMIT) {
+        // Bases and length bounded before any sum (`isa::layout_entry_in_bounds`): a wrapped top
+        // must not pass for an in-range one.
+        if !crate::isa::layout_entry_in_bounds(e) {
             return bad;
         }
         let continues = k > 0 && layout[k - 1].carry;
