@@ -47,7 +47,7 @@ T₀ = 893 606. Each band is [T_prev − 1.15·Δ, T_prev − 0.85·Δ], with T_
 | D | 145 441 | rows(reduce) − [EINV+MOV+FSUB in reduce] − Q·(E + H + K + 3) | 726 349–769 981 | 749 846 (Δ −143 760) | yes |
 | E1 | 35 120 (ruled; was 54 160) | rows(select) − Q·Σ_r(2·la_r + 5) − Q·Σ_r(a_r + 9) | 709 458–719 994 | 703 766 (Δ −46 080) | **no** (below; accepted) |
 | E2 | 40 800 (re-read after E1; was 33 760) | rows(fold_round, re-read after E1) − 4·Q·R | 656 846–669 086 (from E1's measured 703 766) | 664 886 (Δ −38 880) | yes |
-| F | 82 560 (re-read after E2; was 82 800) | rows(bit_selected_power, re-read after E2) − 4·Q·(H + R) | 569 942–594 710 (from E2's measured 664 886) | | |
+| F | 82 560 (re-read after E2; was 82 800) | rows(bit_selected_power, re-read after E2) − 4·Q·(H + R) | 569 942–594 710 (from E2's measured 664 886) | 585 686 (Δ −79 200) | yes |
 
 Inputs: D = 163 601 − (1 120 + 4 480 + 1 120) − 80·(119 + 7 + 14 + 3); E1 = 50 960 − 80·79 − 80·119 (Σla = 17,
 Σa = 38); E2 = 43 680 − 4·80·9, with `fold_round` re-read after E1 (36 720 → 43 680: the row loads moved into it);
@@ -76,6 +76,13 @@ the allocator's schedule; every other span is unchanged. The F band is recompute
 `bit_selected_power` span (87 680): Δ_F = 82 560, band 569 942–594 710. E2's 664 886 is above 524 287, so Cut F
 is built (Task 4). Even F's band floor (569 942) is above the 2^19 gate: reaching 524 287 needs Δ_F ≥ 140 599,
 58 039 more than F's projection.
+
+**F measured in band (Task 4).** Production lands at 585 686 rows (Δ −79 200 against a projected −82 560).
+`bit_selected_power` 87 680 → 7 680 is 6 rows a call, not the formula's 4: the `(G, base)` pair's two `FADDI`s, two
+reloads (`LOAD`), the `POW` and the output's `LOAD`, 16 calls a query (H + R = 7 + 9). `sample_bits` 57 276 → 58 076
+(+800, 10 a query): under `On` the 64 bits are hinted into a 65-cell buffer by eight `HINTN`s and loaded back, instead
+of 64 `HINT`s. Every other span is unchanged. **The phase ends here, above the gate: 585 686 − 524 287 = 61 399 rows
+short of tier 19** (controller ruling 6: F does not widen the gate). Cut F was the last cut the plan holds.
 
 Memory targets: REG 2 147 159 → under 2 097 152 (needs −50 008); RAM 2 213 181 → under 2 097 152.
 
@@ -250,6 +257,67 @@ Pins and literals re-measured (the Re-pin Procedure):
 - The reduce key (`WANT_REDUCE`) moves: the preprocessed region carries the 14-row coefficient table,
   `1136b74d…` → `1465f60a…`. `WANT` (no reduce chip) is unchanged.
 - The exit twin is 192 982 → 185 206 rows at tier 18. The production exit is 703 766 → 664 886 rows at tier 20.
+
+### Cut F (Task 4)
+
+| cut | measured cpu rows | Δ | band | in band | REG (≤ 2 097 151) | RAM (≤ 2 097 151) | `bit_selected_power` span | POW dispatches | reduce chip |
+|---|---:|---:|---|---|---:|---:|---:|---:|---|
+| F | 585 686 | −79 200 (projected −82 560) | 569 942–594 710 | **yes** | 1 290 039, met | 1 903 581, met | 87 680 → **7 680** | 1 280 | width 70 → 81, preprocessed 20 (unchanged), degree 8 → 8 |
+
+```
+== profile Production: inner tier Tier(14), 585686 cpu rows, 54515 permutations, 1903581 mem accesses, 1290039 reg accesses, 212203 witness words, 597259 program instrs
+== profile Test: inner tier Tier(14), 169366 cpu rows, 11875 permutations, 442445 mem accesses, 411319 reg accesses, 46187 witness words, 171771 program instrs
+-- rows per call site (production)
+      115778   19.8%  (none)               reload   21160 spill   5429  /query   1447.2
+       58076    9.9%  sample_bits          reload   12736 spill   5073  /query    726.0
+      248151   42.4%  input_root           reload   97987 spill      3  /query   3101.9
+       20001    3.4%  reduce               reload    1520 spill    321  /query    250.0
+        7680    1.3%  bit_selected_power   reload    2560 spill      0  /query     96.0  [LOAD 3840, FADDI 2560, POW 1280]
+        7680    1.3%  select               reload    1360 spill      0  /query     96.0
+        5040    0.9%  fold_round           reload    2160 spill      0  /query     63.0
+      120640   20.6%  commit_root          reload   35840 spill      0  /query   1508.0
+        2640    0.5%  roll_in              reload    960 spill      0  /query     33.0
+-- reloads 176283, spills 10826; reduce dispatches 9520
+```
+
+Test-profile spans: `bit_selected_power` 17 536 → 1 536, `sample_bits` 12 156; the other spans as after E2.
+
+Each index power is one `POW` dispatch: `(G, base)` in one extension register pair, the query's 65-cell bits buffer in
+`ra`, `off + 256·L` the immediate. The chip runs `L` rows, one a bit, high bit first: row `K` reads the bit at
+`buf + off + L − 1 − K`, carries `G^{2^K}` by squaring and steps `S ← S·(1 + bit·(G^{2^K} − 1))`; the last row writes `S`
+to cell 64, which the program loads back. Σ L = 216 a query (the seven query-point heights and the nine rounds'
+`log_folded`), 17 280 chip rows in production. The bits buffer is the one `sample_bits` checks: under `On` it hints the
+sixty-four bits into the buffer and runs its booleanity, canonicality and decomposition checks on handles loaded from
+those cells, which nothing writes again (`POW` writes only cell 64). The chip also checks each bit boolean itself, so
+it does not rely on that upstream check (`a_pow_row_with_a_non_boolean_bit_is_rejected`). REG falls 1 477 239 →
+1 290 039 (−187 200): the ladder's register traffic is gone. RAM rises 1 888 141 → 1 903 581 (+15 440): the bits
+buffer's writes and loads (10 240), the chip's bit reads (17 280) and the output's write and read (2 560), less 14 720
+reloads and plus 80 spills.
+
+**The gap.** 585 686 rows is 61 399 above 524 287, so the inner proof stays at tier 20; the phase ends at this measured
+point (controller ruling 6). What is left, by span: `input_root` 248 151 (42.4 %; 97 987 of it reloads), `commit_root`
+120 640 (20.6 %; 35 840 reloads), `(none)` 115 778 (the tape reads, the preamble and phase 5; 21 160 reloads),
+`sample_bits` 58 076 (12 736 reloads), `reduce` 20 001, `bit_selected_power` 7 680, `select` 7 680, `fold_round`
+5 040, `roll_in` 2 640. Reloads are 176 283 of the 585 686 (30 %), 133 827 of them inside the two Merkle spans.
+
+Pins and literals re-measured (the Re-pin Procedure):
+- `tests/pins.json`: cpu rows 664 886 → 585 686; mem accesses 1 888 141 → 1 903 581; program instrs 676 459 → 597 259;
+  REG 1 477 239 → 1 290 039; spans bit_selected_power 87 680 → 7 680, sample_bits 57 276 → 58 076; reloads 191 003 →
+  176 283, spills 10 746 → 10 826. Permutations and witness words unchanged. Aggregate Test N = 1/2/3 cpu rows
+  185 480 / 370 551 / 555 622 → 169 640 / 338 871 / 508 102 (mem 439 506 / 878 338 / 1 317 170 → 442 594 / 884 514 /
+  1 326 434).
+- `LOOP_OVERHEAD` 274, unchanged (169 640 = 169 366 + 274). `N3_ROWS` 555 622 → 508 102. Aggregate tiers 18 / 19 / 20 →
+  18 / 19 / **19**: the Test-profile N = 3 aggregate now fits tier 19 (508 102 ≤ 524 287).
+- The production `verify_rv32` digest: `5c30bf74…0d15` → `cf5a350a…1788`.
+- The aggregate digest at the Test shape: `f66aa580…6f63` → `df3a18b8…1073`. At the production shape:
+  `b362024c…fc55` → `dc350ecf…8ba0`.
+- The Off replay does not move (`c580415b…5e6c`): `Off` keeps `sample_bits`' sixty-four `HINT`s and the compiled ladder.
+- Self-verifier digest `b475a9f9…c348` → `e9c9720d…4bb0`. Toy CycleReport (105 485, 6 133, 246 774, 107 493, 24 355) →
+  (101 460, 6 168, 250 619, 103 468, 24 415). Busy (139 267, 7 783, 292 273, 141 667, 30 315) → (127 322, 7 802,
+  296 262, 129 722, 30 375). Phase 5 7 889 / 8 169 → 7 933 / 8 213 (the cpu's 30th selector, POW's limb terms and the
+  `POW` dispatch).
+- The reduce key (`WANT_REDUCE`) is unchanged: F adds no preprocessed column.
+- The exit twin is 185 206 → 169 366 rows at tier 18. The production exit is 664 886 → 585 686 rows at tier 20.
 
 ## 5. What moved (Task 5)
 

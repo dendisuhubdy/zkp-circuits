@@ -734,6 +734,19 @@ impl Builder {
         self.load_ext(msg, 2 * arity as i64 + crate::isa::FOLD_SALT_CELLS as i64)
     }
 
+    /// One `POW` (Cut F): `base·g^{rev(bits, L)}` from the `len` bits at cells `off..off+len` of
+    /// the 65-cell bits buffer `bits` (`DslChallenger::sample_bits_mem`), by the reduce chip's
+    /// pow run; the result is loaded from cell 64. `(g, base)` ride as one extension pair in `rd`.
+    pub fn pow_run(&mut self, bits: Ptr, off: usize, len: usize, g: F, base: F) -> Felt {
+        assert!(len >= 1 && off + len <= 64, "POW: {len} bits at {off} leave the 64-bit buffer");
+        let gb = self.ext_constant(EF::from_basis_coefficients_slice(&[g, base]).expect("two coefficients"));
+        self.begin();
+        let rgb = self.materialise(gb.0);
+        let rp = self.ptr_reg(bits);
+        self.emit(Op::Pow, rgb, rp, BRef::Imm(F::from_u64((off + 256 * len) as u64)));
+        self.load(bits, 64)
+    }
+
     /// The register a `Ptr`'s address lives in, folding any compile-time delta in first. An
     /// absolute pointer has no holder: the address is a constant, materialised into scratch.
     fn ptr_reg(&mut self, p: Ptr) -> RRef {

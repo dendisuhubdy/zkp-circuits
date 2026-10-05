@@ -42,6 +42,11 @@ pub const TS_FOLD_Y1: u32 = 1;
 pub const TS_FOLD_RES0: u32 = 14;
 pub const TS_FOLD_RES1: u32 = 15;
 
+/// A `POW` run's slots (Cut F): every row reads its bit at slot 0 (distinct addresses per row),
+/// the last row writes the output at 15.
+pub const TS_POW_BIT: u32 = 0;
+pub const TS_POW_OUT: u32 = 15;
+
 /// One cell read or written, at the timestamp `16·clk + k` of its slot in the row.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct MemAccess {
@@ -98,6 +103,17 @@ pub struct FoldEvent {
     pub out: [F; 2],
 }
 
+/// One `POW` dispatch (Cut F).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PowEvent {
+    pub base: u64,
+    pub off: u32,
+    pub len: u32,
+    pub g: F,
+    pub s0: F,
+    pub out: F,
+}
+
 /// The state a carrying entry hands to the next row's `REDUCE`.
 #[derive(Clone, Copy)]
 struct ReduceCarry {
@@ -128,6 +144,7 @@ pub struct Event {
     pub perm: Option<PermEvent>,
     pub reduce: Option<ReduceEvent>,
     pub fold: Option<FoldEvent>,
+    pub pow: Option<PowEvent>,
 }
 
 /// A completed run: the event log, the public values the program appended, the number of witness
@@ -193,6 +210,8 @@ pub enum ExecError {
     NonBooleanBit { pc: u32 },
     /// A FOLD whose immediate is not 2, 4 or 8.
     FoldArity { pc: u32, arity: u64 },
+    /// A POW immediate whose run is empty or leaves the 64 bits.
+    PowShape { pc: u32, imm: u64 },
 }
 
 /// Run `p` against `witness` for at most `max_cycles` instructions.
@@ -234,6 +253,7 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
         let mut perm = None;
         let mut reduce = None;
         let mut fold = None;
+        let mut pow = None;
         let mut a = [F::ZERO; 2];
         let mut b_val = if op.b_is_register() { [F::ZERO; 2] } else { [instr.b, F::ZERO] };
         let mut d = [F::ZERO; 2];
@@ -521,13 +541,36 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
                 write_at(&mut mem, &mut mems, clk, TS_FOLD_RES1, res + 1, out[1]);
                 fold = Some(FoldEvent { msg, arity: arity as u32, u: d, ys, out });
             }
+            Op::Pow => {
+                pair(instr.rd, "rd", pc)?;
+                a[0] = regs[ra];
+                d = [regs[rd], regs[rd + 1]];
+                let imm = instr.b.as_canonical_u64();
+                let (off, len) = (imm % 256, imm / 256);
+                if len == 0 || len >= 256 || off + len > 64 {
+                    return Err(ExecError::PowShape { pc, imm });
+                }
+                let base = a[0].as_canonical_u64();
+                bounded(pc, base + 64)?;
+                let (mut g, mut s) = (d[0], d[1]);
+                for t in 0..len {
+                    let bit = read_at(&mem, &mut mems, clk, TS_POW_BIT, base + off + len - 1 - t);
+                    if bit != F::ZERO && bit != F::ONE {
+                        return Err(ExecError::NonBooleanBit { pc });
+                    }
+                    s *= F::ONE + bit * (g - F::ONE);
+                    g = g.square();
+                }
+                write_at(&mut mem, &mut mems, clk, TS_POW_OUT, base + 64, s);
+                pow = Some(PowEvent { base, off: off as u32, len: len as u32, g: d[0], s0: d[1], out: s });
+            }
             Op::Halt => next_pc = pc,
         }
 
         for access in &mems {
             run.max_addr = run.max_addr.max(access.addr);
         }
-        run.events.push(Event { clk, pc, next_pc, instr, a, b_val, d, mem: mems, perm, reduce, fold });
+        run.events.push(Event { clk, pc, next_pc, instr, a, b_val, d, mem: mems, perm, reduce, fold, pow });
         if op == Op::Halt {
             return Ok(run);
         }

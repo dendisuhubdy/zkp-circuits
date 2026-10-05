@@ -135,8 +135,11 @@ fn the_self_program_digest_is_deterministic_and_distinct() {
     // Phase 3's Cut E2 (2026-10-06, docs/06): the fold round is one `FOLD` into the reduce chip's
     // fold run, and the program compiles the rVM's wider cpu (83) and reduce (70, preprocessed 20)
     // tables and the `FOLD`/`FOLD_COEFF` buses (was f60f0f5c…).
+    // Phase 3's Cut F (2026-10-06, docs/06): the index powers are `POW` runs over the query's
+    // bits buffer, and the program compiles the rVM's wider cpu (84) and reduce (81) tables and
+    // the `POW` bus (was b475a9f9…).
     let hex: String = d1.iter().map(|w| format!("{:016x}", p3_field::PrimeField64::as_canonical_u64(w))).collect();
-    assert_eq!(hex, "b475a9f9bd3c3198e236faa578ae617fa9d3941901dafc6429c649b07a70c348",
+    assert_eq!(hex, "e9c9720db4ea38438eee075c3cd5cd2362d60672b2c550d632519627e2724bb0",
                "the self-verifier's digest at the toy fixture shape");
 
     // And it is not the single-proof RV32-machine verifier's digest for the same profile: build
@@ -380,14 +383,19 @@ fn the_self_verifiers_measured_cost_at_two_fixture_shapes() {
     // cpu (83) and reduce (70, preprocessed 20) tables (three more permutations, sixty more tape
     // words): toy 114 955 → 105 485 rows, busy 146 626 → 139 267 (was
     // (114955, 6130, 251855, 116963, 24295) and (146626, 7780, 292843, 149026, 30255)).
+    // Phase 3's Cut F (2026-10-06): each index power is one `POW` run over the query's 65-cell
+    // bits buffer instead of the compiled 4-rows-a-bit ladder, and the self-verifier opens the
+    // wider cpu (84) and reduce (81) tables (more permutations and sixty more tape words for the
+    // opened columns): toy 105 485 → 101 460 rows, busy 139 267 → 127 322 (was
+    // (105485, 6133, 246774, 107493, 24355) and (139267, 7783, 292273, 141667, 30315)).
     assert_eq!(
         (r.cpu_rows, r.permutations, r.mem_accesses, r.program_instrs, r.witness_words),
-        (105485, 6133, 246774, 107493, 24355),
+        (101460, 6168, 250619, 103468, 24415),
         "the tier-8 toy fixture's CycleReport, pinned"
     );
     assert_eq!(
         (rb.cpu_rows, rb.permutations, rb.mem_accesses, rb.program_instrs, rb.witness_words),
-        (139267, 7783, 292273, 141667, 30315),
+        (127322, 7802, 296262, 129722, 30375),
         "the busy fixture's CycleReport, pinned"
     );
 
@@ -408,9 +416,11 @@ fn the_self_verifiers_measured_cost_at_two_fixture_shapes() {
     // the opening round's matrix grouping moved. Phase 3's Cuts D and E1 left it there too, measured.
     // Phase 3's Cut E2 added 44 to both (7 845 / 8 125 before): the cpu's 29th selector, its
     // FOLD address limbs, and the `FOLD` dispatch, one more lookup term in its constraint DAG.
+    // Phase 3's Cut F added 44 more to both (7 889 / 8 169 before): the cpu's 30th selector, POW's
+    // terms in the address limb groups, and the `POW` dispatch.
     let p5a: usize = vp.phase5.iter().map(|c| c.instrs).sum();
     let p5b: usize = vp_b.phase5.iter().map(|c| c.instrs).sum();
-    assert_eq!((p5a, p5b), (7889, 8169), "phase 5 varies with the degree bits, measured");
+    assert_eq!((p5a, p5b), (7933, 8213), "phase 5 varies with the degree bits, measured");
 }
 
 /// VERIFIER-1 for the rVM's own proofs: the rVM machine grinds zero commit-phase bits too

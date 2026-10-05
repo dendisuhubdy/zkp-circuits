@@ -10,7 +10,7 @@ pub mod reduce;
 pub type F = p3_goldilocks::Goldilocks;
 
 /// Bus catalogue. A bus is a name; the batch verifier checks every bus balances.
-/// Twelve buses (Cut D adds `REDUCE_LAYOUT`, Cut E2 `FOLD` and `FOLD_COEFF`; plan R7), not spec
+/// Thirteen buses (Cut D adds `REDUCE_LAYOUT`, Cut E2 `FOLD` and `FOLD_COEFF`, Cut F `POW`; plan R7, R9), not spec
 /// §5's four: the public table, the sponge and compress row kinds and the reduce chip each need
 /// their own channel, and `MEMORY` splits into `REG`/`RAM` (R4).
 pub mod bus {
@@ -48,6 +48,8 @@ pub mod bus {
     /// reduce → reduce (Cut E2): (arity, k, c0..c7). The preprocessed coefficient table provides
     /// (14 rows: arity 2, 4, 8), each phase-1 fold row consumes its own.
     pub const FOLD_COEFF: LookupBus<'static> = LookupBus::new("FOLD_COEFF");
+    /// cpu (POW rows) → reduce (Cut F): (clk, bits_buf, off + 256·L, G, base).
+    pub const POW: LookupBus<'static> = LookupBus::new("POW");
 }
 
 /// Next power of two ≥ n, at least `min` — `research/src/tables/mod.rs`'s helper, verbatim.

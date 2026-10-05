@@ -170,7 +170,7 @@ use recursion::tables::{cpu, memory, poseidon2, program as program_table, public
 
 #[test]
 fn the_table_widths_and_constraint_degrees_are_pinned() {
-    assert_eq!(cpu::col::WIDTH, 83, "72 + the HINTN selector + its eight word columns (Cut B) + the COMPRESS selector (Cut C) + the FOLD selector (phase 3)");
+    assert_eq!(cpu::col::WIDTH, 84, "72 + the HINTN selector + its eight word columns (Cut B) + the COMPRESS selector (Cut C) + the FOLD and POW selectors (phase 3)");
     assert_eq!(memory::col::WIDTH, 11);
     assert_eq!(program_table::col::WIDTH, 3);
     assert_eq!(program_table::pre::WIDTH, 4);
@@ -203,7 +203,7 @@ fn the_table_widths_and_constraint_degrees_are_pinned() {
 /// last, and the other seven unchanged by its presence.
 #[test]
 fn the_reduce_chip_width_and_constraint_degree_are_pinned() {
-    assert_eq!(reduce_table::col::WIDTH, 70, "Cut D's 30 + the fold kind's 40 (Cut E2)");
+    assert_eq!(reduce_table::col::WIDTH, 81, "Cut D's 30 + the fold kind's 40 (Cut E2) + the pow kind's 11 (Cut F)");
     assert_eq!(reduce_table::pre::WIDTH, 20, "preprocessed 9 + the 11-column coefficient table (Cut E2)");
     let p = common::reduce_chain_program(true);
     let degs = recursion::machine::max_constraint_degrees_declaring(&p, Tier(8), true);
@@ -214,9 +214,10 @@ fn the_reduce_chip_width_and_constraint_degree_are_pinned() {
     // any of its lookups or constraints and the batch needs a larger blowup. That is what a pin is
     // for. Cut D made every message degree 1 (counts and values are columns); the measured value
     // did not move: 8 → 8. Cut E2's fold kind (two buses, four more RAM sends, every constraint
-    // degree 2 before gating) measured 8 → 8 as well.
+    // degree 2 before gating) measured 8 → 8 as well, and so did Cut F's pow kind (one more
+    // lookup bus, two RAM sends, two RANGE8 lookups; its product step is degree 5 after gating).
     assert!(degs[7] <= 8, "the reduce chip's degree must stay within log_blowup = 3");
-    assert_eq!(degs[7], 8, "Cut D, Cut E2: the reduce chip's degree, measured (≤ 8)");
+    assert_eq!(degs[7], 8, "Cut D, Cut E2, Cut F: the reduce chip's degree, measured (≤ 8)");
 }
 
 // ── The reduce chip's run rules after Cut D (read off `ReduceAir::eval`) ─────────────────────

@@ -31,8 +31,8 @@ pub const RVM_PROGRAM_DOMAIN: u64 = 15;
 /// Cut E2: the cells between a committed row and its fold result (the row's salts).
 pub const FOLD_SALT_CELLS: u64 = 4;
 
-/// The twenty-nine opcodes: the spec table's twenty-four in its reading order, then the
-/// appended ones (`REDUCE`, `SPONGE`, `HINTN`, `COMPRESS`, `FOLD`), each at the next free number so no earlier
+/// The thirty opcodes: the spec table's twenty-four in its reading order, then the
+/// appended ones (`REDUCE`, `SPONGE`, `HINTN`, `COMPRESS`, `FOLD`, `POW`), each at the next free number so no earlier
 /// opcode — and so no earlier program's digest — ever moves.
 ///
 /// Deliberately absent: `FRIFOLD`, `EXPBITS`, `MERKLE` precompiles — the verifier's fold and
@@ -115,10 +115,14 @@ pub enum Op {
     /// run (an inverse DFT then Horner, 2a rows) writes `Σ_m B_m·u^m` to the two cells after the
     /// row's four salts. Opcode 28, appended; 0–27 never move.
     Fold,
+    /// the index power (phase 3, Cut F): `rd` the pair (G, base), `ra` a 65-cell bits buffer,
+    /// `imm = off + 256·L`; the reduce chip's pow run (one row per bit) writes
+    /// `base·Π_t (1 + bit_{off+L−1−t}·(G^{2^t} − 1))` to cell 64. Opcode 29.
+    Pow,
 }
 
 impl Op {
-    pub const COUNT: usize = 29;
+    pub const COUNT: usize = 30;
 
     /// Every opcode, at the index of its own discriminant (pinned by `tests/isa.rs`).
     pub const ALL: [Op; Self::COUNT] = [
@@ -151,6 +155,7 @@ impl Op {
         Op::Hintn,
         Op::Compress,
         Op::Fold,
+        Op::Pow,
     ];
 
     pub fn from_u8(x: u8) -> Option<Self> {
@@ -188,6 +193,7 @@ impl Op {
             Op::Hintn => "HINTN",
             Op::Compress => "COMPRESS",
             Op::Fold => "FOLD",
+            Op::Pow => "POW",
         }
     }
 
@@ -222,6 +228,10 @@ pub enum DecodeError {
     Register { slot: &'static str, value: u64 },
     /// Cut D: a reduce-layout entry no run could have (zero length, a cell at or above 2^24, or a chain that does not hand over).
     Layout { entry: u32 },
+    /// Cut F: a `POW` immediate whose run is empty or leaves the 64 bits (`off + L > 64`). The
+    /// chip range-checks the two bytes but not their sum — the key commits the immediate, so it
+    /// is checked once, here, as the layout is.
+    PowShape { imm: u64 },
 }
 
 impl Instr {

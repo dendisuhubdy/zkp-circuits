@@ -158,6 +158,30 @@ impl DslChallenger {
     /// fix is liveness in the allocator, not a rewrite here. Task 6's measurement and Task 7's
     /// precompile decision both need to know this.
     pub fn sample_bits(&mut self, b: &mut Builder, bits: usize) -> Vec<Felt> {
+        self.sample_bits_with(b, bits, |b| ((0..64).map(|_| b.hint()).collect(), None)).0
+    }
+
+    /// [`DslChallenger::sample_bits`] with the sixty-four bits hinted into a 65-cell buffer (Cut F):
+    /// the bits are then cells a `POW` run reads, and cell 64 is the run's output. Same tape, same
+    /// checks — the booleanity, canonicality and decomposition below run on the handles loaded
+    /// from those very cells, which nothing writes again (the buffer is fresh; `POW` writes only
+    /// cell 64).
+    pub fn sample_bits_mem(&mut self, b: &mut Builder, bits: usize) -> (Vec<Felt>, Ptr) {
+        let (v, buf) = self.sample_bits_with(b, bits, |b| {
+            let buf = b.hint_array_padded(64, 1);
+            ((0..64).map(|k| b.get(buf, k)).collect(), Some(buf.base))
+        });
+        (v, buf.expect("the bits buffer"))
+    }
+
+    /// The body both forms share: `read` produces the sixty-four bit handles (and, for the
+    /// buffered form, the buffer).
+    fn sample_bits_with(
+        &mut self,
+        b: &mut Builder,
+        bits: usize,
+        read: impl FnOnce(&mut Builder) -> (Vec<Felt>, Option<Ptr>),
+    ) -> (Vec<Felt>, Option<Ptr>) {
         b.span("sample_bits", |b| {
             assert!(bits <= 32, "sample_bits({bits}): p3 requires 2^bits < |F|, and a query index space \
                                  wider than 2^32 does not exist on this machine");
@@ -165,7 +189,7 @@ impl DslChallenger {
             let zero = b.zero();
 
             // The sixty-four bits first, so the tape's segment is one contiguous run.
-            let bit: Vec<Felt> = (0..64).map(|_| b.hint()).collect();
+            let (bit, buf) = read(b);
             for (k, &bk) in bit.iter().enumerate() {
                 let less_one = b.add_const(bk, F::NEG_ONE);
                 let p = b.mul(bk, less_one);
@@ -191,7 +215,7 @@ impl DslChallenger {
             let sum = b.add(lo, shifted);
             b.assert_eq(sum, x, "sample_bits decomposition");
 
-            bit[..bits].to_vec()
+            (bit[..bits].to_vec(), buf)
         })
     }
 

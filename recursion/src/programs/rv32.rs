@@ -257,10 +257,17 @@ where
     ch.check_witness(b, shape.query_pow_bits(), pow, "query pow");
 
     // 6. The query indices — little-endian bit handles, `sample_bits(log_global_max_height)` each
-    // (`TwoAdicFriFolding::extra_query_index_bits() == 0`).
-    let index_bits: Vec<Vec<Felt>> = (0..shape.num_queries())
-        .map(|_| ch.sample_bits(b, log_global))
-        .collect();
+    // (`TwoAdicFriFolding::extra_query_index_bits() == 0`). `On` (Cut F): the bits are also cells
+    // of a 65-cell buffer, which the index powers' `POW` runs read.
+    let (index_bits, index_cells): (Vec<Vec<Felt>>, Vec<Option<Ptr>>) = (0..shape.num_queries())
+        .map(|_| match b.precompiles() {
+            Precompiles::On => {
+                let (bits, buf) = ch.sample_bits_mem(b, log_global);
+                (bits, Some(buf))
+            }
+            Precompiles::Off => (ch.sample_bits(b, log_global), None),
+        })
+        .unzip();
     mark(b, "phase 6 preamble: claimed evals, betas, final poly, pow, indices");
 
     // 7. Per query, unrolled: the count is a compile-time constant of the shape, and a counted
@@ -289,7 +296,7 @@ where
     mark(b, "query segments: tape reads");
     b.unrolled(shape.num_queries(), |b, q| {
         emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
-                   &index_bits[q], &all_rows[q], &all_groups[q], &all_paths[q], &all_commit_openings[q],
+                   &index_bits[q], index_cells[q], &all_rows[q], &all_groups[q], &all_paths[q], &all_commit_openings[q],
                    &all_commit_paths[q]);
     });
     mark(b, "queries: merkle walks, reduction, folds");
@@ -625,6 +632,7 @@ fn emit_query<S: VerifierShape>(
     fri_alpha: Ext,
     final_poly: Ext,
     index_bits: &[Felt],
+    index_cells: Option<Ptr>,
     rows: &[Vec<Array<Felt>>],
     groups: &[Vec<(Ptr, usize)>],
     paths: &[Array<Felt>],
@@ -639,7 +647,7 @@ fn emit_query<S: VerifierShape>(
     }
 
     // ── the batch-opening reduction.
-    let ros = b.span("reduce", |b| emit_reduced_openings(b, shape, index_bits, fri_alpha, opened, rows));
+    let ros = b.span("reduce", |b| emit_reduced_openings(b, shape, index_bits, index_cells, fri_alpha, opened, rows));
 
     // ── the fold chain (`fold_query`, verifier.rs:523-671).
     let mut ros: BTreeMap<usize, Ext> = ros.into_iter().collect();
@@ -654,7 +662,8 @@ fn emit_query<S: VerifierShape>(
         b.span("select", |b| own_slot_check(b, msg, own, folded, &format!("commit phase own slot[{r}]")));
         shift += la;
         let group_bits = &index_bits[shift..shift + log_folded];
-        folded = b.span("fold_round", |b| fold_eval(b, log_folded, la, group_bits, betas[r], msg));
+        let cells = index_cells.map(|p| (p, shift));
+        folded = b.span("fold_round", |b| fold_eval(b, log_folded, la, group_bits, betas[r], msg, cells));
         b.span("commit_root", |b| {
             emit_commit_root(b, la, msg, commit_paths[r], &index_bits[shift..], fri_caps[r], &format!("commit phase root[{r}]"))
         });
@@ -715,15 +724,24 @@ pub fn own_slot_check(b: &mut Builder, msg: Ptr, own: &[Felt], folded: Ext, name
 
 /// One fold round over the committed row at `msg`. `Off` (the reference): load the row, run the
 /// compiled barycentric fold. `On` (Cut E2): `u = β·s⁻¹` on the cpu — `s` the coset's first point,
-/// one `INV`, one `EMULF` — and the inverse DFT plus Horner in the reduce chip's fold run.
-pub fn fold_eval(b: &mut Builder, log_folded: usize, la: usize, group_bits: &[Felt], beta: Ext, msg: Ptr) -> Ext {
+/// one `INV`, one `EMULF` — and the inverse DFT plus Horner in the reduce chip's fold run. With
+/// `cells = Some((bits, off))` (Cut F) `s` is a `POW` run over the index's cells `off..off+log_folded`.
+pub fn fold_eval(
+    b: &mut Builder,
+    log_folded: usize,
+    la: usize,
+    group_bits: &[Felt],
+    beta: Ext,
+    msg: Ptr,
+    cells: Option<(Ptr, usize)>,
+) -> Ext {
     match b.precompiles() {
         Precompiles::Off => {
             let evals: Vec<Ext> = (0..1usize << la).map(|j| b.load_ext(msg, 2 * j as i64)).collect();
             emit_fold_round(b, log_folded, la, group_bits, beta, &evals)
         }
         Precompiles::On => {
-            let s = bit_selected_power(b, F::two_adic_generator(log_folded + la), log_folded, group_bits, F::ONE);
+            let s = index_power(b, F::two_adic_generator(log_folded + la), log_folded, group_bits, F::ONE, cells);
             let s_inv = b.inv(s);
             let u = b.ext_mul_base(beta, s_inv);
             b.fold_run(msg, 1usize << la, u)
@@ -906,13 +924,14 @@ fn emit_reduced_openings<S: VerifierShape>(
     b: &mut Builder,
     shape: &S,
     index_bits: &[Felt],
+    index_cells: Option<Ptr>,
     fri_alpha: Ext,
     opened: &QueryOpenings,
     rows: &[Vec<Array<Felt>>],
 ) -> Vec<(usize, Ext)> {
     match b.precompiles() {
         Precompiles::Off => emit_reduced_openings_compiled(b, shape, index_bits, fri_alpha, opened, rows),
-        Precompiles::On => emit_reduced_openings_layout(b, shape, index_bits, fri_alpha, opened, rows),
+        Precompiles::On => emit_reduced_openings_layout(b, shape, index_bits, index_cells, fri_alpha, opened, rows),
     }
 }
 
@@ -925,6 +944,7 @@ fn emit_reduced_openings_layout<S: VerifierShape>(
     b: &mut Builder,
     shape: &S,
     index_bits: &[Felt],
+    index_cells: Option<Ptr>,
     fri_alpha: Ext,
     opened: &QueryOpenings,
     rows: &[Vec<Array<Felt>>],
@@ -938,7 +958,8 @@ fn emit_reduced_openings_layout<S: VerifierShape>(
         for (mi, m) in mats.iter().enumerate() {
             let h = m.log_height;
             if !xs.contains_key(&h) {
-                let x = emit_query_point(b, h, &index_bits[log_global - h..], true);
+                let cells = index_cells.map(|p| (p, log_global - h));
+                let x = index_power(b, F::two_adic_generator(h), h, &index_bits[log_global - h..], F::GENERATOR, cells);
                 xs.insert(h, x);
             }
             let x = xs[&h];
@@ -1107,6 +1128,18 @@ fn emit_query_point(b: &mut Builder, log_height: usize, index_bits: &[Felt], shi
         index_bits,
         if shifted { F::GENERATOR } else { F::ONE },
     )
+}
+
+/// `base·g^{rev(index, log_rev)}`: Cut F's `POW` run when the bits are cells (`On`), the compiled
+/// ladder otherwise (`Off`, the reference).
+fn index_power(b: &mut Builder, g: F, log_rev: usize, bits: &[Felt], base: F, cells: Option<(Ptr, usize)>) -> Felt {
+    match cells {
+        Some((buf, off)) if b.precompiles() == Precompiles::On => {
+            assert_eq!(bits.len(), log_rev, "POW starts its ladder at g itself: the run is the whole index");
+            b.span("bit_selected_power", |b| b.pow_run(buf, off, log_rev, g, base))
+        }
+        _ => bit_selected_power(b, g, log_rev, bits, base),
+    }
 }
 
 /// `base · g^{reverse_bits_len(index, log_rev)}` from the low `index_bits.len()` bits of `index`:

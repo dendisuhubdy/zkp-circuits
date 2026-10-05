@@ -40,7 +40,7 @@ fn event(clk: u32, pc: u32) -> Event {
         mem: vec![],
         perm: None,
         reduce: None,
-        fold: None,
+        fold: None, pow: None,
     }
 }
 

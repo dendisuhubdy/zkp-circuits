@@ -398,3 +398,39 @@ fn fold_refuses_an_arity_outside_two_four_eight() {
     let p = prog(vec![i(Op::Faddi, 4, 0, 300), i(Op::Fold, 2, 4, 3), i(Op::Halt, 0, 0, 0)]);
     assert_eq!(execute(&p, &[], 100), Err(ExecError::FoldArity { pc: 1, arity: 3 }));
 }
+
+fn pow_prog(bits: &[u64], off: u64, len: u64, g: F, base: F) -> Program {
+    let mut v = vec![];
+    for (k, &bit) in bits.iter().enumerate() {
+        v.push(i(Op::Faddi, 1, 0, bit));
+        v.push(i(Op::Store, 1, 0, 400 + k as u64));
+    }
+    v.extend([Instr { op: Op::Faddi, rd: 2, ra: 0, b: g }, Instr { op: Op::Faddi, rd: 3, ra: 0, b: base }, i(Op::Faddi, 4, 0, 400)]);
+    v.extend([i(Op::Pow, 2, 4, off + 256 * len), i(Op::Load, 6, 0, 464), i(Op::Public, 0, 6, 0), i(Op::Halt, 0, 0, 0)]);
+    prog(v)
+}
+
+#[test]
+fn pow_is_the_bit_selected_power() {
+    use p3_field::TwoAdicField;
+    let bits: Vec<u64> = (0..64).map(|k| (0x9e37_79b9u64 >> (k % 32)) & 1).collect();
+    let (off, len) = (5u64, 11u64);
+    let g = F::two_adic_generator(len as usize);
+    let exec = execute(&pow_prog(&bits, off, len, g, F::GENERATOR), &[], 10_000).unwrap();
+    let mut want = F::GENERATOR;
+    for k in 0..len {
+        if bits[(off + k) as usize] == 1 {
+            want *= g.exp_u64(1 << (len - 1 - k));
+        }
+    }
+    assert_eq!(exec.public, vec![want]);
+}
+
+#[test]
+fn pow_refuses_a_non_boolean_bit_and_a_bad_shape() {
+    let mut bits = vec![0u64; 64];
+    bits[3] = 2;
+    assert_eq!(execute(&pow_prog(&bits, 0, 8, F::TWO, F::ONE), &[], 10_000).unwrap_err(), ExecError::NonBooleanBit { pc: 131 });
+    let bits = vec![0u64; 64];
+    assert!(matches!(execute(&pow_prog(&bits, 60, 8, F::TWO, F::ONE), &[], 10_000), Err(ExecError::PowShape { .. })));
+}

@@ -22,10 +22,16 @@
 //! at `B_{a−1−j}`; phase 2 (rows `K = a..2a`) is Horner at `u` over the accumulators, shifted down
 //! one pair a row. The last row writes `Σ_m B_m·u^m` after the row's salts. Every constraint is
 //! degree 2 before its gating; there is no extension inverse.
-use super::{bus, F};
+//!
+//! **The pow row kind (Cut F).** A `POW` dispatch is a run of `L` rows under its cpu clock, after
+//! the fold rows: row `K` reads the bit at `buf + off + L − 1 − K` (boolean, checked here), carries
+//! `P_G = G^{2^K}` by squaring and steps `S ← S·(1 + bit·(P_G − 1))` from `S = base`; the last row
+//! writes `S` to `buf + 64`. `(clk, buf, off + 256·L, G, base)` arrive on the run's first row from
+//! the cpu's `POW` lookup, so neither `G` nor `base` is the witness's choice.
+use super::{bus, range::RangeCounts, F};
 use crate::emulator::{
-    Event, TS_ALPHA0, TS_ALPHA1, TS_FOLD_RES0, TS_FOLD_RES1, TS_FOLD_Y0, TS_FOLD_Y1, TS_KEY0, TS_KEY1, TS_RES0, TS_RES1, TS_RUN_PX,
-    TS_RUN_PZ0, TS_RUN_PZ1,
+    Event, TS_ALPHA0, TS_ALPHA1, TS_FOLD_RES0, TS_FOLD_RES1, TS_FOLD_Y0, TS_FOLD_Y1, TS_KEY0, TS_KEY1, TS_POW_BIT, TS_POW_OUT, TS_RES0,
+    TS_RES1, TS_RUN_PX, TS_RUN_PZ0, TS_RUN_PZ1,
 };
 use crate::isa::ReduceEntry;
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
@@ -93,7 +99,21 @@ pub mod col {
     pub const FOUT1: usize = 68;
     /// The coefficient table's multiplicity.
     pub const MULT_C: usize = 69;
-    pub const WIDTH: usize = 70;
+    // ── the pow row kind (Cut F): one row per index bit, high bit first ──
+    pub const IS_POW: usize = 70;
+    pub const P_FIRST: usize = 71;
+    pub const P_LAST: usize = 72;
+    pub const P_K: usize = 73;
+    pub const P_BASE: usize = 74;
+    /// The immediate's two bytes: `imm = P_OFF + 256·P_L`, both range-checked on the first row.
+    pub const P_OFF: usize = 75;
+    pub const P_L: usize = 76;
+    pub const P_BIT: usize = 77;
+    /// `G^{2^K}` and the running product before this row's bit.
+    pub const P_G: usize = 78;
+    pub const P_S: usize = 79;
+    pub const P_OUT: usize = 80;
+    pub const WIDTH: usize = 81;
 }
 pub mod pre {
     pub const L_IS_ENTRY: usize = 0;
@@ -270,22 +290,25 @@ where
             t.assert_zero(n(IS_FIRST) * (one.clone() - n(CHAIN_START)) * (one.clone() - carry));
         }
 
-        // ── kinds: reduce rows, then fold rows, then padding ──
+        // ── kinds: reduce rows, then fold rows, then pow rows (Cut F), then padding ──
         let (is_fold, f_first, f_ph1, f_last) = (v(IS_FOLD), v(F_FIRST), v(F_PH1), v(F_LAST));
         for c in [IS_FOLD, F_FIRST, F_PH1, F_LAST] {
             b.assert_bool(v(c));
         }
         b.assert_zero(is_real.clone() * is_fold.clone());
+        b.assert_zero(v(IS_POW) * is_real.clone());
+        b.assert_zero(v(IS_POW) * is_fold.clone());
         for f in [f_first.clone(), f_ph1.clone(), f_last.clone()] {
             b.assert_zero(f * (one.clone() - is_fold.clone()));
         }
         b.assert_zero(v(MULT_C) * (one.clone() - l(pre::C_IS_ROW)));
-        b.when_last_row().assert_zero(is_real.clone() + is_fold.clone());
+        b.when_last_row().assert_zero(is_real.clone() + is_fold.clone() + v(IS_POW));
         b.when_first_row().assert_zero(is_fold.clone() * (one.clone() - f_first.clone()));
         {
             let mut t = b.when_transition();
-            t.assert_zero((one.clone() - is_real.clone() - is_fold.clone()) * (n(IS_REAL) + n(IS_FOLD)));
+            t.assert_zero((one.clone() - is_real.clone() - is_fold.clone() - v(IS_POW)) * (n(IS_REAL) + n(IS_FOLD) + n(IS_POW)));
             t.assert_zero(is_fold.clone() * n(IS_REAL));
+            t.assert_zero(v(IS_POW) * (n(IS_REAL) + n(IS_FOLD)));
             // A run starts at K = 0 in phase 1 with zero accumulators, ends on F_LAST, and only there.
             t.assert_zero(is_fold.clone() * (one.clone() - f_last.clone()) * (one.clone() - n(IS_FOLD)));
             t.assert_zero(is_fold.clone() * (one.clone() - f_last.clone()) * n(F_FIRST));
@@ -336,6 +359,36 @@ where
             t.assert_zero(ph2 * n(D0 + 15));
         }
 
+        // ── the pow row kind (Cut F) ──
+        let (is_pow, p_first, p_last) = (v(IS_POW), v(P_FIRST), v(P_LAST));
+        for c in [IS_POW, P_FIRST, P_LAST, P_BIT] {
+            b.assert_bool(v(c));
+        }
+        b.assert_zero(p_first.clone() * (one.clone() - is_pow.clone()));
+        b.assert_zero(p_last.clone() * (one.clone() - is_pow.clone()));
+        b.when_first_row().assert_zero(is_pow.clone() * (one.clone() - p_first.clone()));
+        b.assert_zero(p_first.clone() * v(P_K));
+        b.assert_zero(p_last.clone() * (v(P_K) - v(P_L) + one.clone()));
+        let step = v(P_S) * (one.clone() + v(P_BIT) * (v(P_G) - one.clone()));
+        b.assert_zero(p_last.clone() * (v(P_OUT) - step.clone()));
+        {
+            let mut t = b.when_transition();
+            t.assert_zero(is_pow.clone() * (one.clone() - p_last.clone()) * (one.clone() - n(IS_POW)));
+            t.assert_zero(is_pow.clone() * (one.clone() - p_last.clone()) * n(P_FIRST));
+            t.assert_zero(p_last.clone() * n(IS_POW) * (one.clone() - n(P_FIRST)));
+            // A pow row entered from any other kind (the last reduce row, the last fold row) is a
+            // run's first row: a headless run sends no `POW` message, and would still write its
+            // output at a clock and base of the prover's choosing.
+            t.assert_zero((one.clone() - is_pow.clone()) * n(IS_POW) * (one.clone() - n(P_FIRST)));
+            let pr = n(IS_POW) * (one.clone() - n(P_FIRST));
+            for c in [CLK, P_BASE, P_OFF, P_L] {
+                t.assert_zero(pr.clone() * (n(c) - v(c)));
+            }
+            t.assert_zero(pr.clone() * (n(P_K) - v(P_K) - one.clone()));
+            t.assert_zero(pr.clone() * (n(P_G) - v(P_G) * v(P_G)));
+            t.assert_zero(pr * (n(P_S) - step));
+        }
+
         // ── buses ──
         bus::REDUCE.table_entry(b, [v(CLK), v(ENTRY)], is_first.clone());
         let flags = v(CHAIN_START) + AB::Expr::from_u32(2) * v(CARRY);
@@ -376,7 +429,19 @@ where
         bus::RAM.send(b, [y_addr + one.clone(), fts(TS_FOLD_Y1), v(Y1), AB::Expr::ZERO], Count::bounded(f_ph1, 1));
         let res = v(F_MSG) + AB::Expr::from_u32(2) * v(F_A) + AB::Expr::from_u32(crate::isa::FOLD_SALT_CELLS as u32);
         bus::RAM.send(b, [res.clone(), fts(TS_FOLD_RES0), v(FOUT0), one.clone()], Count::bounded(f_last.clone(), 1));
-        bus::RAM.send(b, [res + one.clone(), fts(TS_FOLD_RES1), v(FOUT1), one], Count::bounded(f_last, 1));
+        bus::RAM.send(b, [res + one.clone(), fts(TS_FOLD_RES1), v(FOUT1), one.clone()], Count::bounded(f_last, 1));
+
+        // ── the pow kind's messages (Cut F): the dispatch and the immediate's two bytes on the run's
+        // first row, one bit read a row, the output write on the last row ──
+        let imm = v(P_OFF) + AB::Expr::from_u32(256) * v(P_L);
+        bus::POW.table_entry(b, [v(CLK), v(P_BASE), imm, v(P_G), v(P_S)], p_first.clone());
+        for c in [P_OFF, P_L] {
+            bus::RANGE8.lookup_key(b, [v(c)], Count::bounded(p_first.clone(), 1));
+        }
+        let pts = |slot: u32| sixteen.clone() * v(CLK) + AB::Expr::from_u32(slot);
+        let bit_addr = v(P_BASE) + v(P_OFF) + v(P_L) - one.clone() - v(P_K);
+        bus::RAM.send(b, [bit_addr, pts(TS_POW_BIT), v(P_BIT), AB::Expr::ZERO], Count::bounded(is_pow, 1));
+        bus::RAM.send(b, [v(P_BASE) + AB::Expr::from_u32(64), pts(TS_POW_OUT), v(P_OUT), one], Count::bounded(p_last, 1));
     }
 }
 
@@ -409,10 +474,28 @@ pub fn fold_rows(events: &[&Event]) -> usize {
     events.iter().map(|e| 2 * e.fold.unwrap().arity as usize).sum()
 }
 
+/// The `POW` events, in execution order (Cut F).
+pub fn pow_events(events: &[Event]) -> Vec<&Event> {
+    events.iter().filter(|e| e.pow.is_some()).collect()
+}
+
+/// One chip row per index bit.
+pub fn pow_rows(events: &[&Event]) -> usize {
+    events.iter().map(|e| e.pow.unwrap().len as usize).sum()
+}
+
 /// The runs in execution order (a chain's entries are consecutive dispatches, so adjacent), then
-/// (Cut E2) the fold runs, the provider regions' multiplicities, and all-zero padding.
-pub fn reduce_trace(layout: &[ReduceEntry], events: &[&Event], folds: &[&Event], height: usize) -> RowMajorMatrix<F> {
-    let n_rows = reduce_rows(events) + fold_rows(folds);
+/// (Cut E2) the fold runs, (Cut F) the pow runs, the provider regions' multiplicities, and
+/// all-zero padding. `counts` takes the pow runs' immediate bytes (`RANGE8`).
+pub fn reduce_trace(
+    layout: &[ReduceEntry],
+    events: &[&Event],
+    folds: &[&Event],
+    pows: &[&Event],
+    height: usize,
+    counts: &mut RangeCounts,
+) -> RowMajorMatrix<F> {
+    let n_rows = reduce_rows(events) + fold_rows(folds) + pow_rows(pows);
     assert!(
         n_rows < height && provider_rows(layout) <= height,
         "reduce table: {n_rows} rows, {} layout entries, height {height}",
@@ -476,12 +559,14 @@ pub fn reduce_trace(layout: &[ReduceEntry], events: &[&Event], folds: &[&Event],
     for e in events {
         v[e.reduce.unwrap().entry as usize * WIDTH + MULT] += F::ONE;
     }
-    fill_folds(&mut v, row, folds);
+    let row = fill_folds(&mut v, row, folds);
+    fill_pows(&mut v, row, pows, counts);
     RowMajorMatrix::new(v, WIDTH)
 }
 
-/// The fold runs, after the reduce runs (`reduce_trace` calls this with its next free row).
-fn fill_folds(v: &mut [F], mut row: usize, folds: &[&Event]) {
+/// The fold runs, after the reduce runs (`reduce_trace` calls this with its next free row);
+/// returns the next free row.
+fn fill_folds(v: &mut [F], mut row: usize, folds: &[&Event]) -> usize {
     for e in folds {
         let ev = e.fold.unwrap();
         let a = ev.arity as usize;
@@ -536,6 +621,39 @@ fn fill_folds(v: &mut [F], mut row: usize, folds: &[&Event]) {
                 // The coefficient table's row for (a, k): arity 2 at rows 0–1, 4 at 2–5, 8 at 6–13.
                 v[(a - 2 + k) * WIDTH + MULT_C] += F::ONE;
             }
+        }
+    }
+    row
+}
+
+/// The pow runs, after the fold runs (Cut F). The event's reads are the bits in run order.
+fn fill_pows(v: &mut [F], mut row: usize, pows: &[&Event], counts: &mut RangeCounts) {
+    for e in pows {
+        let ev = e.pow.unwrap();
+        let (mut g, mut s) = (ev.g, ev.s0);
+        counts.range8(ev.off);
+        counts.range8(ev.len);
+        for t in 0..ev.len as usize {
+            let bit = e.mem[t].value;
+            let r = &mut v[row * WIDTH..(row + 1) * WIDTH];
+            r[IS_POW] = F::ONE;
+            r[P_FIRST] = F::from_bool(t == 0);
+            r[P_LAST] = F::from_bool(t + 1 == ev.len as usize);
+            r[P_K] = F::from_u64(t as u64);
+            r[P_BASE] = F::from_u64(ev.base);
+            r[P_OFF] = F::from_u32(ev.off);
+            r[P_L] = F::from_u32(ev.len);
+            r[CLK] = F::from_u64(e.clk as u64);
+            r[P_BIT] = bit;
+            r[P_G] = g;
+            r[P_S] = s;
+            s *= F::ONE + bit * (g - F::ONE);
+            g = g.square();
+            if t + 1 == ev.len as usize {
+                r[P_OUT] = s;
+                debug_assert_eq!(s, ev.out, "the trace recomputes the emulator's power");
+            }
+            row += 1;
         }
     }
 }

@@ -553,7 +553,8 @@ pub fn eval_row(
 }
 
 /// A program that reaches every chip: registers and RAM (`STORE`, `LOAD`), a `POSEIDON2`
-/// dispatch, a three-row `REDUCE` run of layout entry 0 (Cut D), the four `PUBLIC`s, `HALT`.
+/// dispatch, a three-row `REDUCE` run of layout entry 0 (Cut D), an arity-2 `FOLD` (Cut E2), a
+/// three-bit `POW` (Cut F), the four `PUBLIC`s, `HALT`.
 /// (`tests/tables.rs`' padding-row rule and `tests/binding.rs`' binding rule both run over it.)
 #[allow(dead_code)]
 pub fn every_chip_program() -> recursion::isa::Program {
@@ -587,6 +588,16 @@ pub fn every_chip_program() -> recursion::isa::Program {
     v.push(Instr { op: Op::Faddi, rd: 3, ra: 0, b: F::ZERO });
     v.push(Instr { op: Op::Faddi, rd: 4, ra: 0, b: F::from_u64(300) });
     v.push(Instr { op: Op::Fold, rd: 2, ra: 4, b: F::from_u64(2) });
+    // Cut F: one three-bit POW over the bits (1, 0, 1) at cells 400–402, G = 7, base = 1 — the pow
+    // kind's bit reads and output write (cell 464) are covered by the binding and padding rules.
+    // Cell 401 is never written (its read is a fresh zero), which keeps the RAM table at 61 real
+    // rows of 64, clear of the padding row `tests/tables.rs` checks.
+    st(&mut v, 400, 1);
+    st(&mut v, 402, 1);
+    v.push(Instr { op: Op::Faddi, rd: 2, ra: 0, b: F::from_u64(7) });
+    v.push(Instr { op: Op::Faddi, rd: 3, ra: 0, b: F::ONE });
+    v.push(Instr { op: Op::Faddi, rd: 4, ra: 0, b: F::from_u64(400) });
+    v.push(Instr { op: Op::Pow, rd: 2, ra: 4, b: F::from_u64(256 * 3) });
     for _ in 0..4 {
         v.push(Instr { op: Op::Public, rd: 0, ra: 0, b: F::ZERO });
     }
@@ -809,4 +820,26 @@ pub fn fold_program(runs: &[(usize, Vec<recursion::isa::EF>, recursion::isa::EF)
     v.extend([i(Op::Loade, 6, 0, F::from_u64(first_res)), i(Op::Public, 0, 6, F::ZERO), i(Op::Public, 0, 7, F::ZERO)]);
     v.extend([i(Op::Public, 0, 6, F::ZERO), i(Op::Public, 0, 7, F::ZERO), i(Op::Halt, 0, 0, F::ZERO)]);
     (Program { instrs: v, checkpoints: vec![], reduce_layout: vec![] }, want)
+}
+
+/// Cut F's honest pow program (`tests/emulator.rs::pow_prog`, shared): the 64 bits stored at cells
+/// 400–463, `(G, base)` in r2/r3, the buffer in r4, one `POW`, its output (cell 464) published four
+/// times.
+#[allow(dead_code)]
+pub fn pow_program(bits: &[u64], off: u64, len: u64, g: recursion::isa::F, base: recursion::isa::F) -> recursion::isa::Program {
+    use p3_field::PrimeCharacteristicRing;
+    use recursion::isa::{Instr, Op, Program, F};
+    let i = |op: Op, rd: u8, ra: u8, b: u64| Instr { op, rd, ra, b: F::from_u64(b) };
+    let mut v = vec![];
+    for (k, &bit) in bits.iter().enumerate() {
+        v.push(i(Op::Faddi, 1, 0, bit));
+        v.push(i(Op::Store, 1, 0, 400 + k as u64));
+    }
+    v.extend([Instr { op: Op::Faddi, rd: 2, ra: 0, b: g }, Instr { op: Op::Faddi, rd: 3, ra: 0, b: base }, i(Op::Faddi, 4, 0, 400)]);
+    v.extend([i(Op::Pow, 2, 4, off + 256 * len), i(Op::Load, 6, 0, 464)]);
+    for _ in 0..4 {
+        v.push(i(Op::Public, 0, 6, 0));
+    }
+    v.push(i(Op::Halt, 0, 0, 0));
+    Program { instrs: v, checkpoints: vec![], reduce_layout: vec![] }
 }

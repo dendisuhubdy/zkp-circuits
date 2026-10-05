@@ -3,7 +3,7 @@
 //! refuse its malformed inputs at a named point.
 mod common;
 
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
 use rand::SeedableRng;
 use recursion::dsl::{Builder, Checkpoints};
 use recursion::emulator::{execute, ExecError};
@@ -424,7 +424,7 @@ fn fold_via_the_chip_matches_the_compiled_fold() {
                 }
                 let bits: Vec<recursion::dsl::Felt> = (0..log_folded).map(|k| b.constant(F::from_u64(((index >> k) & 1) as u64))).collect();
                 let be = b.ext_constant(beta);
-                let out = fold_eval(&mut b, log_folded, la, &bits, be, msg);
+                let out = fold_eval(&mut b, log_folded, la, &bits, be, msg, None);
                 b.public_ext(out);
                 b.public_ext(out);
                 let got = execute(&b.finish(), &[], 1_000_000).unwrap().public;
@@ -432,6 +432,66 @@ fn fold_via_the_chip_matches_the_compiled_fold() {
             };
             assert_eq!(run(Precompiles::Off), want, "compiled, la {la}");
             assert_eq!(run(Precompiles::On), want, "the chip, la {la}");
+            // Cut F: the same fold with `s` a POW run over the index's cells (at offset 3 of a
+            // 65-cell buffer, as `emit_query` places a round's group bits after earlier rounds').
+            let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, Precompiles::On);
+            let msg = b.alloc(2 * (1 << la) + 6);
+            for (j, v) in row.iter().enumerate() {
+                let c = b.ext_constant(*v);
+                b.store_ext(msg, 2 * j as i64, c);
+            }
+            let buf = b.alloc(65);
+            let bits: Vec<recursion::dsl::Felt> = (0..log_folded)
+                .map(|k| {
+                    let c = b.constant(F::from_u64(((index >> k) & 1) as u64));
+                    b.store(buf, 3 + k as i64, c);
+                    c
+                })
+                .collect();
+            let be = b.ext_constant(beta);
+            let out = fold_eval(&mut b, log_folded, la, &bits, be, msg, Some((buf, 3)));
+            b.public_ext(out);
+            b.public_ext(out);
+            let p = b.finish();
+            assert!(p.instrs.iter().any(|i| i.op == recursion::isa::Op::Pow), "the cells path dispatches POW");
+            let got = execute(&p, &[], 1_000_000).unwrap().public;
+            assert_eq!(ef([got[0], got[1]]), want, "the chip with POW, la {la}");
         }
     }
+}
+
+/// Cut F: POW equals the compiled ladder for random bits, offsets and lengths.
+#[test]
+fn pow_matches_the_bit_selected_ladder() {
+    use p3_field::TwoAdicField;
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(31);
+    let m = Machine::new(FriProfile::Test);
+    for (off, len) in [(0u64, 1u64), (0, 20), (5, 11), (44, 20), (63, 1)] {
+        let bits: Vec<u64> = (0..64).map(|_| rand::RngExt::random::<bool>(&mut rng) as u64).collect();
+        let g = F::two_adic_generator(len as usize + 3);
+        let mut want = F::GENERATOR;
+        for k in 0..len {
+            if bits[(off + k) as usize] == 1 {
+                want *= g.exp_u64(1 << (len - 1 - k));
+            }
+        }
+        let p = common::pow_program(&bits, off, len, g, F::GENERATOR);
+        let (proof, exec) = m.prove(&p, &[], None).unwrap();
+        m.verify(&p, &proof).unwrap();
+        assert_eq!(exec.public[0], want, "off {off}, len {len}");
+    }
+}
+
+/// Cut F: a POW immediate whose run leaves the 64 bits (or is empty) is refused at registration,
+/// as the emulator refuses it at run time — the chip range-checks the two bytes, not their sum.
+#[test]
+fn a_pow_immediate_leaving_the_buffer_is_refused_at_registration() {
+    use recursion::isa::DecodeError;
+    for (off, len) in [(60u64, 8u64), (0, 0), (64, 1), (0, 65)] {
+        let p = common::pow_program(&[0; 64], off, len, F::TWO, F::ONE);
+        assert_eq!(Machine::check_program(&p), Err(DecodeError::PowShape { imm: off + 256 * len }), "off {off}, len {len}");
+        assert!(matches!(execute(&p, &[], 10_000), Err(ExecError::PowShape { .. })), "off {off}, len {len}");
+    }
+    let p = common::pow_program(&[0; 64], 44, 20, F::TWO, F::ONE);
+    assert_eq!(Machine::check_program(&p), Ok(()));
 }
