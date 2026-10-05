@@ -1376,10 +1376,12 @@ fn a_fold_run_with_a_tampered_coefficient_accumulator_is_rejected() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 
-/// Spec §5: a FOLD whose u differs from the cpu's — every row of the run (so the carry holds),
-/// leaving the FOLD dispatch unmatched.
+/// Spec §5: a FOLD whose u differs from the cpu's — every row of the run (so the carry holds).
+/// Over a random row the Horner steps no longer reproduce the trace's accumulators, so the
+/// transition constraints refuse it before the `FOLD` bus is reached; the bus binding of `u` alone
+/// is isolated by `a_fold_run_whose_u_is_not_the_dispatched_u_is_rejected_by_the_fold_bus`.
 #[test]
-fn a_fold_whose_u_differs_from_the_dispatch_is_rejected() {
+fn a_fold_whose_u_differs_from_the_dispatch_is_rejected_by_the_horner_steps() {
     let (m, p, mut t) = fold_setup();
     let (w, first) = (reduce_table::col::WIDTH, fold_first_row(&t));
     let r = t.reduce.as_mut().unwrap();
@@ -1403,9 +1405,11 @@ fn a_fold_run_cut_short_is_rejected() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 
-/// A phase-1 row whose coefficients are not the table's.
+/// A phase-1 row whose coefficients are not the table's, over a non-zero `y`: the accumulator step
+/// `n(D) = D + C·y` refuses it before the lookup is reached. The `FOLD_COEFF` binding alone is
+/// isolated by `a_fold_coefficient_off_the_table_is_rejected_by_the_coefficient_lookup`.
 #[test]
-fn a_fold_row_with_a_coefficient_off_the_table_is_rejected() {
+fn a_fold_row_with_a_coefficient_off_the_table_is_rejected_by_the_accumulator_step() {
     let (m, p, mut t) = fold_setup();
     let (w, first) = (reduce_table::col::WIDTH, fold_first_row(&t));
     t.reduce.as_mut().unwrap().values[first * w + reduce_table::col::C0] += F::ONE;
@@ -1459,4 +1463,119 @@ fn a_headless_fold_run_after_the_reduce_rows_is_rejected() {
     ram.push(MemAccess { addr: 501, ts: ts + 15, value: F::ZERO, is_write: true });
     let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
     assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a headless fold run after the last reduce row VERIFIED, writing 777 to cell 500");
+}
+
+// ── Cut E2 fix round 1: forgeries each refused by exactly one rule ───────────────────────────
+// Every forgery below keeps every other constraint and every other bus satisfied, and each test
+// was mutation-checked: with its one rule deleted from `ReduceAir::eval` the forgery VERIFIES.
+
+fn fold_traces(p: &Program) -> (Machine, Traces) {
+    let exec = execute(p, &[], 10_000).unwrap();
+    (Machine::new(FriProfile::Test), build_traces(p, &exec, Tier(8)).unwrap())
+}
+
+/// The `FOLD` bus binds `u`. Over a constant row every `B_{m≥1}` is zero, so each Horner
+/// accumulator stays zero and `FOUT = B_0` for any `u`: changing `U0` on all 2a rows of the run
+/// keeps every constraint and the RAM bus satisfied, and only the dispatch `(clk, msg, u, a)` the
+/// cpu sends no longer matches the run's `FOLD` provide.
+#[test]
+fn a_fold_run_whose_u_is_not_the_dispatched_u_is_rejected_by_the_fold_bus() {
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(42);
+    let y = common::random_ext(&mut rng);
+    let (p, _) = common::fold_program(&[(3, vec![y; 8], common::random_ext(&mut rng))]);
+    let (m, mut t) = fold_traces(&p);
+    prove_and_verify(&m, &p, &t).expect("the honest constant-row fold verifies");
+    let (w, first) = (reduce_table::col::WIDTH, fold_first_row(&t));
+    let r = t.reduce.as_mut().unwrap();
+    for row in first..first + 16 {
+        assert_eq!(r.values[row * w + reduce_table::col::FACC0], F::ZERO, "a constant row keeps FACC at zero");
+        r.values[row * w + reduce_table::col::U0] += F::ONE;
+    }
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a fold run at a u the cpu never dispatched VERIFIED");
+}
+
+/// The `FOLD_COEFF` lookup binds the coefficients. With `y_0 = 0`, row 0's `C·y_0` is zero
+/// whatever `C` is, so a tampered `C0` there leaves every accumulator, the result and the RAM
+/// bus unchanged; only the lookup of `(a, 0, C0..C7)` in the committed table refuses it.
+#[test]
+fn a_fold_coefficient_off_the_table_is_rejected_by_the_coefficient_lookup() {
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(43);
+    let mut ys: Vec<EF> = (0..8).map(|_| common::random_ext(&mut rng)).collect();
+    ys[0] = EF::ZERO;
+    let (p, _) = common::fold_program(&[(3, ys, common::random_ext(&mut rng))]);
+    let (m, mut t) = fold_traces(&p);
+    prove_and_verify(&m, &p, &t).expect("the honest fold with y_0 = 0 verifies");
+    let (w, first) = (reduce_table::col::WIDTH, fold_first_row(&t));
+    t.reduce.as_mut().unwrap().values[first * w + reduce_table::col::C0] += F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a phase-1 row with a coefficient off the table VERIFIED");
+}
+
+/// An arity-2 fold of the all-zero row at u = 3 whose result is never read back by the program
+/// (so a forged result needs only its two RAM writes changed): the cells are stored as zero, the
+/// fold runs, and the program publishes four zeros.
+fn zero_row_fold_program() -> Program {
+    let mut v: Vec<Instr> = (300..304).map(|a| i(Op::Store, 0, 0, a)).collect();
+    v.extend([i(Op::Faddi, 2, 0, 3), i(Op::Faddi, 3, 0, 0), i(Op::Faddi, 4, 0, 300), i(Op::Fold, 2, 4, 2)]);
+    v.extend([i(Op::Public, 0, 0, 0), i(Op::Public, 0, 0, 0), i(Op::Public, 0, 0, 0), i(Op::Public, 0, 0, 0), i(Op::Halt, 0, 0, 0)]);
+    Program { instrs: v, checkpoints: vec![], reduce_layout: vec![] }
+}
+
+/// The phase switch zeroes the Horner accumulator. Over the all-zero row every `B_m` is zero and
+/// the honest result is 0; a first phase-2 row with `FACC = 1` instead runs Horner to
+/// `FACC·u^a = 9` (u = 3, a = 2). The chain and `FOUT` are recomputed and the RAM table is given
+/// the forged result writes, so only the switch's `FACC = 0` rule refuses it.
+#[test]
+fn a_fold_run_whose_horner_does_not_start_at_zero_is_rejected_by_the_phase_switch() {
+    use reduce_table::col::*;
+    let p = zero_row_fold_program();
+    let m = Machine::new(FriProfile::Test);
+    let mut exec = execute(&p, &[], 1000).unwrap();
+    let honest = build_traces(&p, &exec, Tier(8)).unwrap();
+    prove_and_verify(&m, &p, &honest).expect("the honest zero-row fold verifies");
+    let (mut red, lh) = (honest.reduce.clone().unwrap(), honest.reduce_log_height);
+    let first = fold_first_row(&honest);
+    let w = WIDTH;
+    assert_eq!(red.values[(first + 3) * w + FOUT0], F::ZERO, "the honest fold of the zero row is zero");
+    red.values[(first + 2) * w + FACC0] = F::ONE; // the first phase-2 row (K = a = 2)
+    red.values[(first + 3) * w + FACC0] = F::from_u64(3); // 1·u + D_0
+    red.values[(first + 3) * w + FOUT0] = F::from_u64(9); // 3·u + D_0
+    let f = exec.events.iter().position(|e| e.instr.op == Op::Fold).unwrap();
+    let res = exec.events[f].mem.iter_mut().find(|a| a.is_write && a.addr == 300 + 4 + 4).unwrap();
+    res.value = F::from_u64(9);
+    let reg = cpu::register_accesses(&exec.events);
+    let ram = cpu::ram_accesses(&exec.events);
+    let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a fold whose Horner started at FACC = 1 VERIFIED, writing 9 for the zero row's 0");
+}
+
+/// The phase switch happens at `K = a`. An arity-2 run that switches one row early (phase 1 is
+/// row 0 alone, phase 2 rows 1–3) skips `y_1`: its two reads are dropped from the RAM table and
+/// the coefficient table's `(2, 1)` multiplicity with them. Over the all-zero row the result is
+/// still 0, so every other constraint and every bus balances; only the switch's `n(K) = a` rule
+/// refuses it. (Over a non-zero row this run would fold a row with `y_1` never read.)
+#[test]
+fn a_fold_run_whose_phase_switch_is_early_is_rejected_by_the_switch_index() {
+    use reduce_table::col::*;
+    let p = zero_row_fold_program();
+    let m = Machine::new(FriProfile::Test);
+    let mut exec = execute(&p, &[], 1000).unwrap();
+    let honest = build_traces(&p, &exec, Tier(8)).unwrap();
+    let (mut red, lh) = (honest.reduce.clone().unwrap(), honest.reduce_log_height);
+    let first = fold_first_row(&honest);
+    let w = WIDTH;
+    let row1 = (first + 1) * w;
+    red.values[row1 + F_PH1] = F::ZERO;
+    red.values[row1 + Y0] = F::ZERO;
+    red.values[row1 + Y1] = F::ZERO;
+    for j in 0..8 {
+        red.values[row1 + C0 + j] = F::ZERO;
+    }
+    // The coefficient table's row for (a = 2, k = 1) is row 1; its multiplicity loses the lookup.
+    red.values[w + MULT_C] -= F::ONE;
+    let f = exec.events.iter().position(|e| e.instr.op == Op::Fold).unwrap();
+    exec.events[f].mem.retain(|a| a.is_write || a.addr < 302);
+    let reg = cpu::register_accesses(&exec.events);
+    let ram = cpu::ram_accesses(&exec.events);
+    let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a fold run whose phase 1 ended at K = a − 2 VERIFIED, never reading y_1");
 }
