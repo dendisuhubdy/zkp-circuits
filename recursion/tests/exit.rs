@@ -285,14 +285,15 @@ fn the_committed_program_digest_is_reproducible() {
 // ── M5.2 Task 10: the test-profile exit twin ──────────────────────────────────────────────────
 
 /// The Task-10 twin: **the post-cut verifier program over one real test-profile bundle proof,
-/// proved and verified natively** — 230 950 rows, tier 18 since phase 2's row cuts (461 988 rows
+/// proved and verified natively** — 202 198 rows since phase 3's Cut D (230 950 after phase 2's row cuts), tier 18 (461 988 rows
 /// at tier 19 in constraint set 8, 441 643 in constraint set 6), with the exact shape of Task 10's
-/// production exit (tier 20, 893 606 rows). `#[ignore]`d for its cost: the tier-19 twin was
+/// production exit (tier 20, 749 846 rows). `#[ignore]`d for its cost: the tier-19 twin was
 /// killed at 78.7 GB live on a 48 GB box (`recursion/docs/04-phase2-row-cuts.md` §"The prover's
 /// live heap", against a 94.2 GB Linux peak); one height shorter (all but the poseidon2 and reduce
 /// tables), the tier-18 twin was projected at ≈ 47–50 GB. Since the quotient-layout fork the same
 /// shape proves on this 48 GB box at 33.27 GB peak live (2026-10-05,
-/// `tests/memprofile.rs::tier19_exit_twin`, 16 threads; `recursion/docs/05-quotient-layout.md`).
+/// `tests/memprofile.rs::tier19_exit_twin`, 16 threads; `recursion/docs/05-quotient-layout.md`),
+/// and at 24.86 GB since phase 3's Cut D (`recursion/docs/06-phase3-fold-reduce.md` §3).
 /// The sibling
 /// `cheating.rs`'s `a_proof_of_one_program_does_not_verify_another` covers the small-scale case;
 /// here the R1 binding is checked at full scale: a proof of the verifier program never verifies
@@ -311,7 +312,7 @@ fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_ver
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 230_950, "the twin proves the post-cut program as measured (phase 2's row cuts: the N=1 aggregate pin 231 224 less the 274-row loop overhead; 461 988 at tier 19 in constraint set 8, 461 082 in constraint set 7 with VERIFIER-1, 441 643 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 202_198, "the twin proves the post-cut program as measured (phase 3's Cut D: the N=1 aggregate pin 202 472 less the 274-row loop overhead; 230 950 after phase 2's row cuts; 461 988 at tier 19 in constraint set 8, 461 082 in constraint set 7 with VERIFIER-1, 441 643 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(18));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();
@@ -333,10 +334,11 @@ fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_ver
 /// requirement (a 48.6 GB committed oracle, a ≥ 64 GB machine) counted one of the prover's four
 /// memory terms and is withdrawn: the tier-21 proof measured 376.9 GB on the 503 GB box, and the
 /// measured live-heap model (`recursion/docs/04-phase2-row-cuts.md` §"The prover's live heap")
-/// puts this tier-20 proof at ≈ 190–240 GB (the production RAM table stays at 2^22) — a
+/// puts this tier-20 proof at ≈ 190–240 GB (modelled with the production RAM table at 2^22; since
+/// phase 3's Cut D the REG and RAM tables declare 2^21, `recursion/docs/06-phase3-fold-reduce.md`) — a
 /// ≥ 256 GB host. Not attempted on this 48 GB box.
 #[test]
-#[ignore = "the M5.2 exit: production profile, post-cut program, tier 20, 893 606 rows; \
+#[ignore = "the M5.2 exit: production profile, post-cut program, tier 20, 749 846 rows; \
             ~190-240 GB projected (docs/04 §live heap; tier 21 measured 376.9 GB), a >= 256 GB host. \
             Run on the big machine: \
             cargo +1.98.1 test -p recursion --release --test exit -- --ignored --nocapture"]
@@ -354,7 +356,7 @@ fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 893_606, "the exit proves the post-cut program as measured (phase 2's row cuts, `tests/pins.json`; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 749_846, "the exit proves the post-cut program as measured (phase 3's Cut D, `tests/pins.json`; 893 606 after phase 2's row cuts; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(20));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();

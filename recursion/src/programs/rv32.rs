@@ -18,7 +18,7 @@
 
 use crate::dsl::hash;
 use crate::dsl::transcript::DslChallenger;
-use crate::dsl::{Array, Builder, Checkpoints, Digest, Ext, Felt, Ptr, DIGEST_ELEMS};
+use crate::dsl::{Array, Builder, Checkpoints, Digest, Ext, Felt, Ptr, ReduceRun, DIGEST_ELEMS};
 use crate::emulator::Execution;
 use crate::isa::{Program, EF, F};
 use crate::public_values::RVM_PUB_DOMAIN;
@@ -853,7 +853,7 @@ fn bit_indicator(b: &mut Builder, bits: &[Felt], v: usize) -> Felt {
 /// instances have equal `zeta_next`s), and the reference's per-(batch, matrix, point) inverses
 /// are then the same elements — its `batch_multiplicative_inverse` is an optimisation, not
 /// semantics.
-fn emit_reduced_openings<S: VerifierShape>(
+fn emit_reduced_openings_compiled<S: VerifierShape>(
     b: &mut Builder,
     shape: &S,
     index_bits: &[Felt],
@@ -889,12 +889,9 @@ fn emit_reduced_openings<S: VerifierShape>(
                     .copied()
                     .unwrap_or_else(|| (b.ext_constant(EF::ONE), b.ext_constant(EF::ZERO)));
                 let row = rows[ri][mi];
-                (ro, alpha_pow) = match b.precompiles() {
-                    // The compiled loop, kept as the precompile's differential reference.
-                    Precompiles::Off => reduce_compiled(b, *vals, row, inv, ro, alpha_pow, fri_alpha),
-                    // Cut D, Task 1a: the chip path is wired in Task 1b.
-                    Precompiles::On => reduce_compiled(b, *vals, row, inv, ro, alpha_pow, fri_alpha),
-                };
+                // The compiled loop, kept as the precompile's differential reference (`Off`).
+                let (ro2, ap2) = reduce_compiled(b, *vals, row, inv, ro, alpha_pow, fri_alpha);
+                (ro, alpha_pow) = (ro2, ap2);
                 acc.insert(h, (alpha_pow, ro));
             }
         }
@@ -909,6 +906,88 @@ fn emit_reduced_openings<S: VerifierShape>(
         b.assert_eq(c1, zero, "reduced opening at the blowup height");
     }
     acc.into_iter().rev().map(|(h, (_, ro))| (h, ro)).collect()
+}
+
+/// One query's batch-opening reduction: the `Off` reference (the compiled loop, run by run) or
+/// Cut D's chip path. Same value, same order — heights descending.
+fn emit_reduced_openings<S: VerifierShape>(
+    b: &mut Builder,
+    shape: &S,
+    index_bits: &[Felt],
+    fri_alpha: Ext,
+    opened: &QueryOpenings,
+    rows: &[Vec<Array<Felt>>],
+) -> Vec<(usize, Ext)> {
+    match b.precompiles() {
+        Precompiles::Off => emit_reduced_openings_compiled(b, shape, index_bits, fri_alpha, opened, rows),
+        Precompiles::On => emit_reduced_openings_layout(b, shape, index_bits, fri_alpha, opened, rows),
+    }
+}
+
+/// Cut D: the query points and the `(height, point)` inverse keys are computed exactly as the
+/// compiled form computes them, in first-use order; the keys and alpha are stored once into this
+/// query's key buffer; each height's runs — in `(round, matrix, point)` order, so alpha's powers
+/// run as in `open_inputs` — become one chain of back-to-back `REDUCE` rows whose result lands in
+/// the height's cell of this query's result buffer, read back once.
+fn emit_reduced_openings_layout<S: VerifierShape>(
+    b: &mut Builder,
+    shape: &S,
+    index_bits: &[Felt],
+    fri_alpha: Ext,
+    opened: &QueryOpenings,
+    rows: &[Vec<Array<Felt>>],
+) -> Vec<(usize, Ext)> {
+    let log_global = shape.log_global_max_height();
+    let mut xs: BTreeMap<usize, Felt> = BTreeMap::new();
+    let mut slot_of: BTreeMap<(usize, bool), usize> = BTreeMap::new();
+    let mut invs: Vec<Ext> = Vec::new();
+    let mut runs: BTreeMap<usize, Vec<(Array<Ext>, Array<Felt>, usize)>> = BTreeMap::new();
+    for (ri, mats) in opened.rounds.iter().enumerate() {
+        for (mi, m) in mats.iter().enumerate() {
+            let h = m.log_height;
+            if !xs.contains_key(&h) {
+                let x = emit_query_point(b, h, &index_bits[log_global - h..], true);
+                xs.insert(h, x);
+            }
+            let x = xs[&h];
+            for (pi, (z, vals)) in m.points.iter().enumerate() {
+                let key = (h, pi == 1);
+                let slot = match slot_of.get(&key) {
+                    Some(&s) => s,
+                    None => {
+                        let (z0, z1) = b.ext_parts(*z);
+                        let d0 = b.sub(z0, x);
+                        let diff = b.ext_from_parts(d0, z1);
+                        invs.push(b.ext_inv_checked(diff, "opening point matches the query point"));
+                        slot_of.insert(key, invs.len() - 1);
+                        invs.len() - 1
+                    }
+                };
+                runs.entry(h).or_default().push((*vals, rows[ri][mi], slot));
+            }
+        }
+    }
+    // The blowup-height entry exists only for a constant trace (`verifier.rs:858-864`); no RV32
+    // instance has one, and the chip path does not carry its zero check.
+    assert!(!runs.contains_key(&LOG_BLOWUP), "a reduced opening at the blowup height");
+    let keys = b.alloc(2 + 2 * invs.len() as u64);
+    b.store_ext(keys, 0, fri_alpha);
+    for (s, inv) in invs.iter().enumerate() {
+        b.store_ext(keys, 2 + 2 * s as i64, *inv);
+    }
+    let res = b.alloc(2 * runs.len() as u64);
+    let mut cells = Vec::with_capacity(runs.len());
+    for (j, (&h, rs)) in runs.iter().rev().enumerate() {
+        let mut chain = Vec::with_capacity(rs.len());
+        for &(vals, row, slot) in rs {
+            let key = b.offset(keys, 2 + 2 * slot as i64);
+            chain.push(ReduceRun { vals, row, key });
+        }
+        let cell = b.offset(res, 2 * j as i64);
+        b.reduce(&chain, keys, cell);
+        cells.push((h, cell));
+    }
+    cells.into_iter().map(|(h, cell)| (h, b.load_ext(cell, 0))).collect()
 }
 
 /// One run of the batch-opening reduction, as a compiled DSL loop: `acc += Σ_k

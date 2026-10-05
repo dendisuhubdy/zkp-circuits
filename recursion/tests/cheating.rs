@@ -1226,7 +1226,7 @@ fn a_forged_stored_high_lane_in_the_aggregate_verifier_is_refused() {
 
     let honest = execute(&program, &tape.words, 1 << 24).expect("the honest aggregate accepts");
     let tier = Tier::for_cycles(honest.cpu_rows()).expect("the N=1 aggregate has a tier");
-    assert_eq!(tier, Tier(18), "the test-profile N=1 aggregate is tier 18 (231 224 rows since phase 2's row cuts; tier 19 before)");
+    assert_eq!(tier, Tier(18), "the test-profile N=1 aggregate is tier 18 (202 472 rows since phase 3's Cut D, 231 224 since phase 2's row cuts; tier 19 before)");
     // The reduce trace depends only on REDUCE events, which the STOREE forgery does not touch, so
     // the honest build's reduce table is the one the forged trace uses.
     let honest_traces = build_traces(&program, &honest, tier).unwrap();

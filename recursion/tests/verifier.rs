@@ -13,7 +13,7 @@ use p3_field::PrimeCharacteristicRing;
 use rand_zkvm::machine::{FriProfile, Machine};
 use recursion::dsl::Checkpoints;
 use recursion::emulator::{execute, ExecError};
-use recursion::isa::F;
+use recursion::isa::{Op, F};
 use recursion::programs::verify_rv32;
 use recursion::reference::replay;
 use recursion::shape::{InnerKey, InnerShape};
@@ -822,15 +822,17 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// `dsl::hash::absorb_staged`, is itself a program change): `5e04fba0…2993` → `9eba7380…193d`.
 /// Re-registered for phase 2's row cuts (2026-10-03, `docs/04-phase2-row-cuts.md` — program
 /// changes all three: height-group hint buffers, `HINTN`, `COMPRESS`): `9eba7380…193d` →
-/// `5f1f6901…12df`.
+/// `5f1f6901…12df`. Re-registered for phase 3's Cut D (2026-10-05, `docs/06-phase3-fold-reduce.md` —
+/// the batch-opening reduction becomes one key buffer and one `REDUCE` chain per height per query):
+/// `5f1f6901…12df` → `8a2d166f…8509`.
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "5f1f69010b8aa4cbb6072ffd8a631fa05897c18ed3663ae2bcd136455d2612df",
-        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 2's row cuts"
+        "8a2d166fbcb6561465d7ffbab4dc858711c7c5dfb7dc31bab6932bc2cedc8509",
+        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 3's Cut D"
     );
 }
 
@@ -999,4 +1001,23 @@ fn breaking_one_air_constraint_on_a_non_first_instance_is_refused_at_that_instan
             other => panic!("instance {i}: expected the quotient identity to fail, got {other:?}"),
         }
     }
+}
+
+/// Cut D: the shipped build reduces through the chip — one REDUCE row per layout entry, the same
+/// chains in every query, one chain per distinct opened height.
+#[test]
+fn the_shipped_build_dispatches_one_reduce_row_per_layout_entry() {
+    let (p, shape, key) = one_test_proof();
+    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
+    let layout = &vp.program.reduce_layout;
+    assert!(!layout.is_empty(), "the On build registers a reduce layout");
+    let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &p.proof).unwrap();
+    let exec = execute(&vp.program, &tape.words, 1 << 24).expect("accepts a real proof");
+    assert_eq!(exec.histogram()[Op::Reduce as usize], layout.len(), "one REDUCE row per entry");
+    assert_eq!(layout.len() % shape.num_queries, 0, "the same entries in every query");
+    let chains = layout.iter().filter(|e| e.chain_start).count();
+    let res: std::collections::BTreeSet<u64> = layout.iter().map(|e| e.res).collect();
+    assert_eq!(res.len(), chains, "one result cell per chain");
+    // `rand_zkvm::machine::Machine` is imported above under that name; the rVM's is qualified.
+    recursion::machine::Machine::check_program(&vp.program).expect("the layout is legal");
 }
