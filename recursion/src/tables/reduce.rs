@@ -265,6 +265,16 @@ where
             t.assert_zero(in_run_next.clone() * (n(ACC1) - acc_next1.clone()));
             t.assert_zero(in_run_next.clone() * (n(APOW0) - apow_next0.clone()));
             t.assert_zero(in_run_next.clone() * (n(APOW1) - apow_next1.clone()));
+            // Pinned by an isolating forgery or the carry rule in `tests/tables.rs`: the
+            // addresses, `CLK`, `RES`, `ROW_END` (R5's end marker — uncarried, a run ends early and
+            // skips columns). Kept, but redundant for a program that dispatches each chain's
+            // entries in order — every builder-emitted program; the emulator refuses any other
+            // order (`ReduceChain`) — so no forgery isolates them (the final review, 2026-10-06):
+            // `ENTRY` and `CARRY` matter only on a last row, and the next entry's first row is
+            // fixed by the cpu's `REDUCE [clk + 1, entry + 1]` dispatch and its layout lookup,
+            // whose flags `check_layout`'s chain rules tie to this entry's; `CHAIN_START` gates
+            // nothing off a first row. (Over a program that skips an entry, `ENTRY`'s carry and
+            // the entry step are what refuse the skip: `a_carry_followed_by_the_wrong_entry_…`.)
             for c in [INV0, INV1, ALPHA0, ALPHA1, CLK, ENTRY, ROW_END, KEY, ALPHA_ADDR, RES, CHAIN_START, CARRY] {
                 t.assert_zero(in_run_next.clone() * (n(c) - v(c)));
             }
@@ -337,7 +347,10 @@ where
                 t.assert_zero(fr.clone() * (n(c) - v(c)));
             }
             t.assert_zero(fr.clone() * (n(F_K) - v(F_K) - one.clone()));
-            // Phase 1 is a prefix of the run, and it ends exactly at K = a − 1.
+            // Phase 1 is a prefix of the run, and it ends exactly at K = a − 1. (The prefix rule is
+            // defence in depth: a phase-1 row after a phase-2 row has K ≥ a, and the committed
+            // coefficient table has no `(a, K ≥ a)` row for its `FOLD_COEFF` lookup — the final
+            // review, 2026-10-06.)
             t.assert_zero(fr.clone() * (one.clone() - f_ph1.clone()) * n(F_PH1));
             let switch = fr.clone() * f_ph1.clone() * (one.clone() - n(F_PH1));
             t.assert_zero(switch.clone() * (n(F_K) - v(F_A)));

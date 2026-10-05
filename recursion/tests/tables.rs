@@ -239,32 +239,73 @@ fn reduce_row(real: bool, first: bool, rng: &mut impl rand::Rng) -> Vec<F> {
     r
 }
 
-/// OPCODES-1 / TABLES-1, as a rule: every column a run row's RAM messages use as an address or a
-/// timestamp is carried from the row before when the next row is the same run's.
+/// A row of the fold kind (Cut E2) or the pow kind (Cut F): that kind's own columns and the shared
+/// `CLK` random, its kind flag set, `first` its start flag, and every other column zero — the
+/// carry rule below is about one kind's rows at a time.
+fn kind_row(kind: std::ops::Range<usize>, flag: usize, start: usize, first: bool, rng: &mut impl rand::Rng) -> Vec<F> {
+    use reduce_table::col::*;
+    let mut r = vec![F::ZERO; WIDTH];
+    for c in kind.chain([CLK]) {
+        r[c] = common::random_felt(rng);
+    }
+    r[flag] = F::ONE;
+    r[start] = F::from_bool(first);
+    r
+}
+
+/// OPCODES-1 / TABLES-1, as a rule, for each of the chip's three row kinds: every column a row's
+/// RAM messages use as an address or a timestamp is carried from the row before when the next row
+/// is the same run's — and so is every column in that kind's `must` list, which holds the carried
+/// columns that are not RAM fields but would free a run if uncarried. The final fix wave (the
+/// whole-branch review, Important 1) widened this from the reduce kind's 30 columns to the fold
+/// kind (`CLK`, `F_MSG`, `F_A`, `F_K`, `U0`, `U1`: the addresses, the arity the end rule and the
+/// result address read, the index, and `u`) and the pow kind (`CLK`, `P_BASE`, `P_OFF`, `P_L`,
+/// `P_K`), and added the reduce kind's `ROW_END` (R5's end marker: uncarried, a run can end early
+/// and skip columns — `tests/cheating.rs`'s `a_reduce_run_ending_early_is_rejected_by_the_row_end_carry`).
+/// A column is carried when some constraint depends on its next-row value along a run and no
+/// longer does when the next row starts a new run.
 #[test]
 fn every_reduce_run_row_carries_its_addresses_and_clock_from_the_row_before() {
+    use reduce_table::col::*;
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0x0bc0_de01);
     let (interactions, constraints) = common::symbolic_air(&reduce_air());
-    let (cur, next_in_run, next_first) = (reduce_row(true, false, &mut rng), reduce_row(true, false, &mut rng), reduce_row(true, true, &mut rng));
-    let mut used = std::collections::BTreeSet::new();
-    for i in interactions.iter().filter(|i| i.bus_name == bus::RAM.name()) {
-        for field in &i.fields[0..2] {
-            for c in 0..reduce_table::col::WIDTH {
-                if common::depends(field, &cur, &next_in_run, c, false, &mut rng) {
-                    used.insert(c);
+    type RowFn = Box<dyn Fn(bool, &mut rand::rngs::StdRng) -> Vec<F>>;
+    let kinds: [(&str, std::ops::Range<usize>, RowFn, Vec<usize>); 3] = [
+        ("reduce", 0..REDUCE_KIND_COLS, Box::new(|first, rng| reduce_row(true, first, rng)), vec![CLK, ADDR_V, ADDR_R, KEY, ALPHA_ADDR, RES, ROW_END]),
+        // Phase-2 rows that are not last: the phase switch, which reads `n(F_K)` too, is off there,
+        // so the K step is the one rule on `n(F_K)` (on phase-1 rows the switch masked its
+        // deletion — mutation-checked, final fix wave).
+        ("fold", IS_FOLD..IS_POW, Box::new(|first, rng| {
+            let mut r = kind_row(IS_FOLD..IS_POW, IS_FOLD, F_FIRST, first, rng);
+            r[F_PH1] = F::ZERO;
+            r[F_LAST] = F::ZERO;
+            r
+        }), vec![CLK, F_MSG, F_A, F_K, U0, U1]),
+        ("pow", IS_POW..WIDTH, Box::new(|first, rng| kind_row(IS_POW..WIDTH, IS_POW, P_FIRST, first, rng)), vec![CLK, P_BASE, P_OFF, P_L, P_K]),
+    ];
+    for (name, cols, row, must) in kinds {
+        let (cur, next_in_run, next_first) = (row(false, &mut rng), row(false, &mut rng), row(true, &mut rng));
+        let mut used = std::collections::BTreeSet::new();
+        for i in interactions.iter().filter(|i| i.bus_name == bus::RAM.name()) {
+            for field in &i.fields[0..2] {
+                for c in cols.clone().chain([CLK]) {
+                    if common::depends(field, &cur, &next_in_run, c, false, &mut rng) {
+                        used.insert(c);
+                    }
                 }
             }
         }
+        assert!(used.iter().all(|c| must.contains(c)), "{name}: a RAM address/timestamp column outside the pinned list: {used:?} against {must:?}");
+        assert!(used.contains(&CLK) && used.len() >= 3, "sanity, {name}: {used:?}");
+        let unchained: Vec<usize> = must
+            .iter()
+            .copied()
+            .filter(|&c| {
+                !constraints.iter().any(|k| common::depends(k, &cur, &next_in_run, c, true, &mut rng) && !common::depends(k, &cur, &next_first, c, true, &mut rng))
+            })
+            .collect();
+        assert!(unchained.is_empty(), "{name} kind: columns {unchained:?} are not carried along a run");
     }
-    used.retain(|&c| c < REDUCE_KIND_COLS);
-    use reduce_table::col::{ADDR_V, ALPHA_ADDR, CLK, KEY, RES};
-    assert!([CLK, ADDR_V, KEY, ALPHA_ADDR, RES].iter().all(|c| used.contains(c)), "sanity: {used:?}");
-    let unchained: Vec<usize> = used
-        .iter()
-        .copied()
-        .filter(|&c| !constraints.iter().any(|k| common::depends(k, &cur, &next_in_run, c, true, &mut rng) && !common::depends(k, &cur, &next_first, c, true, &mut rng)))
-        .collect();
-    assert!(unchained.is_empty(), "RAM address/timestamp columns {unchained:?} are not carried along a run");
 }
 
 /// V-OPCODES-1, as a rule: no admissible padding row sends or provides anything, whatever its

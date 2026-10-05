@@ -1433,9 +1433,13 @@ fn a_fold_whose_u_differs_from_the_dispatch_is_rejected_by_the_horner_steps() {
     assert!(rejects(|| prove_and_verify(&m, &p, &t)));
 }
 
-/// Spec §5: a FOLD run cut short — its last phase-2 row turned into padding.
+/// Spec §5: a FOLD run cut short — its last phase-2 row turned into padding. The trace no longer
+/// sends the result's two writes the run's RAM log holds, so the `RAM` bus refuses it (with the
+/// must-continue rule deleted it is still refused — mutation-checked, final fix wave); the run
+/// ending without `F_LAST` also violates the must-continue rule, which
+/// `a_fold_run_stopping_before_its_last_row_is_rejected_by_the_must_continue_rule` isolates.
 #[test]
-fn a_fold_run_cut_short_is_rejected() {
+fn a_fold_run_cut_short_is_rejected_by_its_missing_result_write() {
     let (m, p, mut t) = fold_setup();
     let (w, last) = (reduce_table::col::WIDTH, fold_first_row(&t) + 15);
     let r = t.reduce.as_mut().unwrap();
@@ -1560,15 +1564,25 @@ const ZERO_ROW_ARITY: u64 = 2;
 
 /// The result cell the fold run writes: after the row's `2a` cells and its salts.
 fn zero_row_result() -> u64 {
-    ZERO_ROW_MSG + 2 * ZERO_ROW_ARITY + recursion::isa::FOLD_SALT_CELLS
+    zero_row_result_at(ZERO_ROW_ARITY)
+}
+
+/// [`zero_row_result`] at another arity.
+fn zero_row_result_at(arity: u64) -> u64 {
+    ZERO_ROW_MSG + 2 * arity + recursion::isa::FOLD_SALT_CELLS
 }
 
 /// An arity-2 fold of the all-zero row at u = 3 whose result is never read back by the program
 /// (so a forged result needs only its two RAM writes changed): the cells are stored as zero, the
 /// fold runs, and the program publishes four zeros.
 fn zero_row_fold_program() -> Program {
-    let mut v: Vec<Instr> = (ZERO_ROW_MSG..ZERO_ROW_MSG + 2 * ZERO_ROW_ARITY).map(|a| i(Op::Store, 0, 0, a)).collect();
-    v.extend([i(Op::Faddi, 2, 0, 3), i(Op::Faddi, 3, 0, 0), i(Op::Faddi, 4, 0, ZERO_ROW_MSG), i(Op::Fold, 2, 4, ZERO_ROW_ARITY)]);
+    zero_row_fold_program_at(ZERO_ROW_ARITY)
+}
+
+/// [`zero_row_fold_program`] at another arity (final fix wave: the arity-4 `F_A` carry forgery).
+fn zero_row_fold_program_at(arity: u64) -> Program {
+    let mut v: Vec<Instr> = (ZERO_ROW_MSG..ZERO_ROW_MSG + 2 * arity).map(|a| i(Op::Store, 0, 0, a)).collect();
+    v.extend([i(Op::Faddi, 2, 0, 3), i(Op::Faddi, 3, 0, 0), i(Op::Faddi, 4, 0, ZERO_ROW_MSG), i(Op::Fold, 2, 4, arity)]);
     v.extend([i(Op::Public, 0, 0, 0), i(Op::Public, 0, 0, 0), i(Op::Public, 0, 0, 0), i(Op::Public, 0, 0, 0), i(Op::Halt, 0, 0, 0)]);
     Program { instrs: v, checkpoints: vec![], reduce_layout: vec![] }
 }
@@ -1632,6 +1646,276 @@ fn a_fold_run_whose_phase_switch_is_early_is_rejected_by_the_switch_index() {
     let ram = cpu::ram_accesses(&exec.events);
     let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
     assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a fold run whose phase 1 ended at K = a − 2 VERIFIED, never reading y_1");
+}
+
+// ── Final fix wave (the whole-branch review, Important 1): the fold kind's structure rules and the
+// reduce kind's `ROW_END` carry ────────────────────────────────────────────────────────────────
+// Each forgery below keeps every other constraint and every bus satisfied, so the one rule its
+// name gives is the only one that refuses it; each was mutation-checked in a scratch copy (that
+// rule deleted from `ReduceAir::eval`, the test run alone: it fails with its "VERIFIED" message),
+// recorded in the final fix report. The fold forgeries run over the all-zero row
+// (`zero_row_fold_program[_at]`, u = 3), whose honest result is 0 and is never read back, so a
+// forged run needs only its RAM log edited; the pow kind's Task 4/5 forgeries are the template.
+
+/// The fold kind's own columns, `IS_FOLD..=FOUT1`: what a forgery moves between rows or clears
+/// when a fold row becomes padding. `MULT_C` (col 69) is the provider region's, not the row's;
+/// `CLK` (shared by every kind) is handled by each forgery.
+const FOLD_KIND: std::ops::RangeInclusive<usize> = reduce_table::col::IS_FOLD..=reduce_table::col::FOUT1;
+
+/// The honest zero-row fold at `arity`: the machine, the run, its reduce trace and declared
+/// log-height, and the run's first row. The honest proof verifies.
+fn zero_row_parts(arity: u64) -> (Machine, Program, Execution, p3_matrix::dense::RowMajorMatrix<F>, u8, usize) {
+    let p = zero_row_fold_program_at(arity);
+    let m = Machine::new(FriProfile::Test);
+    let exec = execute(&p, &[], 1000).unwrap();
+    let honest = build_traces(&p, &exec, Tier(8)).unwrap();
+    prove_and_verify(&m, &p, &honest).expect("the honest zero-row fold verifies");
+    let first = fold_first_row(&honest);
+    (m, p, exec, honest.reduce.unwrap(), honest.reduce_log_height, first)
+}
+
+/// The run's `FOLD` event (its y reads and its result writes).
+fn fold_event(exec: &mut Execution) -> &mut recursion::emulator::Event {
+    exec.events.iter_mut().find(|e| e.instr.op == Op::Fold).unwrap()
+}
+
+/// Copy fold row `from`'s kind columns and clock onto row `to` (the provider multiplicities stay).
+fn move_fold_row(red: &mut p3_matrix::dense::RowMajorMatrix<F>, from: usize, to: usize) {
+    let w = reduce_table::col::WIDTH;
+    for c in FOLD_KIND.chain([reduce_table::col::CLK]) {
+        red.values[to * w + c] = red.values[from * w + c];
+    }
+}
+
+/// Turn row `row` into padding: its fold kind columns and its clock cleared.
+fn clear_fold_row(red: &mut p3_matrix::dense::RowMajorMatrix<F>, row: usize) {
+    let w = reduce_table::col::WIDTH;
+    for c in FOLD_KIND.chain([reduce_table::col::CLK]) {
+        red.values[row * w + c] = F::ZERO;
+    }
+}
+
+/// A forged reduce-chip trace with the run's (edited) RAM log, through the host-check-free path.
+fn reduce_forgery_refused(m: &Machine, p: &Program, exec: &Execution, red: p3_matrix::dense::RowMajorMatrix<F>, lh: u8) -> bool {
+    let reg = cpu::register_accesses(&exec.events);
+    let ram = cpu::ram_accesses(&exec.events);
+    let t = traces_from_parts(p, exec, Tier(8), &reg, &ram, Some((red, lh)));
+    rejects(|| prove_and_verify(m, p, &t))
+}
+
+/// `F_MSG` is carried along a fold run. Every row after the first moves its row base 20 cells on:
+/// `y_1` is read from the fresh cells 322–323 (zero, as the row's own cells are) and the result
+/// is written to 328–329 instead of 308–309. The first row keeps the dispatched base, so the
+/// `FOLD` message balances, and the RAM log carries the moved reads and writes; only
+/// `n(F_MSG) = F_MSG` along the run refuses it. (Over a real row the run would fold values from
+/// any cells and write its result anywhere.)
+#[test]
+fn a_fold_run_moving_its_row_base_mid_run_is_rejected_by_the_base_carry() {
+    use reduce_table::col::*;
+    let (m, p, mut exec, mut red, lh, first) = zero_row_parts(ZERO_ROW_ARITY);
+    for row in first + 1..first + 4 {
+        red.values[row * WIDTH + F_MSG] += F::from_u64(20);
+    }
+    for a in fold_event(&mut exec).mem.iter_mut().filter(|a| a.is_write || a.addr >= ZERO_ROW_MSG + 2) {
+        a.addr += 20;
+    }
+    assert!(reduce_forgery_refused(&m, &p, &exec, red, lh), "a fold run that moved its row base mid-run VERIFIED, writing its result 20 cells away");
+}
+
+/// `CLK` is carried along a fold run. Every row after the first claims the next clock: `y_1`'s
+/// reads and the result's writes move to `16·(clk + 1) + slot`, which the RAM log carries (nothing
+/// else touches those cells afterwards); the first row (the `FOLD` message) keeps the dispatch
+/// clock. Only `n(CLK) = CLK` along the run refuses it. (Unpinned, a run reads `y_k` at a clock
+/// of its choosing — the OPCODES-1 stale read, for the fold kind.)
+#[test]
+fn a_fold_run_moving_its_clock_mid_run_is_rejected_by_the_clock_carry() {
+    use reduce_table::col::*;
+    let (m, p, mut exec, mut red, lh, first) = zero_row_parts(ZERO_ROW_ARITY);
+    for row in first + 1..first + 4 {
+        red.values[row * WIDTH + CLK] += F::ONE;
+    }
+    for a in fold_event(&mut exec).mem.iter_mut().filter(|a| a.is_write || a.addr >= ZERO_ROW_MSG + 2) {
+        a.ts += 16;
+    }
+    assert!(reduce_forgery_refused(&m, &p, &exec, red, lh), "a fold run that moved its clock mid-run VERIFIED");
+}
+
+/// `F_A` is carried along a fold run. An arity-4 run whose phase-2 rows claim `a = 3`: phase 1
+/// (K = 0..3) keeps the dispatched arity, so its coefficient lookups and the switch at
+/// `n(K) = 4` hold, and phase 2 then ends at `K = 2·3 − 1 = 5` — two Horner steps short — and
+/// writes its result to `MSG + 2·3 + 4`, the row's last two salt cells, instead of
+/// `MSG + 2·4 + 4`. Over the zero row the Horner chain is zero either way; rows 6–7 become padding
+/// and the RAM log's result writes move down two cells. Only `n(F_A) = F_A` refuses it.
+#[test]
+fn a_fold_run_changing_its_arity_mid_run_is_rejected_by_the_arity_carry() {
+    use reduce_table::col::*;
+    let (m, p, mut exec, mut red, lh, first) = zero_row_parts(4);
+    for row in first + 4..first + 6 {
+        red.values[row * WIDTH + F_A] = F::from_u64(3);
+    }
+    red.values[(first + 5) * WIDTH + F_LAST] = F::ONE;
+    for row in first + 6..first + 8 {
+        clear_fold_row(&mut red, row);
+    }
+    for a in fold_event(&mut exec).mem.iter_mut().filter(|a| a.is_write) {
+        assert!(a.addr >= zero_row_result_at(4));
+        a.addr -= 2;
+    }
+    assert!(reduce_forgery_refused(&m, &p, &exec, red, lh), "a fold run that changed its arity mid-run VERIFIED, ending two rows early in the salt cells");
+}
+
+/// `U` is carried along a fold run: every row after the first changes `U0` (`lane` 0) or `U1`
+/// (`lane` 1). Over a constant row every `B_{m≥1}` is zero, so the Horner accumulator stays zero
+/// and the result is `B_0` whatever `u` the phase-2 rows use; the first row keeps the dispatched
+/// `u`, so the `FOLD` message balances. Only that lane's `n(U) = U` refuses it. (Over a real row
+/// the run would fold at a `u` the cpu never dispatched; the bus binding of the first row's `u`
+/// is `a_fold_run_whose_u_is_not_the_dispatched_u_is_rejected_by_the_fold_bus`.)
+fn fold_u_moved_mid_run_refused(lane: usize) -> bool {
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(44);
+    let y = common::random_ext(&mut rng);
+    let (p, _) = common::fold_program(&[(3, vec![y; 8], common::random_ext(&mut rng))]);
+    let (m, mut t) = fold_traces(&p);
+    prove_and_verify(&m, &p, &t).expect("the honest constant-row fold verifies");
+    let (w, first) = (reduce_table::col::WIDTH, fold_first_row(&t));
+    let r = t.reduce.as_mut().unwrap();
+    for row in first + 1..first + 16 {
+        assert_eq!(r.values[row * w + reduce_table::col::FACC0], F::ZERO, "a constant row keeps FACC at zero");
+        r.values[row * w + reduce_table::col::U0 + lane] += F::ONE;
+    }
+    rejects(|| prove_and_verify(&m, &p, &t))
+}
+
+#[test]
+fn a_fold_run_moving_u0_mid_run_is_rejected_by_the_u0_carry() {
+    assert!(fold_u_moved_mid_run_refused(0), "a fold run whose phase-2 rows used another u0 VERIFIED");
+}
+
+#[test]
+fn a_fold_run_moving_u1_mid_run_is_rejected_by_the_u1_carry() {
+    assert!(fold_u_moved_mid_run_refused(1), "a fold run whose phase-2 rows used another u1 VERIFIED");
+}
+
+/// A run starts with zero accumulators. The review's example: the zero row at arity 2 with
+/// `D0 = 1` from the first row — phase 1 adds `C·0`, so pair 0 enters Horner at 1, and the run
+/// writes `1·u = 3` where the honest fold is 0. Every step from the first row on is the honest
+/// recurrence (`FACC = 1` on the last row, `FOUT = 3`), the RAM log's result write says 3; only
+/// `F_FIRST·D = 0` refuses it.
+#[test]
+fn a_fold_run_starting_with_a_dirty_accumulator_is_rejected_by_the_zero_start_rule() {
+    use reduce_table::col::*;
+    let (m, p, mut exec, mut red, lh, first) = zero_row_parts(ZERO_ROW_ARITY);
+    for row in first..first + 3 {
+        red.values[row * WIDTH + D0] = F::ONE; // pair 0 through phase 1 and into the first phase-2 row
+    }
+    red.values[(first + 3) * WIDTH + FACC0] = F::ONE; // 0·u + D_0
+    red.values[(first + 3) * WIDTH + FOUT0] = F::from_u64(3); // 1·u + D_0 (pair 0 shifted out: 0)
+    fold_event(&mut exec).mem.iter_mut().find(|a| a.is_write && a.addr == zero_row_result()).unwrap().value = F::from_u64(3);
+    assert!(reduce_forgery_refused(&m, &p, &exec, red, lh), "a fold run starting at D0 = 1 VERIFIED, writing 3 for the zero row's 0");
+}
+
+/// A run starts at `K = 0`. An arity-2 run that starts at `K = 1` is three rows: phase 1 is the
+/// one row K = 1 (it reads `y_1` and looks up the table's `(2, 1)` row), the switch lands at
+/// `n(K) = 2 = a`, and phase 2 is K = 2, 3 with the last row at `2a − 1`. `y_0` is never read: its
+/// two reads leave the RAM log and the table's `(2, 0)` multiplicity drops by one. The `FOLD`
+/// message, the lookups, the K step, the switch and the end rule all hold; only `F_FIRST·K = 0`
+/// refuses it.
+#[test]
+fn a_fold_run_starting_past_k_zero_is_rejected_by_the_first_index_rule() {
+    use reduce_table::col::*;
+    let (m, p, mut exec, mut red, lh, first) = zero_row_parts(ZERO_ROW_ARITY);
+    assert_eq!(first, 0, "a fold-only program's run starts at row 0, beside the coefficient table");
+    // Row 0 becomes the honest row 1 (K = 1, its coefficients and its read) with row 0's start flag.
+    move_fold_row(&mut red, 1, 0);
+    red.values[F_FIRST] = F::ONE;
+    move_fold_row(&mut red, 2, 1);
+    move_fold_row(&mut red, 3, 2);
+    clear_fold_row(&mut red, 3);
+    red.values[MULT_C] -= F::ONE; // the table's (2, 0) row, at row 0
+    fold_event(&mut exec).mem.retain(|a| a.is_write || a.addr >= ZERO_ROW_MSG + 2);
+    assert!(reduce_forgery_refused(&m, &p, &exec, red, lh), "a fold run starting at K = 1 VERIFIED, never reading y_0");
+}
+
+/// `K` steps by one. An arity-2 run whose index jumps from 0 to 2: phase 1 is row K = 0 alone
+/// (the switch at `n(K) = 2 = a` holds), then K = 2, 3. `y_1` is never read: its reads leave the
+/// RAM log and the table's `(2, 1)` multiplicity drops. Only `n(K) = K + 1` refuses it. (The
+/// early switch with the K step intact is `a_fold_run_whose_phase_switch_is_early_is_rejected_by_the_switch_index`.)
+#[test]
+fn a_fold_run_skipping_an_index_is_rejected_by_the_index_step() {
+    use reduce_table::col::*;
+    let (m, p, mut exec, mut red, lh, first) = zero_row_parts(ZERO_ROW_ARITY);
+    move_fold_row(&mut red, first + 2, first + 1);
+    move_fold_row(&mut red, first + 3, first + 2);
+    clear_fold_row(&mut red, first + 3);
+    red.values[WIDTH + MULT_C] -= F::ONE; // the table's (2, 1) row, at row 1
+    fold_event(&mut exec).mem.retain(|a| a.is_write || a.addr < ZERO_ROW_MSG + 2);
+    assert!(reduce_forgery_refused(&m, &p, &exec, red, lh), "a fold run whose index jumped 0 → 2 VERIFIED, never reading y_1");
+}
+
+/// A run ends at `K = 2a − 1`. An arity-2 run that claims `F_LAST` at K = 2 writes the Horner value
+/// one step early (over the zero row still 0, at the same cells and clock, so the RAM log is the
+/// honest one) and its fourth row becomes padding. Only `F_LAST·(K − 2a + 1) = 0` refuses it.
+#[test]
+fn a_fold_run_ending_before_k_two_a_minus_one_is_rejected_by_the_end_rule() {
+    use reduce_table::col::*;
+    let (m, p, exec, mut red, lh, first) = zero_row_parts(ZERO_ROW_ARITY);
+    red.values[(first + 2) * WIDTH + F_LAST] = F::ONE;
+    clear_fold_row(&mut red, first + 3);
+    assert!(reduce_forgery_refused(&m, &p, &exec, red, lh), "a fold run ending at K = 2a − 2 VERIFIED, one Horner step short");
+}
+
+/// A run continues until `F_LAST`. An arity-2 run that stops after K = 2 with no last row: its
+/// fourth row becomes padding and its result is never written (the RAM log's two result writes
+/// dropped), so the result cell keeps whatever it held. Only `IS_FOLD·(1 − F_LAST)·(1 − n(IS_FOLD))
+/// = 0` refuses it.
+#[test]
+fn a_fold_run_stopping_before_its_last_row_is_rejected_by_the_must_continue_rule() {
+    let (m, p, mut exec, mut red, lh, first) = zero_row_parts(ZERO_ROW_ARITY);
+    clear_fold_row(&mut red, first + 3);
+    fold_event(&mut exec).mem.retain(|a| !a.is_write);
+    assert!(reduce_forgery_refused(&m, &p, &exec, red, lh), "a fold run that stopped before its last row VERIFIED, never writing its result");
+}
+
+/// `ROW_END` is carried along a reduce run (R5's end marker: `IS_LAST ⟺ ADDR_R = ROW_END`). The
+/// three-column run of `reduce_run_program` that ends at its second row: row 1 sets `ROW_END` to
+/// its own `ADDR_R` (121) and claims `IS_LAST`, writing `(10 − 4)·1 + (20 − 5)·3 = 51` where the
+/// honest reduction is 267; row 2 becomes padding, column 2's reads leave the RAM log, and the
+/// cpu reads 51 back. The first row keeps the layout's `ROW_END` (122), so the `REDUCE_LAYOUT`
+/// lookup balances. Only `n(ROW_END) = ROW_END` along the run refuses it.
+///
+/// (The other in-run carries: `RES` is pinned by `tests/tables.rs`'s carry rule; `ENTRY` and
+/// `CARRY` are not pinned by a forgery — a changed `ENTRY` or `CARRY` mid-run only matters on a
+/// carrying last row, whose next entry the cpu's `REDUCE [clk, entry]` dispatch and
+/// `check_layout`'s chain rules already fix — see the comment at the carry in `ReduceAir::eval`.)
+#[test]
+fn a_reduce_run_ending_early_is_rejected_by_the_row_end_carry() {
+    use reduce_table::col::*;
+    let p = reduce_run_program(false);
+    let m = Machine::new(FriProfile::Test);
+    let mut exec = execute(&p, &[], 1000).unwrap();
+    let honest = build_traces(&p, &exec, Tier(8)).unwrap();
+    let (mut red, lh) = (honest.reduce.clone().unwrap(), honest.reduce_log_height);
+    let w = WIDTH;
+    assert_eq!(red.values[2 * w + IS_LAST], F::ONE, "row 2 is the honest run's last row");
+    let r1 = &mut red.values[w..2 * w];
+    assert_eq!(r1[ADDR_R], F::from_u64(121));
+    r1[IS_LAST] = F::ONE;
+    r1[ROW_END] = F::from_u64(121);
+    r1[END_INV] = F::ZERO;
+    r1[OUT0] = F::from_u64(51);
+    r1[OUT1] = F::ZERO;
+    r1[WRITES] = F::ONE;
+    for c in 0..MULT {
+        red.values[2 * w + c] = F::ZERO;
+    }
+    let r = events_of(&exec, Op::Reduce)[0];
+    // The event's log: the key's two reads, alpha's two, three per column, the result's two writes.
+    let log = &mut exec.events[r].mem;
+    assert_eq!(log.len(), 4 + 9 + 2);
+    log.drain(4 + 6..4 + 9);
+    assert!(log[4 + 6].is_write && log[4 + 6].addr == 214);
+    log[4 + 6].value = F::from_u64(51);
+    forge_accumulator_readback(&mut exec, F::from_u64(51));
+    assert!(reduce_forgery_refused(&m, &p, &exec, red, lh), "a reduce run that ended at its second row VERIFIED, publishing 51 against an honest 267");
 }
 
 // ── Cut F: the pow row kind ──────────────────────────────────────────────────────────────────
