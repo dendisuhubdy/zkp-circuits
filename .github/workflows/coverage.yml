@@ -1,0 +1,100 @@
+# Line coverage of the Rust test suite, measured with cargo-llvm-cov (LLVM source-based coverage)
+# and uploaded to Codecov, which draws the badge in README.md.
+#
+# What is measured: one job per crate with a test suite, each uploaded under its own Codecov flag.
+# `research` (the reference zkVM) runs every test file but `bundle`, `viewing` and `e2e` — the
+# three that prove at tier 14 and 16 and together want more memory than a hosted runner has
+# (research/AGENTS.md's figures). `recursion` skips its two tier-19/20 round trips, as fullnode's
+# nightly-rvm job does. `evm2rv` and `sbpf2rv` build their shims with the runner's clang under
+# `RAND_GUEST_CLANG_UNPINNED=1` (the pin is Homebrew's 23.1.1; hc is not compared to published
+# images here), and skip the one test that is about that pin. `rand-guest` and `zkp1`–`zkp6` run
+# whole. Not measured: `gpu-kernels` (nightly Rust), `rand-zkvm-cuda` (needs CUDA), `guest-sdk`
+# and the C runtimes (no cargo tests).
+#
+# The upload needs `CODECOV_TOKEN` (an organisation secret on randprotocol, or this repository's):
+# Codecov refuses a push upload without it, so until the secret exists the job runs the suite under
+# instrumentation and fails at the upload step. Every `uses:` is pinned by commit sha with its
+# tag in the trailing comment, as fullnode's ci.yml does.
+name: coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read the repository, nothing else: the job writes to Codecov, not to GitHub.
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: research
+            args: --release --lib $(for f in tests/*.rs; do n=$(basename "$f" .rs); case "$n" in bundle|viewing|e2e) ;; *) printf -- '--test %s ' "$n";; esac; done)
+          - crate: recursion
+            args: --release -- --skip round_trips --skip two_test_profile
+          - crate: evm2rv
+            args: --release -- --skip the_shim_refuses_a_clang_other_than_the_pin
+          - crate: sbpf2rv
+            args: --release -- --skip the_shim_refuses_a_clang_other_than_the_pinned_one
+          - crate: rand-guest
+            args: --release
+          - crate: zkp1
+            args: --release
+          - crate: zkp2
+            args: --release
+          - crate: zkp3
+            args: --release
+          - crate: zkp4
+            args: --release
+          - crate: zkp5
+            args: --release
+          - crate: zkp6
+            args: --release
+    env:
+      RAND_GUEST_CLANG_UNPINNED: "1"
+      CLANG: /usr/bin/clang
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The guest toolchain as fullnode's guest-provenance job installs it: Rust 1.98.1 with the
+      # riscv32 target and llvm-tools, and no `$CARGO_HOME/config.toml` (rand-guest refuses to
+      # build under one; the hosted runner ships one).
+      - name: The guest toolchain rand-guest pins
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --target riscv32im-unknown-none-elf --component llvm-tools
+          rm -f "${CARGO_HOME:-$HOME/.cargo}/config" "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable (branch head, 2026-10-05)
+      # llvm-tools for the toolchain the checkout pins (rust-toolchain.toml, where there is one),
+      # not for the action's: rustup resolves the toolchain from the working directory.
+      - name: llvm-tools for the pinned toolchain
+        working-directory: ${{ matrix.crate }}
+        run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ${{ matrix.crate }}
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+      - name: Coverage
+        run: cargo llvm-cov --lcov --output-path lcov.info ${{ matrix.args }}
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: ${{ matrix.crate }}/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          flags: ${{ matrix.crate }}

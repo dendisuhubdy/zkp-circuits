@@ -1,5 +1,9 @@
 # circuits/ — zero-knowledge proof walkthroughs in Rust
 
+[![coverage](https://codecov.io/gh/randprotocol/zkp-circuits/graph/badge.svg)](https://codecov.io/gh/randprotocol/zkp-circuits)
+
+Line coverage of every crate with a test suite, measured per crate by `.github/workflows/coverage.yml` (cargo-llvm-cov) on every push to `main` and published to Codecov under one flag per crate.
+
 | crate | system | library | what it teaches |
 |---|---|---|---|
 | `zkp1` | zk-SNARK (Groth16) | arkworks | what a circuit / R1CS is; setup → prove → verify; the three ZK properties |
