@@ -22,6 +22,7 @@ fn toy_program() -> Program {
             instr(Op::Halt, 0, 0, 0),
         ],
         checkpoints: vec![],
+        reduce_layout: vec![],
     }
 }
 
@@ -91,17 +92,17 @@ fn the_verifier_key_is_reproducible_and_cached_per_program_tier_reduce() {
     let mut b = toy_program();
     b.instrs[2] = instr(Op::Fsub, 3, 1, 2);
 
-    let ka1 = m.verifier_key(&a, Tier(8), false);
-    let ka2 = m.verifier_key(&a, Tier(8), false);
+    let ka1 = m.verifier_key(&a, Tier(8), 0);
+    let ka2 = m.verifier_key(&a, Tier(8), 0);
     assert!(std::sync::Arc::ptr_eq(&ka1, &ka2), "a cache hit returns the same key");
     assert_eq!(m.cached_keys(), 1);
 
-    let kb = m.verifier_key(&b, Tier(8), false);
+    let kb = m.verifier_key(&b, Tier(8), 0);
     assert_eq!(m.cached_keys(), 2);
     // A different program is a different key (R1/R6: the key binds the program).
     assert!(!std::sync::Arc::ptr_eq(&ka1, &kb));
 
-    let kr = m.verifier_key(&a, Tier(8), true);
+    let kr = m.verifier_key(&a, Tier(8), 4);
     assert_eq!(m.cached_keys(), 3);
     assert!(!std::sync::Arc::ptr_eq(&ka1, &kr));
 }

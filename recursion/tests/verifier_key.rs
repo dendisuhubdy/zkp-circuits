@@ -7,7 +7,7 @@
 //! `StdRng::seed_from_u64(KEY_SEED)`; since constraint set 7 it is `key_derivation_v2`'s stream
 //! under the rVM's own labels, so no `rand` release can move it. What it pins is the sixteen-element Merkle cap itself (the value `InnerKey`/`RvmKey`
 //! absorb), in canonical form, for a two-instruction program at tier 8, with and without the reduce
-//! chip declared (one cap: see `WANT`) — the cap is the part the salt stream decides, and a changed stream, salt draw or
+//! chip declared (two caps: `WANT`, `WANT_REDUCE`) — the cap is the part the salt stream decides, and a changed stream, salt draw or
 //! preprocessed table changes it. **A red here is a consensus event for any chain with an
 //! aggregation section** (none is live): re-pinning it means new aggregate verifier keys.
 
@@ -18,16 +18,15 @@ use recursion::machine::{FriProfile, Machine, Tier};
 use recursion::isa::F;
 
 fn cap_hex(m: &Machine, p: &Program, reduce: bool) -> Vec<String> {
-    let common = m.verifier_key(p, Tier(8), reduce);
+    let common = m.verifier_key(p, Tier(8), if reduce { 4 } else { 0 });
     let pre = common.preprocessed.as_ref().expect("the program and range tables are preprocessed");
     pre.commitment.roots().iter().flatten().map(|x| format!("{:016x}", x.as_canonical_u64())).collect()
 }
 
 /// The cap, in `roots()` order: four digests of four elements.
 ///
-/// The same cap answers with the reduce chip declared and without it, and that too is measured: the
-/// reduce chip has no preprocessed columns, so declaring it changes the batch's lookups and degree
-/// bits but not the preprocessed commitment.
+/// Cut D: declaring the reduce chip adds its preprocessed region (an empty layout: all-zero rows),
+/// so the cap differs; both caps are pinned.
 ///
 /// Re-pinned for constraint set 7 (HCS-1): the rVM's key config draws its salts from
 /// `key_derivation_v2`'s stream under the labels `rvm/key/mmcs` / `rvm/key/pcs`
@@ -40,6 +39,15 @@ const WANT: [&str; 16] = [
     "c6c360a80fcc32a3", "7aaca7245e6a835a", "259781276e93c195", "fbde180612a69b9c",
 ];
 
+/// The cap with the reduce chip declared at height 2^4 over an empty layout (Cut D), its
+/// preprocessed region carrying the 14-row fold coefficient table (Cut E2; was `1136b74d…`).
+const WANT_REDUCE: [&str; 16] = [
+    "1465f60a95152d43", "208336379a094499", "722c10793b62814f", "c34998e19e1f0268",
+    "82a6530d27b003c5", "f17904c7c9f6dea9", "d2edca6121d2c3ce", "6f9a4fbc6515fd40",
+    "d556f6368a4e5713", "d019f54fd96d85d0", "23ae35c011151880", "a0380780419218fd",
+    "bd90119cc64badcf", "c2939a08d0f9e65f", "03933014272eec7c", "5bf5626b05094a95",
+];
+
 #[test]
 fn the_rvm_verifier_keys_answer_their_known_caps() {
     let p = Program {
@@ -48,6 +56,7 @@ fn the_rvm_verifier_keys_answer_their_known_caps() {
             Instr { op: Op::Halt, rd: 0, ra: 0, b: F::ZERO },
         ],
         checkpoints: vec![],
+        reduce_layout: vec![],
     };
     // Both profiles: the profile changes FRI's query count and grinding, never the preprocessed
     // commitment, so one pin serves both (measured, as in `research/tests/verifier_key.rs`).
@@ -57,6 +66,6 @@ fn the_rvm_verifier_keys_answer_their_known_caps() {
         eprintln!("{profile:?} no reduce: {plain:?}");
         eprintln!("{profile:?} reduce:    {reduce:?}");
         assert_eq!(plain, WANT, "{profile:?}: the rVM verifier key changed (no reduce chip)");
-        assert_eq!(reduce, WANT, "{profile:?}: the rVM verifier key changed (reduce chip declared)");
+        assert_eq!(reduce, WANT_REDUCE, "{profile:?}: the rVM verifier key changed (reduce chip declared)");
     }
 }

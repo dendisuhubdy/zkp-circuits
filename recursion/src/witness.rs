@@ -76,8 +76,9 @@ pub enum Segment {
     InputOpenings,
     /// Per query, per input round: the restored authentication path's siblings, four words a level.
     InputPaths,
-    /// Per query, per commit-phase round: `arity − 1` sibling values, then the row's four salts —
-    /// the commit-phase tree is a hiding MMCS too, so its leaf is `flatten_to_base(row) ‖ salt(4)`.
+    /// Per query, per commit-phase round: the whole `arity`-wide row (Cut E1: the query's own value
+    /// included), then the row's four salts — the commit-phase tree is a hiding MMCS too, so its
+    /// leaf is `flatten_to_base(row) ‖ salt(4)`.
     CommitPhaseOpenings,
     /// Per query, per commit-phase round: the restored path's siblings.
     CommitPhasePaths,
@@ -491,8 +492,8 @@ where
         }
         w.end();
 
-        // 13 ── per query, per commit-phase round: the `arity − 1` siblings that complete the row,
-        // then the row's four salts.
+        // 13 ── per query, per commit-phase round: the whole committed row (Cut E1), then the
+        // row's four salts.
         //
         // The salts are here because the commit-phase tree is a *hiding* MMCS too — `ChallengeMmcs`
         // is `ExtensionMmcs<Val, Challenge, ValMmcs>` and `ValMmcs` is the
@@ -501,8 +502,11 @@ where
         // recompute a commit-phase leaf at all.
         w.begin(Segment::CommitPhaseOpenings);
         for q in 0..shape.num_queries() {
-            for step in &fri.commit_phase_openings {
-                w.exts(&step.sibling_values[q]);
+            for (round, step) in fri.commit_phase_openings.iter().enumerate() {
+                // Cut E1: the whole reconstructed row — the query's own folded value at
+                // `index_in_group` among its siblings — which the program hints straight into the
+                // leaf buffer and checks the own slot of.
+                w.exts(&r.commit_rows[round][q][0]);
                 // One matrix per commit-phase round, so one salt set per query.
                 assert_eq!(step.opening_proof.0[q].len(), 1);
                 assert_eq!(step.opening_proof.0[q][0].len(), SALT_ELEMS);
@@ -579,12 +583,12 @@ pub fn per_query_levels(rounds: &[InputRound]) -> usize {
     rounds.iter().map(|g| levels_for(&g.dims)).sum()
 }
 
-/// The words one query occupies in [`Segment::CommitPhaseOpenings`]: per round, the `arity − 1`
-/// sibling *extension* values (two words each) and then the query row's four salts.
+/// The words one query occupies in [`Segment::CommitPhaseOpenings`]: per round, the whole
+/// `arity`-wide row (two words per value), then the four salts.
 pub fn open_stride(log_arities: &[usize]) -> usize {
     log_arities
         .iter()
-        .map(|&a| ((1usize << a) - 1) * <EF as BasedVectorSpace<Val>>::DIMENSION + SALT_ELEMS)
+        .map(|&a| (1usize << a) * <EF as BasedVectorSpace<Val>>::DIMENSION + SALT_ELEMS)
         .sum()
 }
 

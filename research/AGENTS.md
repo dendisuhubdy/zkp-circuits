@@ -18,21 +18,28 @@ are `docs/01–06`; the README has the reading order.
 
 **The sibling `recursion/` crate is the recursion VM (rVM), complete through
 M5.4** (M5.4 merged on 2026-09-16, `271679d`) **and phase 2's row cuts**
-(2026-10-04, branch `feat/rvm-phase2`, `recursion/docs/04`): the field-native
-ISA — 26 instructions at M5.4, 28 since phase 2 — + emulator + DSL; the eight-instance batch machine (`machine/`) proving the
+(2026-10-04, branch `feat/rvm-phase2`, `recursion/docs/04`) **and phase 3's
+fold-reduce cuts** (2026-10-05, branch `feat/rvm-phase3`, `recursion/docs/06`): the field-native
+ISA — 26 instructions at M5.4, 28 since phase 2, 30 since phase 3 — + emulator + DSL; the eight-instance batch machine (`machine/`) proving the
 $N$-generic aggregate program that verifies $N$ of *this* crate's proofs in one
-recursive STARK — $893{,}606$ cpu rows per inner proof, tier 20, after M5.2's
+recursive STARK — $585{,}686$ cpu rows per inner proof, tier 20 (both memory
+tables $2^{21}$), after M5.2's
 three measurement-gated cuts (liveness, `REDUCE`, `SPONGE`: $1{,}968{,}619$,
-tier 21) and phase 2's three (2026-10-03: opened rows hinted into the
+tier 21), phase 2's three (2026-10-03: opened rows hinted into the
 height-group sponge buffers, `HINTN` = 26, `COMPRESS` = 27 — from
-$2{,}047{,}268$ at constraint set 8; `recursion/docs/04`); the
+$2{,}047{,}268$ at constraint set 8 to $893{,}606$; `recursion/docs/04`) and
+phase 3's four (2026-10-05: the reduction's layout preprocessed in the reduce
+chip, the own slot by one `LOADE`, `FOLD` = 28, `POW` = 29 — 61 399 rows short
+of the $2^{19}$ gate, which was not widened; `recursion/docs/06`); the
 chain-facing `aggregate`/`verify_aggregate` API the fullnode's `shrugg-rvm`
 vendors; the proving-backend split (`Backend::{Reference, Cuda}`, zero new
 kernels — the RV32 CUDA crate covers the rVM's instances as-is); and the
 self-verifier, written with its measured requirement. Its measured records are
 `recursion/docs/00` (ISA/emulator/verifier), `01` (the machine), `02` (the
 aggregate economics), `03` (GPU + self-recursion, the 11-row big-machine
-runbook), `04` (phase 2's row cuts and the prover's measured live heap); plans/specs in `docs/superpowers/`. **Open only on hardware**: the
+runbook), `04` (phase 2's row cuts and the prover's measured live heap), `05` (the
+quotient layout), `06` (phase 3's cuts; the tier-18 twin proves on 48 GB at
+26.88 GB live); plans/specs in `docs/superpowers/`. **Open only on hardware**: the
 PTX first build and the production N re-measurement, blocked on a fleet GPU
 node (80 GB device, ≥ 160 GB host; `PTX_BUILD.md`); the deferred proofs
 (M5.2's exit — tier 20 since phase 2 —, N≥2 twins, the self-proof) run on the
