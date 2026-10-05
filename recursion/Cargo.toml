@@ -87,3 +87,6 @@ opt-level = 1
 [patch.crates-io]
 p3-fri = { path = "../vendor/p3-fri" }
 p3-merkle-tree = { path = "../vendor/p3-merkle-tree" }
+# The quotient-layout fork (`../vendor/PROVENANCE.md`, `docs/05-quotient-layout.md`): `PerChunk`
+# is upstream byte for byte; this machine selects `PerInstance` (`machine::QUOTIENT_LAYOUT`).
+p3-batch-stark = { path = "../vendor/p3-batch-stark" }
