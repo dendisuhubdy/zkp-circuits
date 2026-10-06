@@ -1,10 +1,11 @@
-# rVM at rate ¼ — the recursion machine's own FRI profile moves to `log_blowup 2` at equal proven security
+# rVM at rate ¼ — the recursion machine's own FRI profile moves to `log_blowup 2` at equal proven security (92 queries, 24 grinding bits)
 
 **Date:** 2026-10-06. **Scope:** `recursion/` (the rVM), `research/src/machine.rs`'s profile doc,
 the whitepaper's parameter table (one row, on a branch), the fullnode follow-through.
 **Base:** circuits `main` 3316e11 (phase 3 merged). **Decided with the operator:** the lever is
-the rVM's *own* FRI profile, not the inner one; the equal-security point is **80 queries with 24
-query-grinding bits** (not more queries); the whitepaper edit is in scope.
+the rVM's *own* FRI profile, not the inner one; the equal-security point is **92 queries with 24
+query-grinding bits** — equal under the whitepaper's own (unique-decoding) theorem, not only under
+`p3-security`'s list-decoding regime (§0.1); the whitepaper edit is in scope.
 
 ## 0. Why
 
@@ -29,35 +30,48 @@ Assumed shape for the run: `log_trace_length 22` (the production rVM's tallest t
 the ZK doubling), AIR degree 8, 24 committed functions, a LogUp bus. The run reproduces the paper's
 figure for today's profile, which is the calibration:
 
-| rVM regime | proven bits (what binds) | conjectured (random-words) | legacy ethSTARK `b·q + g` |
-|---|---:|---:|---:|
-| today: rate ⅛, q 80, g 20 | **86.4** (low-degree test, unique decoding) | 95.8 | 260 |
-| rate ¼, q 80, **g 24** | **86.2** (batch combination, LDR m = 4) | 95.8 | 184 |
-| rate ¼, q 80, g 28 | 88.0 | 95.8 | 188 |
-| rate ¼, q 96, g 20 | 88.0 (batch combination, LDR m = 3) | 95.8 | 212 |
-| rate ¼, q 110, g 20 | 94.6 (low-degree test) | 95.8 | 240 |
-| rate ¼, q 120, g 20 | 95.8 (the LogUp fingerprint — the field term — binds) | 95.8 | 260 |
+The whitepaper's FRI theorem (`randprotocol_implementation.tex`, "FRI soundness as instantiated")
+bounds the query term with the **unique-decoding** radius: `q · log2(2/(1+ρ)) + g` — 0.830 bits a
+query at rate ⅛, 0.678 at rate ¼. `p3-security` reports that regime (UDR) and, beside it, the
+**list-decoding** regime (LDR: the BCSS25 proximity-gaps theorem, also proven) and takes the better.
+Both columns matter: the paper stands on the first.
 
-Three things the table settles. (1) The equal-security point at rate ¼ is 80 queries with four more
-grinding bits (86.2 vs 86.4, inside the model's own slack), or 96 queries at 20 bits — not the
-"~120 queries" `docs/06` §7 reasoned from the Johnson radius alone (120 is where the field term
-saturates, not where equality is reached). (2) The conjectured bound is 95.8 either way: it is the
-field term (Goldilocks² is 128 bits) that caps it, not the rate. (3) The legacy ethSTARK bound,
-which the whitepaper's remark quotes (`3·80+20 = 260`), stays far above 100 (`2·80+24 = 184`).
+| rVM regime | paper's UDR formula | `p3-security` best proven (regime that binds) | conjectured (random-words) | legacy ethSTARK `b·q + g` |
+|---|---:|---:|---:|---:|
+| today: rate ⅛, q 80, g 20 | **86.4** | 86.4 (low-degree test, UDR) | 95.8 | 260 |
+| rate ¼, q 80, g 24 | 78.2 | 86.2 (batch combination, LDR m = 4) | 95.8 | 184 |
+| rate ¼, **q 92, g 24** | **86.4** | **88.0** (batch combination, LDR m = 3) | 95.8 | 208 |
+| rate ¼, q 98, g 20 | 86.5 | 88.0 | 95.8 | 216 |
+| rate ¼, q 80, g 32 | 86.2 | 88.0 | 95.8 | 192 |
+| rate ¼, q 110, g 20 | 94.6 | 94.6 (low-degree test, UDR) | 95.8 | 240 |
+| rate ¼, q 120, g 20 | 101.4 | 95.8 (the LogUp fingerprint — the field term — binds) | 95.8 | 260 |
 
-The choice of grinding over queries keeps the query count at 80, so the rVM's verify time, the
-self-verifier's query phase (the rows that dominate it) and the proof's query count do not grow;
-what the prover pays is `2^24` expected Poseidon2 duplex evaluations once per proof, which
-Plonky3 grinds in parallel (`grinding_challenger.rs`, `into_par_iter().find_map_any`) — seconds.
+Four things the table settles. (1) At rate ¼, 80 queries with four more grinding bits is equal
+only under list decoding; under the theorem the paper states it loses eight bits. The equal point
+under *both* is **92 queries at 24 grinding bits** (`92 × 0.678 + 24 = 86.38` against today's
+`86.41`; 88.0 under list decoding) — the operator's choice (2026-10-06), after the 80/24 option was
+first presented without the paper's own column and then withdrawn. (2) It is not the "~120 queries"
+`docs/06` §7 reasoned from the Johnson radius alone: 120 is where the field term saturates. (3) The
+conjectured bound is 95.8 either way — the field term (Goldilocks² is 128 bits) caps it, not the
+rate. (4) The legacy ethSTARK bound the paper's remark quotes (`3·80+20 = 260`) stays far above 100
+(`2·92+24 = 208`).
 
-**The numbers above are the design's premise, not its pin.** §4 makes the same computation over
-the rVM's *real* chip shapes a test; if that test wants 25 grinding bits rather than 24 for
-equality, the constant follows the test. The rule is fixed here: proven bits at the new regime
-≥ proven bits at today's regime − 0.5, over the same real shape, with 80 queries.
+The cost of the twelve extra queries is linear in the query count: +15 % on the rVM's verify
+time, on the self-verifier's query phase (the rows that dominate it) and on the proof's
+query-dependent bytes; the prover pays `2^24` expected Poseidon2 duplex evaluations once per proof,
+which Plonky3 grinds in parallel (`grinding_challenger.rs`, `into_par_iter().find_map_any`) —
+seconds. Against that, every LDE and tree in the prover halves.
+
+**The numbers above are the design's premise, not its pin.** §4 makes the same computation a test
+with two assertions: the paper's closed-form UDR bits at the new regime ≥ today's − 0.5, and
+`p3-security`'s best proven bits over the rVM's *real* chip shapes at the new regime ≥ today's
+− 0.5. If the real-shape report wants one more query or grinding bit, the constant follows the
+test; the rule, not the digit, is the design.
 
 ### 0.2 What it buys (projection; replaced by measurement in §6)
 
-Halving the LDE factor halves every committed term. Against `docs/06` §3's projections:
+Halving the LDE factor halves every committed term (the +15 % queries touch the FRI query
+phase's transients, not the committed terms). Against `docs/06` §3's projections:
 
 | proof | tier | docs/06 projection | at rate ¼ (projection) |
 |---|---:|---|---|
@@ -68,8 +82,8 @@ Halving the LDE factor halves every committed term. Against `docs/06` §3's proj
 | production N=4 | 22 | ≈ 410–490 GB | ≈ 205–245 GB |
 
 Prove time falls with the LDE sizes (the NTTs and the Merkle trees are over half the rows);
-verify time falls slightly (one Merkle level fewer per path, same query count); proof size falls
-by one digest per path per round. None of these is claimed until measured.
+verify time moves by +15 % queries less one Merkle level per path; proof size by the same two
+terms with opposite signs. None of these is claimed until measured.
 
 ## 1. What changes, precisely
 
@@ -80,9 +94,10 @@ by one digest per path per round. None of these is claimed until measured.
 ```rust
 /// The rVM's own FRI parameters — not the inner RV32 machine's. The inner profile (research's
 /// `FriProfile`: 80 queries, rate ⅛, 20 grinding bits) sizes the proofs this machine *verifies*;
-/// these size the proofs it *makes*. Rate ¼ halves every LDE and tree the prover holds; the
-/// four extra grinding bits keep the proven proximity-gaps floor where the paper's 80/8/20 put it
-/// (`tests/security.rs` pins the comparison over this machine's real chip shapes, docs/07).
+/// these size the proofs it *makes*. Rate ¼ halves every LDE and tree the prover holds; twelve
+/// more queries and four more grinding bits keep the proven floor where the paper's 80/8/20 put
+/// it — under the paper's own unique-decoding theorem (92 × 0.678 + 24 = 86.4 bits) and under
+/// `p3-security`'s list-decoding regime (88.0) alike; `tests/security.rs` pins both (docs/07).
 /// Consensus-facing like the inner profile: the chain's `fri_profile` name binds both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RvmFri { pub log_blowup: usize, pub num_queries: usize, pub query_pow_bits: usize }
@@ -91,7 +106,7 @@ impl RvmFri {
     pub const fn of(profile: FriProfile) -> RvmFri {
         match profile {
             FriProfile::Test => RvmFri { log_blowup: 2, num_queries: 16, query_pow_bits: 4 },
-            FriProfile::Production => RvmFri { log_blowup: 2, num_queries: 80, query_pow_bits: 24 },
+            FriProfile::Production => RvmFri { log_blowup: 2, num_queries: 92, query_pow_bits: 24 },
         }
     }
 }
@@ -112,10 +127,10 @@ phase's measured anchor.
 `recursion/src/shape.rs:34` has `pub const LOG_BLOWUP: usize = 3` "from research's
 `generic_config`", used by both machines' shapes. It becomes two things:
 
-- `INNER_LOG_BLOWUP: usize = 3` — the inner RV32 machine's, still mirroring research (and still
-  pinned by a one-line test this phase adds beside `tests/shape.rs`, asserting it equals the
-  `log_blowup` research's `generic_config` builds — the literal is read from a built config, not
-  copied).
+- `INNER_LOG_BLOWUP: usize = 3` — the inner RV32 machine's, still mirroring research, and
+  cross-checked against research's *real* config by `tests/verifier.rs:86` over a real inner
+  proof (`Σ log_arities + INNER_LOG_BLOWUP == log_global_max_height`): a changed literal in
+  research would fail that assertion.
 - `VerifierShape::log_blowup(&self) -> usize`: `InnerShape` answers `INNER_LOG_BLOWUP`, `RvmShape`
   answers `RvmFri::of(self.profile).log_blowup`.
 
@@ -144,6 +159,8 @@ profile's numbers — the two no longer coincide at Production.
 
 ### 1.4 What else moves
 
+- **The rVM's query count** is 92 at Production: `RvmShape.num_queries` and the self-verifier's
+  query loop follow it; the inner shapes keep 80.
 - **The rVM verifier keys** (`tests/verifier_key.rs`, `WANT` / `WANT_REDUCE`): the preprocessed
   program table's Merkle cap is over its LDE, whose height halves. Both pins move once and are
   re-recorded with the before values. (The inner keys and `inner_vk_digest` do not move.)
@@ -155,7 +172,7 @@ profile's numbers — the two no longer coincide at Production.
   `Machine`, so it inherits the new parameters at the re-vendor; `warm_aggregation`'s key build
   halves; `admitted_tiers` and the admission vectors are untouched; `docs/aggregation.md` and the
   genesis page state that a chain's `fri_profile` name binds two parameter sets, inner 80/8/20
-  and rVM 80/4/24, both constants of the vendored constraint set. No genesis field is added.
+  and rVM 92/4/24, both constants of the vendored constraint set. No genesis field is added.
 
 ### 1.5 What does not move
 
@@ -170,9 +187,10 @@ fullnode's `admitted_tiers`.
   `verify` builds the config from `RvmFri::of(self.profile)`, so a proof cannot choose its rate.
   The replay and the self-verifier program take it from the shape, which is a function of the
   profile and the program, not of the proof.
-- **The proven bound.** `p3-security`'s `proven_security_report` over the rVM's real shape at the
-  new regime is ≥ the old regime's − 0.5 bits (§4's test, 80 queries, the grinding bits the test
-  settles). The commit-phase bound (`commit_phase_error_*`) is included by the report; the
+- **The proven bound, twice.** The paper's closed-form unique-decoding bits at the new regime are
+  ≥ today's − 0.5 (`92 × log2(2/1.25) + 24` against `80 × log2(2/1.125) + 20`), and
+  `p3-security`'s `proven_security_report` over the rVM's real shape at the new regime is ≥ the
+  old regime's − 0.5 bits (§4's test; the digits follow the test). The commit-phase bound (`commit_phase_error_*`) is included by the report; the
   LogUp fingerprint term is included (`logup::security_term`); the batch-combination term at the
   real `num_batched_functions` is included. Nothing in the argument depends on the conjecture.
 - **Hiding is unchanged in kind**: four random codewords per committed matrix and a salt per leaf
@@ -184,12 +202,13 @@ fullnode's `admitted_tiers`.
 ## 3. Governance surface
 
 - `research/src/machine.rs` `FriProfile`'s doc: one sentence — the rVM's own proofs take
-  `recursion::machine::RvmFri` (80 / 4 / 24 at Production), equal proven floor, `docs/07`.
+  `recursion::machine::RvmFri` (92 / 4 / 24 at Production), equal proven floor under the paper's
+  own theorem, `docs/07`.
 - Whitepaper (`whitepapers/randprotocol_implementation.tex`): in the deployed-parameters table and
-  the "choice of 80 queries" remark, one row and one sentence: *the aggregate (rVM) proof: 80
-  queries, blowup 4, 24 grinding bits — ≈ 86 proven bits, equal to the bundle proof's; the rate
-  is halved for the aggregator's memory, the grinding bits raised to keep the floor; measured in
-  `recursion/docs/07`.* Written on a branch of the whitepapers repository, not pushed: publishing
+  the "choice of 80 queries" remark, one row and one sentence: *the aggregate (rVM) proof: 92
+  queries, blowup 4, 24 grinding bits — `92 × 0.678 + 24 ≈ 86.4` proven bits under the same
+  theorem, equal to the bundle proof's; the rate is halved for the aggregator's memory, the
+  queries and grinding bits raised to keep the floor; measured in `recursion/docs/07`.* Written on a branch of the whitepapers repository, not pushed: publishing
   is the operator's.
 - The node's genesis/aggregation docs (fullnode follow-through), as in §1.4.
 
@@ -202,9 +221,10 @@ fullnode's `admitted_tiers`.
    the ZK doubling, the number §0.1 used; 128-bit
    field, 128-bit collision resistance, the real committed-matrix count); `LogUpAir` from the
    machine's bus (interaction count, max message width). Two reports per regime — old (3, 80, 20)
-   and new (`RvmFri::of(Production)`) — printed and asserted: `new.proven ≥ old.proven − 0.5`,
-   `new.conjectured ≥ 95`, legacy `2·80 + g ≥ 100`. A second assertion pins the Test regime's
-   structure (rate ¼, 16, 4). This is the phase's gate: it runs before any pin is touched.
+   and new (`RvmFri::of(Production)`) — printed and asserted: the paper's closed-form UDR bits
+   `new ≥ old − 0.5`; `p3-security`'s best proven `new ≥ old − 0.5`; `new.conjectured ≥ 95`;
+   legacy `2·q + g ≥ 100`. A second assertion pins the Test regime's structure (rate ¼, 16, 4).
+   This is the phase's gate: it runs before any pin is touched.
 2. **`tests/machine.rs`**: `RvmFri::of` pinned for both profiles; a rate-⅛ proof of the toy (made
    with a test-only config builder taking an explicit `RvmFri`) refused by `Machine::verify` by a
    named error, never a panic.
@@ -251,7 +271,7 @@ two of `docs/06` §7's "proofs this box cannot run" into measurements.
 
 | risk | closed by |
 |---|---|
-| the real-shape security report comes out below equality at 24 bits | the test decides the bits (25 if needed); the rule, not the digit, is the design |
+| the real-shape security report comes out below equality at 92 / 24 | the test decides the digits (one more query or bit); the rule, not the digit, is the design |
 | a `LOG_BLOWUP` reader missed by the audit still assumes 3 for rVM proofs | the self-verifier round trip over real rVM proofs refuses on any disagreement; the grep list in §1.2 is the checklist and the constant is deleted, so a missed site fails to compile |
 | the inner programs drift through the shared shape trait | the aggregate pins asserted before any re-pin (§4 item 5) |
 | the CUDA/reference backend sizes its NTT from a hardcoded blowup | `cargo check --features reference-backend`; the backend's own round-trip tests under `reference-backend` if the box runs them; no blowup literal found in `rand-zkvm-cuda` |
@@ -260,7 +280,8 @@ two of `docs/06` §7's "proofs this box cannot run" into measurements.
 ## 9. Rulings
 
 - The rVM's own profile is the lever; the inner profile is untouched.
-- Equality with today's proven floor, at 80 queries, with grinding bits the real-shape test sets.
+- Equality with today's proven floor under the paper's own theorem *and* under `p3-security`'s
+  best proven regime: 92 queries, 24 grinding bits, the digits following the pinned test.
 - The constant `LOG_BLOWUP` is retired, not kept beside a second one.
 - Projections are projections until the run exists; the twin's run is the anchor.
 - This branch bases on the merged phase 3 and is pushed only after phase 3 is.
