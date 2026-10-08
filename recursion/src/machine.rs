@@ -406,6 +406,8 @@ impl Machine {
 
     /// A machine under an explicit regime — the tests' entry (a rate-⅛ proof to show refused;
     /// `docs/07`). Every machine a node or an aggregator runs is `new(profile)`'s.
+    // test entry; not for production machines
+    #[doc(hidden)]
     pub fn with_fri(profile: FriProfile, fri: RvmFri) -> Self {
         Self { config: build_config(fri, SaltRng::fresh(), SaltRng::fresh()), profile, fri, keys: Mutex::new(KeyCache::default()) }
     }

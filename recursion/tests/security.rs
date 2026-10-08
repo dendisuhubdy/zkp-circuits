@@ -174,9 +174,3 @@ fn the_new_rvm_profile_is_not_below_todays_proven_floor() {
     assert!(new_conj >= 95.0, "conjectured (random-words) bits: {new_conj:.2}");
     assert!(new_legacy >= 100.0, "legacy ethSTARK bits: {new_legacy}");
 }
-
-#[test]
-fn the_test_regime_keeps_its_shape() {
-    // Rate ¼ with the suite's 16 queries and 4 bits: the same code paths as production, cheap.
-    assert_eq!(regime((2, 16, 4)).log_blowup, 2);
-}

@@ -577,11 +577,12 @@ fn a_tampered_tape_fails_the_prove_at_the_named_step() {
 /// SIGKILL, twice), so the suite's heaviest *proven* aggregate is the N=1 round-trip — tier 18
 /// since phase 2; skipped on the 48 GB box for memory until phase 3, after which it proves here
 /// (the tier-18 twin's shape, 26.88 GB live, `docs/06-phase3-fold-reduce.md` §6) — and this runs
-/// alone, watchdog-guarded, the way the twin does. Since phase 3 docs/06's cell model puts this
-/// tier-19 proof at ≈ 52 GB live: past the 48 GB box.
+/// alone, watchdog-guarded, the way the twin does. Since phase 3 docs/06's cell model put this
+/// tier-19 proof at ≈ 52 GB live, past the 48 GB box; at rate ¼ it proves and verifies on this
+/// 48 GB box (`docs/07-rvm-rate-quarter.md` §3; ≈ 30 GB projected, heap not printed).
 #[test]
-#[ignore = "the N=2 in-suite aggregate: tier 19 (tier 20 before phase 2), ~34 GB macOS RSS observed before jetsam on the \
-            shared box (twice); run alone: cargo test --release -p recursion --test aggregate \
+#[ignore = "the N=2 in-suite aggregate: tier 19 (tier 20 before phase 2); proves on the 48 GB box at rate 1/4 (docs/07 §3), \
+            ~30 GB live projected; heavy, so run alone: cargo test --release -p recursion --test aggregate \
             two_test_profile -- --ignored --nocapture"]
 fn two_test_profile_bundle_proofs_aggregate_and_verify_natively() {
     let proofs: Vec<Proof> =
@@ -605,13 +606,14 @@ fn two_test_profile_bundle_proofs_aggregate_and_verify_natively() {
 /// The M5.3 exit (spec §7, R4's profile ruling): an aggregate of **3 real test-profile bundle
 /// proofs** verifies natively — tier 19 since phase 3 (508 102 rows; tier 20 after phase 2's row
 /// cuts, 21 before; the GB figures in this note are the pre-cut macOS RSS readings, not live-heap
-/// numbers — `docs/04`). Not proved since its tier moved: docs/06's cell model puts it at ≈ 78 GB
-/// live (`docs/06-phase3-fold-reduce.md` §3, §6), past the 48 GB box — a ≥ 128 GB host. Timed and measured: wall time, proof size, verify time; the RSS
+/// numbers — `docs/04`). Not proved since its tier moved: docs/06's cell model put it at ≈ 78 GB
+/// live at rate ⅛ (`docs/06-phase3-fold-reduce.md` §3, §6); at rate ¼ ≈ 45 GB projected
+/// (`docs/07-rvm-rate-quarter.md` §4), at the edge of the 48 GB box — a ≥ 64 GB host. Timed and measured: wall time, proof size, verify time; the RSS
 /// watchdog runs outside the process (see the ignore note). On a box that jetsams the largest
 /// process at ~33 GB the attempt is expected to die there — the peak it reaches is the
 /// measurement, and the plan's fallback records N=1 (tier 19, completed) as the in-scope proof.
 #[test]
-#[ignore = "the N=3 exit twin: tier 19 since phase 3 (20 after phase 2, 21 before), ~78 GB live projected (docs/06 §3), a >= 128 GB host; watchdog-guarded; \
+#[ignore = "the N=3 exit twin: tier 19 since phase 3 (20 after phase 2, 21 before), ~45 GB live projected at rate 1/4 (docs/07 §4), a >= 64 GB host; watchdog-guarded; \
             run alone: cargo test --release -p recursion --test aggregate twin -- --ignored --nocapture"]
 fn twin_three_test_profile_bundle_proofs_aggregate_and_verify_natively() {
     let proofs: Vec<Proof> =
@@ -858,9 +860,9 @@ fn prove_production_aggregate(n: usize, expected_tier: RvmTier) {
 /// A6, runbook row 6: the production N=1 aggregate (tier 20 since phase 2's row cuts; ≈ 190–240 GB
 /// projected from docs/04's measured terms then, ≈ 110–130 GB since phase 3's memory tables went
 /// to 2^21, docs/06 §3 — the ~48.6 GB oracle / ≥ 64 GB sizing it carried at tier 21 counted one
-/// of four terms and is withdrawn).
+/// of four terms and is withdrawn; ≈ 64–75 GB projected at rate ¼, docs/07 §4 — a ≥ 96 GB host).
 #[test]
-#[ignore = "issue45 A6: production N=1 aggregate proof, tier 20, ~110-130 GB projected (docs/06 §3), >=160 GB host. Run: \
+#[ignore = "issue45 A6: production N=1 aggregate proof, tier 20, ~64-75 GB projected at rate 1/4 (docs/07 §4), >=96 GB host. Run: \
             cargo test --release -p recursion --test aggregate production_n1_aggregate_proves_and_verifies -- --ignored --nocapture"]
 fn production_n1_aggregate_proves_and_verifies() {
     prove_production_aggregate(1, RvmTier(20));
@@ -868,19 +870,20 @@ fn production_n1_aggregate_proves_and_verifies() {
 
 /// A6, runbook row 7: the production N=2 aggregate (tier 21 since phase 2's row cuts; ≈ 475 GB
 /// derived in docs/04 then, ≈ 210–245 GB projected since phase 3, docs/02 §"Phase 3" and docs/06
-/// §3 — a >= 256 GB host, tight).
+/// §3 at rate ⅛; ≈ 122–142 GB projected at rate ¼, docs/07 §4 — a ≥ 192 GB host).
 #[test]
-#[ignore = "issue45 A6: production N=2 aggregate proof, tier 21, ~210-245 GB projected (docs/06 §3), >=256 GB host. Run: \
+#[ignore = "issue45 A6: production N=2 aggregate proof, tier 21, ~122-142 GB projected at rate 1/4 (docs/07 §4), >=192 GB host. Run: \
             cargo test --release -p recursion --test aggregate production_n2_aggregate_proves_and_verifies -- --ignored --nocapture"]
 fn production_n2_aggregate_proves_and_verifies() {
     prove_production_aggregate(2, RvmTier(21));
 }
 
 /// A6, runbook row 8: the production N=3 aggregate (tier 21 since phase 3 — 1 757 062 rows; tier 22
-/// after phase 2's row cuts, 23 before; ≈ 290–340 GB projected, docs/02 §"Phase 3" and docs/06
-/// §3). Only attempt after the rest.
+/// after phase 2's row cuts, 23 before; ≈ 290–340 GB projected at rate ⅛, docs/02 §"Phase 3" and
+/// docs/06 §3; ≈ 168–197 GB projected at rate ¼, docs/07 §4 — a ≥ 256 GB host). Only attempt
+/// after the rest.
 #[test]
-#[ignore = "issue45 A6: production N=3 aggregate proof, tier 21, ~290-340 GB projected (docs/06 §3), >=512 GB host. Run: \
+#[ignore = "issue45 A6: production N=3 aggregate proof, tier 21, ~168-197 GB projected at rate 1/4 (docs/07 §4), >=256 GB host. Run: \
             cargo test --release -p recursion --test aggregate production_n3_aggregate_proves_and_verifies -- --ignored --nocapture"]
 fn production_n3_aggregate_proves_and_verifies() {
     prove_production_aggregate(3, RvmTier(21));

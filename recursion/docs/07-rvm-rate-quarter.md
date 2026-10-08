@@ -20,7 +20,7 @@ and grinding counts are the price of keeping the proven floor where the paper's 
 under the whitepaper's own unique-decoding theorem the new regime gives **86.38 bits** against
 today's **86.41**, and `p3-security`'s best proven bound over the rVM's real chip shapes gives the
 same two figures. Measured on the test profile: the tier-18 exit twin's peak live heap
-**26.88 → 15.64 GB (×0.58)**, its verify 7.07 → 3.53 s, its prove time about the same (+2 %);
+**26.88 → 15.64 GB (×0.58)**, its verify 7.07 → 3.53 s, its prove time within run-to-run noise (+2 %);
 the test N=2 aggregate (tier 19), projected at ≈ 52 GB in `docs/06` and never run before,
 **proved and verified on this box**. Projected from the twin's ratio, the production N=1
 aggregate falls from ≈ 110–130 GB to **≈ 64–75 GB** — a ≥ 96 GB host, not yet the ≤ 64 GB
@@ -100,7 +100,9 @@ structure (rate ¼, 16 queries, 4 bits).
   the FRI schedule, `log_global_max_height`, the replay's `FriParameters` and round geometry
   (`reference.rs`), `h_of` and the reduced-opening accumulator in `programs/rv32.rs` — takes it
   from the shape it is reading; `RvmShape`'s `num_queries` (92 at Production) and
-  `query_pow_bits` come from `RvmFri::of(profile)` (`shape.rs`).
+  `query_pow_bits` come from `RvmFri::of(profile)` (`shape.rs`). `RvmShape::shape_words` and
+  `header_words` do not carry the blowup, and that is intended: the blowup is committed through
+  the rVM verifier key's cap and the self-verifier's program digest (§5), both of which moved.
 - **The self-verifier** (`rv32r`) reads rVM proofs at rate ¼: one Merkle level fewer per path,
   so its digest and `CycleReport` pins moved (§5). The witness tape follows the replay.
 - **The Test profile moved to rate ¼ too**, with its 16 queries and 4 bits: the suite runs the
@@ -139,16 +141,24 @@ matched. The test prints **no heap figure** — it is not under the heap profile
 heap is not measured. What is measured is the outcome: a tier-19 rVM proof that `docs/06` §6
 listed among "the proofs this box cannot run" now runs here.
 
-**Why the twin's heap fell and its prove time did not.** The twin's span log (`prove_batch`,
-141.7 → 148.5 s) shows three phases that got faster and one that got slower: `compute quotient`
+**Why the twin's heap fell and its prove time did not.** The prove wall is within run-to-run
+noise (+2 %). The twin's span log (`prove_batch`, 141.7 → 148.5 s) shows three phases that got
+faster and one that got slower: `compute quotient`
 67.8 → 62.1 s; the four `build merkle tree` commits, its siblings under `prove_batch` (two before
 it, two after), 29.4 → 26.3 s (10.4 + 6.2 + 8.9 + 3.9 → 11.7 + 7.1 + 4.1 + 3.4); the `FRI
 prover` 7.4 → 4.2 s — and the two `randomize polys` spans
 **25.6 → 41.7 s** (16.6 + 9.0 → 28.0 + 13.7), the time inside their `with_random_cols` children.
-The +16.1 s of `randomize polys` cancels the ≈ 12 s saved elsewhere. The span log shows where the
-time went; it does not say why `randomize polys` is slower over a smaller domain, and this record
-does not guess. The tier-16 synthetic shows no such rise (`randomize polys` 3.9 + 2.1 → 4.0 +
-2.2 s) and its prove fell ×0.89.
+The +16.1 s of `randomize polys` cancels the ≈ 12 s saved elsewhere, but it is not attributable to
+the rate: `randomize polys` randomizes the trace *before* the LDE, so its work does not depend on
+the blowup. On a single run each side, the rise is run-to-run or load variation; the tier-16
+synthetic shows no such rise (`randomize polys` 3.9 + 2.1 → 4.0 + 2.2 s) and its prove fell
+×0.89.
+
+**Why ×0.58 and not ×0.5.** Every LDE term halves, but the heap fell ×0.58. The likely cause —
+not measured — is the quotient domain: the rVM's degree-8 chips have 8 quotient chunks, more than
+the blowup 4, so `TwoAdicFriPcs::get_evaluations_on_domain` re-extrapolates (coset iDFT →
+truncate → coset DFT) and holds a matrix of the old LDE's size during `compute quotient`, a term
+the rate does not halve.
 
 **Verify and proof bytes.** At the Test profile the query count did not change, so the spec's
 "+15 % queries" does not apply to these runs: the measured change is the rate alone. The twin's
@@ -177,7 +187,8 @@ LDE term halved, the error bar the model's own ±10 % — gives:
 | production N=3 | 21 | ≈ 290–340 GB (projection) | ≈ 168–197 GB (projection) | ≥ 256 GB |
 | production N=4 | 22 | ≈ 410–490 GB (projection) | ≈ 238–284 GB (projection) | ≥ 384 GB |
 
-Each projected range is `docs/06`'s range × 0.58. By the re-weighted unit, `docs/06`'s
+Each projected range is `docs/06`'s range × 0.58 (×0.58 rather than ×0.5 plausibly because of the
+quotient-domain re-extrapolation, §3 — the likely cause, not measured). By the re-weighted unit, `docs/06`'s
 twin-anchored production figure (108 GB) becomes 21 516 × 0.0029 = 63 GB, inside the error bar of
 the table's 64 (which starts from `docs/06`'s rounded 110). **The ≤ 64 GB class (the fullnode
 repository's `docs/compute-optimization.md` §4.4) is at the edge, not met:** the low end of the
@@ -213,18 +224,24 @@ one production inner proof; 169 366, tier 18 for the twin).
 
 - **`tests/security.rs`** — the phase's gate, run before any pin was touched: the two assertions
   of §1 over the real chip shapes at the codeword count, plus the conjectured and legacy floors,
-  and the Test regime's structure (2 passed).
+  (1 passed; the Test regime's literal is pinned by `tests/machine.rs`).
 - **`tests/machine.rs`** — `RvmFri::of` pinned for both profiles; a rate-⅛ proof of the toy,
   made with `Machine::with_fri`, refused by `Machine::verify` by name (10 passed).
-- **`tests/shape.rs`** — `the_fri_schedule_is_a_function_of_the_blowup` (4 passed).
+- **`tests/shape.rs`** — `the_fri_schedule_is_invariant_under_the_blowup`: the arity schedule at
+  blowup 2 equals the one at blowup 3, since the arities read only height differences and the
+  blowup shifts every round height by the same amount (4 passed).
 - **`tests/verifier_key.rs`** and **`tests/self_verify.rs`** — the re-pins of §5 with the before
   values in their comments; the self-verifier's round trips at the toy and busy shapes, the
   thirteen tampered proofs still refused at their named steps (8 passed).
 - **The suite**: `cargo test --release --no-fail-fast -- --skip a_one_proof_aggregate_round_trips`
   — **30 binaries, 299 passed, 0 failed, 20 ignored** (294 passed at phase 3's end; the five new
-  are security's two, machine's two and shape's one).
-- `cargo check --release --features reference-backend` and `--features mock-cuda` build (the
-  cfg-gated backend configs take `RvmFri`).
+  are security's two, machine's two and shape's one). The final fix round deleted security's
+  duplicate Test-regime test, so the count by arithmetic is 298 (not re-run as a whole).
+- **`tests/backend.rs`** — `--features reference-backend` and `--features mock-cuda`, each
+  3 passed: the backend's proof verifies on the CPU verifier and matches a CPU proof's shape at
+  rate ¼, where the degree-8 chips' 8 quotient chunks exceed the blowup 4 and the backends run
+  `rand-zkvm-cuda`'s own DFT on the re-extrapolation path. (The file had not compiled since the
+  `reduce_layout` field; it now builds `Program { reduce_layout: vec![], .. }`.)
 
 ## 7. Out of scope, recorded
 
@@ -244,7 +261,6 @@ one production inner proof; 169 366, tier 18 for the twin).
 The rVM proves its own proofs at rate ¼ with 92 queries and 24 grinding bits, at **86.38 proven
 bits against 86.41** under the paper's theorem and under `p3-security` over the real shape — the
 floor the 2026-09-12 audit (ZM1) insisted on, kept. The tier-18 twin's peak live heap is
-**15.64 GB, ×0.58**, its verify halves, its prove time does not move (the `randomize polys` spans
-take back what the quotient, the trees and FRI save), and the test N=2 aggregate — a tier-19 proof
-— now runs on this 48 GB box. The production N=1 aggregate is projected at ≈ 64–75 GB: a ≥ 96 GB
+**15.64 GB, ×0.58**, its verify halves, its prove time is within run-to-run noise (+2 %), and
+the test N=2 aggregate — a tier-19 proof — now runs on this 48 GB box. The production N=1 aggregate is projected at ≈ 64–75 GB: a ≥ 96 GB
 host where `docs/06` asked ≥ 160 GB, and the edge of the ≤ 64 GB class, not inside it.

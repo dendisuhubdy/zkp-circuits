@@ -104,8 +104,8 @@ terms with opposite signs. None of these is claimed until measured.
 /// `FriProfile`: 80 queries, rate ⅛, 20 grinding bits) sizes the proofs this machine *verifies*;
 /// these size the proofs it *makes*. Rate ¼ halves every LDE and tree the prover holds; twelve
 /// more queries and four more grinding bits keep the proven floor where the paper's 80/8/20 put
-/// it — under the paper's own unique-decoding theorem (92 × 0.678 + 24 = 86.4 bits) and under
-/// `p3-security`'s list-decoding regime (88.0) alike; `tests/security.rs` pins both (docs/07).
+/// it — 86.38 proven bits against 86.41, under the paper's own unique-decoding theorem and under
+/// `p3-security`'s proven bound over the real shape alike; `tests/security.rs` pins both (docs/07).
 /// Consensus-facing like the inner profile: the chain's `fri_profile` name binds both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RvmFri { pub log_blowup: usize, pub num_queries: usize, pub query_pow_bits: usize }
@@ -203,7 +203,9 @@ fullnode's `admitted_tiers`.
   real `num_batched_functions` is included. Nothing in the argument depends on the conjecture.
 - **Hiding is unchanged in kind**: four random codewords per committed matrix and a salt per leaf
   row; the LDE domain is smaller but the hiding argument (eprint 2024/1037 §4.2) is over the
-  number of random columns and the query count, both unchanged.
+  number of random columns (unchanged) and the query count, which went 80 → 92 at Production
+  (16 at Test, unchanged). More openings would weaken a hiding bound, but hiding is not a privacy
+  requirement for the rVM: its witness — the bundle proofs and the public values — is public.
 - **The grinding witness** is checked by the verifier exactly as today (24 bits instead of 20);
   the commit-phase PoW stays at 0 bits with VERIFIER-1's zero-word assertion.
 
@@ -260,8 +262,8 @@ two of `docs/06` §7's "proofs this box cannot run" into measurements.
 - `recursion/docs/07-rvm-rate-quarter.md`: the security argument with the real-shape report
   tables (old and new regime), the measured terms, the pins that moved, the re-projections, the
   suite count.
-- `docs/06` §7 item 2: a pointer ("done at 80 / 4 / 24 — `docs/07`; the equal-security count is
-  80 queries with four more grinding bits, not ~120 queries"). `docs/01`'s memory section: one
+- `docs/06` §7 item 2: a pointer ("done at 92 / 4 / 24 — `docs/07`; the equal-security count is
+  twelve more queries and four more grinding bits, not ~120 queries"). `docs/01`'s memory section: one
   line. `research/AGENTS.md`: one sentence.
 - Fullnode (after the circuits merge and push): re-vendor; `docs/node-hardware.md` §4,
   `docs/compute-optimization.md` §4.1 and §4.4 (the ≤ 64 GB row), `docs/aggregation.md`,

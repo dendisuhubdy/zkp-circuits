@@ -482,7 +482,10 @@ fn fri_schedule(degree_bits: &[usize], log_blowup: usize) -> Result<Vec<usize>, 
     Ok(out)
 }
 
-/// [`fri_schedule`] for the tests (`tests/shape.rs`): the schedule is a function of the blowup.
+/// [`fri_schedule`] for the tests (`tests/shape.rs`). The schedule is invariant under the blowup:
+/// the arities depend only on height differences, which the blowup shifts uniformly.
+// test entry; not for production machines
+#[doc(hidden)]
 pub fn fri_schedule_for_tests(degree_bits: &[usize], log_blowup: usize) -> Result<Vec<usize>, ShapeError> {
     fri_schedule(degree_bits, log_blowup)
 }
