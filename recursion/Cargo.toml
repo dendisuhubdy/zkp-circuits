@@ -52,6 +52,9 @@ hex = "0.4"
 # `tests/memprofile.rs`: a span-boundary heap logger over Plonky3's own `tracing` spans (the
 # version is the one the p3 crates already lock).
 tracing = "0.1"
+# `tests/security.rs`: the soundness estimator Plonky3 ships, over this machine's real chip shapes
+# (the same crate `research/src/machine.rs`'s `fri_soundness_tests` leans on through p3-fri).
+p3-security = "=0.7.0"
 
 [features]
 # `rand-zkvm-cuda`'s CPU-twin engines (the reference backend). Research's feature, mirrored.
