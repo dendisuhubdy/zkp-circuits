@@ -2,8 +2,9 @@
 //! verifier-key cache (plan Task 1; the chip set and `prove`/`verify` grow per task through
 //! Task 6, mirroring `research/src/machine.rs`'s structure).
 //!
-//! The rVM reuses the RV32 machine's exact proof-system configuration (spec §5's reuse ruling):
-//! same field, extension, Poseidon2 permutation, hiding FRI profile and batch machinery. What is
+//! The rVM reuses the RV32 machine's field, permutation and proof system; its FRI parameters are
+//! its own (`RvmFri`, rate ¼ since `docs/07`) (spec §5's reuse ruling):
+//! same field, extension, Poseidon2 permutation, hiding FRI machinery and batch machinery. What is
 //! new is the chip set and that the verifier key is **program-dependent** (plan R1/R6): the
 //! program table is preprocessed, so the preprocessed cap binds every program word and there is
 //! no in-circuit `hc` digest. Since the quotient-layout fork (`docs/05`) the rVM's own proofs
@@ -52,6 +53,30 @@ pub type Pcs = HidingFriPcs<Val, Dft, ValMmcs, ChallengeMmcs, SaltRng>;
 type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
 pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
 
+/// The rVM's own FRI parameters — not the inner RV32 machine's. The inner profile (research's
+/// `FriProfile`: 80 queries, rate ⅛, 20 grinding bits) sizes the proofs this machine *verifies*;
+/// these size the proofs it *makes*. Rate ¼ halves every LDE and tree the prover holds; twelve
+/// more queries and four more grinding bits keep the proven floor where the paper's 80/8/20 put
+/// it — under the paper's own unique-decoding theorem (92 × 0.678 + 24 = 86.4 bits) and under
+/// `p3-security`'s list-decoding regime (88.0) alike; `tests/security.rs` pins both (docs/07).
+/// Consensus-facing like the inner profile: the chain's `fri_profile` name binds both parameter
+/// sets, and a proof made under another regime is refused by `verify` (`tests/machine.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RvmFri {
+    pub log_blowup: usize,
+    pub num_queries: usize,
+    pub query_pow_bits: usize,
+}
+
+impl RvmFri {
+    pub const fn of(profile: FriProfile) -> RvmFri {
+        match profile {
+            FriProfile::Test => RvmFri { log_blowup: 2, num_queries: 16, query_pow_bits: 4 },
+            FriProfile::Production => RvmFri { log_blowup: 2, num_queries: 92, query_pow_bits: 24 },
+        }
+    }
+}
+
 /// How this machine commits each instance's quotient chunks (`docs/05-quotient-layout.md`): one
 /// matrix per instance, salted once, instead of Plonky3's one matrix per chunk — the prover's
 /// largest memory term cut by about 60 % of itself. A property of the machine, pinned here like the
@@ -91,12 +116,12 @@ pub mod backend;
 /// seeds the PCS's own random codewords/quotient blinding. Kept private: callers pick a seeding
 /// strategy through `make_config` (fresh OS entropy, for proving) or `key_config`
 /// (deterministic, for a preprocessed commitment any verifier can recompute).
-fn build_config(profile: FriProfile, mmcs_rng: SaltRng, pcs_rng: SaltRng) -> Config {
+fn build_config(fri: RvmFri, mmcs_rng: SaltRng, pcs_rng: SaltRng) -> Config {
     let perm = permutation();
     let hash = Hash::new(perm.clone());
     let compress = Compress::new(perm);
     let val_mmcs = ValMmcs::new(hash, compress, 2, mmcs_rng);
-    generic_config(profile, Dft::default(), val_mmcs, pcs_rng)
+    generic_config(fri, Dft::default(), val_mmcs, pcs_rng)
 }
 
 /// The FRI/PCS setup, written once over any value-MMCS and DFT. Every backend goes through
@@ -105,7 +130,7 @@ fn build_config(profile: FriProfile, mmcs_rng: SaltRng, pcs_rng: SaltRng) -> Con
 /// `ValMmcs`/`Radix2DitParallel` pair, and `backend`'s `reference_config`/`cuda_config` call it
 /// with theirs (`research/src/machine.rs`'s `generic_config`, mirrored).
 fn generic_config<D, M>(
-    profile: FriProfile,
+    fri: RvmFri,
     dft: D,
     val_mmcs: M,
     pcs_rng: SaltRng,
@@ -115,24 +140,24 @@ where
     M: p3_commit::Mmcs<Val, MultiProof: Sync, Error: Sync> + Clone,
 {
     let challenge_mmcs = ExtensionMmcs::new(val_mmcs.clone());
-    let fri = p3_fri::FriParameters {
-        log_blowup: 3,
+    let p = p3_fri::FriParameters {
+        log_blowup: fri.log_blowup,
         log_final_poly_len: 0,
         max_log_arity: 3,
-        num_queries: profile.num_queries(),
+        num_queries: fri.num_queries,
         commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: profile.pow_bits(),
+        query_proof_of_work_bits: fri.query_pow_bits,
         mmcs: challenge_mmcs,
     };
-    let pcs = HidingFriPcs::new(dft, val_mmcs, fri, 4, pcs_rng);
+    let pcs = HidingFriPcs::new(dft, val_mmcs, p, 4, pcs_rng);
     StarkConfig::new(pcs, Challenger::new(permutation()))
 }
 
 /// The deterministic config behind `verifier_key`: any verifier recomputes the same preprocessed
 /// commitment from `(program, tier, reduce)` alone — `research`'s `key_config`, verbatim in role.
-fn key_config(profile: FriProfile) -> Config {
+fn key_config(fri: RvmFri) -> Config {
     let (mmcs_rng, pcs_rng) = key_rngs();
-    build_config(profile, mmcs_rng, pcs_rng)
+    build_config(fri, mmcs_rng, pcs_rng)
 }
 
 fn key_rngs() -> (SaltRng, SaltRng) {
@@ -140,7 +165,7 @@ fn key_rngs() -> (SaltRng, SaltRng) {
 }
 
 pub fn make_config(profile: FriProfile) -> Config {
-    build_config(profile, SaltRng::fresh(), SaltRng::fresh())
+    build_config(RvmFri::of(profile), SaltRng::fresh(), SaltRng::fresh())
 }
 
 /// The rVM tier ladder (plan R2): stride 2 through the cheap-test sizes, then every rung near the
@@ -371,11 +396,17 @@ impl KeyCache {
     }
 }
 
-pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<KeyCache> }
+pub struct Machine { pub config: Config, pub profile: FriProfile, pub fri: RvmFri, keys: Mutex<KeyCache> }
 
 impl Machine {
     pub fn new(profile: FriProfile) -> Self {
-        Self { config: make_config(profile), profile, keys: Mutex::new(KeyCache::default()) }
+        Self::with_fri(profile, RvmFri::of(profile))
+    }
+
+    /// A machine under an explicit regime — the tests' entry (a rate-⅛ proof to show refused;
+    /// `docs/07`). Every machine a node or an aggregator runs is `new(profile)`'s.
+    pub fn with_fri(profile: FriProfile, fri: RvmFri) -> Self {
+        Self { config: build_config(fri, SaltRng::fresh(), SaltRng::fresh()), profile, fri, keys: Mutex::new(KeyCache::default()) }
     }
 
     /// The preprocessed commitment for `(program, tier, reduce_log_height)` (R6), cached. The chip set
@@ -391,7 +422,7 @@ impl Machine {
         // reduce table is built at its own declared height, because its preprocessed region (Cut D:
         // the program's reduce layout) is committed at that height.
         let degrees = log_ext_degrees(program, tier, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, reduce_log_height);
-        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &airs, &degrees).common);
+        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.fri), &airs, &degrees).common);
         self.keys.lock().unwrap().insert(key, common.clone());
         common
     }
@@ -608,7 +639,7 @@ impl Machine {
         // Built with `key_config` so the preprocessed tree's commitment matches exactly what a
         // verifier recomputes via `verifier_key`; `prove_batch` itself runs against
         // `self.config` (fresh entropy) for the main/quotient/permutation commitments.
-        let key_cfg = key_config(self.profile);
+        let key_cfg = key_config(self.fri);
         let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &log_ext_degrees(program, tier, traces.reg_log_height, traces.ram_log_height, traces.poseidon2_log_height, traces.reduce_log_height));
         let batch = prove_batch_with_layout(&self.config, &instances, &prover_data, layout);
         Proof {
@@ -793,7 +824,7 @@ pub fn max_constraint_degrees(program: &Program, tier: Tier) -> Vec<usize> {
 /// provider_rows(..))`), not the bare floor; the symbolic degree is height-invariant either way.
 pub fn max_constraint_degrees_declaring(program: &Program, tier: Tier, reduce: bool) -> Vec<usize> {
     let machine = Machine::new(FriProfile::Test);
-    let key_cfg = key_config(machine.profile);
+    let key_cfg = key_config(machine.fri);
     let arc = Arc::new(program.clone());
     let reduce_log_height = if reduce { crate::tables::reduce::reduce_log_height(1, provider_rows(&program.reduce_layout)) } else { 0 };
     let airs = chips(&arc, tier, reduce_log_height);

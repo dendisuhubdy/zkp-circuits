@@ -26,7 +26,10 @@ use p3_field::PrimeCharacteristicRing;
 
 /// (log_blowup, num_queries, query_pow_bits).
 const OLD: (usize, usize, usize) = (3, 80, 20);
-const NEW: (usize, usize, usize) = (2, 92, 24);
+fn new_regime() -> (usize, usize, usize) {
+    let f = recursion::machine::RvmFri::of(FriProfile::Production);
+    (f.log_blowup, f.num_queries, f.query_pow_bits)
+}
 
 /// The production exit's declared heights (`docs/06` §3): cpu `2^20`, reg `2^21`, ram `2^21`,
 /// poseidon2 `2^16`, reduce `2^18`; the tallest *extended* table is `2^22`. The program table is
@@ -158,10 +161,10 @@ fn the_new_rvm_profile_is_not_below_todays_proven_floor() {
     let (air, by_matrix, inst, bus) = real_shape();
     // Informational: batching counted per committed matrix (the optimistic count).
     bits("matrices", OLD, &air, &by_matrix, &bus);
-    bits("matrices", NEW, &air, &by_matrix, &bus);
+    bits("matrices", new_regime(), &air, &by_matrix, &bus);
     // Asserted: batching counted per codeword (the conservative count FRI really combines).
     let (old_paper, old_p3, _, _) = bits("codewords", OLD, &air, &inst, &bus);
-    let (new_paper, new_p3, new_conj, new_legacy) = bits("codewords", NEW, &air, &inst, &bus);
+    let (new_paper, new_p3, new_conj, new_legacy) = bits("codewords", new_regime(), &air, &inst, &bus);
     // The calibration: today's regime reproduces the paper's ≈ 86 proven bits.
     assert!((old_paper - 86.4).abs() < 0.2, "the paper's own figure for 80/8/20: {old_paper:.2}");
     assert!(old_p3 >= 85.0, "p3-security at today's regime over the real shape: {old_p3:.2}");
