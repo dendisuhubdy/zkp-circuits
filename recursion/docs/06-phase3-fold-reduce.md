@@ -746,8 +746,8 @@ gate**. In order of leverage:
    The reduce chip's own "read `px` once for a matrix's two points" (spec §2.5) would cut chip
    rows, not cpu rows: the `reduce` span is 20 001 cpu rows now, 3.4 %, and not a gate lever.
 4. **The proofs this box cannot run** (§6): the test N=2 and N=3 aggregates (≈ 52 and ≈ 78 GB
-   projected; the N=3 one's tier assertion moved 20 → 19 this phase and no proof has exercised
-   it), the production exit and N=1 aggregate (≈ 110–130 GB), and the production N≥2
+   projected — the test N=2 aggregate proved on this box since docs/07; the N=3 one's tier
+   assertion moved 20 → 19 this phase and no proof has exercised it), the production exit and N=1 aggregate (≈ 110–130 GB), and the production N≥2
    aggregates. They want a ≥ 128 GB host for the test shapes and ≥ 160 GB for production N=1;
    the projections in §3 become measurements there.
 5. **The reduce chip's N ceiling** (§3, the final fix wave): `REDUCE_MAX_LOG_HEIGHT = 20` caps

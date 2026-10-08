@@ -20,10 +20,11 @@ and grinding counts are the price of keeping the proven floor where the paper's 
 under the whitepaper's own unique-decoding theorem the new regime gives **86.38 bits** against
 today's **86.41**, and `p3-security`'s best proven bound over the rVM's real chip shapes gives the
 same two figures. Measured on the test profile: the tier-18 exit twin's peak live heap
-**26.88 → 15.64 GB (×0.58)**, its verify 7.07 → 3.53 s, its prove time unchanged; the test N=2
-aggregate (tier 19), projected at ≈ 52 GB in `docs/06` and never run before, **proved and verified
-on this box**. Projected from the twin's ratio, the production N=1 aggregate falls from
-≈ 110–130 GB to **≈ 64–75 GB** — a ≥ 96 GB host, not yet the ≤ 64 GB class.
+**26.88 → 15.64 GB (×0.58)**, its verify 7.07 → 3.53 s, its prove time about the same (+2 %);
+the test N=2 aggregate (tier 19), projected at ≈ 52 GB in `docs/06` and never run before,
+**proved and verified on this box**. Projected from the twin's ratio, the production N=1
+aggregate falls from ≈ 110–130 GB to **≈ 64–75 GB** — a ≥ 96 GB host, not yet the ≤ 64 GB
+class.
 
 ## 1. The security argument
 
@@ -135,15 +136,14 @@ verify 6.67 s, 268 168 B, same 26.88 GB peak); the before column here is today's
 **The test N=2 aggregate** (`two_test_profile_bundle_proofs_aggregate_and_verify_natively`, run
 alone): it proved, its `RvmTier(19)` assertion held, it verified natively and its eight outputs
 matched. The test prints **no heap figure** — it is not under the heap profiler — so its peak live
-heap is not measured. `/usr/bin/time` around the run reports a `maximum resident set size` of
-22.8 GB (22 833 594 368 B) for the largest process under cargo; as `docs/04` says of macOS RSS,
-that is not a memory number. What is measured is the outcome: a tier-19 rVM proof that `docs/06`
-§6 listed among "the proofs this box cannot run" now runs here.
+heap is not measured. What is measured is the outcome: a tier-19 rVM proof that `docs/06` §6
+listed among "the proofs this box cannot run" now runs here.
 
 **Why the twin's heap fell and its prove time did not.** The twin's span log (`prove_batch`,
 141.7 → 148.5 s) shows three phases that got faster and one that got slower: `compute quotient`
-67.8 → 62.1 s, the four `build merkle tree` commits inside it 29.4 → 26.3 s (10.4 + 6.2 + 8.9 +
-3.9 → 11.7 + 7.1 + 4.1 + 3.4), the `FRI prover` 7.4 → 4.2 s — and the two `randomize polys` spans
+67.8 → 62.1 s; the four `build merkle tree` commits, its siblings under `prove_batch` (two before
+it, two after), 29.4 → 26.3 s (10.4 + 6.2 + 8.9 + 3.9 → 11.7 + 7.1 + 4.1 + 3.4); the `FRI
+prover` 7.4 → 4.2 s — and the two `randomize polys` spans
 **25.6 → 41.7 s** (16.6 + 9.0 → 28.0 + 13.7), the time inside their `with_random_cols` children.
 The +16.1 s of `randomize polys` cancels the ≈ 12 s saved elsewhere. The span log shows where the
 time went; it does not say why `randomize polys` is slower over a smaller domain, and this record
@@ -155,9 +155,10 @@ does not guess. The tier-16 synthetic shows no such rise (`randomize polys` 3.9 
 verify window is dominated by the verifier key's own commitment — the preprocessed program
 table's coset LDE and Merkle tree, built inside `verify` (`build merkle tree` 0.8 → 0.4 s) — and
 an unspanned interval between the two, 6.0 s before (149.1 → 155.1 s) and 2.9 s after (152.2 →
-155.1 s), which the span log does not name. Both halved; that is the ×0.50. Proof bytes fell 2–3 %: one Merkle level fewer per opened path at 16
-queries. The production profile's +12 queries (+15 % of the query-phase work and of the
-query-dependent bytes) is **not measured** here; no production rVM proof runs on this box.
+155.1 s), which the span log does not name. Both halved; that is the ×0.50. Proof bytes fell
+2–3 %: one Merkle level fewer per opened path at 16 queries. The production profile's +12
+queries (+15 % of the query-phase work and of the query-dependent bytes) is **not measured**
+here; no production rVM proof runs on this box.
 
 ## 4. What it means for the hardware plan
 
@@ -178,13 +179,14 @@ LDE term halved, the error bar the model's own ±10 % — gives:
 
 Each projected range is `docs/06`'s range × 0.58. By the re-weighted unit, `docs/06`'s
 twin-anchored production figure (108 GB) becomes 21 516 × 0.0029 = 63 GB, inside the error bar of
-the table's 64 (which starts from `docs/06`'s rounded 110). **The ≤ 64 GB class (`compute-optimization.md` §4.4) is at the edge, not met:** the
-low end of the range touches it, the range does not fit under it, and nothing at production has
-been measured. The ×0.58 is the twin's; the tier-16 synthetic measured ×0.64, so the ratio depends on
-the shape and the high end is the planning figure. The production
-profile's 92 queries add query-phase transients that the Test-profile twin does not carry (the
-committed terms are unaffected). Every line above except the two measured ones is a projection
-until a production proof runs on a ≥ 96 GB host.
+the table's 64 (which starts from `docs/06`'s rounded 110). **The ≤ 64 GB class (the fullnode
+repository's `docs/compute-optimization.md` §4.4) is at the edge, not met:** the low end of the
+range touches it, the range does not fit under it, and nothing at production has been measured.
+The ×0.58 is the twin's; the tier-16 synthetic measured ×0.64, so the ratio depends on the shape
+and the high end is the planning figure. The production profile's 92 queries add query-phase
+transients that the Test-profile twin does not carry (the committed terms are unaffected). Every
+line above except the two measured ones is a projection until a production proof runs on a
+≥ 96 GB host.
 
 ## 5. What moved
 
