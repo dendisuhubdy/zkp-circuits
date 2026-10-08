@@ -1,0 +1,124 @@
+warning: unused import: `ShapeKey`
+  --> src/witness.rs:24:54
+   |
+24 | use crate::shape::{InnerKey, InnerShape, ProofBatch, ShapeKey, VerifierShape, CAP_HEIGHT};
+   |                                                      ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `recursion` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.09s
+     Running tests/profile.rs (target/release/deps/profile-c9181f744cd16c4c)
+
+running 1 test
+== profile Test: inner tier Tier(14), 169366 cpu rows, 11875 permutations, 442445 mem accesses, 411319 reg accesses, 46187 witness words, 171771 program instrs
+-- shape: log_arities [1, 1, 2, 2, 2, 1, 3, 3, 2] (sum of arities 38), degree_bits [13, 15, 17, 16, 9, 9, 17, 11, 8], queries 16
+-- builder stats: spills 3146 reloads 51531 perms 11875 cells 58352 live_max 25
+-- rows by phase (program instructions in emission order)
+        1093    0.6%  phases 0-4: header, transcript, commitments, terminal sum
+       26404   15.4%  phase 5: constraint evaluation at zeta
+       50869   29.6%  phase 6 preamble: claimed evals, betas, final poly, pow, indices
+        9899    5.8%  query segments: tape reads
+       83016   48.3%  queries: merkle walks, reduction, folds
+         489    0.3%  phase 8: the interface digest (R5)
+      171770  total
+-- executed opcode histogram
+       61790   36.5%  LOAD
+       16993   10.0%  STORE
+       15787    9.3%  FADDI
+       10531    6.2%  LOADE
+        7189    4.2%  SPONGE
+        6624    3.9%  EMUL
+        6146    3.6%  FMUL
+        6100    3.6%  STOREE
+        5712    3.4%  MOV
+        5006    3.0%  HINTN
+        3887    2.3%  FADD
+        3511    2.1%  EADD
+        3248    1.9%  COMPRESS
+        2780    1.6%  FSUB
+        2405    1.4%  JEQ
+        2174    1.3%  HINTE
+        1977    1.2%  ESUB
+        1904    1.1%  REDUCE
+        1791    1.1%  HINT
+        1438    0.8%  POSEIDON2
+        1343    0.8%  FMULI
+         256    0.2%  POW
+         251    0.1%  EINV
+         230    0.1%  EMULF
+         144    0.1%  INV
+         144    0.1%  FOLD
+           4    0.0%  PUBLIC
+           1    0.0%  HALT
+-- rows per call site (executed; reloads and spills inside it; per query; every opcode, most frequent first)
+       75554   44.6%  (none)               reload   21096 spill   2037  /query   4722.1  [LOAD 21467, LOADE 9491, STORE 8710, EMUL 6384, STOREE 5786, HINTN 4878, MOV 4528, FADDI 3690, EADD 3415, HINTE 2174, ESUB 1833, HINT 1710, POSEIDON2 1178, EMULF 86, JEQ 82, FSUB 73, SPONGE 37, EINV 27, PUBLIC 4, HALT 1]
+       12156    7.2%  sample_bits          reload    2672 spill   1041  /query    759.8  [LOAD 3712, FMUL 1666, FSUB 1139, JEQ 1139, FADDI 1104, FADD 1071, FMULI 1071, STORE 1031, HINTN 128, HINT 81, STOREE 10, POSEIDON2 4]
+       48919   28.9%  input_root           reload   18883 spill      3  /query   3057.4  [LOAD 23507, FADDI 8305, SPONGE 6704, STORE 4947, COMPRESS 1840, FMUL 1600, FADD 960, FSUB 480, JEQ 320, POSEIDON2 256]
+        4001    2.4%  reduce               reload     304 spill     65  /query    250.1  [REDUCE 1904, MOV 896, LOADE 416, STOREE 304, FSUB 224, EINV 224, FADDI 32, STORE 1]
+        1536    0.9%  bit_selected_power   reload     512 spill      0  /query     96.0  [LOAD 768, FADDI 512, POW 256]
+        1536    0.9%  select               reload     272 spill      0  /query     96.0  [MOV 288, JEQ 288, FMULI 272, LOAD 272, ESUB 144, LOADE 144, FADD 128]
+        1008    0.6%  fold_round           reload     432 spill      0  /query     63.0  [LOAD 288, LOADE 288, EMULF 144, INV 144, FOLD 144]
+       24128   14.2%  commit_root          reload    7168 spill      0  /query   1508.0  [LOAD 11776, FMUL 2880, STORE 2304, FADDI 2144, FADD 1728, COMPRESS 1408, FSUB 864, JEQ 576, SPONGE 448]
+         528    0.3%  roll_in              reload     192 spill      0  /query     33.0  [EMUL 240, LOADE 192, EADD 96]
+-- reloads 51531, spills 3146
+-- reduce dispatches 1904
+-- ram accesses: 290428 reads, 152017 writes; max_addr 4250914
+== profile Production: inner tier Tier(14), 585686 cpu rows, 54515 permutations, 1903581 mem accesses, 1290039 reg accesses, 212203 witness words, 597259 program instrs
+-- shape: log_arities [1, 1, 2, 2, 2, 1, 3, 3, 2] (sum of arities 38), degree_bits [13, 15, 17, 16, 9, 9, 17, 11, 8], queries 80
+-- builder stats: spills 10826 reloads 176283 perms 54515 cells 250224 live_max 25
+-- rows by phase (program instructions in emission order)
+        1093    0.2%  phases 0-4: header, transcript, commitments, terminal sum
+       26404    4.4%  phase 5: constraint evaluation at zeta
+      101125   16.9%  phase 6 preamble: claimed evals, betas, final poly, pow, indices
+       49515    8.3%  query segments: tape reads
+      418632   70.1%  queries: merkle walks, reduction, folds
+         489    0.1%  phase 8: the interface digest (R5)
+      597258  total
+-- executed opcode histogram
+      226030   38.6%  LOAD
+       67307   11.5%  FADDI
+       60129   10.3%  STORE
+       35797    6.1%  SPONGE
+       30338    5.2%  FMUL
+       24910    4.3%  HINTN
+       19183    3.3%  FADD
+       16240    2.8%  COMPRESS
+       14755    2.5%  LOADE
+       13484    2.3%  FSUB
+       11573    2.0%  JEQ
+       10704    1.8%  MOV
+        9520    1.6%  REDUCE
+        8575    1.5%  HINT
+        7584    1.3%  EMUL
+        7316    1.2%  STOREE
+        6463    1.1%  FMULI
+        3895    0.7%  EADD
+        2553    0.4%  ESUB
+        2478    0.4%  POSEIDON2
+        2174    0.4%  HINTE
+        1280    0.2%  POW
+        1147    0.2%  EINV
+         806    0.1%  EMULF
+         720    0.1%  INV
+         720    0.1%  FOLD
+           4    0.0%  PUBLIC
+           1    0.0%  HALT
+-- rows per call site (executed; reloads and spills inside it; per query; every opcode, most frequent first)
+      115778   19.8%  (none)               reload   21160 spill   5429  /query   1447.2  [HINTN 24270, LOAD 21467, STORE 18822, LOADE 9555, HINT 8430, FADDI 7082, EMUL 6384, STOREE 5786, MOV 4784, EADD 3415, HINTE 2174, ESUB 1833, POSEIDON2 1178, JEQ 226, FSUB 217, EMULF 86, SPONGE 37, EINV 27, PUBLIC 4, HALT 1]
+       58076    9.9%  sample_bits          reload   12736 spill   5073  /query    726.0  [LOAD 17936, FMUL 7938, FSUB 5427, JEQ 5427, FADDI 5264, FADD 5103, FMULI 5103, STORE 5063, HINTN 640, HINT 145, POSEIDON2 20, STOREE 10]
+      248151   42.4%  input_root           reload   97987 spill      3  /query   3101.9  [LOAD 121107, FADDI 41521, SPONGE 33520, STORE 24723, COMPRESS 9200, FMUL 8000, FADD 4800, FSUB 2400, JEQ 1600, POSEIDON2 1280]
+       20001    3.4%  reduce               reload    1520 spill    321  /query    250.0  [REDUCE 9520, MOV 4480, LOADE 2080, STOREE 1520, FSUB 1120, EINV 1120, FADDI 160, STORE 1]
+        7680    1.3%  bit_selected_power   reload    2560 spill      0  /query     96.0  [LOAD 3840, FADDI 2560, POW 1280]
+        7680    1.3%  select               reload    1360 spill      0  /query     96.0  [MOV 1440, JEQ 1440, FMULI 1360, LOAD 1360, ESUB 720, LOADE 720, FADD 640]
+        5040    0.9%  fold_round           reload    2160 spill      0  /query     63.0  [LOAD 1440, LOADE 1440, EMULF 720, INV 720, FOLD 720]
+      120640   20.6%  commit_root          reload   35840 spill      0  /query   1508.0  [LOAD 58880, FMUL 14400, STORE 11520, FADDI 10720, FADD 8640, COMPRESS 7040, FSUB 4320, JEQ 2880, SPONGE 2240]
+        2640    0.5%  roll_in              reload     960 spill      0  /query     33.0  [EMUL 1200, LOADE 960, EADD 480]
+-- reloads 176283, spills 10826
+-- reduce dispatches 9520
+-- ram accesses: 1254540 reads, 649041 writes; max_addr 4438050
+test where_the_rows_go ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.34s
+
+EXIT 0
