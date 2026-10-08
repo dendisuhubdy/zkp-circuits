@@ -29,7 +29,9 @@ const OLD: (usize, usize, usize) = (3, 80, 20);
 const NEW: (usize, usize, usize) = (2, 92, 24);
 
 /// The production exit's declared heights (`docs/06` §3): cpu `2^20`, reg `2^21`, ram `2^21`,
-/// poseidon2 `2^16`, reduce `2^18`, program `2^20`; the tallest *extended* table is `2^22`.
+/// poseidon2 `2^16`, reduce `2^18`; the tallest *extended* table is `2^22`. The program table is
+/// the toy program's (tiny, not the exit's `2^20`): the bound reads the chips' constraint systems
+/// and the tallest height, neither of which depends on the program.
 const PRODUCTION: (Tier, u8, u8, u8, u8) = (Tier(20), 21, 21, 16, 18);
 
 fn regime(p: (usize, usize, usize)) -> p3_security::fri::FriRegime {
@@ -66,8 +68,9 @@ fn toy() -> Arc<Program> {
 
 /// The real shape of this machine's batch at the production exit, as `p3-security` wants it:
 /// the AIR parameters over every chip (constraint count summed, degree and combo maxed), the
-/// instance shape at the tallest extended height, the LogUp bus, and the committed-matrix count.
-fn real_shape() -> (StarkAirParams, InstanceShape, LogUpAir) {
+/// instance shape at the tallest extended height (twice: batching over the committed-matrix count,
+/// and over the codeword count FRI actually combines with powers of alpha), and the LogUp bus.
+fn real_shape() -> (StarkAirParams, InstanceShape, InstanceShape, LogUpAir) {
     let (tier, reg, ram, pos, red) = PRODUCTION;
     let program = toy();
     let shape = RvmShape::of(FriProfile::Production, &program, tier, reg, ram, pos, red);
@@ -97,20 +100,45 @@ fn real_shape() -> (StarkAirParams, InstanceShape, LogUpAir) {
     let n = airs.len();
     let with_lookups = shape.num_lookups.iter().filter(|&&k| k > 0).count();
     let preprocessed = shape.preprocessed_widths.iter().filter(|&&w| w > 0).count();
-    let air = StarkAirParams { num_constraints, max_constraint_degree: max_degree, max_combo: max_degree };
-    let inst = InstanceShape {
+    // `max_combo` is the out-of-domain points a column is opened at (zeta, zeta·g), not the degree.
+    let air = StarkAirParams { num_constraints, max_constraint_degree: max_degree, max_combo: 2 };
+    // random + main + quotient (one per instance since docs/05) + preprocessed + permutation.
+    let matrices = n + n + n + preprocessed + with_lookups;
+    // The codewords FRI batches: every column of every committed matrix at every opening point.
+    const DIMENSION: usize = 2; // Challenge over Val
+    const HIDING: usize = 4; // the hiding wrapper's random codewords per committed matrix
+    let pts = |next: bool| 1 + next as usize;
+    let random = n * DIMENSION;
+    let main: usize = (0..n).map(|i| (shape.widths[i] + HIDING) * pts(shape.main_next[i])).sum();
+    let quotient: usize = (0..n)
+        .map(|i| 2 * ((1usize << shape.log_num_quotient_chunks[i]) << 1) + HIDING)
+        .sum();
+    let pre: usize = (0..n)
+        .filter(|&i| shape.preprocessed_widths[i] > 0)
+        .map(|i| shape.preprocessed_widths[i] * pts(shape.pre_next[i]))
+        .sum();
+    let perm: usize = (0..n)
+        .filter(|&i| shape.num_lookups[i] > 0)
+        .map(|i| ((shape.num_lookups[i] + 1) * DIMENSION + HIDING) * 2)
+        .sum();
+    let codewords = random + main + quotient + pre + perm;
+    let inst_at = |num_batched_functions| InstanceShape {
         log_trace_length: *shape.degree_bits.iter().max().unwrap(),
         modulus_bits: <Challenge as Field>::bits(),
         collision_resistance: 128,
-        // random + main + quotient (one per instance since docs/05) + preprocessed + permutation.
-        num_batched_functions: n + n + n + preprocessed + with_lookups,
+        num_batched_functions,
     };
+    let (by_matrix, by_codeword) = (inst_at(matrices), inst_at(codewords));
     let bus = LogUpAir { num_interactions, max_message_width };
-    eprintln!("real shape: {air:?} {inst:?} {bus:?}");
-    (air, inst, bus)
+    eprintln!("real shape: {air:?} {by_codeword:?} {bus:?}");
+    eprintln!(
+        "batched functions: {matrices} matrices; {codewords} codewords \
+         (random {random}, main {main}, quotient {quotient}, preprocessed {pre}, permutation {perm})"
+    );
+    (air, by_matrix, by_codeword, bus)
 }
 
-fn bits(p: (usize, usize, usize), air: &StarkAirParams, inst: &InstanceShape, bus: &LogUpAir) -> (f64, f64, f64, f64) {
+fn bits(tag: &str, p: (usize, usize, usize), air: &StarkAirParams, inst: &InstanceShape, bus: &LogUpAir) -> (f64, f64, f64, f64) {
     let r = regime(p);
     let g = GrindingSites::NONE;
     let term = logup::security_term(bus, inst, &g).expect("the batch has a LogUp bus");
@@ -118,7 +146,7 @@ fn bits(p: (usize, usize, usize), air: &StarkAirParams, inst: &InstanceShape, bu
     let conj = conjectured_security_report(&r, air, inst, &[term], &g);
     let (reg, bind) = proven.binding();
     eprintln!(
-        "regime {p:?}: paper-UDR {:.2}, p3 proven {:.2} (binds {} in {reg:?}; UDR {:.2}), conjectured {:.2}, legacy {}",
+        "[{tag}] regime {p:?}: paper-UDR {:.2}, p3 proven {:.2} (binds {} in {reg:?}; UDR {:.2}), conjectured {:.2}, legacy {}",
         paper_udr_bits(p), proven.security_bits(), bind.label, proven.udr.security_bits(), conj.security_bits(),
         p.0 * p.1 + p.2
     );
@@ -127,9 +155,13 @@ fn bits(p: (usize, usize, usize), air: &StarkAirParams, inst: &InstanceShape, bu
 
 #[test]
 fn the_new_rvm_profile_is_not_below_todays_proven_floor() {
-    let (air, inst, bus) = real_shape();
-    let (old_paper, old_p3, _, _) = bits(OLD, &air, &inst, &bus);
-    let (new_paper, new_p3, new_conj, new_legacy) = bits(NEW, &air, &inst, &bus);
+    let (air, by_matrix, inst, bus) = real_shape();
+    // Informational: batching counted per committed matrix (the optimistic count).
+    bits("matrices", OLD, &air, &by_matrix, &bus);
+    bits("matrices", NEW, &air, &by_matrix, &bus);
+    // Asserted: batching counted per codeword (the conservative count FRI really combines).
+    let (old_paper, old_p3, _, _) = bits("codewords", OLD, &air, &inst, &bus);
+    let (new_paper, new_p3, new_conj, new_legacy) = bits("codewords", NEW, &air, &inst, &bus);
     // The calibration: today's regime reproduces the paper's ≈ 86 proven bits.
     assert!((old_paper - 86.4).abs() < 0.2, "the paper's own figure for 80/8/20: {old_paper:.2}");
     assert!(old_p3 >= 85.0, "p3-security at today's regime over the real shape: {old_p3:.2}");
