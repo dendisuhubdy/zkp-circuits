@@ -170,7 +170,10 @@ on a 48 GB box, 94.2 GB peak on Linux). Since phase 2's row cuts the exit is 893
 until it is proved. Since phase 3 (`docs/06-phase3-fold-reduce.md` §3) it is 585 686 rows, still
 tier 20, with both memory tables at `2^21`; the same cell-weighted model projects **≈ 110–130 GB**
 (108 GB anchored on the tier-18 twin measured at 26.88 GB live on this box, 123–127 GB anchored on
-docs/05's projection) — a ≥ 160 GB host, until it is proved.
+docs/05's projection) — a ≥ 160 GB host, until it is proved. Since `docs/07` the rVM proves at
+rate ¼ (`machine::RvmFri`: 92 queries, 24 grinding bits, 86.38 proven bits against 86.41): every
+LDE term in that list halves; the measured twin is 15.64 GB live (×0.58), and the exit is
+projected at ≈ 64–75 GB — a ≥ 96 GB host, until it is proved.
 
 **Measured 2026-09-30 (constraint set 8, a 503 GB box, fullnode #45): the exit proves in
 8 164.8 s, verifies in 99.3 s, is 1 566 619 bytes, and peaks at 376.9 GB resident** — 7.8× the

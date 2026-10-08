@@ -39,7 +39,9 @@ self-verifier, written with its measured requirement. Its measured records are
 aggregate economics), `03` (GPU + self-recursion, the 11-row big-machine
 runbook), `04` (phase 2's row cuts and the prover's measured live heap), `05` (the
 quotient layout), `06` (phase 3's cuts; the tier-18 twin proves on 48 GB at
-26.88 GB live); plans/specs in `docs/superpowers/`. **Open only on hardware**: the
+26.88 GB live), `07` (the rVM's own FRI profile at rate ¼ — `RvmFri`: 92 queries, 24
+grinding bits, 86.38 proven bits against 80/8/20's 86.41 under the paper's theorem; the twin at
+15.64 GB live, the production N=1 projected at ≈ 64–75 GB); plans/specs in `docs/superpowers/`. **Open only on hardware**: the
 PTX first build and the production N re-measurement, blocked on a fleet GPU
 node (80 GB device, ≥ 160 GB host; `PTX_BUILD.md`); the deferred proofs
 (M5.2's exit — tier 20 since phase 2 —, N≥2 twins, the self-proof) run on the

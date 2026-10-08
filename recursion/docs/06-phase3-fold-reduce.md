@@ -735,7 +735,12 @@ gate**. In order of leverage:
    a consensus decision for the paper and the node, not a row cut for this crate. The rVM's
    *own* profile is a separate lever with the opposite sign for memory: `log_blowup 3 → 2` for
    rVM proofs halves every LDE term of §3's table at ~1.5× the rVM's own queries (docs/04's
-   memory candidate 3) — the lever for §3's ≈ 110–130 GB, not for the cpu rows.
+   memory candidate 3) — the lever for §3's ≈ 110–130 GB, not for the cpu rows. **Done
+   (2026-10-06, `docs/07`):** at 92 queries and 24 grinding bits — equal to 80/8/20 under the
+   paper's unique-decoding theorem (`92 × 0.678 + 24 = 86.38` against 86.41, and the same under
+   `p3-security` over the real chip shapes), not the ~120 queries reasoned above, which is where
+   the field term saturates; measured, the tier-18 twin's peak live heap 26.88 → 15.64 GB (×0.58),
+   and the production N=1 projected at ≈ 64–75 GB.
 3. **The rest of the program, for scale.** Outside the query spans: the tape reads, preamble and
    phase 5 (`(none)`, 115 778 rows, 21 160 reloads) and `sample_bits` (58 076, 12 736 reloads).
    The reduce chip's own "read `px` once for a matrix's two points" (spec §2.5) would cut chip

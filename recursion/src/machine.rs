@@ -57,8 +57,9 @@ pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
 /// `FriProfile`: 80 queries, rate ⅛, 20 grinding bits) sizes the proofs this machine *verifies*;
 /// these size the proofs it *makes*. Rate ¼ halves every LDE and tree the prover holds; twelve
 /// more queries and four more grinding bits keep the proven floor where the paper's 80/8/20 put
-/// it — under the paper's own unique-decoding theorem (92 × 0.678 + 24 = 86.4 bits) and under
-/// `p3-security`'s list-decoding regime (88.0) alike; `tests/security.rs` pins both (docs/07).
+/// it — under the paper's own unique-decoding theorem (92 × 0.678 + 24 = 86.38 bits against 86.41)
+/// and under `p3-security`'s best proven bound over the real chip shapes (86.38 too: the low-degree
+/// test binds in both regimes); `tests/security.rs` pins both (docs/07).
 /// Consensus-facing like the inner profile: the chain's `fri_profile` name binds both parameter
 /// sets, and a proof made under another regime is refused by `verify` (`tests/machine.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
