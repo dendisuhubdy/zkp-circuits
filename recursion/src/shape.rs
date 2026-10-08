@@ -1014,6 +1014,24 @@ impl RvmShape {
         Ok(shape)
     }
 
+    /// The shape a proof of `program` declares: [`RvmShape::of`] over the proof's own header
+    /// (tier and the four declared heights). How a tree step's child shape is read off a child.
+    pub fn of_proof(
+        profile: FriProfile,
+        program: &std::sync::Arc<crate::isa::Program>,
+        proof: &crate::machine::Proof,
+    ) -> Self {
+        Self::of(
+            profile,
+            program,
+            proof.tier,
+            proof.reg_log_height,
+            proof.ram_log_height,
+            proof.poseidon2_log_height,
+            proof.reduce_log_height,
+        )
+    }
+
     /// The `AirLayout` `verify_batch`'s precompute loop builds for instance `i` —
     /// [`InnerShape::air_layout`], verbatim.
     pub fn air_layout(&self, i: usize, air: &crate::machine::Chip) -> AirLayout {
