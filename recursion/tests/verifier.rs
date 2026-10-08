@@ -83,7 +83,7 @@ fn the_host_transcript_replay_reproduces_machine_verifys_acceptance() {
     assert_eq!(r.betas.len(), shape.log_arities.len());
     assert_eq!(
         r.log_global_max_height,
-        shape.log_arities.iter().sum::<usize>() + recursion::shape::LOG_BLOWUP
+        shape.log_arities.iter().sum::<usize>() + recursion::shape::INNER_LOG_BLOWUP
     );
     // The replay is the transcript, so its zeta must also satisfy the quotient identity the
     // native verifier checked: accumulator * inv_vanishing == quotient, per instance.

@@ -23,7 +23,7 @@ use crate::emulator::Execution;
 use crate::isa::{Program, EF, F};
 use crate::public_values::RVM_PUB_DOMAIN;
 use crate::shape::{
-    natural_domain, InnerKey, InnerShape, ShapeKey, VerifierShape, CAP_HEIGHT, LOG_BLOWUP,
+    natural_domain, InnerKey, InnerShape, ShapeKey, VerifierShape, CAP_HEIGHT,
     NUM_RANDOM_CODEWORDS, RVM_VK_DOMAIN,
 };
 use p3_air::{Air, BaseAir};
@@ -390,7 +390,7 @@ pub fn verify_rv32_with(
 const SALT_ELEMS: usize = hash::SALT_ELEMS;
 
 /// One committed matrix of the opening argument, already merged with the hiding wrapper's hidden
-/// halves: its log-height (`degree_bits[i] + LOG_BLOWUP`), and per opening point the point itself
+/// halves: its log-height (`degree_bits[i] + log_blowup`), and per opening point the point itself
 /// (`zeta`, or the instance's `zeta_next`) and the claimed values at it — the public prefix, then
 /// the four hidden values (none for the preprocessed round) — the order `open_inputs`'
 /// accumulation consumes them in.
@@ -466,7 +466,7 @@ fn observe_claimed<S: VerifierShape>(
         (z, Array::new(out, public.len + n_hidden, 2))
     };
 
-    let h_of = |i: usize| shape.degree_bits()[i] + LOG_BLOWUP;
+    let h_of = |i: usize| shape.degree_bits()[i] + shape.log_blowup();
     let n = shape.instances();
     let mut rounds = Vec::with_capacity(5);
     let mut metas = Vec::with_capacity(5);
@@ -909,7 +909,7 @@ fn emit_reduced_openings_compiled<S: VerifierShape>(
     // The blowup-height entry exists only for a constant (height-1) trace; its reduced opening
     // must then be zero (`FinalPolyMismatch`, `verifier.rs:858-864`). No RV32 instance has
     // `degree_bits == 0`, so this never fires for this machine's shapes.
-    if let Some(&(_, ro)) = acc.get(&LOG_BLOWUP) {
+    if let Some(&(_, ro)) = acc.get(&shape.log_blowup()) {
         let (c0, c1) = b.ext_parts(ro);
         let zero = b.zero();
         b.assert_eq(c0, zero, "reduced opening at the blowup height");
@@ -982,7 +982,7 @@ fn emit_reduced_openings_layout<S: VerifierShape>(
     }
     // The blowup-height entry exists only for a constant trace (`verifier.rs:858-864`); no RV32
     // instance has one, and the chip path does not carry its zero check.
-    assert!(!runs.contains_key(&LOG_BLOWUP), "a reduced opening at the blowup height");
+    assert!(!runs.contains_key(&shape.log_blowup()), "a reduced opening at the blowup height");
     let keys = b.alloc(2 + 2 * invs.len() as u64);
     b.store_ext(keys, 0, fri_alpha);
     for (s, inv) in invs.iter().enumerate() {

@@ -18,3 +18,17 @@ fn a_single_height_is_one_group_in_index_order() {
 fn an_empty_round_has_no_groups() {
     assert!(height_groups(&[]).is_empty());
 }
+
+/// The arity schedule follows the blowup it is given: the same degree bits one height lower at
+/// every round, and the fold ends at the final height `log_blowup + 0`.
+#[test]
+fn the_fri_schedule_is_a_function_of_the_blowup() {
+    use recursion::shape::{fri_schedule_for_tests, INNER_LOG_BLOWUP};
+    // The toy rVM shape's extended degree bits at tier 8 (cpu 9, reg 10, ram 10, poseidon2 9, public 9, range 9, program 9).
+    let bits = [9usize, 9, 10, 10, 9, 9, 9];
+    let at_three = fri_schedule_for_tests(&bits, INNER_LOG_BLOWUP).unwrap();
+    let at_two = fri_schedule_for_tests(&bits, 2).unwrap();
+    assert_eq!(at_three.iter().sum::<usize>() + INNER_LOG_BLOWUP, 10 + INNER_LOG_BLOWUP, "folds from the tallest input height to the final height");
+    assert_eq!(at_two.iter().sum::<usize>() + 2, 10 + 2);
+    assert!(at_two.iter().all(|&a| a >= 1 && a <= 3), "arities stay within max_log_arity: {at_two:?}");
+}

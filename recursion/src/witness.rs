@@ -557,7 +557,7 @@ impl WitnessTape {
 ///
 /// Both bounds are asserted rather than clamped. A round with no matrices, or one whose tallest tree
 /// is shorter than the cap, is not a round this machine's PCS can produce (`cap_height = 2` and
-/// every committed matrix is at least `2^(LOG_BLOWUP + 1)` rows tall) — and silently clamping to
+/// every committed matrix is at least `2^(log_blowup + 1)` rows tall (3 for inner proofs, 2 for the rVM's own)) — and silently clamping to
 /// zero levels would turn that into a walk that checks nothing.
 pub fn levels_for(dims: &[Dimensions]) -> usize {
     let max_height =
