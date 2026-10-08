@@ -51,6 +51,21 @@ Cost (*projected*): 2 × (0.85–1.45 M) + ~300 rows → 1.7–2.9 M cpu rows, t
 - **Errors**: `TreeLayout { covers, leaf_size }`, `TreeDepth`, `TreeKeyPin { level }`, `TreeRootDigest`, `TreeTier`; in-program refusals keep their checkpoint names.
 - **Docs**: `fullnode/docs/aggregation.md` gains the tree rules (AGG-6 per level, AGG-3 on the root, the layout rule, the recompute) and drops "ZKQ-5: decide before trees ship"; `compute-optimization.md` §4.2–§4.4 is corrected (§8).
 
+## 4.1 Resolutions made while planning (binding; they correct §2–§4 where they differ)
+
+The plan (`docs/superpowers/plans/2026-10-08-tree-aggregation.md`, "Design resolutions" R1–R10) found these, and they govern:
+
+- **R1** — `rv32t` is `rv32n`'s counted loop with the constant count 2, not two straight-line emissions, so `verify_n(program, proof, 2)`'s canonical reduce height (static rows × n) is exact. Per-child refusal names are dropped; tamper tests identify the child by the region they corrupt.
+- **R2** — three pinned key digests, not two: `vk_leaf` (children of `rv32t_leaf`), `vk_t_leaf` (children of level-2 steps, which are `rv32t_leaf` proofs), `vk_int` (children of level ≥ 3).
+- **R3** — "one `rv32t_int` for every level ≥ 2" is a measured condition: it holds only if `rv32t_int`'s proofs declare the same shape words as `rv32t_leaf`'s. Tested at both profiles; where it fails, that profile's `max_depth` is 2.
+- **R4** — the genesis carries the leaf and step heights in a top-level `aggregation_tree` section naming its admitted shape, so the node can rebuild the three programs and keys; existing genesis hashes do not move.
+- **R5** — the wrong-cap tamper is two tests: with honest children it is refused in-program (`quotient identity[0]`); with children of a foreign program of identical shape it is refused only at the root recompute.
+- **R6** — the root's tier must equal the pinned step tier exactly (`TreeTier`); the flat path keeps `admitted_tiers`.
+- **R7** — the test-profile steps are *projected* at tier 19 (≈ 52 GB), past the 48 GB laptop: they are proved on the 256 GB droplet and cached for the in-suite tests.
+- **R8** — a `Tree` aggregate is signed under a new domain `rand-aggregate-tree-1`; `Flat` signing is byte-identical to today.
+- **R9** — errors: a root-program digest mismatch reuses `AggregateProgramMismatch` (AGG-6); new `TreeNotAdmitted`, `TreeKeyPin { level }`, `TreeLayout`, `TreeDepth`, `TreeRootDigest`, `TreeTier`.
+- **R10** — the heap harness moves to `tests/heap/mod.rs`, shared by `memprofile.rs` and `tree_measure.rs`.
+
 ## 5. Tasks (one task, one review, one re-pin each) and the gate
 
 0. **Measure first.** Prove one production leaf (L = 2) on the 256 GB droplet; run `rv32r` over it on the 503 GB droplet (the existing k = 1 program, baked cap). Pin: the child verification's rows, tier, live heap and time; the leaf's rows/tier/heap/time/proof bytes. From that, set the band for the interior step (2 × child + overhead, ±15 %). **Stop rule**: if one child verification lands above 1.5 M cpu rows, the k = 2 step exceeds tier 22 and the spec stops for a decision (k = 1 chains, a bigger tier, or the memory track first).
