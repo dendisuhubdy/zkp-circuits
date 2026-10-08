@@ -665,17 +665,17 @@ impl Machine {
             Backend::Reference => {
                 // Fresh entropy for the proving config (hiding), deterministic for the key
                 // config — the same split `make_config`/`key_config` make on the CPU.
-                let cfg = backend::reference_config(self.profile, SaltRng::fresh(), SaltRng::fresh());
+                let cfg = backend::reference_config(self.fri, SaltRng::fresh(), SaltRng::fresh());
                 let (mmcs_rng, pcs_rng) = key_rngs();
-                let key = backend::reference_config(self.profile, mmcs_rng, pcs_rng);
+                let key = backend::reference_config(self.fri, mmcs_rng, pcs_rng);
                 self.prove_on(&cfg, &key, program, witness, tier)
             }
             #[cfg(any(feature = "cuda", feature = "mock-cuda"))]
             Backend::Cuda => {
                 let gpu = rand_zkvm_cuda::gpu::GpuProver::probe(backend::PERM_SEED).map_err(|e| ProveError::Backend(e.to_string()))?;
-                let cfg = backend::cuda_config(self.profile, gpu.clone(), SaltRng::fresh(), SaltRng::fresh());
+                let cfg = backend::cuda_config(self.fri, gpu.clone(), SaltRng::fresh(), SaltRng::fresh());
                 let (mmcs_rng, pcs_rng) = key_rngs();
-                let key = backend::cuda_config(self.profile, gpu, mmcs_rng, pcs_rng);
+                let key = backend::cuda_config(self.fri, gpu, mmcs_rng, pcs_rng);
                 self.prove_on(&cfg, &key, program, witness, tier)
             }
         }
