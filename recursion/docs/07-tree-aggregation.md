@@ -54,12 +54,18 @@ Stop rule (spec §5): C ≤ 1 500 000. It **held** on the emulated C = 575 246, 
 limit. The interior step band (M5) is 2C + O ± 15 %, with O = 300 projected (Task 1a measures
 it at the test profile):
 
-2C + 300 = 1 150 792, so the band is **[978 173, 1 323 411]**, tier 21 (cpu height 2^21; both
-ends are inside tier 21). Spec §3 projected 1.7–2.9 M rows at tier 21 or 22, so the step is now
-expected at the bottom of that range's tier and not tier 22. For comparison, O's analogue in
-`rv32r` is its phase 8 (392 rows: the in-program vk digest and the 17-word interface sponge).
-`rv32t` adds the cap read (32 rows) and the in-program `vk_c` sponge to that, and hints B once
-where 2C counts it twice (−16). 300 stays the projection until Task 1a measures it.
+2C + 300 = 1 150 792, so the band is **[978 173, 1 323 411]**. The band **spans tiers 20 and 21**:
+tier 20 holds up to 2^20 − 1 = 1 048 575 rows, so the low end (978 173) is tier 20, while the
+centre (1 150 792) and the high end (1 323 411) are tier 21. The band does not fix the step's
+tier. R6 pins the root's tier exactly, and the tier sets the host class, so **the measured step
+(Task 2) decides the pinned tier**. At the centre it is tier 21. Spec §3 projected 1.7–2.9 M
+rows at tier 21 or 22, so tier 22 is now out of the band. `the_pinned_band_is_the_emulated_childs`
+holds the pinned band to this formula and to these tiers.
+
+O = 300 is the brief's projection, kept here. By R1, `rv32t` is `rv32n`'s counted loop at count 2,
+so its fixed cost is likely nearer **400–450**: the loop scaffolding (`rv32n`'s overhead), one
+phase 8 (`rv32r`'s is 392 rows: the in-program vk digest and the interface sponge) and the cap
+read (≈ 32). Task 1a measures O. A shift of 100–150 rows moves the band by about 0.01 %.
 
 Memory, projected: the `rv32r` peak × (step cells / `rv32r` cells) by docs/06 §3's cell weights.
 This is *pending* the droplet's `rv32r` peak (Step 8), and Task 2 replaces it.

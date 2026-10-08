@@ -3,8 +3,10 @@
 //! existing k = 1 self-verifier `rv32r`, with its cap baked, is then run over that leaf proof on
 //! the 503 GB droplet: emulated first (the stop rule), then proved under the heap profiler. Every
 //! run is logged under `docs/measurements/`. The numbers land in `tests/pins.json`'s
-//! `tree_measure` block and `docs/07-tree-aggregation.md` §1–§2. All tests here are ignored and
-//! run on a droplet, one per process.
+//! `tree_measure` block and `docs/07-tree-aggregation.md` §1–§2. The proving and real-leaf tests are
+//! ignored and run on a droplet, one per process; the laptop's emulated-shape count is ignored too
+//! (minutes). Two tests run in-suite, in seconds: the accepting walk against the emulator, and
+//! the pinned band against the pinned emulated child.
 mod common;
 mod heap;
 
@@ -28,6 +30,16 @@ const L: usize = 2;
 const P: FriProfile = FriProfile::Production;
 /// Spec §5's stop rule: one child verification above this, and the k = 2 step exceeds tier 22.
 const STOP_CHILD_ROWS: usize = 1_500_000;
+/// The interior step's fixed overhead O, projected (spec §3; the brief's value). Task 1a
+/// measures it; by R1 it is nearer 400–450, which moves the band by about 0.01 %.
+const O_PROJECTED: usize = 300;
+
+/// M5's band for the interior step over a child of `child` rows: `(2C + O, floor(0.85·(2C + O)),
+/// ceil(1.15·(2C + O)))`, in integers.
+fn band(child: usize, o: usize) -> (usize, usize, usize) {
+    let step = 2 * child + o;
+    (step, 85 * step / 100, (115 * step).div_ceil(100))
+}
 
 /// `$RECURSION_FIXTURES/tree/{name}.rvmproof`: postcard `recursion::machine::Proof` bytes.
 fn tree_file(name: &str) -> std::path::PathBuf {
@@ -221,7 +233,8 @@ fn accepting_rows(program: &Program, phase_rows: &[(&'static str, usize)]) -> (u
 
 /// The walk against the emulator, in-suite (seconds): `rv32r` over a real test-profile rVM proof
 /// (`tests/self_verify.rs`'s toy program at tier 8) executes exactly the rows the walk counts,
-/// in total and in phase 8. What makes the laptop's production count below an execution's count.
+/// in total and in every phase. This is what lets the laptop's production count (walked, not
+/// executed) stand for an execution's count.
 #[test]
 fn the_accepting_walk_counts_what_rv32r_executes() {
     use recursion::isa::{Instr, Op, F};
@@ -283,12 +296,29 @@ fn production_rv32r_rows_at_the_emulated_leaf_shape() {
     println!("== rv32r at the production leaf shape (accepting walk): {rows} rows, tier {:?}, child {child} rows, phase 8 {phase8} rows, program {} instrs ({} traps), reduce height {rv32r_reduce:?}, peak live {:.2} GB",
         Tier::for_cycles(rows), vp.program.instrs.len(), vp.program.instrs.len() - rows, gb(heap::PEAK.load(Relaxed)));
     println!("-- phases {phases:?}");
-    let o = 300usize;
-    let step = 2 * child + o;
-    println!("== band: 2C + {o} = {step} rows, [{}, {}], tier {:?}", (0.85 * step as f64).floor() as usize, (1.15 * step as f64).ceil() as usize, Tier::for_cycles(step));
+    let (step, lo, hi) = band(child, O_PROJECTED);
+    println!("== band: 2C + {O_PROJECTED} = {step} rows (tier {:?}), [{lo} (tier {:?}), {hi} (tier {:?})]",
+        Tier::for_cycles(step), Tier::for_cycles(lo), Tier::for_cycles(hi));
     assert!(child <= STOP_CHILD_ROWS,
         "STOP (spec §5): one child verification is {child} rows, above {STOP_CHILD_ROWS}: the k = 2 step exceeds tier 22");
     assert_eq!(rows, common::pin("tree_measure", "rv32r_cpu_rows_emulated"), "the pinned emulated rv32r rows");
     assert_eq!(child, common::pin("tree_measure", "child_cpu_rows_emulated"), "the pinned emulated child");
     assert_eq!(leaf_rows, common::pin("tree_measure", "leaf_cpu_rows_emulated"), "the pinned emulated leaf rows");
+}
+
+/// The pinned band cannot drift from the pinned emulated child (in-suite, instant): `step_band_lo`
+/// and `step_band_hi` are M5's formula over `child_cpu_rows_emulated` and the projected O. The
+/// band straddles two tiers, 20 at its low end and 21 at its centre and high end: the measured
+/// step (Task 2), not the band, decides the pinned step tier (R6).
+#[test]
+fn the_pinned_band_is_the_emulated_childs() {
+    let child = common::pin("tree_measure", "child_cpu_rows_emulated");
+    let (step, lo, hi) = band(child, O_PROJECTED);
+    assert_eq!(lo, common::pin("tree_measure", "step_band_lo"), "step_band_lo is floor(0.85·(2C + O))");
+    assert_eq!(hi, common::pin("tree_measure", "step_band_hi"), "step_band_hi is ceil(1.15·(2C + O))");
+    assert_eq!(
+        (Tier::for_cycles(lo), Tier::for_cycles(step), Tier::for_cycles(hi)),
+        (Some(Tier(20)), Some(Tier(21)), Some(Tier(21))),
+        "the band spans tiers 20 and 21, its centre at 21"
+    );
 }
