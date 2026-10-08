@@ -62,6 +62,14 @@ query-dependent bytes; the prover pays `2^24` expected Poseidon2 duplex evaluati
 which Plonky3 grinds in parallel (`grinding_challenger.rs`, `into_par_iter().find_map_any`) —
 seconds. Against that, every LDE and tree in the prover halves.
 
+**Measured over the real chip shapes (Task 1, 2026-10-08, `tests/security.rs`: 708 constraints,
+degree 8, `log_trace_length 22`, 126 bus messages a row of width ≤ 10, and the codewords FRI
+combines counted per column and opening point — 1 692, not the 35 committed matrices):** today's
+(3, 80, 20) gives 86.41 bits under the paper's formula and 86.41 under `p3-security` (the
+low-degree test binds, unique decoding); the chosen (2, 92, 24) gives 86.38 and 86.38 (the same
+term binds — at the real codeword count the list-decoding regime no longer wins, so the synthetic
+table's 88.0 does not hold; the conjectured bound is 95.44). Equal to 0.03 bits under both.
+
 **The numbers above are the design's premise, not its pin.** §4 makes the same computation a test
 with two assertions: the paper's closed-form UDR bits at the new regime ≥ today's − 0.5, and
 `p3-security`'s best proven bits over the rVM's *real* chip shapes at the new regime ≥ today's
@@ -190,7 +198,7 @@ fullnode's `admitted_tiers`.
 - **The proven bound, twice.** The paper's closed-form unique-decoding bits at the new regime are
   ≥ today's − 0.5 (`92 × log2(2/1.25) + 24` against `80 × log2(2/1.125) + 20`), and
   `p3-security`'s `proven_security_report` over the rVM's real shape at the new regime is ≥ the
-  old regime's − 0.5 bits (§4's test; the digits follow the test). The commit-phase bound (`commit_phase_error_*`) is included by the report; the
+  old regime's − 0.5 bits (§4's test; the digits follow the test — measured 86.41 → 86.38 both ways, 2026-10-08). The commit-phase bound (`commit_phase_error_*`) is included by the report; the
   LogUp fingerprint term is included (`logup::security_term`); the batch-combination term at the
   real `num_batched_functions` is included. Nothing in the argument depends on the conjecture.
 - **Hiding is unchanged in kind**: four random codewords per committed matrix and a salt per leaf
