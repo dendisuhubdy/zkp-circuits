@@ -855,7 +855,7 @@ pub fn pow_program(bits: &[u64], off: u64, len: u64, g: recursion::isa::F, base:
 /// in file order. Panics, naming the block, when the file has none: the first measuring run
 /// is what writes it.
 #[allow(dead_code)]
-pub fn pin_block(name: &str) -> Vec<(String, usize)> {
+pub fn pin_block(name: &str) -> Vec<(String, i64)> {
     let s = std::fs::read_to_string(pins_path()).expect("tests/pins.json");
     let at = s.find(&format!("\"{name}\": {{")).unwrap_or_else(|| panic!("tests/pins.json has no `{name}` block yet"));
     let block = &s[at..at + s[at..].find('}').expect("the block closes")];
@@ -864,7 +864,7 @@ pub fn pin_block(name: &str) -> Vec<(String, usize)> {
         .skip(1)
         .filter_map(|line| {
             let (k, v) = line.trim().trim_end_matches(',').split_once(": ")?;
-            Some((k.trim_matches('"').to_string(), v.parse::<usize>().expect("a numeric field")))
+            Some((k.trim_matches('"').to_string(), v.parse::<i64>().expect("a numeric field")))
         })
         .collect()
 }
@@ -872,6 +872,13 @@ pub fn pin_block(name: &str) -> Vec<(String, usize)> {
 /// One value of a nested pin block.
 #[allow(dead_code)]
 pub fn pin(block: &str, key: &str) -> usize {
+    usize::try_from(pin_i64(block, key)).unwrap_or_else(|_| panic!("tests/pins.json's `{block}.{key}` is negative"))
+}
+
+/// One signed value of a nested pin block: a measured difference such as `tree_test.step_overhead`
+/// (the step's rows less 2C), which the measurement found negative.
+#[allow(dead_code)]
+pub fn pin_i64(block: &str, key: &str) -> i64 {
     pin_block(block)
         .into_iter()
         .find(|(k, _)| k == key)

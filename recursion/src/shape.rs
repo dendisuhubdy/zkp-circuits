@@ -1032,6 +1032,13 @@ impl RvmShape {
         )
     }
 
+    /// Whether a tree step built for `self` verifies proofs of `other`: everything the program
+    /// reads of a child shape agrees (the vk preimage's shape words, and the tape header words it
+    /// pins). The committed program is not read: its cap is a tape value (R3's fixed-point test).
+    pub fn same_step_words(&self, other: &RvmShape) -> bool {
+        self.shape_words() == other.shape_words() && self.header_words() == other.header_words()
+    }
+
     /// The `AirLayout` `verify_batch`'s precompute loop builds for instance `i` —
     /// [`InnerShape::air_layout`], verbatim.
     pub fn air_layout(&self, i: usize, air: &crate::machine::Chip) -> AirLayout {

@@ -33,7 +33,15 @@
     "rv32r_cpu_rows_emulated": 575638,
     "child_cpu_rows_emulated": 575246,
     "rv32r_tier_emulated": 20,
-    "step_band_lo": 978173,
-    "step_band_hi": 1323411
+    "step_band_lo": 977893,
+    "step_band_hi": 1323033,
+    "step_cpu_rows_emulated": 1148417,
+    "step_tier_emulated": 21
+  },
+  "tree_test": {
+    "child_cpu_rows": 144829,
+    "step_leaf_cpu_rows": 289629,
+    "step_overhead": -29,
+    "step_leaf_tier": 19
   }
 }

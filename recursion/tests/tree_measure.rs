@@ -5,8 +5,9 @@
 //! run is logged under `docs/measurements/`. The numbers land in `tests/pins.json`'s
 //! `tree_measure` block and `docs/07-tree-aggregation.md` §1–§2. The proving and real-leaf tests are
 //! ignored and run on a droplet, one per process; the laptop's emulated-shape count is ignored too
-//! (minutes). Two tests run in-suite, in seconds: the accepting walk against the emulator, and
-//! the pinned band against the pinned emulated child.
+//! (minutes), and so is Task 1a's production step count (`production_rv32t_rows_at_the_emulated_leaf_shape`).
+//! Three tests run in-suite, in seconds: the accepting walk against the emulator, the looped walk
+//! (`rv32t`'s) against the emulator, and the pinned band against the pinned emulated child.
 mod common;
 mod heap;
 
@@ -17,7 +18,7 @@ use recursion::dsl::Checkpoints;
 use recursion::emulator::execute;
 use recursion::isa::Program;
 use recursion::machine::{Machine, Tier};
-use recursion::programs::{verify_rv32r, VerifierProgram};
+use recursion::programs::{rv32t_leaf, verify_rv32r, verify_rv32t, VerifierProgram, TREE_ARITY};
 use recursion::shape::{InnerKey, InnerShape, RvmKey, RvmShape};
 use recursion::witness::WitnessTape;
 use std::sync::atomic::Ordering::Relaxed;
@@ -30,14 +31,19 @@ const L: usize = 2;
 const P: FriProfile = FriProfile::Production;
 /// Spec §5's stop rule: one child verification above this, and the k = 2 step exceeds tier 22.
 const STOP_CHILD_ROWS: usize = 1_500_000;
-/// The interior step's fixed overhead O, projected (spec §3; the brief's value). Task 1a
-/// measures it; by R1 it is nearer 400–450, which moves the band by about 0.01 %.
-const O_PROJECTED: usize = 300;
+/// The interior step's overhead O = step rows − 2C, measured by Task 1a at the test profile
+/// (`tree_test.step_overhead`; spec §3 projected +300). It is signed: the step's own fixed rows
+/// (its preamble, the loop's absorbs and back edge, the final permutation) are outweighed by what
+/// each loop pass does *not* run that `rv32r`'s C counts (the baked cap's constants, the binding
+/// read) and by the loop body's different register allocation (docs/07 §2).
+fn o_measured() -> i64 {
+    common::pin_i64("tree_test", "step_overhead")
+}
 
 /// M5's band for the interior step over a child of `child` rows: `(2C + O, floor(0.85·(2C + O)),
 /// ceil(1.15·(2C + O)))`, in integers.
-fn band(child: usize, o: usize) -> (usize, usize, usize) {
-    let step = 2 * child + o;
+fn band(child: usize, o: i64) -> (usize, usize, usize) {
+    let step = usize::try_from(2 * child as i64 + o).expect("a step has rows");
     (step, 85 * step / 100, (115 * step).div_ceil(100))
 }
 
@@ -231,16 +237,81 @@ fn accepting_rows(program: &Program, phase_rows: &[(&'static str, usize)]) -> (u
     (visited.iter().filter(|v| **v).count(), phases)
 }
 
-/// The walk against the emulator, in-suite (seconds): `rv32r` over a real test-profile rVM proof
-/// (`tests/self_verify.rs`'s toy program at tier 8) executes exactly the rows the walk counts,
-/// in total and in every phase. This is what lets the laptop's production count (walked, not
-/// executed) stand for an execution's count.
-#[test]
-fn the_accepting_walk_counts_what_rv32r_executes() {
+/// [`accepting_rows`] through `rv32t`'s two kinds of data-free control flow. Besides the DSL's
+/// assertion, the walk admits:
+/// - exactly one *backward* `JNE`, the counted loop's back edge (`Builder::counted_loop_mem` with
+///   the compile-time count `TREE_ARITY`): taken `trips − 1` times, then fallen through;
+/// - *forward* `JNE`s, which in `rv32t` are only `hash::absorb_staged`'s `if_eq(cursor, full)`.
+///   The cursor is a function of the absorb schedule alone (it starts at rate lane 1, behind the
+///   count word, and each absorb advances it by one), so the `k`-th forward `JNE` executed falls
+///   into its body (the deferred permutation) exactly when `(1 + k) mod RATE = 0`, and jumps over
+///   it otherwise.
+///
+/// The count is then the program's alone. Rows are visits, one cpu row each; phases count visits.
+/// `the_looped_walk_counts_what_rv32t_executes` holds the walk, schedule included, to the
+/// emulator. `JMP` or a second loop panics.
+fn accepting_rows_looped(program: &Program, phase_rows: &[(&'static str, usize)], trips: usize) -> (usize, Vec<(&'static str, usize)>) {
+    use p3_field::PrimeField64;
+    use recursion::dsl::hash::RATE;
+    use recursion::isa::Op;
+    assert!(trips >= 1, "a counted loop runs at least once");
+    let instrs = &program.instrs;
+    let mut visits = vec![0usize; instrs.len()];
+    let mut back_edge: Option<usize> = None;
+    let mut taken = 0usize;
+    let mut absorbs = 0usize;
+    let mut pc = 0usize;
+    loop {
+        let ins = instrs[pc];
+        visits[pc] += 1;
+        match ins.op {
+            Op::Halt => break,
+            Op::Jmp => panic!("pc {pc}: JMP — not an assertion, an absorb or a counted loop's back edge"),
+            Op::Jne => {
+                let target = ins.b.as_canonical_u64() as usize;
+                if target > pc {
+                    // `absorb_staged`'s branch over the deferred permutation.
+                    let full = (1 + absorbs) % RATE == 0;
+                    absorbs += 1;
+                    pc = if full { pc + 1 } else { target };
+                    continue;
+                }
+                assert!(back_edge.is_none_or(|e| e == pc), "pc {pc}: a second loop — the walk admits one");
+                back_edge = Some(pc);
+                if taken + 1 < trips {
+                    taken += 1;
+                    pc = target;
+                } else {
+                    pc += 1;
+                }
+            }
+            Op::Jeq => {
+                let target = ins.b.as_canonical_u64() as usize;
+                let trap = instrs[pc + 1];
+                assert!(target == pc + 2 && trap.op == Op::Inv && trap.rd == 1 && trap.ra == 0,
+                    "pc {pc}: a JEQ that is not an assertion over a one-row trap");
+                pc = target;
+            }
+            _ => pc += 1,
+        }
+    }
+    assert_eq!(taken + 1, trips, "the loop ran {trips} times");
+    assert_eq!(absorbs, 8 + 4 * trips, "the interface schedule: the eight binding words, then four public words per child");
+    let mut phases = Vec::new();
+    let mut at = 0;
+    for &(name, n) in phase_rows {
+        phases.push((name, visits[at..at + n].iter().sum()));
+        at += n;
+    }
+    (visits.iter().sum(), phases)
+}
+
+/// `tests/self_verify.rs`'s toy program: a real tier-8 rVM proof in a second.
+fn toy_program() -> Arc<Program> {
     use recursion::isa::{Instr, Op, F};
     use p3_field::PrimeCharacteristicRing;
     let i = |op, rd, ra, b: u64| Instr { op, rd, ra, b: F::from_u64(b) };
-    let program = Arc::new(Program {
+    Arc::new(Program {
         instrs: vec![
             i(Op::Faddi, 1, 0, 7), i(Op::Faddi, 2, 0, 5), i(Op::Fadd, 3, 1, 2), i(Op::Inv, 4, 3, 0),
             i(Op::Faddi, 5, 0, 100), i(Op::Store, 2, 5, 3), i(Op::Load, 6, 5, 3), i(Op::Faddi, 7, 0, 64),
@@ -250,7 +321,16 @@ fn the_accepting_walk_counts_what_rv32r_executes() {
         ],
         checkpoints: vec![],
         reduce_layout: vec![],
-    });
+    })
+}
+
+/// The walk against the emulator, in-suite (seconds): `rv32r` over a real test-profile rVM proof
+/// (`tests/self_verify.rs`'s toy program at tier 8) executes exactly the rows the walk counts,
+/// in total and in every phase. This is what lets the laptop's production count (walked, not
+/// executed) stand for an execution's count.
+#[test]
+fn the_accepting_walk_counts_what_rv32r_executes() {
+    let program = toy_program();
     let t = FriProfile::Test;
     let (proof, _) = Machine::new(t).prove(&program, &[], None).expect("the toy proves");
     let shape = RvmShape::of_proof(t, &program, &proof);
@@ -268,6 +348,55 @@ fn the_accepting_walk_counts_what_rv32r_executes() {
         at += n;
     }
     assert!(rows < vp.program.instrs.len(), "the traps are not rows");
+}
+
+/// The looped walk against the emulator, in-suite (seconds): `rv32t` over two real tier-8 toy
+/// proofs executes exactly the rows [`accepting_rows_looped`] counts at `TREE_ARITY` trips, in
+/// total and in every phase. What lets the laptop's production step count (walked over the
+/// emulated leaf shape; no production leaf proof exists here) stand for an execution's.
+#[test]
+fn the_looped_walk_counts_what_rv32t_executes() {
+    let program = toy_program();
+    let t = FriProfile::Test;
+    let m = Machine::new(t);
+    let (a, _) = m.prove(&program, &[], None).expect("the toy proves");
+    let (b, _) = m.prove(&program, &[], None).expect("the toy proves");
+    let shape = RvmShape::of_proof(t, &program, &a);
+    assert!(shape.matches(&b), "one fixed workload, one shape");
+    let vp = verify_rv32t(&shape, Checkpoints::Off);
+    let tape = WitnessTape::build_tree_step(t, &shape, [&a, &b], &common::TEST_BINDING).unwrap();
+    let exec = execute(&vp.program, &tape.words, MAX_CYCLES).expect("rv32t accepts two toy proofs");
+    let (rows, phases) = accepting_rows_looped(&vp.program, &vp.phase_rows, TREE_ARITY as usize);
+    assert_eq!(rows, exec.cpu_rows(), "the looped walk is the executed run");
+    let pcs: Vec<usize> = exec.events.iter().map(|e| e.pc as usize).collect();
+    let mut at = 0;
+    for (k, &(name, n)) in vp.phase_rows.iter().enumerate() {
+        let executed = pcs.iter().filter(|&&pc| (at..at + n).contains(&pc)).count();
+        assert_eq!(phases[k], (name, executed), "the looped walk is the executed run in {name}");
+        at += n;
+    }
+}
+
+/// Task 1a on the laptop: the production interior step's rows by the looped walk over
+/// `rv32t_leaf` built at the emulated production leaf shape (nothing proved; the step reads only
+/// the child's shape words, so no leaf key is needed). Checked against the band, which is now
+/// M5's formula over the emulated C and the O measured at the test profile (`tree_test`).
+#[test]
+#[ignore = "tree Task 1a on the laptop: the production leaf emulated (no proof) and rv32t_leaf's accepting path counted at its shape — ~2 min, 8 GB"]
+fn production_rv32t_rows_at_the_emulated_leaf_shape() {
+    let (_program, _leaf_rows, shape) = emulated_leaf_shape();
+    let vp = rv32t_leaf(&shape, Checkpoints::Off);
+    let (rows, phases) = accepting_rows_looped(&vp.program, &vp.phase_rows, TREE_ARITY as usize);
+    let child = common::pin("tree_measure", "child_cpu_rows_emulated");
+    let o = rows as i64 - 2 * child as i64;
+    let (lo, hi) = (common::pin("tree_measure", "step_band_lo"), common::pin("tree_measure", "step_band_hi"));
+    let reduce = recursion::machine::canonical_reduce_log_height(&vp.program, TREE_ARITY);
+    println!("== rv32t_leaf at the production leaf shape (looped walk): {rows} rows, tier {:?}, 2C + {o} (C = {child}), program {} instrs, canonical reduce height at n = {TREE_ARITY}: {reduce:?}; band [{lo}, {hi}]",
+        Tier::for_cycles(rows), vp.program.instrs.len());
+    println!("-- phases {phases:?}");
+    assert!((lo..=hi).contains(&rows), "the production step ({rows} rows) leaves the band [{lo}, {hi}]");
+    assert_eq!(rows, common::pin("tree_measure", "step_cpu_rows_emulated"), "the pinned emulated step rows");
+    assert_eq!(Tier::for_cycles(rows).unwrap().0, common::pin("tree_measure", "step_tier_emulated"), "the pinned emulated step tier");
 }
 
 /// Task 0's stop rule checked on the laptop, before any droplet (48 GB: nothing is proved).
@@ -296,8 +425,9 @@ fn production_rv32r_rows_at_the_emulated_leaf_shape() {
     println!("== rv32r at the production leaf shape (accepting walk): {rows} rows, tier {:?}, child {child} rows, phase 8 {phase8} rows, program {} instrs ({} traps), reduce height {rv32r_reduce:?}, peak live {:.2} GB",
         Tier::for_cycles(rows), vp.program.instrs.len(), vp.program.instrs.len() - rows, gb(heap::PEAK.load(Relaxed)));
     println!("-- phases {phases:?}");
-    let (step, lo, hi) = band(child, O_PROJECTED);
-    println!("== band: 2C + {O_PROJECTED} = {step} rows (tier {:?}), [{lo} (tier {:?}), {hi} (tier {:?})]",
+    let o = o_measured();
+    let (step, lo, hi) = band(child, o);
+    println!("== band: 2C + ({o}) = {step} rows (tier {:?}), [{lo} (tier {:?}), {hi} (tier {:?})]",
         Tier::for_cycles(step), Tier::for_cycles(lo), Tier::for_cycles(hi));
     assert!(child <= STOP_CHILD_ROWS,
         "STOP (spec §5): one child verification is {child} rows, above {STOP_CHILD_ROWS}: the k = 2 step exceeds tier 22");
@@ -307,13 +437,13 @@ fn production_rv32r_rows_at_the_emulated_leaf_shape() {
 }
 
 /// The pinned band cannot drift from the pinned emulated child (in-suite, instant): `step_band_lo`
-/// and `step_band_hi` are M5's formula over `child_cpu_rows_emulated` and the projected O. The
+/// and `step_band_hi` are M5's formula over `child_cpu_rows_emulated` and the measured O. The
 /// band straddles two tiers, 20 at its low end and 21 at its centre and high end: the measured
 /// step (Task 2), not the band, decides the pinned step tier (R6).
 #[test]
 fn the_pinned_band_is_the_emulated_childs() {
     let child = common::pin("tree_measure", "child_cpu_rows_emulated");
-    let (step, lo, hi) = band(child, O_PROJECTED);
+    let (step, lo, hi) = band(child, o_measured());
     assert_eq!(lo, common::pin("tree_measure", "step_band_lo"), "step_band_lo is floor(0.85·(2C + O))");
     assert_eq!(hi, common::pin("tree_measure", "step_band_hi"), "step_band_hi is ceil(1.15·(2C + O))");
     assert_eq!(
