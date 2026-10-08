@@ -1,0 +1,38 @@
+warning: unused import: `ShapeKey`
+  --> src/witness.rs:24:54
+   |
+24 | use crate::shape::{InnerKey, InnerShape, ProofBatch, ShapeKey, VerifierShape, CAP_HEIGHT};
+   |                                                      ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `recursion` (lib) generated 1 warning
+   Compiling recursion v0.1.0 (/Users/dendisuhubdy/rand-worktrees/circuits-rate4/recursion)
+    Finished `release` profile [optimized] target(s) in 4.77s
+     Running tests/aggregate.rs (target/release/deps/aggregate-c7eba00c3e3ef1ae)
+
+running 1 test
+test two_test_profile_bundle_proofs_aggregate_and_verify_natively has been running for over 60 seconds
+N=2 aggregate proof: 273957 bytes
+test two_test_profile_bundle_proofs_aggregate_and_verify_natively ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 156.61s
+
+      161.82 real       801.19 user        57.34 sys
+         22833594368  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             6944497  page reclaims
+                5074  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   3  signals received
+                 477  voluntary context switches
+             1025007  involuntary context switches
+           746604606  instructions retired
+           251787473  cycles elapsed
+            33309272  peak memory footprint
