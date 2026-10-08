@@ -26,5 +26,14 @@
     "rows_sample_bits": 58076,
     "reloads": 176283,
     "spills": 10826
+  },
+  "tree_measure": {
+    "leaf_cpu_rows_emulated": 1171511,
+    "leaf_tier_emulated": 21,
+    "rv32r_cpu_rows_emulated": 575638,
+    "child_cpu_rows_emulated": 575246,
+    "rv32r_tier_emulated": 20,
+    "step_band_lo": 978173,
+    "step_band_hi": 1323411
   }
 }

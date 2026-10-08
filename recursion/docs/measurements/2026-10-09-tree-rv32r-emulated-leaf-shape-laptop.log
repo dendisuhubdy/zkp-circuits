@@ -1,0 +1,14 @@
+# 2026-10-09, laptop (48 GB Apple silicon), branch feat/tree-aggregation
+# cargo test --release --test tree_measure production_rv32r_rows_at_the_emulated_leaf_shape -- --ignored --exact --nocapture
+# Emulation only: nothing is proved. macOS RSS is not a memory number (docs/04); the live peak is the counting allocator's.
+    Finished `release` profile [optimized] target(s) in 2.02s
+     Running tests/tree_measure.rs (/Users/dendisuhubdy/rand-worktrees/circuits-phase2/recursion/target/release/deps/tree_measure-e821f03b0f0603be)
+running 1 test
+== emulated leaf: 1171511 rows, tier 21, program 597665 instrs (program table 2^20), heights reg 22 ram 22 poseidon2 17 reduce 19 (canonical at n = 2: Some(19)); trace heights [1048576, 2097152, 4194304, 4194304, 131072, 8, 256, 524288], permutations 109004
+test production_rv32r_rows_at_the_emulated_leaf_shape has been running for over 60 seconds
+leaf key built in 0.3 s, live 0.02 GB, peak 8.31 GB
+== rv32r at the production leaf shape (accepting walk): 575638 rows, tier Some(Tier(20)), child 575246 rows, phase 8 392 rows, program 588172 instrs (12534 traps), reduce height Some(18), peak live 8.31 GB
+-- phases [("phases 0-4: header, transcript, commitments, terminal sum", 919), ("phase 5: constraint evaluation at zeta", 20785), ("phase 6 preamble: claimed evals, betas, final poly, pow, indices", 88514), ("query segments: tape reads", 52315), ("queries: merkle walks, reduction, folds", 412712), ("phase 8: the interface digest", 392)]
+== band: 2C + 300 = 1150792 rows, [978173, 1323411], tier Some(Tier(21))
+test production_rv32r_rows_at_the_emulated_leaf_shape ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 93.61s
