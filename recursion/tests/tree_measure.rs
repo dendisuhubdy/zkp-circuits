@@ -6,6 +6,8 @@
 //! `tree_measure` block and `docs/08-tree-aggregation.md` §1–§2. The proving and real-leaf tests are
 //! ignored and run on a droplet, one per process; the laptop's emulated-shape count is ignored too
 //! (minutes), and so is Task 1a's production step count (`production_rv32t_rows_at_the_emulated_leaf_shape`).
+//! Task 2 adds the production depth-2 tree (leaves 1–3, both `rv32t_leaf` steps, the `rv32t_int`
+//! root through `verify_tree`, and the per-level genesis values), all ignored, for the 256 GB droplet.
 //! Three tests run in-suite, in seconds: the accepting walk against the emulator, the looped walk
 //! (`rv32t`'s) against the emulator, and the pinned band against the pinned emulated child.
 mod common;
@@ -13,13 +15,13 @@ mod heap;
 
 use heap::{gb, install, report, LIVE};
 use rand_zkvm::machine::{FriProfile, Proof};
-use recursion::aggregate::{aggregate, aggregate_program, verify_aggregate, InnerVerifierKey};
+use recursion::aggregate::{aggregate, aggregate_program, prove_tree_step, verify_aggregate, verify_tree, InnerVerifierKey, TreeShapes};
 use recursion::dsl::Checkpoints;
-use recursion::emulator::execute;
+use recursion::emulator::{execute, Execution};
 use recursion::isa::Program;
 use recursion::machine::{Machine, Tier};
 use recursion::programs::{rv32t_leaf, verify_rv32r, verify_rv32t, VerifierProgram, TREE_ARITY};
-use recursion::shape::{InnerKey, InnerShape, RvmKey, RvmShape};
+use recursion::shape::{inner_vk_digest, InnerKey, InnerShape, RvmHeights, RvmKey, RvmShape};
 use recursion::witness::WitnessTape;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
@@ -451,4 +453,167 @@ fn the_pinned_band_is_the_emulated_childs() {
         (Some(Tier(21)), Some(Tier(21)), Some(Tier(21))),
         "the band is tier 21 end to end"
     );
+}
+
+// ── Task 2: the production depth-2 tree (4 leaves of L = 2; 2 rv32t_leaf; 1 rv32t_int) ──────────
+//
+// Host class (tree Task 2 rulings): at the rVM's rate ¼ docs/07 §4 projects a tier-21 proof at
+// ≈ 122–197 GB (production N = 2 / N = 3 rows), so the leaves, the steps and the root all run on
+// the 256 GB droplet, one proving process at a time. The steps' emulated rows (1 294 577, tier 21)
+// and band [1 102 455, 1 491 559] are Task R's pins (`tree_measure`).
+
+fn env_index(var: &str, max: usize) -> usize {
+    let k: usize = std::env::var(var).unwrap_or_else(|_| panic!("set {var}")).parse().expect("an index");
+    assert!(k <= max, "{var} ≤ {max}");
+    k
+}
+
+/// Leaves 1–3 (one per process): `TREE_LEAF=k`. Leaf 0 is Task 0's `production_leaf_l2`.
+#[test]
+#[ignore = "tree Task 2: production rv32n leaf k (TREE_LEAF=1..3), 1 171 511 rows tier 21, 122-142 GB projected at rate 1/4 (docs/07 §4) — the 256 GB droplet"]
+fn production_tree_leaf() {
+    let k = env_index("TREE_LEAF", 3);
+    assert!(k >= 1, "leaf 0 is Task 0's production_leaf_l2");
+    prove_leaf(k);
+}
+
+/// The production leaf's inner key, program and declared shape, read off cached leaf 0.
+fn production_leaf_shape() -> (InnerVerifierKey, Arc<Program>, RvmShape) {
+    let proofs = bundles(0, L);
+    let vk = inner(&proofs[0]);
+    let program = Arc::new(aggregate_program(&vk));
+    let leaf = load("Production-leaf-0", &program, L as u64);
+    let shape = RvmShape::of_proof(P, &program, &leaf);
+    (vk, program, shape)
+}
+
+/// The shape a proof of `program` over `exec` would declare, without proving: `build_traces`'
+/// heights (the rule `prove` applies) at the tier the rows need (tree Task 1b's method).
+fn emulated_shape(program: &Arc<Program>, exec: &Execution) -> RvmShape {
+    let tier = Tier::for_cycles(exec.cpu_rows()).expect("the run fits a tier");
+    let t = recursion::machine::build_traces(program, exec, tier).expect("the run's traces build");
+    RvmShape::of(P, program, tier, t.reg_log_height, t.ram_log_height, t.poseidon2_log_height, t.reduce_log_height)
+}
+
+/// The production per-level step heights (spec §4.1 R3/R4), from the proved step S_1 and root
+/// S_2: `[S_1, S_2]` when `rv32t_int`'s own proofs declare S_1's words (it is the fixed point);
+/// otherwise level 3's program, `rv32t` at S_2, is emulated over (root, root) as Task 1b's
+/// `a_third_step_program_at_the_roots_shape_is_the_fixed_point` does, and the list is
+/// `[S_1, S_2, S_3]` when S_3 repeats S_2. `None` when level 3 is not a fixed point either (the
+/// list needs a proved level 3 to continue). Prints the verdict and the list length.
+fn production_step_list(s_step: &RvmShape, s_root: &RvmShape, root: &recursion::machine::Proof) -> Option<Vec<RvmHeights>> {
+    if s_root.same_step_words(s_step) {
+        println!("== fixed point (R3): HOLDS at level 2 — rv32t_int verifies its own proofs; production list length 2");
+        return Some(vec![s_step.heights(), s_root.heights()]);
+    }
+    let t3 = Arc::new(verify_rv32t(s_root, Checkpoints::Off).program);
+    let tape = WitnessTape::build_tree_step(P, s_root, [root, root], &common::TEST_BINDING).unwrap();
+    let exec = execute(&t3, &tape.words, MAX_CYCLES).expect("rv32t at the root's shape accepts two roots");
+    let s3 = emulated_shape(&t3, &exec);
+    println!("== level 3 emulated: {} rows, tier {}, header {:?} (root {:?})", exec.cpu_rows(), s3.tier,
+        s3.header_words(), s_root.header_words());
+    if s3.same_step_words(s_root) {
+        println!("== fixed point (R3): FAILS at level 2, HOLDS at level 3 (emulated) — production list length 3");
+        Some(vec![s_step.heights(), s_root.heights(), s3.heights()])
+    } else {
+        println!("== fixed point (R3): FAILS at levels 2 and 3 — production list length ≥ 4; max_depth 3 until a level-3 step is proved");
+        None
+    }
+}
+
+/// Step `TREE_STEP=k` ∈ {0, 1}: `rv32t_leaf` over leaves (2k, 2k + 1). Emulated first, against
+/// docs/08 §2's band (M5), then proved under the heap profiler.
+#[test]
+#[ignore = "tree Task 2: production rv32t_leaf step k (TREE_STEP=0|1), 1 294 577 rows emulated, tier 21; 122-197 GB projected at rate 1/4 (docs/07 §4) — the 256 GB droplet"]
+fn production_tree_step() {
+    let k = env_index("TREE_STEP", 1);
+    let (_vk, program, shape) = production_leaf_shape();
+    let a = load(&format!("Production-leaf-{}", 2 * k), &program, L as u64);
+    let b = load(&format!("Production-leaf-{}", 2 * k + 1), &program, L as u64);
+    let vp = verify_rv32t(&shape, Checkpoints::Off);
+    let tape = WitnessTape::build_tree_step(P, &shape, [&a, &b], &common::TEST_BINDING).unwrap();
+    let rows = execute(&vp.program, &tape.words, MAX_CYCLES).expect("rv32t_leaf accepts two production leaves").cpu_rows();
+    let (lo, hi) = (common::pin("tree_measure", "step_band_lo"), common::pin("tree_measure", "step_band_hi"));
+    println!("== step {k} emulated: {rows} rows, tier {:?}, band [{lo}, {hi}] {} (emulated pin {})", Tier::for_cycles(rows),
+        if (lo..=hi).contains(&rows) { "IN" } else { "OUT: write the correction into docs/08 §2 (M5)" },
+        common::pin("tree_measure", "step_cpu_rows_emulated"));
+    let t0 = install();
+    let m = Machine::new(P);
+    let t = Instant::now();
+    let proof = prove_tree_step(&m, &shape, [&a, &b], &common::TEST_BINDING, None).expect("the step proves");
+    let prove_s = t.elapsed().as_secs_f64();
+    let tv = Instant::now();
+    m.verify_n(&vp.program, &proof, TREE_ARITY).expect("the step verifies at n = 2");
+    println!("verify {:.2} s", tv.elapsed().as_secs_f64());
+    save(&format!("Production-step-{k}"), &proof);
+    heights(&format!("step {k}"), &proof);
+    report(&format!("tree step {k}: rv32t_leaf (production)"), t0, rows, proof.tier, proof.size(), prove_s);
+}
+
+/// The root: `rv32t_int` over steps 0 and 1, proved, then verified through `verify_tree` with the
+/// shapes and keys the node rebuilds from the heights (`TreeShapes::build`), and the production
+/// list length read off the next level, emulated at the root's shape (R3).
+#[test]
+#[ignore = "tree Task 2: production rv32t_int root over the two steps (tier 21 expected; 122-197 GB projected at rate 1/4, docs/07 §4), then verify_tree — the 256 GB droplet"]
+fn production_tree_root() {
+    let (vk, _program, leaf_shape) = production_leaf_shape();
+    let t_leaf = Arc::new(verify_rv32t(&leaf_shape, Checkpoints::Off).program);
+    let s0 = load("Production-step-0", &t_leaf, TREE_ARITY);
+    let s1 = load("Production-step-1", &t_leaf, TREE_ARITY);
+    let s_step = RvmShape::of_proof(P, &t_leaf, &s0);
+    assert!(s_step.matches(&s1), "both level-1 steps declare one shape");
+    let vp = verify_rv32t(&s_step, Checkpoints::Off);
+    let tape = WitnessTape::build_tree_step(P, &s_step, [&s0, &s1], &common::TEST_BINDING).unwrap();
+    let rows = execute(&vp.program, &tape.words, MAX_CYCLES).expect("rv32t_int accepts the two steps").cpu_rows();
+    println!("== root emulated: {rows} rows, tier {:?}", Tier::for_cycles(rows));
+    let t0 = install();
+    let m = Machine::new(P);
+    let t = Instant::now();
+    let root = prove_tree_step(&m, &s_step, [&s0, &s1], &common::TEST_BINDING, None).expect("the root proves");
+    let prove_s = t.elapsed().as_secs_f64();
+    save("Production-root", &root);
+    heights("root", &root);
+    report("tree root: rv32t_int (production)", t0, rows, root.tier, root.size(), prove_s);
+
+    let t_int = Arc::new(vp.program.clone());
+    let s_root = RvmShape::of_proof(P, &t_int, &root);
+    let shapes = TreeShapes::build(P, &vk, leaf_shape.heights(), &[s_step.heights(), s_root.heights()]).unwrap();
+    assert_eq!(shapes.root_program(2).digest(), t_int.digest(), "the rebuilt level-2 program is the proved root's");
+    let keys = shapes.keys();
+    let covered: Vec<Vec<u64>> = bundles(0, 4 * L).iter().map(|p| p.public_values.clone()).collect();
+    let tv = Instant::now();
+    verify_tree(&m, shapes.root_program(2), &root, &vk, &covered, &common::TEST_BINDING, L, 2, &keys).expect("the production tree verifies");
+    println!("verify_tree {:.2} s", tv.elapsed().as_secs_f64());
+    let _ = production_step_list(&s_step, &s_root, &root);
+}
+
+/// The chain's `aggregation_tree` genesis values (docs/08 §4; Task 3a), printed per level from the
+/// cached leaf, step and root: the leaf heights and `vk_leaf`, then for each listed level its
+/// heights, step program digest (`step_digests`), key (`step_keys`) and tier (`step_tiers`), the
+/// last entry repeating.
+#[test]
+#[ignore = "tree Task 2: prints the production aggregation_tree genesis values from the cached tree (keys at tier 21: the 256 GB droplet)"]
+fn production_tree_genesis_values() {
+    let (vk, program, leaf_shape) = production_leaf_shape();
+    let t_leaf = Arc::new(verify_rv32t(&leaf_shape, Checkpoints::Off).program);
+    let s0 = load("Production-step-0", &t_leaf, TREE_ARITY);
+    let s_step = RvmShape::of_proof(P, &t_leaf, &s0);
+    let t_int = Arc::new(verify_rv32t(&s_step, Checkpoints::Off).program);
+    let root = load("Production-root", &t_int, TREE_ARITY);
+    let s_root = RvmShape::of_proof(P, &t_int, &root);
+    let list = production_step_list(&s_step, &s_root, &root).expect("a fixed point within three levels");
+    let shapes = TreeShapes::build(P, &vk, leaf_shape.heights(), &list).unwrap();
+    assert!(shapes.fixed_point(), "the list's last entry verifies its own proofs");
+    assert_eq!(shapes.steps[0], s_step);
+    assert_eq!(shapes.steps[1], s_root);
+    let hex = |d: [recursion::isa::F; 4]| d.map(|f| p3_field::PrimeField64::as_canonical_u64(&f));
+    let keys = shapes.keys();
+    println!("== aggregate_program_digest {:?}", hex(program.digest()));
+    println!("== leaf_size {L}, leaf heights {:?}", leaf_shape.heights());
+    println!("== vk_leaf {:?}", hex(keys.vk_leaf));
+    assert_eq!(keys.vk_leaf, inner_vk_digest(&leaf_shape, &RvmKey::of(P, &leaf_shape)));
+    for (k, s) in shapes.steps.iter().enumerate() {
+        println!("== level {}: heights {:?}, step_digests[{k}] {:?}, step_keys[{k}] {:?}, step_tiers[{k}] {}",
+            k + 1, s.heights(), hex(s.program.digest()), hex(keys.step_keys[k]), s.tier);
+    }
 }

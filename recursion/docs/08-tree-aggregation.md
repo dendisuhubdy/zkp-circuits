@@ -111,7 +111,49 @@ This is *pending* the droplet's `rv32r` peak (Step 8), and Task 2 replaces it.
 
 ## 3. The production tree, per step (Task 2)
 
+**Pending (droplet).** The API landed on the laptop (tree Task 2, `verify_tree`, `prove_tree_step`,
+`aggregate_tree`, `TreeShapes`/`TreeKeys` as per-level lists, spec §4.1 R2–R4); nothing at
+production has been proved yet. At the rVM's rate ¼, docs/07 §4 projects a tier-21 proof at
+≈ 122–197 GB, so the three remaining leaves, both `rv32t_leaf` steps (1 294 577 rows emulated,
+tier 21, band [1 102 455, 1 491 559]) and the `rv32t_int` root all run on the **256 GB droplet**,
+one proving process at a time (not the 503 GB box the plan named). The table below gets one row
+per proof (4 leaves, 2 steps, 1 root): host, rows, tier, the heights, prove, verify, proof bytes,
+peak live and maximum RSS, and the log path.
+
+Run, on `$HOST256` (`/root/scripts/step.sh` as in Task 0; each under `nohup … &` with a `.done`
+poll if the session cannot stay open):
+
+```bash
+H=$HOST256
+ssh -A root@$H 'cd /root/circuits && git fetch origin && git checkout --detach origin/feat/tree-aggregation && git rev-parse HEAD > COMMIT'
+rsync -a $RECURSION_FIXTURES/Production-{0,1,2,3,4,5,6,7}.proof root@$H:/root/recursion-fixtures/
+rsync -a $RECURSION_FIXTURES/tree/Production-leaf-0.rvmproof root@$H:/root/recursion-fixtures/tree/
+for k in 1 2 3; do ssh root@$H "TREE_LEAF=$k RAYON_NUM_THREADS=32 /root/scripts/step.sh 40-tree-leaf-$k cargo test --release --features parallel --test tree_measure production_tree_leaf -- --ignored --exact --nocapture"; done
+for k in 0 1; do ssh root@$H "TREE_STEP=$k RAYON_NUM_THREADS=32 /root/scripts/step.sh 41-tree-step-$k cargo test --release --features parallel --test tree_measure production_tree_step -- --ignored --exact --nocapture"; done
+ssh root@$H 'RAYON_NUM_THREADS=32 /root/scripts/step.sh 42-tree-root cargo test --release --features parallel --test tree_measure production_tree_root -- --ignored --exact --nocapture'
+ssh root@$H '/root/scripts/step.sh 43-tree-genesis cargo test --release --test tree_measure production_tree_genesis_values -- --ignored --exact --nocapture'
+for n in 40-tree-leaf-1 40-tree-leaf-2 40-tree-leaf-3 41-tree-step-0 41-tree-step-1 42-tree-root 43-tree-genesis; do scp root@$H:/root/out/$n.log docs/measurements/$(date -u +%F)-tree-${n#4?-tree-}-production.log; done
+rsync -a root@$H:/root/recursion-fixtures/tree/ $RECURSION_FIXTURES/tree/
+```
+
+Expected: every `.done` holds `0`; `41-tree-step-0` prints `== step 0 emulated: … band [1102455,
+1491559] IN`; `42-tree-root` prints `verify_tree … s` and the fixed-point verdict. **Stop** if a
+step or the root is killed for memory: record the `.rss` file's last line here and halt for a
+decision (spec ruling 1: the memory track first).
+
 ## 4. The interior step against the band, the fixed point, the genesis values (Task 2)
+
+**Pending (droplet).** To be filled from `41-tree-step-*`, `42-tree-root` and `43-tree-genesis`:
+the step against the band (in or out, and the correction if out); the root against the step
+(`rv32t_int` vs `rv32t_leaf` rows); the fixed-point verdict and the production list length
+(`production_step_list`: 2 when `rv32t_int`'s proofs declare S_1's words, 3 when level 3, emulated
+at the root's shape over (root, root), repeats S_2 — Task 1b's test-profile method — else ≥ 4 and
+`max_depth` 3 until a level-3 step is proved); and the genesis values verbatim, per level
+(`aggregate_program_digest`, `leaf_size`, the leaf heights, `vk_leaf`, then each level's heights,
+`step_digests[k]`, `step_keys[k]`, `step_tiers[k]`, the last entry repeating). Then the
+`tree_measure` pins (`step_cpu_rows`, `step_tier`, `step_peak_live_mb`, `step_prove_s`,
+`step_proof_bytes`, `root_cpu_rows`, `root_tier`, `root_peak_live_mb`, `root_prove_s`,
+`root_proof_bytes`, `verify_tree_ms`) and the plan's Step 7 row-pin test.
 
 ## 5. The test-profile tree (Tasks 1a, 1b)
 
