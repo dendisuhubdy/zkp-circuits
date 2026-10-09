@@ -149,7 +149,7 @@ fn production_rv32r_over_the_leaf_emulates() {
 
 /// Task 0, run 3 (the 503 GB droplet, hours): the same program proved, under the heap profiler.
 #[test]
-#[ignore = "tree Task 0: rv32r over the production leaf, proved (tier 21 projected, 210-340 GB) — the 503 GB droplet"]
+#[ignore = "tree Task 0: rv32r over the production leaf, proved (648 910 rows, tier 20; 64-75 GB projected at rate 1/4, docs/07 §4) — the 256 GB droplet"]
 fn production_rv32r_over_the_leaf_proves() {
     let (vp, tape, rows, child) = rv32r_over_leaf();
     assert!(child <= STOP_CHILD_ROWS, "the stop rule holds before anything is proved");
