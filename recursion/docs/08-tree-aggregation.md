@@ -133,10 +133,68 @@ step_leaf_tier 19}`. Log: `docs/measurements/2026-10-09-tree-rv32t-test-profile-
 (rate ¼; the rate-⅛ run is `…-laptop.log`). The four test leaves were re-proved at rate ¼.
 
 **Memory (docs/07 §4's table, rate ¼):** tier 18 = 15.64 GB live, measured (26.88 GB at rate ⅛);
-tier 19 ≈ 30 GB, projected (≈ 52 GB at rate ⅛), and the test N = 2 aggregate, a tier-19 proof,
-has been proved on this 48 GB box. Task 1b was planned for the 256 GB droplet when tier 19 was
-past the laptop (R7); at rate ¼ the test-profile step may fit here, which Task 1b should measure
-rather than assume.
+tier 19 ≈ 30 GB, projected (≈ 52 GB at rate ⅛). Task 1b was planned for the 256 GB droplet when
+tier 19 was past the laptop (R7); at rate ¼ it is not, and Task 1b proved the whole test tree on
+this 48 GB laptop (below).
+
+**Task 1b (this 48 GB laptop, 16 cores, 2026-10-09): the depth-2 test tree, proved.** Eight proofs,
+one proving process at a time, cached as `$RECURSION_FIXTURES/tree/Test-*.rvmproof` (git-ignored;
+`generate_test_tree_fixtures` proves whatever `tree/` lacks, and the suite never proves a step).
+
+| proof | program | over | rows | tier | heights reg/ram/p2/reduce | bytes | max RSS (process, measured) | prove time |
+|---|---|---|---|---|---|---|---|---|
+| leaf-0..3 | `rv32n`, L = 1 | bundle fixtures 0–3 | 169 640 | 18 | 19/19/14/16 | 262 377–264 907 | (Task 1a; 15.64 GB live, docs/07) | (Task 1a) |
+| step-0, step-1 | `rv32t_leaf` | leaves 0–1, 2–3 | 287 107 | 19 | 20/20/15/16 | 280 133 (step-0) | **34.35 GB** (step-1 alone) | ≈ 2 min 15 s |
+| root | `rv32t_int` | step-0, step-1 | 306 985 | 19 | 20/20/15/17 | 283 172 | **33.21 GB** (alone) | ≈ 2 min 25 s |
+| foreign-0 | leaf program + one `HALT` (R5) | bundle fixture 0 | 169 640 | 18 | 19/19/14/16 | 264 267 | **21.39 GB** (alone) | ≈ 1 min 15 s |
+
+The generator's first run proved step-0, step-1, the root and the foreign leaf in one process:
+513 s wall, **34.11 GB** maximum RSS (`/usr/bin/time -l`). Each kind's own peak was then measured
+by deleting only that file and re-running the generator (so the process proves that proof alone,
+plus loading and verifying the cached rest): step 34.35 GB / 177 s, root 33.21 GB / 182 s, foreign
+21.39 GB / 114 s. These are process maximum RSS, not the live-heap profile docs/07 reports
+(15.64 GB live for tier 18 vs 21.39 GB RSS here). No swapping beyond the box's background level
+(swap used 3.2 → 7.7 GB of compressed swap while other work was running). The generator is not a
+profile. Log: `docs/measurements/2026-10-09-tree-test-fixtures-laptop.log`. The root and the foreign
+leaf in the cache are the isolation runs' (byte counts above); step-0 is the first run's.
+
+`rv32t_leaf` 287 107 rows vs `rv32t_int` 306 985 (+19 878): the same pipeline twice over another
+child shape. A step child is a tier-19 proof, its traces twice a tier-18 leaf's height, so each
+pass of the loop opens longer Merkle paths and folds further.
+
+Every level publishes exactly the host's `[vk_c ‖ 2 ‖ B ‖ D_a ‖ D_b]` in cover order: `vk_leaf` at
+level 1 (both steps), `vk_t_leaf` at level 2 (the root). The child keys are computed by the test
+(`RvmKey::of`), never read off `VerifierProgram.key` (a zero placeholder for `rv32t`). A foreign
+program's children (R5, second half) pass every in-program check, publish `vk_foreign`, and fail
+the recompute with `vk_leaf`.
+
+**The fixed point (R3) does not hold at the test profile.** `rv32t_int` is built for S_T (an
+`rv32t_leaf` proof's shape). Its own root declares other header words:
+
+| | tier, reg, ram, p2, **reduce**, program, queries | log arities |
+|---|---|---|
+| S_T (`rv32t_leaf` proof) | 19, 20, 20, 15, **16**, 18, 16 | 1, 1, **2, 1**, 3, 3, 1, 3, 2, 3, 1 |
+| root (`rv32t_int` proof) | 19, 20, 20, 15, **17**, 18, 16 | 1, 1, **1, 2**, 3, 3, 1, 3, 2, 3, 1 |
+
+The interior step's two passes over tier-19 children run more reduce rows than `rv32t_leaf`'s
+two over tier-18 leaves, so the reduce table crosses 2^16 into 2^17. That moves the distinct degree
+bits and so the FRI arity schedule. `rv32t_int` cannot verify its own output, so the test profile's
+`max_depth` is 2 (no third program). `the_interior_step_verifies_its_own_output` is ignored with
+that reason. The production profile's verdict is Task 2's (§4).
+
+| digest | value |
+|---|---|
+| `T_LEAF_TEST` (`rv32t_leaf` at the test leaf shape) | `2c586636c4c0f94cdf13b410154679d995eefad11e27371e0786e89e206ccd34` |
+| `T_INT_TEST` (`rv32t_int` at S_T) | `04b1677122526e51c0d278375b0c30ebd37f94ba8a2afed3cd3e019ecdc3c226` |
+| `vk_leaf` (the test leaf's key) | `188d4b1498d166b041fa080181c893e7e200202ac0ad28e7ab79ef9dd2acfdcb` |
+| `vk_t_leaf` (S_T's key) | `6b04244466ffac1c530e8b70b4907c2dedcb2964466a9589234843eab8d8507a` |
+| `vk_int` (the root's key) | `a92a0baa3ae1888f61a35820655f0d6cadf7b2de2ca48a6f434a0c4ca3efbb70` |
+| `vk_foreign` (the foreign leaf's key) | `989ff1e996cd551191590f5603626615e66f1a73e4cc820a111713073815cc2f` |
+
+(Key digests are the four `inner_vk_digest` limbs as canonical u64, 16 hex digits each, printed once.)
+Pins: `tree_test.{step_int_cpu_rows 306 985, step_int_tier 19, step_proof_bytes 280 133}`.
+`step_proof_bytes` is the cached step-0's size. A re-proved step has fresh ZK randomness and may
+differ by a few hundred bytes, so it moves with a regenerated fixture.
 
 ## 6. The chain (Tasks 3a, 3b)
 

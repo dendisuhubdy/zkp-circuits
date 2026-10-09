@@ -42,6 +42,9 @@
     "child_cpu_rows": 143568,
     "step_leaf_cpu_rows": 287107,
     "step_overhead": -29,
-    "step_leaf_tier": 19
+    "step_leaf_tier": 19,
+    "step_int_cpu_rows": 306985,
+    "step_int_tier": 19,
+    "step_proof_bytes": 280133
   }
 }

@@ -5,7 +5,7 @@
 //! verifies it through `verify_tree`.
 mod common;
 
-use p3_field::PrimeCharacteristicRing;
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use rand_zkvm::machine::{FriProfile, Proof as BundleProof};
 use recursion::aggregate::{aggregate, aggregate_program, InnerVerifierKey};
 use recursion::dsl::Checkpoints;
@@ -16,7 +16,7 @@ use recursion::programs::{rv32t_int, rv32t_leaf, tree_step_program_digest, verif
 use recursion::public_values::{public_digest, tree_step_words};
 use recursion::shape::{inner_vk_digest, InnerKey, InnerShape, RvmKey, RvmShape};
 use recursion::witness::{Segment, TapeError, WitnessTape, TREE_TAPE_PREAMBLE};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 const MAX_CYCLES: usize = 1 << 24;
@@ -25,7 +25,6 @@ const B: &[u32; 8] = &common::TEST_BINDING;
 
 /// Set only by the ignored generator (Task 1b): an in-suite run never starts a tier-19 proof
 /// on a box that cannot hold it (R7). Leaves are exempt: tier 18, 15.64 GB live at rate ¼ (docs/07 §4).
-#[allow(dead_code)] // read by Task 1b's step proving
 static ALLOW_STEP_PROVING: AtomicBool = AtomicBool::new(false);
 
 fn tree_file(name: &str) -> std::path::PathBuf {
@@ -53,7 +52,6 @@ fn load_or_prove(name: &str, program: &Program, n: u64, may_prove: bool, prove: 
 
 /// Four test-profile leaves, `rv32n` over bundle fixture k = 0..3 each (L = 1; 169 640 rows,
 /// tier 18 — `tests/pins.json`'s `aggregate_test_n1_cpu_rows`).
-#[allow(dead_code)] // `inner` and `bundles` are Task 1b's and Task 2's (the chain recompute)
 struct Leaves {
     inner: InnerVerifierKey,
     program: Arc<Program>,
@@ -282,4 +280,166 @@ fn a_child_of_the_wrong_shape_is_refused_by_the_tape_builder() {
         WitnessTape::build_tree_step(P, &wrong, [&l.proofs[0], &l.proofs[1]], B).err(),
         Some(TapeError::Replay(recursion::reference::ReplayError::Shape))
     );
+}
+
+/// The builder's pre-check runs over *both* children before any replay (Task 1a review minor):
+/// child 0 matches the shape but is tampered, so its replay alone refuses it with a non-shape
+/// error; child 1 declares another shape. Only the pre-check can answer `Shape` for the pair.
+#[test]
+fn the_tape_builder_shape_checks_both_children_before_replaying_either() {
+    let l = leaves();
+    let copy = |p: &Proof| postcard::from_bytes::<Proof>(&p.to_bytes()).unwrap();
+    let mut tampered = copy(&l.proofs[0]);
+    tampered.public_values[0] = (tampered.public_values[0] + 1) % F::ORDER_U64;
+    assert!(l.shape.matches(&tampered), "a public-value tamper keeps the declared shape");
+    let mut other = copy(&l.proofs[1]);
+    other.ram_log_height += 1;
+    assert!(!l.shape.matches(&other));
+    let alone = WitnessTape::build_tree_step(P, &l.shape, [&tampered, &l.proofs[1]], B).err();
+    assert!(matches!(alone, Some(TapeError::Replay(ref e)) if *e != recursion::reference::ReplayError::Shape),
+        "the tampered child alone is refused by its replay, not the shape check: {alone:?}");
+    assert_eq!(
+        WitnessTape::build_tree_step(P, &l.shape, [&tampered, &other], B).err(),
+        Some(TapeError::Replay(recursion::reference::ReplayError::Shape)),
+        "child 1's shape is refused before child 0 is replayed"
+    );
+}
+
+// ── Task 1b: the proved test tree ───────────────────────────────────────────────────────────
+
+struct TestTree {
+    t_leaf: Arc<Program>,
+    steps: Vec<Proof>,
+    /// S_T: an `rv32t_leaf` proof's declared shape, carrying `rv32t_leaf`'s program.
+    s_step: RvmShape,
+    t_int: Arc<Program>,
+    root: Proof,
+    /// The root's declared shape, carrying `rv32t_int`'s program. R3: its words must equal S_T's.
+    s_root: RvmShape,
+    foreign: Proof,
+    s_foreign: RvmShape,
+}
+
+fn test_tree() -> &'static TestTree {
+    static T: OnceLock<TestTree> = OnceLock::new();
+    T.get_or_init(|| {
+        let l = leaves();
+        let may = ALLOW_STEP_PROVING.load(Ordering::SeqCst);
+        let m = Machine::new(P);
+        let prove_step = |child: &RvmShape, program: &Program, a: &Proof, b: &Proof| -> Proof {
+            let tape = WitnessTape::build_tree_step(P, child, [a, b], B).unwrap();
+            m.prove(program, &tape.words, None).expect("a test tree step proves").0
+        };
+        let t_leaf = Arc::new(rv32t_leaf(&l.shape, Checkpoints::Off).program);
+        let steps: Vec<Proof> = (0..2)
+            .map(|k| load_or_prove(&format!("Test-step-{k}"), &t_leaf, 2, may, || {
+                prove_step(&l.shape, &t_leaf, &l.proofs[2 * k], &l.proofs[2 * k + 1])
+            }))
+            .collect();
+        let s_step = RvmShape::of_proof(P, &t_leaf, &steps[0]);
+        assert!(s_step.matches(&steps[1]), "both level-1 steps declare one shape");
+        let t_int = Arc::new(rv32t_int(&s_step, Checkpoints::Off).program);
+        let root = load_or_prove("Test-root", &t_int, 2, may, || prove_step(&s_step, &t_int, &steps[0], &steps[1]));
+        let s_root = RvmShape::of_proof(P, &t_int, &root);
+        let fprog = Arc::new(foreign_leaf_program(&l.program));
+        let foreign = load_or_prove("Test-foreign-0", &fprog, 1, true, || {
+            let tape = WitnessTape::build_n(P, &l.inner.shape, &l.inner.key, std::slice::from_ref(&l.bundles[0]), B).unwrap();
+            m.prove(&fprog, &tape.words, None).expect("the foreign leaf proves").0
+        });
+        let s_foreign = RvmShape::of_proof(P, &fprog, &foreign);
+        TestTree { t_leaf, steps, s_step, t_int, root, s_root, foreign, s_foreign }
+    })
+}
+
+fn u64s(v: &[F]) -> Vec<u64> {
+    v.iter().map(|f| f.as_canonical_u64()).collect()
+}
+
+/// The generator (R7): proves whatever `tree/` lacks. Run it once where docs/08 §5 says, then
+/// copy `$RECURSION_FIXTURES/tree/` to every box that runs the suite.
+#[test]
+#[ignore = "tree Task 1b: proves the test tree's steps and root (tier 19, tests/pins.json tree_test.step_leaf_tier; 34.3 GB max RSS measured for a step, 33.2 GB for the root) — this 48 GB laptop, one proving process at a time"]
+fn generate_test_tree_fixtures() {
+    ALLOW_STEP_PROVING.store(true, Ordering::SeqCst);
+    let t = test_tree();
+    let l = leaves();
+    for (name, p) in [("leaf-0", &l.proofs[0]), ("step-0", &t.steps[0]), ("root", &t.root), ("foreign-0", &t.foreign)] {
+        eprintln!("TREE_TEST_FIXTURE {name}: tier {} reg {} ram {} poseidon2 {} reduce {} bytes {}",
+            p.tier.0, p.reg_log_height, p.ram_log_height, p.poseidon2_log_height, p.reduce_log_height, p.size());
+    }
+}
+
+/// The depth-2 tree, every level: each step and the root publish exactly the host's
+/// `[vk_c ‖ 2 ‖ B ‖ D_a ‖ D_b]` in cover order, with level 1's `vk_c = vk_leaf` and level 2's
+/// `vk_c = vk_t_leaf` (R2). The child keys are computed here, never read off a
+/// `VerifierProgram` (whose `key` is a zero placeholder for `rv32t`). The root's rows, as
+/// emulated, are pinned.
+#[test]
+fn the_test_tree_proves_and_every_level_publishes_the_host_digest() {
+    let (l, t) = (leaves(), test_tree());
+    let vk_leaf = inner_vk_digest(&l.shape, &l.key);
+    let vk_t_leaf = inner_vk_digest(&t.s_step, &RvmKey::of(P, &t.s_step));
+    for k in 0..2 {
+        assert_eq!(t.steps[k].public_values, u64s(&host_step(&vk_leaf, B, &l.proofs[2 * k], &l.proofs[2 * k + 1])), "step {k}");
+    }
+    assert_eq!(t.root.public_values, u64s(&host_step(&vk_t_leaf, B, &t.steps[0], &t.steps[1])), "the root");
+    let exec = emulate_step(&t.s_step, &t.t_int, &t.steps[0], &t.steps[1], B).expect("rv32t_int accepts the two steps");
+    eprintln!("TREE_TEST_INT rows {} tier {} step_bytes {} root_bytes {}", exec.cpu_rows(), t.root.tier.0, t.steps[0].size(), t.root.size());
+    assert_eq!(exec.cpu_rows(), common::pin("tree_test", "step_int_cpu_rows"));
+    assert_eq!(t.root.tier.0, common::pin("tree_test", "step_int_tier"));
+    assert_eq!(t.steps[0].size(), common::pin("tree_test", "step_proof_bytes"));
+}
+
+/// Review Focus 2 (R3): `rv32t_int` is built for S_T, the shape of an `rv32t_leaf` proof, and
+/// must verify proofs of *itself* at level 3. Its own root declares S_T's words, so the root
+/// twice over is a valid level-3 pair: accepted, publishing `vk_int`, which is not `vk_t_leaf`.
+#[test]
+#[ignore = "R3: the test-profile fixed point does not hold (docs/08 §5); max_depth 2"]
+fn the_interior_step_verifies_its_own_output() {
+    let t = test_tree();
+    assert!(
+        t.s_root.same_step_words(&t.s_step),
+        "R3: rv32t_int's own proofs declare another shape: {:?} vs {:?}. Record both in docs/08 §5 and set the test \
+         profile's max_depth to 2 (no third program)",
+        t.s_root.header_words(),
+        t.s_step.header_words()
+    );
+    let vk_int = inner_vk_digest(&t.s_root, &RvmKey::of(P, &t.s_root));
+    let vk_t_leaf = inner_vk_digest(&t.s_step, &RvmKey::of(P, &t.s_step));
+    assert_ne!(vk_int, vk_t_leaf, "level 2 and level 3 publish different child keys (R2)");
+    let exec = emulate_step(&t.s_root, &t.t_int, &t.root, &t.root, B).expect("rv32t_int accepts two of its own proofs");
+    assert_eq!(exec.public, host_step(&vk_int, B, &t.root, &t.root));
+}
+
+/// Review Focus 1 (R5, second half): children of a foreign program with identical shape words,
+/// under that program's honest cap, pass every in-program check. The step publishes the key it
+/// checked against, and the chain's recompute with the pinned `vk_leaf` refuses it. The children's
+/// digests equal the honest leaf's (the same run), so `vk_c` is the only difference.
+#[test]
+fn a_foreign_program_child_pair_passes_in_program_and_fails_the_root_recompute() {
+    let (l, t) = (leaves(), test_tree());
+    assert!(t.s_foreign.same_step_words(&l.shape));
+    assert_eq!(t.foreign.public_values, l.proofs[0].public_values, "the same run publishes the same digest");
+    let step = rv32t_leaf(&l.shape, Checkpoints::Off).program;
+    let exec = emulate_step(&t.s_foreign, &step, &t.foreign, &t.foreign, B).expect("accepted in-program");
+    let vk_foreign = inner_vk_digest(&t.s_foreign, &RvmKey::of(P, &t.s_foreign));
+    let vk_leaf = inner_vk_digest(&l.shape, &l.key);
+    assert_ne!(vk_foreign, vk_leaf);
+    assert_eq!(exec.public, host_step(&vk_foreign, B, &t.foreign, &t.foreign), "it publishes the key it checked against");
+    assert_ne!(exec.public, host_step(&vk_leaf, B, &t.foreign, &t.foreign), "the chain's recompute refuses it (Task 2: TreeRootDigest)");
+}
+
+/// The two step programs' digests at the test-profile shapes (M4). History: first pinned by tree
+/// Task 1b.
+const T_LEAF_TEST: &str = "2c586636c4c0f94cdf13b410154679d995eefad11e27371e0786e89e206ccd34";
+const T_INT_TEST: &str = "04b1677122526e51c0d278375b0c30ebd37f94ba8a2afed3cd3e019ecdc3c226";
+
+#[test]
+fn the_test_tree_program_digests_are_pinned() {
+    let t = test_tree();
+    let (a, b) = (recursion::programs::digest_hex(&t.t_leaf), recursion::programs::digest_hex(&t.t_int));
+    eprintln!("TREE_TEST_DIGESTS t_leaf {a} t_int {b}");
+    assert_ne!(a, b, "two programs");
+    assert_eq!(a, T_LEAF_TEST, "rv32t_leaf at the test leaf shape");
+    assert_eq!(b, T_INT_TEST, "rv32t_int at the test step shape");
 }

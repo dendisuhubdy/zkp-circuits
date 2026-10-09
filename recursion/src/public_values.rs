@@ -89,13 +89,14 @@ pub fn interface_words_bound<S: VerifierShape>(shape: &S, key: &S::Key, binding:
     w
 }
 
-/// The tree step's interface list (tree aggregation, spec §3–§4): `[vk_c(4) ‖ 2 ‖ B(8) ‖ D_a(4)
-/// ‖ D_b(4)]`, 21 words, `D_a` and `D_b` the two children's published digests in cover order.
+/// The tree step's interface list (tree aggregation, spec §3–§4): `[vk_c(4) ‖ N ‖ B(8) ‖ D_a(4)
+/// ‖ D_b(4)]`, 21 words, `N = TREE_ARITY = 2` and `D_a`, `D_b` the two children's published
+/// digests in cover order.
 /// `rv32t`'s staged sponge absorbs exactly this; the chain recomputes it at every level ≥ 1 with
 /// that level's pinned `vk_c` (`aggregate::TreeKeys::at_level`).
 pub fn tree_step_words(vk_c: &[F; 4], binding: &[u32; 8], d_a: &[F; 4], d_b: &[F; 4]) -> Vec<F> {
     let mut w = vk_c.to_vec();
-    w.push(F::from_u64(2));
+    w.push(F::from_u64(crate::programs::TREE_ARITY));
     w.extend(binding.iter().map(|x| F::from_u64(*x as u64)));
     w.extend_from_slice(d_a);
     w.extend_from_slice(d_b);
