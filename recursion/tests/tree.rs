@@ -582,6 +582,9 @@ fn verify_tree_names_every_refusal() {
         Err(VerifyTreeError::TreeLayout { covers: 4, leaf_size: usize::MAX })), "L·2^d overflows: refused, no panic");
     assert!(matches!(verify_tree(&m, &t.t_int, &t.root, &l.inner, &c4, B, 1 << 40, 63, &k),
         Err(VerifyTreeError::TreeLayout { covers: 4, .. })), "L·2^63 overflows: refused, no panic");
+    let wraps_to_4 = (1usize << 62) + 1; // 4·(2^62 + 1) = 2^64 + 4 ≡ 4: an unchecked product would accept the layout
+    assert!(matches!(verify_tree(&m, &t.t_int, &t.root, &l.inner, &c4, B, wraps_to_4, 2, &k),
+        Err(VerifyTreeError::TreeLayout { covers: 4, .. })), "L·2^d wrapping onto the cover count is refused");
     let swapped = vec![c4[1].clone(), c4[0].clone(), c4[2].clone(), c4[3].clone()];
     assert!(matches!(vt(&t.t_int, &t.root, &swapped, B, 2, &k), Err(VerifyTreeError::TreeRootDigest)));
     let pairs_swapped = vec![c4[2].clone(), c4[3].clone(), c4[0].clone(), c4[1].clone()];
