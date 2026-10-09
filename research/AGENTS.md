@@ -30,7 +30,11 @@ height-group sponge buffers, `HINTN` = 26, `COMPRESS` = 27 — from
 $2{,}047{,}268$ at constraint set 8 to $893{,}606$; `recursion/docs/04`) and
 phase 3's four (2026-10-05: the reduction's layout preprocessed in the reduce
 chip, the own slot by one `LOADE`, `FOLD` = 28, `POW` = 29 — 61 399 rows short
-of the $2^{19}$ gate, which was not widened; `recursion/docs/06`); the
+of the $2^{19}$ gate, which was not widened; `recursion/docs/06`) **and tree aggregation** (2026-10, branch
+`feat/tree-aggregation`, `recursion/docs/08`): `rv32t`, the 2-to-1 step over a compile-time child
+shape with the child key a published tape value, `verify_tree`'s bottom-up recompute, and a
+production depth-2 tree measured on the 256/503 GB droplets (pending: the test tree is proved on
+the laptop); the
 chain-facing `aggregate`/`verify_aggregate` API the fullnode's `shrugg-rvm`
 vendors; the proving-backend split (`Backend::{Reference, Cuda}`, zero new
 kernels — the RV32 CUDA crate covers the rVM's instances as-is); and the
@@ -41,7 +45,8 @@ runbook), `04` (phase 2's row cuts and the prover's measured live heap), `05` (t
 quotient layout), `06` (phase 3's cuts; the tier-18 twin proves on 48 GB at
 26.88 GB live), `07` (the rVM's own FRI profile at rate ¼ — `RvmFri`: 92 queries, 24
 grinding bits, 86.38 proven bits against 80/8/20's 86.41 under the paper's theorem; the twin at
-15.64 GB live, the production N=1 projected at ≈ 64–75 GB); plans/specs in `docs/superpowers/`. **Open only on hardware**: the
+15.64 GB live, the production N=1 projected at ≈ 64–75 GB), `08` (tree aggregation: the child and
+step measured by emulation, the test tree proved); plans/specs in `docs/superpowers/`. **Open only on hardware**: the
 PTX first build and the production N re-measurement, blocked on a fleet GPU
 node (80 GB device, ≥ 160 GB host; `PTX_BUILD.md`); the deferred proofs
 (M5.2's exit — tier 20 since phase 2 —, N≥2 twins, the self-proof) run on the

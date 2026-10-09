@@ -264,4 +264,99 @@ openings or a wider table. The test prints the actual sizes.
 
 ## 6. The chain (Tasks 3a, 3b)
 
+Fullnode branch `feat/tree-aggregation` (`~/rand-worktrees/fullnode-tree`), not pushed: `2d002ee5`
+and `202a8b10` (Task 3a, core), `bf888100` (the re-vendor of circuits `92b750e`), `153c7204` and
+`43d0687f` (Task 3b, node). The rules as built are fullnode `docs/aggregation.md` §3.8; this is
+their summary, and the per-level wording is the spec's §4.1.
+
+- **Genesis section.** `aggregation_tree` (beside `aggregation`, which it requires): `shape`,
+  `leaf_size` L, `max_depth`, the leaf's heights and `vk_leaf`, and a per-level `steps` list
+  (`steps[k-1]` is level k: its heights and tier, program digest, the key digest of its proofs).
+  The last entry repeats for deeper levels, sound only at a fixed point. Bounds: 1 <= L <= 5,
+  1 <= `max_depth` <= 8, a non-empty list no longer than `max_depth`, an admitted shape, no zero
+  pin. The genesis hash appends `"aggregation_tree" || bincode(section)` after `multisig`, only
+  when present; a genesis without it hashes as before.
+- **Layout.** `Action::Aggregate` carries `layout: flat | tree` (a trailing 4-byte enum index;
+  `serde(default)` flat). A tree covers exactly L * 2^d bundles, 1 <= d <= `max_depth`; another
+  count is `TreeLayout` / `TreeDepth`, refused at preflight before the register is read. The cap
+  is the layout's: flat is bounded by `max_covers`, a tree by L * 2^`max_depth`.
+- **Signing domains.** `rand-aggregate-tree-1` (the ChainId form) and `rand-aggregate-tree-2` (the
+  genesis-bound form): the flat preimage under another tag, so flipping the layout is
+  `BadSignature`.
+- **Admission.** 6t (a section for the covered shape, and the count is a tree), 7a (the root's
+  declared tier equals the tier pinned for level d, `TreeTier`; the executor also holds the
+  other four declared heights to the level's pins off the header), 7b (the executor rebuilds the
+  leaf and every listed step; the root's program is level d's digest, then `vk_leaf` and each
+  step key the recompute uses are the pins; `TreeKeyPin { level }` is numbered by the consuming
+  level), 8 (`verify_tree`: the bottom-up recompute under the chain's one binding, compared with
+  the root's four public values, then `verify_n(root program, root, 2)`).
+- **ZKQ-5, implemented.** The tie is the recompute (docs/02 ZKQ-5), not an in-program equality:
+  a root with any level made under another binding is `TreeRootDigest`.
+- **Errors**: `TreeNotAdmitted`, `TreeLayout`, `TreeDepth`, `TreeTier`, `TreeKeyPin`,
+  `CoveredPublicValues`, `TreeRootDigest`; all but `TreeKeyPin` are permanent verdicts in the
+  admission refusal cache.
+- **Startup.** A node with the section rebuilds it and compares every listed level's program
+  digest and key and `vk_leaf` before opening its store (`aggregation_tree pins: ok`, else
+  `refusing to start`). It also refuses a section the rVM cannot serve: L past the shape's N
+  ceiling, a non-canonical pinned reduce height, or `max_depth` past the list when the last entry
+  is not a fixed point. `rand-node genesis --aggregation-tree <TREE.JSON>` runs the same check
+  before writing. `rand-node aggregate --layout tree` proves one whole tree per pass.
+- **Test-profile values on the chain side.** The node's rebuilt digests and keys over docs/08 §5's
+  heights equal this crate's `pins.json` (`the_rebuilt_test_tree_keys_are_the_circuits_pins`).
+- **Pending.** The production section's values (§3-§4) and the cluster run. The cluster run is
+  blocked by the existing startup refusal of any `aggregation` genesis (fullnode
+  `docs/aggregation.md`, "Before enabling aggregation").
+
 ## 7. What moved, and the suite (Task 4)
+
+| what | change |
+|---|---|
+| `src/programs/rv32t.rs` (new) | `verify_rv32t`, `rv32t_leaf`, `rv32t_int`, `tree_step_program_digest`, `TREE_ARITY = 2`: the 2-to-1 step over a compile-time child shape, the child key a published tape value |
+| `src/programs/rv32.rs` | `emit_proof` is now `emit_proof_with(b, shape, cap_closure)`; `emit_proof` calls it with the constant cap. Task 1a's step 3 confirmed the split moved nothing (every existing digest unchanged) |
+| `src/aggregate.rs` | `verify_tree`, `tree_root_digest`, `prove_tree_step`, `aggregate_tree`, `TreeKeys { vk_leaf, step_keys }`, `TreeShapes { leaf, steps }`; `VerifyTreeError`, `AggregateError::{TreeLayout, TreeShape}` |
+| `src/shape.rs` | `RvmHeights`, `RvmShape::{heights, try_of_heights, same_step_words}`, `ShapeError::EmptyTreeSteps` |
+| `src/public_values.rs`, `src/witness.rs` | `tree_step_words` (21 words); `WitnessTape::build_tree_step`, `TREE_TAPE_PREAMBLE = 24` |
+| `tests/tree.rs`, `tests/tree_measure.rs` (new) | the in-suite tree tests over the cached test tree; the ignored production runs |
+| `tests/pins.json` | new blocks `tree_measure` (emulated production rows, band) and `tree_test` (test-profile rows, tiers, `vk_*` limbs) |
+| new test-profile digests | `T_LEAF_TEST` `2c586636...206ccd34`, `T_INT_TEST` `04b16771...ecdc3c226`, `T_FIX_TEST` `08abf188...4795ff396` (§5), and `vk_leaf`, `vk_t_leaf`, `vk_int`, `vk_fix`, `vk_foreign` |
+| production digests, genesis values | pending (256 GB droplet): the per-level `step_digests[k]`, `step_keys[k]`, `step_tiers[k]`, `aggregate_program_digest`, `leaf_size`, the leaf heights and `vk_leaf`, as printed by `production_tree_genesis_values` |
+| no opcode, AIR or key-shape change | the ISA stays at 30 instructions; the machine's AIRs, the flat `aggregate_program_digest` and `RvmKey`/`InnerKey` shapes are untouched |
+| docs | docs/08 (this file); docs/02 ZKQ-5 and API; docs/03; `research/AGENTS.md` |
+
+**The suite.** `cargo test --release` in `recursion/` (one process, no proving tests, no
+generator; the tree tests read the cached test-tree fixtures): **323 passed, 0 failed, 31 ignored** across 32 test binaries
+(HEAD `92b750e` plus these docs; the ignored are the droplet-class proofs, the generator and the
+production runs). Task R's run before the tree API was 310 passed, 26 ignored; Task 2's 322 passed,
+31 ignored.
+
+## 8. Conclusion: the gate
+
+**Circuits half: met at the test profile, pending at production.**
+- The stop rule held: C = 648 518 emulated (43 % of the 1 500 000 limit), the production step
+  1 294 577 rows emulated, inside its band [1 102 455, 1 491 559], tier 21 (§1-§2).
+- The whole test tree was proved on this 48 GB laptop: 4 leaves (tier 18), 2 `rv32t_leaf` steps
+  (287 107 rows, tier 19, 34.35 GB max RSS), the `rv32t_int` root (306 985 rows, tier 19,
+  33.21 GB), and `verify_tree` accepts the root over the 4 bundles' public values (§5). Every
+  refusal named in the spec (swapped pair, swapped subtrees, another binding, wrong level key,
+  foreign program, short or aliased run) is refused in-suite (the foreign case through the
+  recompute, with an emulated foreign step's public values on a real step proof; no foreign step was proved).
+- The fixed point holds at the test profile at level 3 (3 step programs, 4 keys), by emulation,
+  not by a proved level-3 step. Production's list length is decided by the same emulation over
+  the proved production depth-2 tree (not run).
+- Not run: the production tree (3 more leaves, 2 `rv32t_leaf` steps, the `rv32t_int` root;
+  §3). Every production row, tier, peak and genesis value above is pending the 256 GB droplet
+  (`tests/tree_measure.rs`: `production_tree_leaf`, `production_tree_step`, `production_tree_root`,
+  `production_tree_genesis_values`, commands in §3).
+
+**Chain half: implemented and tested, production pending.** `verify_tree` is wired into
+admission, startup pin check, genesis tooling and the aggregator daemon (§6). The node-side
+production check is the ignored `agg_executor::tests::production_tree` (fullnode, 8 bundles
+`Production-0..7`; run on the 256 GB host after the circuits `production_tree_*` runs). The
+cluster run is blocked by the pre-existing startup refusal of any aggregation genesis.
+
+**Host classes.** At rate 1/4 (docs/07 §4) a tier-21 proof projects at 122-197 GB, so the
+production leaves, steps and root run on the **256 GB** class, one proving process at a time
+(the 503 GB box a fallback). The test tree needs 34 GB (tier 19, measured), within 48 GB.
+
+**Next lever.** The memory track (spec ruling 1), not the row count: a tier-21 step at 122-197 GB
+projected against the 64 GB target.

@@ -132,6 +132,13 @@ The path there, toy / busy cpu rows: 152 527 / 188 390 after phase 2 (`docs/04`)
 end, each step in `docs/06` §4. Self-program digest (toy shape) `91e50e14…bd13` →
 `e9c9720db4ea38438eee075c3cd5cd2362d60672b2c550d632519627e2724bb0`.
 
+`rv32r` is the k = 1 case of the self-verifier and stays here with its tests; `rv32t`
+(`src/programs/rv32t.rs`) is its k = 2 loop: the 2-to-1 tree step, over a compile-time child shape,
+with the child key a published tape value (`docs/08`). At the production leaf's shape (the
+emulated L = 2 leaf, 1 171 511 rows, tier 21) the measured child, `rv32r` over it, is 648 910 rows
+at tier 20, child cost C = 648 518 (counted by the accepting walk, held to the emulator in-suite;
+`docs/08` §1), beside the toy and busy pins above.
+
 **The measured cost, at M5.4** (the record; two test-profile fixtures, 16 queries each) —
 
 | fixture | tier | cpu rows | permutations | mem accesses | program instrs | witness words | phase 5 |
@@ -228,8 +235,10 @@ so 11 follows 3 on the same machine.
   device class).
 - **The self-verifier, built and measured** — `verify_rv32r` with its tamper differential, and
   its requirement measured at two fixtures and derived for the M5.2-exit shape: tier 22,
-  ~97–130 GB, ≥ 128 GB host — the tree-of-aggregates question answered to a number, with the
-  end-to-end proof written and scheduled in the runbook (row 11).
+  ~97–130 GB, ≥ 128 GB host — and the tree-of-aggregates question answered to a measured step
+  class: `docs/08` §2-§3 (the production step 1 294 577 rows emulated, tier 21, inside its band
+  [1 102 455, 1 491 559]; the test-profile step 287 107 rows, tier 19, proved on a 48 GB laptop),
+  with the end-to-end proof written and scheduled in the runbook (row 11).
 - **The consolidated runbook itself**, above: every deferred proof, its command, its class, its
   estimate — one ≥ 64 GB session clears runs 1–6 after chain-side aggregation lands, and the
   GPU node clears 9–10 (and accelerates 6–8, 11) when provisioned.

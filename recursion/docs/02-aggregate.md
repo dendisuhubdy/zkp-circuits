@@ -339,13 +339,15 @@ inner aggregate absorbed. Asked: must the program assert `B_out == B_in`?
   would accept an outer proof over *any* inner statement. So the load-bearing rule is the
   recompute, and the in-program equality would add nothing a correct verifier does not have.
 
-**The rule for whoever registers a tree** (no chain does today — the self-verifier ships as the
-single-proof form, no fullnode code verifies an `rv32r` proof, and no genesis pins its digest):
-a tree aggregate is verified by recomputing each level's interface digest bottom-up from the
-covered bundles and the chain's own binding, the same `B` at every level; never by comparing
-only the root's words. If a future design needs an outer proof whose inner digest the chain
-cannot recompute (an inner proof over data the chain does not hold), revisit this: that design
-must open `D_in` in-program and assert `B_in == B_out`.
+**The rule for whoever registers a tree, as implemented** (tree aggregation, `docs/08` §4 and
+§6): a tree aggregate is verified by `aggregate::verify_tree`, which recomputes each level's
+interface digest bottom-up from the covered bundles' public values (in cover order) and the
+chain's own binding, the same `B` at every level, under the per-level key list (`vk_leaf` for the
+leaves, then `step_keys`, the last entry repeating), and compares the result with the root's four
+public values before `verify_n(root program, root, 2)`. It never compares only the root's words.
+The fullnode's admission calls it at step 8 (`docs/aggregation.md` §3.8). If a future design needs
+an outer proof whose inner digest the chain cannot recompute (an inner proof over data the chain
+does not hold), revisit this: that design must open `D_in` in-program and assert `B_in == B_out`.
 
 ## The N-economics, measured (test profile)
 
@@ -447,6 +449,12 @@ carry the watchdog command lines.
   (`WrongShape { index }`), builds the N-proof tape (`Tape`), proves (`Prove`), and asserts the
   executed program's published digest equals the host-computed one at prove time
   (`DigestMismatch`, R6). Returns the proof and its §4.4 list.
+- Tree aggregation (`docs/08`): `TreeKeys { vk_leaf, step_keys }` and
+  `TreeShapes { leaf, steps }` (per-level lists, the last entry repeating at a fixed point);
+  `tree_root_digest` (the host recompute), `verify_tree(m, root_program, proof, inner, covered,
+  binding, leaf_size, depth, keys)` (recompute, compare, then `verify_n(…, 2)`),
+  `prove_tree_step(m, child, [&Proof; 2], binding, tier)` and `aggregate_tree(m, inner, &TreeShapes,
+  proofs, binding, leaf_size) -> (Proof, depth)`.
 - `verify_aggregate(m, program, a, binding) -> Result<Vec<[u32; 8]>, VerifyAggregateError>` —
   refuses a list whose eight binding words are not the caller's `binding` (`BindingMismatch`,
   AGG-2), then recomputes the §4.4 digest from `a.public` and compares it against the proof's batch public values
