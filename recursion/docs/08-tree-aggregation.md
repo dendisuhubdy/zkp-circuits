@@ -35,7 +35,7 @@ compares two proofs of one toy shape.)
 | leaf: `rv32n`, L = 2 (fixtures 0–1), **emulated** | laptop | 1 171 511 | 21 | 22 / 22 / 17 / 19 (2^20, 597 665 instrs) | — | — | — | — | — |
 | `rv32r` at the leaf's shape (k = 1, baked cap), **counted** | laptop | 648 910 | 20 | — (canonical reduce height at n = 1: 18) | — | — | — | — | — |
 | leaf: `rv32n`, L = 2 (fixtures 0–1), proved | 256 GB | *pending (Step 6)* | | | | | | | |
-| `rv32r` over the leaf (k = 1, baked cap), proved | 503 GB | *pending (Steps 7–8)* | | | | | | | |
+| `rv32r` over the leaf (k = 1, baked cap), proved | 256 GB (tier 20 at rate ¼) | *pending (Steps 7–8)* | | | | | | | |
 
 The leaf's canonical reduce height at n = 2 is `2^19`, the same as the height `build_traces`
 declares (asserted). The leaf's rows and heights equal docs/02's production N = 2 row exactly.
