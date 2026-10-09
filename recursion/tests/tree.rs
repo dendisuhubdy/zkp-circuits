@@ -495,3 +495,230 @@ fn the_test_tree_program_digests_are_pinned() {
     assert_eq!(a, T_LEAF_TEST, "rv32t_leaf at the test leaf shape");
     assert_eq!(b, T_INT_TEST, "rv32t_int at the test step shape");
 }
+
+// ── Task 2: verify_tree, the per-level key list, the prover side's refusals ──────────────────
+
+use recursion::aggregate::{aggregate_tree, tree_root_digest, verify_tree, AggregateError, TreeKeys, TreeShapes, VerifyTreeError};
+use recursion::shape::RvmHeights;
+
+/// The first `n` covered bundles' public values, in cover order.
+fn covered(n: usize) -> Vec<Vec<u64>> {
+    leaves().bundles[..n].iter().map(|b| b.public_values.clone()).collect()
+}
+
+/// docs/08 §5's key digests at the test profile (tree Task 1b), as `digest_hex` prints them.
+const VK_LEAF_TEST: &str = "188d4b1498d166b041fa080181c893e7e200202ac0ad28e7ab79ef9dd2acfdcb";
+const VK_T_LEAF_TEST: &str = "6b04244466ffac1c530e8b70b4907c2dedcb2964466a9589234843eab8d8507a";
+const VK_INT_TEST: &str = "a92a0baa3ae1888f61a35820655f0d6cadf7b2de2ca48a6f434a0c4ca3efbb70";
+
+fn hex(d: &[F; 4]) -> String {
+    d.iter().map(|w| format!("{:016x}", w.as_canonical_u64())).collect()
+}
+
+/// The test profile's four keys (R2 amended): `vk_leaf`, then the step list `[vk_t_leaf, vk_int,
+/// vk_fix]`, the last repeating. The first three are computed from the proved shapes and held to
+/// docs/08 §5; `vk_fix` is Task 1b's `tree_test.vk_fix_*` pin (no level-3 proof exists).
+fn test_keys() -> TreeKeys {
+    let (l, t) = (leaves(), test_tree());
+    let vk_leaf = inner_vk_digest(&l.shape, &l.key);
+    let vk_t_leaf = inner_vk_digest(&t.s_step, &RvmKey::of(P, &t.s_step));
+    let vk_int = inner_vk_digest(&t.s_root, &RvmKey::of(P, &t.s_root));
+    assert_eq!((hex(&vk_leaf).as_str(), hex(&vk_t_leaf).as_str(), hex(&vk_int).as_str()), (VK_LEAF_TEST, VK_T_LEAF_TEST, VK_INT_TEST),
+        "docs/08 §5's key digests");
+    let vk_fix: [F; 4] = std::array::from_fn(|k| F::from_u64(common::pin_u64("tree_test", &format!("vk_fix_{k}"))));
+    TreeKeys { vk_leaf, step_keys: vec![vk_t_leaf, vk_int, vk_fix] }
+}
+
+/// A rVM proof's independent copy (`Proof` has no `Clone`).
+fn copy(p: &Proof) -> Proof {
+    postcard::from_bytes::<Proof>(&p.to_bytes()).unwrap()
+}
+
+/// The proved depth-2 test tree verifies through the chain-facing call, returning the four
+/// covered bundles' `OUT0..7` in cover order.
+#[test]
+fn verify_tree_accepts_the_test_tree() {
+    let (l, t) = (leaves(), test_tree());
+    let outs = verify_tree(&Machine::new(P), &t.t_int, &t.root, &l.inner, &covered(4), B, 1, 2, &test_keys())
+        .expect("the depth-2 test tree verifies");
+    assert_eq!(outs.len(), 4);
+    for (j, out) in outs.iter().enumerate() {
+        let want: [u32; 8] = std::array::from_fn(|k| u32::try_from(l.bundles[j].public_values[rand_zkvm::tables::cpu::pv::OUT0 + k]).unwrap());
+        assert_eq!(*out, want, "bundle {j}");
+    }
+    // A depth-1 tree is a step: step 0 over bundles 0 and 1 under `rv32t_leaf`.
+    let outs1 = verify_tree(&Machine::new(P), &t.t_leaf, &t.steps[0], &l.inner, &covered(2), B, 1, 1, &test_keys())
+        .expect("a level-1 step is a depth-1 tree");
+    assert_eq!(outs1[..], outs[..2]);
+}
+
+/// Every refusal by name, each before `verify_n` builds a key except the last: a count that is
+/// not L·2^d, depth 0, a level with no pinned key, a malformed covered run, a swapped cover
+/// order, another binding, a leaf presented as a depth-1 root (a flat proof as a tree), a level
+/// recomputed under another level's key, and the root verified as the wrong program.
+#[test]
+fn verify_tree_names_every_refusal() {
+    let (l, t) = (leaves(), test_tree());
+    let m = Machine::new(P);
+    let k = test_keys();
+    let c4 = covered(4);
+    let vt = |prog: &Program, proof: &Proof, cov: &[Vec<u64>], b: &[u32; 8], depth: u32, keys: &TreeKeys| {
+        verify_tree(&m, prog, proof, &l.inner, cov, b, 1, depth, keys)
+    };
+    assert!(matches!(vt(&t.t_int, &t.root, &c4[..3], B, 2, &k), Err(VerifyTreeError::TreeLayout { covers: 3, leaf_size: 1 })));
+    assert!(matches!(verify_tree(&m, &t.t_int, &t.root, &l.inner, &c4, B, 0, 2, &k), Err(VerifyTreeError::TreeLayout { covers: 4, leaf_size: 0 })));
+    assert!(matches!(vt(&t.t_int, &t.root, &c4[..1], B, 0, &k), Err(VerifyTreeError::TreeDepth { depth: 0 })));
+    assert!(matches!(vt(&t.t_int, &t.root, &c4, B, 64, &k), Err(VerifyTreeError::TreeDepth { depth: 64 })));
+    let no_steps = TreeKeys { vk_leaf: k.vk_leaf, step_keys: vec![] };
+    assert!(matches!(vt(&t.t_int, &t.root, &c4, B, 2, &no_steps), Err(VerifyTreeError::TreeKeyPin { level: 2 })),
+        "level 2 publishes a step key and none is pinned");
+    let mut short = c4.clone();
+    short[2].pop();
+    assert!(matches!(vt(&t.t_int, &t.root, &short, B, 2, &k), Err(VerifyTreeError::CoveredPublicValues { index: 2 })));
+    let mut aliased = c4.clone();
+    aliased[1][0] += F::ORDER_U64; // the same field element, non-canonically
+    assert!(matches!(vt(&t.t_int, &t.root, &aliased, B, 2, &k), Err(VerifyTreeError::CoveredPublicValues { index: 1 })),
+        "a non-canonical word is refused, not reduced");
+    let swapped = vec![c4[1].clone(), c4[0].clone(), c4[2].clone(), c4[3].clone()];
+    assert!(matches!(vt(&t.t_int, &t.root, &swapped, B, 2, &k), Err(VerifyTreeError::TreeRootDigest)));
+    let pairs_swapped = vec![c4[2].clone(), c4[3].clone(), c4[0].clone(), c4[1].clone()];
+    assert!(matches!(vt(&t.t_int, &t.root, &pairs_swapped, B, 2, &k), Err(VerifyTreeError::TreeRootDigest)));
+    assert!(matches!(vt(&t.t_int, &t.root, &c4, &[7; 8], 2, &k), Err(VerifyTreeError::TreeRootDigest)));
+    assert!(matches!(vt(&t.t_leaf, &l.proofs[0], &c4[..2], B, 1, &k), Err(VerifyTreeError::TreeRootDigest)),
+        "a flat proof (a leaf) is not a depth-1 tree");
+    assert!(matches!(vt(&t.t_int, &t.root, &c4, B, 1, &TreeKeys { vk_leaf: k.vk_leaf, step_keys: k.step_keys.clone() }), Err(VerifyTreeError::TreeLayout { covers: 4, leaf_size: 1 })),
+        "the root presented at the wrong depth");
+    let wrong_level2 = TreeKeys { vk_leaf: k.vk_leaf, step_keys: vec![k.step_keys[1], k.step_keys[1], k.step_keys[2]] };
+    assert!(matches!(vt(&t.t_int, &t.root, &c4, B, 2, &wrong_level2), Err(VerifyTreeError::TreeRootDigest)),
+        "level 2 recomputed under level 3's key");
+    let wrong_level1 = TreeKeys { vk_leaf: k.step_keys[0], step_keys: k.step_keys.clone() };
+    assert!(matches!(vt(&t.t_int, &t.root, &c4, B, 2, &wrong_level1), Err(VerifyTreeError::TreeRootDigest)),
+        "level 1 recomputed under level 2's key");
+    assert!(matches!(vt(&t.t_leaf, &t.root, &c4, B, 2, &k), Err(VerifyTreeError::Verify(_))),
+        "the root verified as rv32t_leaf's proof");
+}
+
+/// Review Focus 4 (R2/R3 amended): level 1 publishes `vk_leaf` and level j ≥ 2 publishes
+/// `step_keys[min(j − 2, len − 1)]`, the last entry repeating. A host-only recompute at depth 5
+/// over a three-entry list, against a hand-rolled one with distinct dummy keys: levels 4 and 5
+/// both take the last entry. Appending a copy of the last entry moves nothing (it is what
+/// repeating means); swapping any two of the four keys moves the root.
+#[test]
+fn verify_tree_selects_the_per_level_key_with_the_last_entry_repeating() {
+    let l = leaves();
+    let depth = 5u32;
+    let n = 1usize << depth;
+    let pvs: Vec<Vec<u64>> = (0..n as u64).map(|j| (0..35).map(|k| 1000 * j + k).collect()).collect();
+    let dummy = |x: u64| -> [F; 4] { std::array::from_fn(|i| F::from_u64(10 * x + i as u64)) };
+    let keys = TreeKeys { vk_leaf: dummy(1), step_keys: vec![dummy(2), dummy(3), dummy(4)] };
+    assert_eq!(
+        (1..=6).map(|j| keys.at_level(j).unwrap()).collect::<Vec<_>>(),
+        vec![dummy(1), dummy(2), dummy(3), dummy(4), dummy(4), dummy(4)],
+        "level j's key: vk_leaf, then the list from level 2, the last entry repeating"
+    );
+    assert_eq!(keys.at_level(0), None, "levels are 1-based");
+
+    let leaf_d: Vec<[F; 4]> = pvs
+        .iter()
+        .map(|p| public_digest(&recursion::public_values::interface_words_bound(&l.inner.shape, &l.inner.key, B, std::slice::from_ref(p))))
+        .collect();
+    let step = |vk: [F; 4], a: [F; 4], b: [F; 4]| public_digest(&tree_step_words(&vk, B, &a, &b));
+    let fold = |level: &[[F; 4]], vk: [F; 4]| -> Vec<[F; 4]> { level.chunks(2).map(|p| step(vk, p[0], p[1])).collect() };
+    let mut level = leaf_d;
+    for vk in [dummy(1), dummy(2), dummy(3), dummy(4), dummy(4)] {
+        level = fold(&level, vk);
+    }
+    assert_eq!(level.len(), 1);
+    let root = level[0];
+    assert_eq!(tree_root_digest(&l.inner, &pvs, B, 1, depth, &keys).unwrap(), root, "the hand-rolled recompute");
+
+    let longer = TreeKeys { vk_leaf: keys.vk_leaf, step_keys: vec![dummy(2), dummy(3), dummy(4), dummy(4)] };
+    assert_eq!(tree_root_digest(&l.inner, &pvs, B, 1, depth, &longer).unwrap(), root, "an explicit repeat is the implicit one");
+    let shorter = TreeKeys { vk_leaf: keys.vk_leaf, step_keys: vec![dummy(2), dummy(3)] };
+    assert_ne!(tree_root_digest(&l.inner, &pvs, B, 1, depth, &shorter).unwrap(), root, "the repeat starts at the right level");
+
+    let all = [dummy(1), dummy(2), dummy(3), dummy(4)];
+    for i in 0..4 {
+        for j in i + 1..4 {
+            let mut s = all;
+            s.swap(i, j);
+            let swapped = TreeKeys { vk_leaf: s[0], step_keys: s[1..].to_vec() };
+            assert_ne!(tree_root_digest(&l.inner, &pvs, B, 1, depth, &swapped).unwrap(), root, "swapping keys {i} and {j}");
+        }
+    }
+    // L = 2 at depth 4 covers the same 32 runs: another layout, another root.
+    assert_ne!(tree_root_digest(&l.inner, &pvs, B, 2, 4, &keys).unwrap(), root);
+}
+
+/// What the node rebuilds from a genesis (`TreeShapes::build` over the pinned heights: the leaf's,
+/// then the per-level step list `[S_T, S_root, S_root]`) is the test tree's own programs and
+/// keys, the third entry the fixed point (Task 1b's `T_FIX_TEST`, `vk_fix`).
+#[test]
+fn the_tree_shapes_rebuild_the_test_tree_programs_and_keys() {
+    let (l, t) = (leaves(), test_tree());
+    let h_leaf = RvmHeights::of_proof(&l.proofs[0]);
+    assert_eq!(h_leaf, l.shape.heights());
+    assert_eq!(RvmShape::try_of_heights(P, &l.program, h_leaf).unwrap(), l.shape, "the heights round-trip");
+    let (h_t, h_root) = (RvmHeights::of_proof(&t.steps[0]), RvmHeights::of_proof(&t.root));
+    let s = TreeShapes::build(P, &l.inner, h_leaf, &[h_t, h_root, h_root]).unwrap();
+    let digests: Vec<String> = s.steps.iter().map(|x| recursion::programs::digest_hex(&x.program)).collect();
+    assert_eq!(digests, [T_LEAF_TEST, T_INT_TEST, T_FIX_TEST], "the per-level step programs");
+    assert_eq!(s.leaf, l.shape);
+    assert_eq!(s.steps[0], t.s_step);
+    assert_eq!(s.steps[1], t.s_root);
+    assert!(s.fixed_point(), "the last entry's program verifies its own proofs");
+    assert_eq!(s.keys(), test_keys());
+    for (level, want) in [(1, T_LEAF_TEST), (2, T_INT_TEST), (3, T_FIX_TEST), (9, T_FIX_TEST)] {
+        assert_eq!(recursion::programs::digest_hex(s.root_program(level)), want, "the root program at depth {level}");
+    }
+    for (level, want) in [(1, &s.leaf), (2, &s.steps[0]), (3, &s.steps[1]), (4, &s.steps[2]), (9, &s.steps[2])] {
+        assert!(std::ptr::eq(s.child_at(level), want), "the child shape at level {level}");
+    }
+    let two = TreeShapes::build(P, &l.inner, h_leaf, &[h_t, h_root]).unwrap();
+    assert!(!two.fixed_point(), "rv32t_int's proofs are not of the shape it was built for (R3)");
+    assert!(matches!(TreeShapes::build(P, &l.inner, h_leaf, &[]), Err(recursion::shape::ShapeError::EmptyTreeSteps)));
+}
+
+/// `aggregate_tree`'s refusals that come before any proving: a count that is not L·2^d (d ≥ 1),
+/// and a depth past a list whose last entry is not a fixed point (its program would not verify
+/// the level below it).
+#[test]
+fn aggregate_tree_refuses_a_bad_layout_and_a_depth_past_a_non_fixed_list_before_proving() {
+    let (l, t) = (leaves(), test_tree());
+    let m = Machine::new(P);
+    let s = TreeShapes::build(P, &l.inner, RvmHeights::of_proof(&l.proofs[0]),
+        &[RvmHeights::of_proof(&t.steps[0]), RvmHeights::of_proof(&t.root)]).unwrap();
+    let bundle = |k: usize| postcard::from_bytes::<BundleProof>(&postcard::to_allocvec(&l.bundles[k % 4]).unwrap()).unwrap();
+    let proofs = |n: usize| -> Vec<BundleProof> { (0..n).map(bundle).collect() };
+    for (n, leaf_size) in [(0, 1), (1, 1), (3, 1), (4, 0), (6, 2), (2, 2), (12, 1)] {
+        assert!(matches!(aggregate_tree(&m, &l.inner, &s, &proofs(n), B, leaf_size),
+            Err(AggregateError::TreeLayout { covers, leaf_size: ls }) if covers == n && ls == leaf_size), "{n} proofs at L = {leaf_size}");
+    }
+    assert!(matches!(aggregate_tree(&m, &l.inner, &s, &proofs(8), B, 1), Err(AggregateError::TreeShape { level: 3 })),
+        "depth 3 over a two-entry list that is not a fixed point");
+}
+
+/// R5, second half, through the chain-facing call (deferred from Task 1b): a step over two
+/// children of the foreign program (identical shape words, its own honest cap) is accepted
+/// in-program and publishes `[vk_foreign ‖ 2 ‖ B ‖ D ‖ D]`. Presented as a depth-1 tree over the
+/// bundle it covers twice, `verify_tree` with the pinned `vk_leaf` refuses it by name at the root
+/// recompute, before any key is built, and the same recompute under `vk_foreign` is exactly what
+/// it published (so `vk_c` is the only discriminator). No foreign step is proved (R7: in-suite
+/// tests never prove a step): the presented proof is the honest step 0 carrying the foreign
+/// step's emulated public values, which `verify_tree` reads before `verify_n`.
+#[test]
+fn a_foreign_program_child_pair_is_refused_by_verify_tree_at_the_root_digest() {
+    let (l, t) = (leaves(), test_tree());
+    let exec = emulate_step(&t.s_foreign, &t.t_leaf, &t.foreign, &t.foreign, B).expect("accepted in-program");
+    let mut presented = copy(&t.steps[0]);
+    presented.public_values = u64s(&exec.public);
+    let cov = vec![l.bundles[0].public_values.clone(), l.bundles[0].public_values.clone()];
+    let k = test_keys();
+    let vk_foreign = inner_vk_digest(&t.s_foreign, &RvmKey::of(P, &t.s_foreign));
+    assert_ne!(vk_foreign, k.vk_leaf);
+    let under_foreign = TreeKeys { vk_leaf: vk_foreign, step_keys: k.step_keys.clone() };
+    assert_eq!(tree_root_digest(&l.inner, &cov, B, 1, 1, &under_foreign).unwrap().to_vec(), exec.public,
+        "it published the key it checked against");
+    assert!(matches!(verify_tree(&Machine::new(P), &t.t_leaf, &presented, &l.inner, &cov, B, 1, 1, &k), Err(VerifyTreeError::TreeRootDigest)),
+        "the pinned vk_leaf refuses the foreign children");
+}
