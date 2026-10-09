@@ -455,6 +455,9 @@ fn a_third_step_program_at_the_roots_shape_is_the_fixed_point() {
     assert_eq!(verify_rv32t(&s_fix, Checkpoints::Off).program.digest(), t_fix.digest(),
         "the program for its own proofs is itself");
     assert_eq!(exec.cpu_rows(), common::pin("tree_test", "step_fix_cpu_rows"));
+    let vk_fix = u64s(&inner_vk_digest(&s_fix, &RvmKey::of(P, &s_fix)));
+    let pinned: Vec<u64> = (0..4).map(|k| common::pin_u64("tree_test", &format!("vk_fix_{k}"))).collect();
+    assert_eq!(vk_fix, pinned, "vk_fix, the key of the fixed-point program's own proofs (children of levels ≥ 4)");
     assert_eq!(recursion::programs::digest_hex(&t_fix), T_FIX_TEST, "the fixed-point step program at S_root");
 }
 

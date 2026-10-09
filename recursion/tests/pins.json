@@ -48,6 +48,10 @@
     "step_proof_bytes_max": 290000,
     "step_leaf_reduce_rows_per_child": 32272,
     "step_int_reduce_rows_per_child": 33296,
-    "step_fix_cpu_rows": 306923
+    "step_fix_cpu_rows": 306923,
+    "vk_fix_0": 4756771443877942240,
+    "vk_fix_1": 18437901406829798119,
+    "vk_fix_2": 13732813924430148200,
+    "vk_fix_3": 10825047408558662485
   }
 }
