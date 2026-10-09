@@ -1,0 +1,139 @@
+# tree Task 1b generator, 2026-10-09T04:26:04Z, HEAD 7a0ca32+wip, 48 GiB, 16 cpus
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/tree.rs (target/release/deps/tree-92ab39fc883249c7)
+
+running 1 test
+test generate_test_tree_fixtures has been running for over 60 seconds
+TREE_TEST_FIXTURE leaf-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 264555
+TREE_TEST_FIXTURE step-0: tier 19 reg 20 ram 20 poseidon2 15 reduce 16 bytes 280133
+TREE_TEST_FIXTURE root: tier 19 reg 20 ram 20 poseidon2 15 reduce 17 bytes 280804
+TREE_TEST_FIXTURE foreign-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 266731
+test generate_test_tree_fixtures ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 512.99s
+
+      513.09 real      2665.44 user       166.03 sys
+         34106212352  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+            20671878  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                5159  voluntary context switches
+             2496860  involuntary context switches
+           752751832  instructions retired
+           234720221  cycles elapsed
+            33210992  peak memory footprint
+exit 0
+
+# per-kind isolation run: only Test-root.rvmproof removed, so this process proves root alone (2026-10-09T04:35:00Z)
+    Finished `release` profile [optimized] target(s) in 0.14s
+     Running tests/tree.rs (target/release/deps/tree-92ab39fc883249c7)
+
+running 1 test
+test generate_test_tree_fixtures has been running for over 60 seconds
+TREE_TEST_FIXTURE leaf-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 264555
+TREE_TEST_FIXTURE step-0: tier 19 reg 20 ram 20 poseidon2 15 reduce 16 bytes 280133
+TREE_TEST_FIXTURE root: tier 19 reg 20 ram 20 poseidon2 15 reduce 17 bytes 283172
+TREE_TEST_FIXTURE foreign-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 266731
+test generate_test_tree_fixtures ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 181.32s
+
+      181.51 real       871.17 user        49.03 sys
+         33213988864  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             5955321  page reclaims
+                 171  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+               19934  voluntary context switches
+              767250  involuntary context switches
+           794744168  instructions retired
+           289214322  cycles elapsed
+            33489496  peak memory footprint
+exit 0
+# root: sampled ps peak RSS 29.59 GiB
+
+# per-kind isolation run: only Test-step-1.rvmproof removed, so this process proves step-1 alone (2026-10-09T04:38:01Z)
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running tests/tree.rs (target/release/deps/tree-92ab39fc883249c7)
+
+running 1 test
+test generate_test_tree_fixtures has been running for over 60 seconds
+TREE_TEST_FIXTURE leaf-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 264555
+TREE_TEST_FIXTURE step-0: tier 19 reg 20 ram 20 poseidon2 15 reduce 16 bytes 280133
+TREE_TEST_FIXTURE root: tier 19 reg 20 ram 20 poseidon2 15 reduce 17 bytes 283172
+TREE_TEST_FIXTURE foreign-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 266731
+test generate_test_tree_fixtures ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 176.66s
+
+      176.82 real       837.29 user        50.10 sys
+         34346844160  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             6028569  page reclaims
+                 170  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                 671  voluntary context switches
+              760685  involuntary context switches
+           775351266  instructions retired
+           253348292  cycles elapsed
+            33227376  peak memory footprint
+exit 0
+# step-1: sampled ps peak RSS 29.87 GiB
+
+# per-kind isolation run: only Test-foreign-0.rvmproof removed, so this process proves foreign-0 alone (2026-10-09T04:40:58Z)
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running tests/tree.rs (target/release/deps/tree-92ab39fc883249c7)
+
+running 1 test
+test generate_test_tree_fixtures has been running for over 60 seconds
+TREE_TEST_FIXTURE leaf-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 264555
+TREE_TEST_FIXTURE step-0: tier 19 reg 20 ram 20 poseidon2 15 reduce 16 bytes 280133
+TREE_TEST_FIXTURE root: tier 19 reg 20 ram 20 poseidon2 15 reduce 17 bytes 283172
+TREE_TEST_FIXTURE foreign-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 264267
+test generate_test_tree_fixtures ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 113.42s
+
+      113.57 real       503.04 user        24.80 sys
+         21386543104  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2679865  page reclaims
+                 170  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                 684  voluntary context switches
+              448723  involuntary context switches
+           779885726  instructions retired
+           252247237  cycles elapsed
+            33292888  peak memory footprint
+exit 0
+# foreign-0: sampled ps peak RSS 19.83 GiB
+all-done

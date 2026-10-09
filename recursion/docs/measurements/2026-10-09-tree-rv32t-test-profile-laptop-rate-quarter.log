@@ -1,0 +1,36 @@
+# 2026-10-09, laptop (48 GB Apple silicon), branch feat/tree-aggregation rebased onto circuits main 71e1a04 (the rVM at rate ¼: blowup 4, 92 queries, 24 grinding bits) — tree Task R
+# cargo test --release --test tree --test tree_measure -- --nocapture  (the four Test-leaf-k proofs re-proved at rate ¼ and cached in $RECURSION_FIXTURES/tree/ by the first post-rebase run)
+# rv32t_leaf executed over two real test-profile leaves (Test-leaf-0, Test-leaf-1); rv32r over Test-leaf-0 for C.
+    Finished `release` profile [optimized] target(s) in 3.06s
+     Running tests/tree.rs (target/release/deps/tree-6c0a9f68a992d281)
+
+running 8 tests
+test a_child_of_the_wrong_shape_is_refused_by_the_tape_builder ... ok
+test a_wrong_hinted_cap_with_honest_children_is_refused_in_program ... ok
+test a_tamper_in_either_child_is_refused_at_the_named_step ... ok
+test the_reduce_height_is_canonical_in_the_tree_step_at_n2 ... ok
+TREE_TEST phases rv32t [("tree preamble: the binding, the child cap, vk_c, the interface state", 413), ("phases 0-4: header, transcript, commitments, terminal sum", 1687), ("phase 5: constraint evaluation at zeta", 41292), ("phase 6 preamble: claimed evals, betas, final poly, pow, indices", 84190), ("query segments: tape reads", 18360), ("queries: merkle walks, reduction, folds", 141066), ("the two-child loop", 88), ("post-loop: the final permutation", 10)]
+TREE_TEST phases rv32r [("phases 0-4: header, transcript, commitments, terminal sum", 911), ("phase 5: constraint evaluation at zeta", 20592), ("phase 6 preamble: claimed evals, betas, final poly, pow, indices", 42095), ("query segments: tape reads", 9180), ("queries: merkle walks, reduction, folds", 70789), ("phase 8: the interface digest", 389)]
+TREE_TEST child 143568 step_leaf 287107 overhead -29 tier Some(Tier(19)) program 146204 instrs
+test swapped_children_and_another_binding_publish_digests_the_chain_never_computes ... ok
+test the_tree_step_accepts_two_real_leaves_and_publishes_the_host_digest ... ok
+test the_tree_step_builds_under_the_replays_loop_invariant ... ok
+test the_tree_step_program_reads_the_child_shape_words_only ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 69.77s
+
+     Running tests/tree_measure.rs (target/release/deps/tree_measure-2bdc23d56174ac54)
+
+running 9 tests
+test production_leaf_l2 ... ignored, tree Task 0: the production rv32n leaf at L = 2 (1 171 511 rows, tier 21; 122-142 GB projected at rate 1/4, docs/07 §4) — the 256 GB droplet
+test production_rv32r_over_the_leaf_emulates ... ignored, tree Task 0: rv32r over the production leaf, emulated — spec §5's stop rule; needs tree/Production-leaf-0.rvmproof
+test production_rv32r_over_the_leaf_proves ... ignored, tree Task 0: rv32r over the production leaf, proved (tier 21 projected, 210-340 GB) — the 503 GB droplet
+test production_rv32r_rows_at_the_emulated_leaf_shape ... ignored, tree Task 0 on the laptop: the production leaf emulated (no proof) and rv32r's accepting path counted at its shape — ~2 min, 8 GB
+test production_rv32t_rows_at_the_emulated_leaf_shape ... ignored, tree Task 1a on the laptop: the production leaf emulated (no proof) and rv32t_leaf's accepting path counted at its shape — ~2 min, 8 GB
+test the_tree_measure_pins_are_the_emulated_rows ... ignored, tree Task 0: the tree_measure pins against a fresh emulation; needs tree/Production-leaf-0.rvmproof
+test the_pinned_band_is_the_emulated_childs ... ok
+test the_accepting_walk_counts_what_rv32r_executes ... ok
+test the_looped_walk_counts_what_rv32t_executes ... ok
+
+test result: ok. 3 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.38s
+

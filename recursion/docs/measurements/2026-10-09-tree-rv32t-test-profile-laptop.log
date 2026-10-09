@@ -1,0 +1,16 @@
+# 2026-10-09, laptop (48 GB Apple silicon), branch feat/tree-aggregation (tree Task 1a)
+# cargo test --release --features parallel --test tree -- --nocapture  (the four Test-leaf-k proofs cached in $RECURSION_FIXTURES/tree/ by the first run)
+# rv32t_leaf executed over two real test-profile leaves (Test-leaf-0, Test-leaf-1); rv32r over Test-leaf-0 for C.
+running 8 tests
+test a_child_of_the_wrong_shape_is_refused_by_the_tape_builder ... ok
+test a_wrong_hinted_cap_with_honest_children_is_refused_in_program ... ok
+test a_tamper_in_either_child_is_refused_at_the_named_step ... ok
+test the_reduce_height_is_canonical_in_the_tree_step_at_n2 ... ok
+TREE_TEST phases rv32t [("tree preamble: the binding, the child cap, vk_c, the interface state", 413), ("phases 0-4: header, transcript, commitments, terminal sum", 1687), ("phase 5: constraint evaluation at zeta", 41292), ("phase 6 preamble: claimed evals, betas, final poly, pow, indices", 84222), ("query segments: tape reads", 19094), ("queries: merkle walks, reduction, folds", 142822), ("the two-child loop", 88), ("post-loop: the final permutation", 10)]
+TREE_TEST phases rv32r [("phases 0-4: header, transcript, commitments, terminal sum", 911), ("phase 5: constraint evaluation at zeta", 20592), ("phase 6 preamble: claimed evals, betas, final poly, pow, indices", 42111), ("query segments: tape reads", 9547), ("queries: merkle walks, reduction, folds", 71667), ("phase 8: the interface digest", 389)]
+TREE_TEST child 144829 step_leaf 289629 overhead -29 tier Some(Tier(19)) program 147465 instrs
+test the_tree_step_accepts_two_real_leaves_and_publishes_the_host_digest ... ok
+test swapped_children_and_another_binding_publish_digests_the_chain_never_computes ... ok
+test the_tree_step_builds_under_the_replays_loop_invariant ... ok
+test the_tree_step_program_reads_the_child_shape_words_only ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.88s

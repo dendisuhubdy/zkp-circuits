@@ -1,0 +1,10 @@
+# 2026-10-09, laptop (48 GB Apple silicon), branch feat/tree-aggregation rebased onto circuits main 71e1a04 (the rVM at rate ¼: blowup 4, 92 queries, 24 grinding bits) — tree Task R
+# cargo test --release --test tree_measure -- --ignored --exact --nocapture --test-threads=1 production_rv32r_rows_at_the_emulated_leaf_shape production_rv32t_rows_at_the_emulated_leaf_shape  (rv32r's half below)
+# Emulation only: nothing is proved. macOS RSS is not a memory number (docs/04); the live peak is the counting allocator's.
+test production_rv32r_rows_at_the_emulated_leaf_shape ... == emulated leaf: 1171511 rows, tier 21, program 597665 instrs (program table 2^20), heights reg 22 ram 22 poseidon2 17 reduce 19 (canonical at n = 2: Some(19)); trace heights [1048576, 2097152, 4194304, 4194304, 131072, 8, 256, 524288], permutations 109004
+leaf key built in 0.3 s, live 0.02 GB, peak 6.33 GB
+== rv32r at the production leaf shape (accepting walk): 648910 rows, tier Some(Tier(20)), child 648518 rows, phase 8 392 rows, program 663308 instrs (14398 traps), reduce height Some(18), peak live 6.33 GB
+-- phases [("phases 0-4: header, transcript, commitments, terminal sum", 919), ("phase 5: constraint evaluation at zeta", 20785), ("phase 6 preamble: claimed evals, betas, final poly, pow, indices", 97175), ("query segments: tape reads", 60716), ("queries: merkle walks, reduction, folds", 468922), ("phase 8: the interface digest", 392)]
+== band: 2C + (-29) = 1297007 rows (tier Some(Tier(21))), [1102455 (tier Some(Tier(21))), 1491559 (tier Some(Tier(21)))]
+ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 66.40s
