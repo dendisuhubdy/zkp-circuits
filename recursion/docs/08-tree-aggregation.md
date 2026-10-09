@@ -148,9 +148,14 @@ the step against the band (in or out, and the correction if out); the root again
 (`rv32t_int` vs `rv32t_leaf` rows); the fixed-point verdict and the production list length
 (`production_step_list`: 2 when `rv32t_int`'s proofs declare S_1's words, 3 when level 3, emulated
 at the root's shape over (root, root), repeats S_2 — Task 1b's test-profile method — else ≥ 4 and
-`max_depth` 3 until a level-3 step is proved); and the genesis values verbatim, per level
-(`aggregate_program_digest`, `leaf_size`, the leaf heights, `vk_leaf`, then each level's heights,
-`step_digests[k]`, `step_keys[k]`, `step_tiers[k]`, the last entry repeating). Then the
+`max_depth` 3 until a level-3 step is proved); and the genesis values verbatim: the
+`aggregate_program_digest` line, then the `aggregation_tree` section as the exact JSON the node's
+`TreeConfig` deserializes, ready for `rand-node genesis --aggregation-tree TREE.JSON` (`shape`,
+`leaf_size`, `max_depth`, `leaf`, `vk_leaf`, and `steps[k] = {heights, program_digest, key}` — the
+spec's `step_tiers[k]` is `steps[k].heights.tier`, `step_digests[k]` is
+`steps[k].program_digest`, `step_keys[k]` is `steps[k].key`; every digest four canonical u64
+limbs, the last entry repeating). The test tree's own section is `tests/tree-test-genesis.json`,
+held by `the_test_tree_genesis_section_prints_as_the_nodes_tree_config`. Then the
 `tree_measure` pins (`step_cpu_rows`, `step_tier`, `step_peak_live_mb`, `step_prove_s`,
 `step_proof_bytes`, `root_cpu_rows`, `root_tier`, `root_peak_live_mb`, `root_prove_s`,
 `root_proof_bytes`, `verify_tree_ms`) and the plan's Step 7 row-pin test.
@@ -284,12 +289,13 @@ their summary, and the per-level wording is the spec's §4.1.
   genesis-bound form): the flat preimage under another tag, so flipping the layout is
   `BadSignature`.
 - **Admission.** 6t (a section for the covered shape, and the count is a tree), 7a (the root's
-  declared tier equals the tier pinned for level d, `TreeTier`; the executor also holds the
-  other four declared heights to the level's pins off the header), 7b (the executor rebuilds the
+  declared tier equals the tier pinned for level d, `TreeTier`), 7b (the executor rebuilds the
   leaf and every listed step; the root's program is level d's digest, then `vk_leaf` and each
   step key the recompute uses are the pins; `TreeKeyPin { level }` is numbered by the consuming
-  level), 8 (`verify_tree`: the bottom-up recompute under the chain's one binding, compared with
-  the root's four public values, then `verify_n(root program, root, 2)`).
+  level), 8 (the executor's `verify_tree`: first the root's other four declared heights against
+  level d's pins, off the header (`aggregate_header_tree`), then the bottom-up recompute under the
+  chain's one binding, compared with the root's four public values, then `verify_n(root program,
+  root, 2)`).
 - **ZKQ-5, implemented.** The tie is the recompute (docs/02 ZKQ-5), not an in-program equality:
   a root with any level made under another binding is `TreeRootDigest`.
 - **Errors**: `TreeNotAdmitted`, `TreeLayout`, `TreeDepth`, `TreeTier`, `TreeKeyPin`,
@@ -319,7 +325,7 @@ their summary, and the per-level wording is the spec's §4.1.
 | `tests/tree.rs`, `tests/tree_measure.rs` (new) | the in-suite tree tests over the cached test tree; the ignored production runs |
 | `tests/pins.json` | new blocks `tree_measure` (emulated production rows, band) and `tree_test` (test-profile rows, tiers, `vk_*` limbs) |
 | new test-profile digests | `T_LEAF_TEST` `2c586636...206ccd34`, `T_INT_TEST` `04b16771...ecdc3c226`, `T_FIX_TEST` `08abf188...4795ff396` (§5), and `vk_leaf`, `vk_t_leaf`, `vk_int`, `vk_fix`, `vk_foreign` |
-| production digests, genesis values | pending (256 GB droplet): the per-level `step_digests[k]`, `step_keys[k]`, `step_tiers[k]`, `aggregate_program_digest`, `leaf_size`, the leaf heights and `vk_leaf`, as printed by `production_tree_genesis_values` |
+| production digests, genesis values | pending (256 GB droplet): the per-level `step_digests[k]`, `step_keys[k]`, `step_tiers[k]`, `aggregate_program_digest`, `leaf_size`, the leaf heights and `vk_leaf`, as printed by `production_tree_genesis_values` (the section as `TreeConfig` JSON) |
 | no opcode, AIR or key-shape change | the ISA stays at 30 instructions; the machine's AIRs, the flat `aggregate_program_digest` and `RvmKey`/`InnerKey` shapes are untouched |
 | docs | docs/08 (this file); docs/02 ZKQ-5 and API; docs/03; `research/AGENTS.md` |
 

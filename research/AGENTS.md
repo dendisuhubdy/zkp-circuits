@@ -33,8 +33,8 @@ chip, the own slot by one `LOADE`, `FOLD` = 28, `POW` = 29 — 61 399 rows short
 of the $2^{19}$ gate, which was not widened; `recursion/docs/06`) **and tree aggregation** (2026-10, branch
 `feat/tree-aggregation`, `recursion/docs/08`): `rv32t`, the 2-to-1 step over a compile-time child
 shape with the child key a published tape value, `verify_tree`'s bottom-up recompute, and a
-production depth-2 tree measured on the 256/503 GB droplets (pending: the test tree is proved on
-the laptop); the
+production depth-2 tree to be measured on the 256 GB droplet (pending; not yet run — the test
+tree is proved on the laptop); the
 chain-facing `aggregate`/`verify_aggregate` API the fullnode's `shrugg-rvm`
 vendors; the proving-backend split (`Backend::{Reference, Cuda}`, zero new
 kernels — the RV32 CUDA crate covers the rVM's instances as-is); and the

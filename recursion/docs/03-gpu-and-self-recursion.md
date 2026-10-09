@@ -235,7 +235,7 @@ so 11 follows 3 on the same machine.
   device class).
 - **The self-verifier, built and measured** — `verify_rv32r` with its tamper differential, and
   its requirement measured at two fixtures and derived for the M5.2-exit shape: tier 22,
-  ~97–130 GB, ≥ 128 GB host — and the tree-of-aggregates question answered to a measured step
+  ~97–130 GB, ≥ 128 GB host — and the tree-of-aggregates question answered to an emulated step
   class: `docs/08` §2-§3 (the production step 1 294 577 rows emulated, tier 21, inside its band
   [1 102 455, 1 491 559]; the test-profile step 287 107 rows, tier 19, proved on a 48 GB laptop),
   with the end-to-end proof written and scheduled in the runbook (row 11).
