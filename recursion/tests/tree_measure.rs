@@ -496,15 +496,17 @@ fn emulated_shape(program: &Arc<Program>, exec: &Execution) -> RvmShape {
 }
 
 /// The production per-level step heights (spec §4.1 R3/R4), from the proved step S_1 and root
-/// S_2: `[S_1, S_2]` when `rv32t_int`'s own proofs declare S_1's words (it is the fixed point);
-/// otherwise level 3's program, `rv32t` at S_2, is emulated over (root, root) as Task 1b's
+/// S_2, and whether the list's last entry is a fixed point: `[S_1, S_2]` when `rv32t_int`'s own
+/// proofs declare S_1's words (it is the fixed point); otherwise level 3's program, `rv32t` at
+/// S_2, is emulated over (root, root) as Task 1b's
 /// `a_third_step_program_at_the_roots_shape_is_the_fixed_point` does, and the list is
-/// `[S_1, S_2, S_3]` when S_3 repeats S_2. `None` when level 3 is not a fixed point either (the
-/// list needs a proved level 3 to continue). Prints the verdict and the list length.
-fn production_step_list(s_step: &RvmShape, s_root: &RvmShape, root: &recursion::machine::Proof) -> Option<Vec<RvmHeights>> {
+/// `[S_1, S_2, S_3]`, a fixed point when S_3 repeats S_2. When it does not, the three-entry list
+/// is still a valid genesis for `max_depth ≤ 3` (its last entry is read only at level ≥ 4).
+/// Prints the verdict and the list length.
+fn production_step_list(s_step: &RvmShape, s_root: &RvmShape, root: &recursion::machine::Proof) -> (Vec<RvmHeights>, bool) {
     if s_root.same_step_words(s_step) {
         println!("== fixed point (R3): HOLDS at level 2 — rv32t_int verifies its own proofs; production list length 2");
-        return Some(vec![s_step.heights(), s_root.heights()]);
+        return (vec![s_step.heights(), s_root.heights()], true);
     }
     let t3 = Arc::new(verify_rv32t(s_root, Checkpoints::Off).program);
     let tape = WitnessTape::build_tree_step(P, s_root, [root, root], &common::TEST_BINDING).unwrap();
@@ -512,13 +514,14 @@ fn production_step_list(s_step: &RvmShape, s_root: &RvmShape, root: &recursion::
     let s3 = emulated_shape(&t3, &exec);
     println!("== level 3 emulated: {} rows, tier {}, header {:?} (root {:?})", exec.cpu_rows(), s3.tier,
         s3.header_words(), s_root.header_words());
-    if s3.same_step_words(s_root) {
+    let fixed = s3.same_step_words(s_root);
+    if fixed {
         println!("== fixed point (R3): FAILS at level 2, HOLDS at level 3 (emulated) — production list length 3");
-        Some(vec![s_step.heights(), s_root.heights(), s3.heights()])
     } else {
-        println!("== fixed point (R3): FAILS at levels 2 and 3 — production list length ≥ 4; max_depth 3 until a level-3 step is proved");
-        None
+        println!("== fixed point (R3): FAILS at levels 2 and 3 — the three-entry list below is valid for max_depth ≤ 3 only; \
+            a longer list needs a proved level-3 step");
     }
+    (vec![s_step.heights(), s_root.heights(), s3.heights()], fixed)
 }
 
 /// Step `TREE_STEP=k` ∈ {0, 1}: `rv32t_leaf` over leaves (2k, 2k + 1). Emulated first, against
@@ -578,11 +581,11 @@ fn production_tree_root() {
     let t_int = Arc::new(vp.program.clone());
     let s_root = RvmShape::of_proof(P, &t_int, &root);
     let shapes = TreeShapes::build(P, &vk, leaf_shape.heights(), &[s_step.heights(), s_root.heights()]).unwrap();
-    assert_eq!(shapes.root_program(2).digest(), t_int.digest(), "the rebuilt level-2 program is the proved root's");
+    assert_eq!(shapes.root_program(2).unwrap().digest(), t_int.digest(), "the rebuilt level-2 program is the proved root's");
     let keys = shapes.keys();
     let covered: Vec<Vec<u64>> = bundles(0, 4 * L).iter().map(|p| p.public_values.clone()).collect();
     let tv = Instant::now();
-    verify_tree(&m, shapes.root_program(2), &root, &vk, &covered, &common::TEST_BINDING, L, 2, &keys).expect("the production tree verifies");
+    verify_tree(&m, shapes.root_program(2).unwrap(), &root, &vk, &covered, &common::TEST_BINDING, L, 2, &keys).expect("the production tree verifies");
     println!("verify_tree {:.2} s", tv.elapsed().as_secs_f64());
     let _ = production_step_list(&s_step, &s_root, &root);
 }
@@ -601,9 +604,9 @@ fn production_tree_genesis_values() {
     let t_int = Arc::new(verify_rv32t(&s_step, Checkpoints::Off).program);
     let root = load("Production-root", &t_int, TREE_ARITY);
     let s_root = RvmShape::of_proof(P, &t_int, &root);
-    let list = production_step_list(&s_step, &s_root, &root).expect("a fixed point within three levels");
+    let (list, fixed) = production_step_list(&s_step, &s_root, &root);
     let shapes = TreeShapes::build(P, &vk, leaf_shape.heights(), &list).unwrap();
-    assert!(shapes.fixed_point(), "the list's last entry verifies its own proofs");
+    assert_eq!(shapes.fixed_point(), fixed, "the rebuilt list agrees with the emulated verdict");
     assert_eq!(shapes.steps[0], s_step);
     assert_eq!(shapes.steps[1], s_root);
     let hex = |d: [recursion::isa::F; 4]| d.map(|f| p3_field::PrimeField64::as_canonical_u64(&f));
@@ -616,4 +619,7 @@ fn production_tree_genesis_values() {
         println!("== level {}: heights {:?}, step_digests[{k}] {:?}, step_keys[{k}] {:?}, step_tiers[{k}] {}",
             k + 1, s.heights(), hex(s.program.digest()), hex(keys.step_keys[k]), s.tier);
     }
+    println!("== list length {}, fixed point {}: {}", list.len(), if fixed { "HOLDS" } else { "FAILS" },
+        if fixed { "max_depth unbounded by R3" } else { "valid genesis for max_depth ≤ 3 only" });
+    assert!(fixed, "no fixed point within three levels: the values above serve max_depth ≤ 3; record them in docs/08 §4 and halt for a decision");
 }

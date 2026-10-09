@@ -245,29 +245,37 @@ impl TreeShapes {
     }
 
     /// The declared shape of level `level`'s proofs (1-based), carrying that level's program;
-    /// the last entry repeats.
-    pub fn step_at(&self, level: u32) -> &RvmShape {
-        assert!(level >= 1, "levels are 1-based");
-        &self.steps[(level as usize - 1).min(self.steps.len() - 1)]
+    /// the last entry repeats. `None` for level 0 and for an empty list (the fields are public,
+    /// so a list put together by hand may be empty), as [`TreeKeys::at_level`] answers.
+    pub fn step_at(&self, level: u32) -> Option<&RvmShape> {
+        let last = self.steps.len().checked_sub(1)?;
+        let k = (level as usize).checked_sub(1)?;
+        Some(&self.steps[k.min(last)])
     }
 
     /// The shape of level `level`'s children (1-based): what that level's tape is built against.
-    pub fn child_at(&self, level: u32) -> &RvmShape {
-        assert!(level >= 1, "levels are 1-based");
-        if level == 1 { &self.leaf } else { self.step_at(level - 1) }
+    /// The leaf at level 1; `None` for level 0 and where [`TreeShapes::step_at`] has none.
+    pub fn child_at(&self, level: u32) -> Option<&RvmShape> {
+        match level {
+            0 => None,
+            1 => Some(&self.leaf),
+            j => self.step_at(j - 1),
+        }
     }
 
     /// The root's program at `depth` (level `depth`'s entry, the last repeating): what AGG-6
     /// checks against `step_digests` and `verify_tree` runs.
-    pub fn root_program(&self, depth: u32) -> &Program {
-        &self.step_at(depth).program
+    pub fn root_program(&self, depth: u32) -> Option<&Program> {
+        self.step_at(depth).map(|s| &*s.program)
     }
 
     /// Whether the last entry is a fixed point (R3): `rv32t` built over its own shape is its own
-    /// program, so it verifies its own proofs and may serve every deeper level.
+    /// program, so it verifies its own proofs and may serve every deeper level. `false` for an
+    /// empty list.
     pub fn fixed_point(&self) -> bool {
-        let last = self.steps.last().expect("a tree has a step level");
-        crate::programs::tree_step_program_digest(last) == last.program.digest()
+        self.steps
+            .last()
+            .is_some_and(|last| crate::programs::tree_step_program_digest(last) == last.program.digest())
     }
 }
 
@@ -279,7 +287,8 @@ pub enum VerifyTreeError {
     TreeDepth { depth: u32 },
     /// The covered count is not `leaf_size · 2^depth` (or `leaf_size` is 0).
     TreeLayout { covers: usize, leaf_size: usize },
-    /// No key is pinned for level `level` (an empty step list under a tree of depth ≥ 2).
+    /// No key, or not the pinned key, for level `level` (spec §4 Errors, amended): here, an empty
+    /// step list under a tree of depth ≥ 2; at the chain, also AGG-6's rebuilt-key mismatch.
     TreeKeyPin { level: u32 },
     /// `covered[index]` is not the inner shape's count of canonical field words with `u32` OUT
     /// words: it cannot be a bundle's public values (and a non-canonical word would alias).
@@ -384,8 +393,8 @@ pub fn prove_tree_step(
 
 /// A whole tree on one machine (the aggregate daemon's `--layout tree`): `L·2^d` bundle proofs
 /// (`d ≥ 1`) → `2^d` leaves → `d` levels of steps, level `j` over `shapes.child_at(j)`. Refused
-/// before any proving: a count that is not `L·2^d`, and a depth past a step list whose last entry
-/// is not a fixed point. Every produced proof is checked against its pinned shape before the next
+/// before any proving: a count that is not `L·2^d`, an empty step list, and a depth past a step
+/// list whose last entry is not a fixed point. Every produced proof is checked against its pinned shape before the next
 /// level is built on it. Returns the root and `d`.
 pub fn aggregate_tree(
     m: &Machine,
@@ -401,7 +410,7 @@ pub fn aggregate_tree(
     }
     let depth = leaves.trailing_zeros();
     let listed = shapes.steps.len() as u32;
-    if depth > listed && !shapes.fixed_point() {
+    if listed == 0 || (depth > listed && !shapes.fixed_point()) {
         return Err(AggregateError::TreeShape { level: listed + 1 });
     }
     let mut level: Vec<crate::machine::Proof> = Vec::with_capacity(leaves);
@@ -413,8 +422,10 @@ pub fn aggregate_tree(
         level.push(p);
     }
     for j in 1..=depth {
-        let child = shapes.child_at(j);
-        let out = shapes.step_at(j);
+        let (child, out) = match (shapes.child_at(j), shapes.step_at(j)) {
+            (Some(c), Some(o)) => (c, o),
+            _ => return Err(AggregateError::TreeShape { level: j }),
+        };
         let mut next = Vec::with_capacity(level.len() / 2);
         for pair in level.chunks(2) {
             let p = prove_tree_step(m, child, [&pair[0], &pair[1]], binding, None)?;
