@@ -1,0 +1,10 @@
+# 2026-10-09, laptop (48 GB Apple silicon), branch feat/tree-aggregation rebased onto circuits main 71e1a04 (the rVM at rate ¼: blowup 4, 92 queries, 24 grinding bits) — tree Task R
+# the same run as …-rv32r-emulated-leaf-shape-laptop-rate-quarter.log (rv32t's half below)
+# Emulation only: nothing is proved; rows by tests/tree_measure.rs's accepting_rows_looped.
+test production_rv32t_rows_at_the_emulated_leaf_shape ... == emulated leaf: 1171511 rows, tier 21, program 597665 instrs (program table 2^20), heights reg 22 ram 22 poseidon2 17 reduce 19 (canonical at n = 2: Some(19)); trace heights [1048576, 2097152, 4194304, 4194304, 131072, 8, 256, 524288], permutations 109004
+== rv32t_leaf at the production leaf shape (looped walk): 1294577 rows, tier Some(Tier(21)), 2C + -2459 (C = 648518), program 661936 instrs, canonical reduce height at n = 2: Some(19); band [1102455, 1491559]
+-- phases [("tree preamble: the binding, the child cap, vk_c, the interface state", 415), ("phases 0-4: header, transcript, commitments, terminal sum", 1703), ("phase 5: constraint evaluation at zeta", 41678), ("phase 6 preamble: claimed evals, betas, final poly, pow, indices", 194350), ("query segments: tape reads", 121432), ("queries: merkle walks, reduction, folds", 934900), ("the two-child loop", 88), ("post-loop: the final permutation", 10)]
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 66.40s
+

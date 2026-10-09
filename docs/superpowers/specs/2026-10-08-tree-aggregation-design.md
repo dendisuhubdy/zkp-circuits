@@ -72,7 +72,7 @@ The plan (`docs/superpowers/plans/2026-10-08-tree-aggregation.md`, "Design resol
 1. **`rv32t`** (circuits): the program, `build_tree_step`, the in-program `vk_c`, the two instantiations, the test-profile end-to-end (L = 1, depth 2, laptop) with the tamper table per level; digests and pins.
 2. **`verify_tree`** and the production acceptance run (circuits): one production tree of depth 2 on the droplets, rows/tier/heap/time per step recorded; the interior step measured against Task 0's band.
 3. **Chain** (fullnode, after the phase-3 re-vendor): the action field, the genesis pins, the recompute, the admission tests on crafted roots, the devnet runbook with a tree aggregate; docs.
-4. **Landing**: the record `recursion/docs/07-tree-aggregation.md`, `docs/02`/`03` updated, the compute-optimization correction, the suite.
+4. **Landing**: the record `recursion/docs/08-tree-aggregation.md`, `docs/02`/`03` updated, the compute-optimization correction, the suite.
 
 **Gate**: a production tree of depth ≥ 2 over real bundle proofs verifies on chain end to end; every step's rows, tier, memory and time measured and pinned; the admission rules written. Not a gate: any memory figure (§8).
 

@@ -24,7 +24,7 @@ const P: FriProfile = FriProfile::Test;
 const B: &[u32; 8] = &common::TEST_BINDING;
 
 /// Set only by the ignored generator (Task 1b): an in-suite run never starts a tier-19 proof
-/// on a box that cannot hold it (R7). Leaves are exempt: tier 18, 26.88 GB live (docs/06 §3).
+/// on a box that cannot hold it (R7). Leaves are exempt: tier 18, 15.64 GB live at rate ¼ (docs/07 §4).
 #[allow(dead_code)] // read by Task 1b's step proving
 static ALLOW_STEP_PROVING: AtomicBool = AtomicBool::new(false);
 
@@ -42,7 +42,7 @@ fn load_or_prove(name: &str, program: &Program, n: u64, may_prove: bool, prove: 
         }
     }
     assert!(may_prove, "{} is missing or stale: run `cargo test --release --test tree generate_test_tree_fixtures \
-        -- --ignored --nocapture` on a host with the docs/07 §5 memory and copy tree/ into $RECURSION_FIXTURES", tree_file(name).display());
+        -- --ignored --nocapture` on a host with the docs/08 §5 memory and copy tree/ into $RECURSION_FIXTURES", tree_file(name).display());
     let p = prove();
     m.verify_n(program, &p, n).expect("a freshly proved tree proof verifies");
     let path = tree_file(name);
@@ -130,8 +130,9 @@ fn the_tree_step_builds_under_the_replays_loop_invariant() {
     assert_eq!(rv32t_int(&l.shape, Checkpoints::Off).program.digest(), a.digest(), "rv32t_int is verify_rv32t, named for levels ≥ 2");
     assert_eq!(tree_step_program_digest(&l.shape), a.digest(), "what a chain pins is the checkpoints-off build");
     // Pinned at the test-profile leaf shape (2026-10-09, tree Task 1a): `rv32t_leaf`'s digest,
-    // the test chain's `t_leaf_digest` (M4).
-    assert_eq!(recursion::programs::digest_hex(&a), "bf80794d25038d95b733f60ce2ad99f2985d75cbe3ef0e1b7f0911beff4d5389", "rv32t_leaf's digest at the test leaf shape");
+    // the test chain's `t_leaf_digest` (M4). Re-pinned at the rVM's rate ¼ (2026-10-09, docs/07,
+    // tree Task R): the child's Merkle paths are one level shorter (was bf80794d…ff4d5389).
+    assert_eq!(recursion::programs::digest_hex(&a), "2c586636c4c0f94cdf13b410154679d995eefad11e27371e0786e89e206ccd34", "rv32t_leaf's digest at the test leaf shape");
 }
 
 /// The program reads the child shape's words and never its committed program: a child program
@@ -150,7 +151,7 @@ fn the_tree_step_program_reads_the_child_shape_words_only() {
 
 /// Two real leaves, in order: accepted, the whole tape consumed, and exactly the host's
 /// `[vk_leaf ‖ 2 ‖ B ‖ D_0 ‖ D_1]` published. Measures C (the k = 1 self-verifier over one leaf,
-/// less phase 8) and the step's overhead O = rows − 2C (docs/07 §2's band term).
+/// less phase 8) and the step's overhead O = rows − 2C (docs/08 §2's band term).
 #[test]
 fn the_tree_step_accepts_two_real_leaves_and_publishes_the_host_digest() {
     let l = leaves();

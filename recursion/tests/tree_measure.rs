@@ -3,7 +3,7 @@
 //! existing k = 1 self-verifier `rv32r`, with its cap baked, is then run over that leaf proof on
 //! the 503 GB droplet: emulated first (the stop rule), then proved under the heap profiler. Every
 //! run is logged under `docs/measurements/`. The numbers land in `tests/pins.json`'s
-//! `tree_measure` block and `docs/07-tree-aggregation.md` §1–§2. The proving and real-leaf tests are
+//! `tree_measure` block and `docs/08-tree-aggregation.md` §1–§2. The proving and real-leaf tests are
 //! ignored and run on a droplet, one per process; the laptop's emulated-shape count is ignored too
 //! (minutes), and so is Task 1a's production step count (`production_rv32t_rows_at_the_emulated_leaf_shape`).
 //! Three tests run in-suite, in seconds: the accepting walk against the emulator, the looped walk
@@ -35,7 +35,7 @@ const STOP_CHILD_ROWS: usize = 1_500_000;
 /// (`tree_test.step_overhead`; spec §3 projected +300). It is signed: the step's own fixed rows
 /// (its preamble, the loop's absorbs and back edge, the final permutation) are outweighed by what
 /// each loop pass does *not* run that `rv32r`'s C counts (the baked cap's constants, the binding
-/// read) and by the loop body's different register allocation (docs/07 §2).
+/// read) and by the loop body's different register allocation (docs/08 §2).
 fn o_measured() -> i64 {
     common::pin_i64("tree_test", "step_overhead")
 }
@@ -70,7 +70,7 @@ fn inner(p: &Proof) -> InnerVerifierKey {
 fn load(name: &str, program: &Program, n: u64) -> recursion::machine::Proof {
     let path = tree_file(name);
     let bytes = std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("{} is missing: run the test that writes it (docs/07 §1) and copy the file here", path.display()));
+        .unwrap_or_else(|_| panic!("{} is missing: run the test that writes it (docs/08 §1) and copy the file here", path.display()));
     let p: recursion::machine::Proof = postcard::from_bytes(&bytes).expect("a cached rVM proof decodes");
     Machine::new(P).verify_n(program, &p, n).expect("the cached proof verifies");
     p
@@ -112,7 +112,7 @@ fn prove_leaf(k: usize) {
 
 /// Task 0, run 1 (the 256 GB droplet).
 #[test]
-#[ignore = "tree Task 0: the production rv32n leaf at L = 2 (1 171 511 rows, tier 21; 210-245 GB projected, docs/06 §3) — the 256 GB droplet"]
+#[ignore = "tree Task 0: the production rv32n leaf at L = 2 (1 171 511 rows, tier 21; 122-142 GB projected at rate 1/4, docs/07 §4) — the 256 GB droplet"]
 fn production_leaf_l2() {
     prove_leaf(0);
 }
@@ -144,7 +144,7 @@ fn production_rv32r_over_the_leaf_emulates() {
     println!("-- phases {:?}", vp.phase_rows);
     assert!(child <= STOP_CHILD_ROWS,
         "STOP (spec §5): one child verification is {child} rows, above {STOP_CHILD_ROWS}: the k = 2 step exceeds tier 22. \
-         Record it in docs/07 §2 and stop for a decision (k = 1 chains, a bigger tier, or the memory track first)");
+         Record it in docs/08 §2 and stop for a decision (k = 1 chains, a bigger tier, or the memory track first)");
 }
 
 /// Task 0, run 3 (the 503 GB droplet, hours): the same program proved, under the heap profiler.
@@ -437,9 +437,9 @@ fn production_rv32r_rows_at_the_emulated_leaf_shape() {
 }
 
 /// The pinned band cannot drift from the pinned emulated child (in-suite, instant): `step_band_lo`
-/// and `step_band_hi` are M5's formula over `child_cpu_rows_emulated` and the measured O. The
-/// band straddles two tiers, 20 at its low end and 21 at its centre and high end: the measured
-/// step (Task 2), not the band, decides the pinned step tier (R6).
+/// and `step_band_hi` are M5's formula over `child_cpu_rows_emulated` and the measured O. At the
+/// rVM's rate ¼ (92 queries) the whole band is tier 21; at rate ⅛ (80 queries) its low end was
+/// tier 20. The measured step (Task 2), not the band, still decides the pinned step tier (R6).
 #[test]
 fn the_pinned_band_is_the_emulated_childs() {
     let child = common::pin("tree_measure", "child_cpu_rows_emulated");
@@ -448,7 +448,7 @@ fn the_pinned_band_is_the_emulated_childs() {
     assert_eq!(hi, common::pin("tree_measure", "step_band_hi"), "step_band_hi is ceil(1.15·(2C + O))");
     assert_eq!(
         (Tier::for_cycles(lo), Tier::for_cycles(step), Tier::for_cycles(hi)),
-        (Some(Tier(20)), Some(Tier(21)), Some(Tier(21))),
-        "the band spans tiers 20 and 21, its centre at 21"
+        (Some(Tier(21)), Some(Tier(21)), Some(Tier(21))),
+        "the band is tier 21 end to end"
     );
 }

@@ -1,4 +1,4 @@
-# 07 — Tree aggregation: a leaf of L bundle proofs, 2-to-1 interior steps, every level recomputed
+# 08 — Tree aggregation: a leaf of L bundle proofs, 2-to-1 interior steps, every level recomputed
 
 Design: `docs/superpowers/specs/2026-10-08-tree-aggregation-design.md`. Plan: `docs/superpowers/plans/2026-10-08-tree-aggregation.md`.
 
@@ -9,9 +9,14 @@ Design: `docs/superpowers/specs/2026-10-08-tree-aggregation-design.md`. Plan: `d
 built with the prover's own height rule (`machine::build_traces`), so every height below is the
 one an honest leaf proof declares. `rv32r` was then built for that `RvmShape` with its `RvmKey`
 (the preprocessed commit of the program, range and reduce-layout tables: well under 1 GB; the
-whole run peaked at 8.31 GB live, most of it the leaf's traces) and its rows **counted, not
-executed**. No real leaf proof exists to execute it over: the leaf is a ≈ 210–245 GB proof
-(projected) and this host has 48 GB.
+whole run peaked at 6.33 GB live, most of it the leaf's traces) and its rows **counted, not
+executed**. No real leaf proof exists to execute it over: the leaf is a ≈ 122–142 GB proof at
+rate ¼ (projected, docs/07 §4; ≈ 210–245 GB at rate ⅛) and this host has 48 GB.
+
+**Rate ¼ (2026-10-09, after the rebase onto circuits main 71e1a04: the rVM's FRI at blowup 4, 92
+queries) superseded the rate-⅛ figures (80 queries)**: C 575 246 → **648 518**, the band
+[977 893, 1 323 033] → **[1 102 455, 1 491 559]**, the production step 1 148 417 → **1 294 577**
+(tier 21 both). The leaf (an inner-RV32 verifier) is unchanged.
 
 The count's method is the accepting walk (`tests/tree_measure.rs`'s `accepting_rows`). `rv32r`'s
 only control flow is the DSL's assertion: a `JEQ` to `pc + 2` over a one-row trap
@@ -28,36 +33,41 @@ compares two proofs of one toy shape.)
 | run | host | rows | tier | heights reg / ram / poseidon2 / reduce (program) | prove | verify | proof | peak live | max RSS |
 |---|---|---:|---:|---|---:|---:|---:|---:|---:|
 | leaf: `rv32n`, L = 2 (fixtures 0–1), **emulated** | laptop | 1 171 511 | 21 | 22 / 22 / 17 / 19 (2^20, 597 665 instrs) | — | — | — | — | — |
-| `rv32r` at the leaf's shape (k = 1, baked cap), **counted** | laptop | 575 638 | 20 | — (canonical reduce height at n = 1: 18) | — | — | — | — | — |
+| `rv32r` at the leaf's shape (k = 1, baked cap), **counted** | laptop | 648 910 | 20 | — (canonical reduce height at n = 1: 18) | — | — | — | — | — |
 | leaf: `rv32n`, L = 2 (fixtures 0–1), proved | 256 GB | *pending (Step 6)* | | | | | | | |
 | `rv32r` over the leaf (k = 1, baked cap), proved | 503 GB | *pending (Steps 7–8)* | | | | | | | |
 
 The leaf's canonical reduce height at n = 2 is `2^19`, the same as the height `build_traces`
 declares (asserted). The leaf's rows and heights equal docs/02's production N = 2 row exactly.
-`rv32r`'s program is 588 172 instructions, of which 12 534 are traps. Its rows by phase:
-phases 0–4 919, phase 5 20 785, phase 6 preamble 88 514, query tape reads 52 315,
-queries 412 712, phase 8 392.
+`rv32r`'s program is 663 308 instructions, of which 14 398 are traps. Its rows by phase:
+phases 0–4 919, phase 5 20 785, phase 6 preamble 97 175, query tape reads 60 716,
+queries 468 922, phase 8 392. Against rate ⅛ only the query-count terms moved (phase 6
+preamble +8 661, reads +8 401, queries +56 210: 92 queries where there were 80, one Merkle
+level fewer each).
 
-C (the child verification: `rv32r` rows less phase 8) = **575 246, emulated**
-(`tree_measure.child_cpu_rows_emulated`). The spec §1 projection was 0.85–1.45 M, so C is
-**below** it, at about 0.68 of the projection's low end. The droplet run replaces "emulated" with
+C (the child verification: `rv32r` rows less phase 8) = **648 518, emulated**
+(`tree_measure.child_cpu_rows_emulated`; 575 246 at rate ⅛). The spec §1 projection was
+0.85–1.45 M, so C is **below** it, at about 0.76 of the projection's low end. The droplet run replaces "emulated" with
 "measured": `production_rv32r_over_the_leaf_emulates` executes the same program over the real
-leaf, and its `child_cpu_rows` must equal 575 246. Phase 8 has no assertion, so its static and
+leaf, and its `child_cpu_rows` must equal 648 518. Phase 8 has no assertion, so its static and
 executed counts agree (asserted).
-Logs: `docs/measurements/2026-10-09-tree-rv32r-emulated-leaf-shape-laptop.log`. Droplet logs:
+Logs: `docs/measurements/2026-10-09-tree-rv32r-emulated-leaf-shape-laptop-rate-quarter.log`
+(rate ¼; the rate-⅛ run is `…-laptop.log`). Droplet logs:
 `docs/measurements/<date>-tree-leaf-l2-production.log`, `…-tree-rv32r-over-leaf-production.log`
 (pending).
 
 ## 2. The band and the stop rule
 
-Stop rule (spec §5): C ≤ 1 500 000. It **held** on the emulated C = 575 246, which is 38 % of the
-limit. The interior step band (M5) is 2C + O ± 15 %, with O the step's overhead, **measured** by
-Task 1a at the test profile: **O = −29** (`tree_test.step_overhead`; spec §3 had projected +300):
+Stop rule (spec §5): C ≤ 1 500 000. It **holds** on the emulated C = 648 518, which is 43 % of the
+limit (38 % at rate ⅛). The interior step band (M5) is 2C + O ± 15 %, with O the step's overhead, **measured** by
+Task 1a at the test profile: **O = −29** (`tree_test.step_overhead`; spec §3 had projected +300;
+re-measured at rate ¼, unchanged):
 
-2C − 29 = 1 150 463, so the band is **[977 893, 1 323 033]** (`tree_measure.step_band_lo/hi`).
-The band **spans tiers 20 and 21**: tier 20 holds up to 2^20 − 1 = 1 048 575 rows, so the low end
-is tier 20, while the centre and the high end are tier 21. R6 pins the root's tier exactly, and the
-tier sets the host class, so the measured step (Task 2) decides the pinned tier.
+2C − 29 = 1 297 007, so the band is **[1 102 455, 1 491 559]** (`tree_measure.step_band_lo/hi`).
+The band is **tier 21 end to end**: tier 20 holds up to 2^20 − 1 = 1 048 575 rows, below the low
+end, and tier 21 up to 2 097 151, above the high end. (At rate ⅛ the band [977 893, 1 323 033]
+spanned tiers 20 and 21.) R6 pins the root's tier exactly, and the measured step (Task 2) still
+decides the pinned tier.
 `the_pinned_band_is_the_emulated_childs` holds the pinned band to this formula and to these tiers.
 
 **Why O is negative.** O = (step rows) − 2C, where C is `rv32r`'s rows less its phase 8. The step's
@@ -81,14 +91,20 @@ proofs, in total and per phase).
 
 | run | rows | tier | program | canonical reduce height (n = 2) |
 |---|---:|---:|---:|---:|
-| `rv32t_leaf` at the production leaf shape, **counted** | **1 148 417** | 21 | 586 992 instrs | 2^19 |
+| `rv32t_leaf` at the production leaf shape, **counted** | **1 294 577** | 21 | 661 936 instrs | 2^19 |
 
-That is 2C − 2 075: **inside the band** (−0.18 % from its centre). Its phases: preamble 415,
-phases 0–4 1 703, phase 5 41 678, phase 6 preamble 177 028, query reads 104 630, queries
-822 864, loop region 88, final permutation 10. Against 2 × `rv32r`'s: the queries are 2 560
-rows fewer (the body's allocation), phases 0–4 135 fewer, phase 5 108 more. Pinned as
+That is 2C − 2 459: **inside the band** (−0.19 % from its centre; at rate ⅛ it was 1 148 417 =
+2C − 2 075). Its phases: preamble 415, phases 0–4 1 703, phase 5 41 678, phase 6 preamble
+194 350, query reads 121 432, queries 934 900, loop region 88, final permutation 10. Against
+2 × `rv32r`'s: the queries are 2 944 rows fewer (the body's allocation, 32 per query, was 2 560
+at 80 queries), phases 0–4 135 fewer, phase 5 108 more. Pinned as
 `tree_measure.step_cpu_rows_emulated` / `step_tier_emulated`; Task 2's proved step replaces it.
-Log: `docs/measurements/2026-10-09-tree-rv32t-emulated-leaf-shape-laptop.log`.
+Log: `docs/measurements/2026-10-09-tree-rv32t-emulated-leaf-shape-laptop-rate-quarter.log`
+(rate ¼; the rate-⅛ run is `…-laptop.log`).
+
+**Tiers at rate ¼, all measured by emulation or the walk:** the production leaf 1 171 511 rows,
+tier 21; `rv32r` over it 648 910, tier 20 (the child C 648 518); the production step 1 294 577,
+tier 21 — under tier 22's floor (2 097 152) by 802 575 rows.
 
 Memory, projected: the `rv32r` peak × (step cells / `rv32r` cells) by docs/06 §3's cell weights.
 This is *pending* the droplet's `rv32r` peak (Step 8), and Task 2 replaces it.
@@ -106,18 +122,21 @@ time, and cached as `$RECURSION_FIXTURES/tree/Test-leaf-{0..3}.rvmproof`. `rv32t
 
 | | value |
 |---|---|
-| C (`rv32r` over leaf 0, less phase 8 389) | **144 829** rows |
-| `rv32t_leaf` over leaves 0, 1 | **289 629** rows, **tier 19** |
-| O = rows − 2C | **−29** (fixed rows 511; see §2) |
-| `rv32t_leaf` program | 147 465 instrs; digest `bf80794d…ff4d5389` (`tests/tree.rs`) |
+| C (`rv32r` over leaf 0, less phase 8 389) | **143 568** rows (144 829 at rate ⅛) |
+| `rv32t_leaf` over leaves 0, 1 | **287 107** rows, **tier 19** (289 629 at rate ⅛) |
+| O = rows − 2C | **−29** (fixed rows 511; see §2; unchanged by rate ¼) |
+| `rv32t_leaf` program | 146 204 instrs; digest `2c586636…206ccd34` (`tests/tree.rs`; `bf80794d…ff4d5389` at rate ⅛) |
 | canonical reduce height | `verify_n(program, proof, 2)`'s equals `build_traces`' (asserted) |
 
-Pins: `tree_test.{child_cpu_rows 144 829, step_leaf_cpu_rows 289 629, step_overhead −29,
-step_leaf_tier 19}`. Log: `docs/measurements/2026-10-09-tree-rv32t-test-profile-laptop.log`.
+Pins: `tree_test.{child_cpu_rows 143 568, step_leaf_cpu_rows 287 107, step_overhead −29,
+step_leaf_tier 19}`. Log: `docs/measurements/2026-10-09-tree-rv32t-test-profile-laptop-rate-quarter.log`
+(rate ¼; the rate-⅛ run is `…-laptop.log`). The four test leaves were re-proved at rate ¼.
 
-**Memory, projected (docs/06 §3's table):** tier 18 = 26.88 GB live, measured; tier 19 ≈ 52 GB,
-projected. The test-profile step is tier 19, past the 48 GB laptop, so Task 1b proves the
-test steps on the 256 GB droplet and the suite loads them from the cache (R7).
+**Memory (docs/07 §4's table, rate ¼):** tier 18 = 15.64 GB live, measured (26.88 GB at rate ⅛);
+tier 19 ≈ 30 GB, projected (≈ 52 GB at rate ⅛), and the test N = 2 aggregate, a tier-19 proof,
+has been proved on this 48 GB box. Task 1b was planned for the 256 GB droplet when tier 19 was
+past the laptop (R7); at rate ¼ the test-profile step may fit here, which Task 1b should measure
+rather than assume.
 
 ## 6. The chain (Tasks 3a, 3b)
 

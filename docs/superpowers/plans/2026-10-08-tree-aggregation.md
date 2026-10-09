@@ -14,7 +14,7 @@
 
 - **R1 — `rv32t` is a counted loop with the constant count 2, not two straight-line emissions.** Spec §4 verifies the root with `verify_n(program, proof, 2)`. `machine::canonical_reduce_log_height(program, n)` multiplies the *static* reduce rows (`tables::reduce::program_rows`) by `n`, so `n = 2` is only correct when the program text holds one child's pipeline and runs it twice. That is exactly `rv32n`'s loop body (spec §3: "the `rv32n` loop body, specialised to `RvmShape`"). Two straight-line emissions would double `program_rows`, make the canonical `n` equal 1, and double the program table. The cost is that refusal names cannot carry the child's index: the loop emits one body, so a refusal is named by `emit_proof`'s own checkpoints (`"header word 0"`, `"quotient identity[0]"`, …), and the tamper tests identify the child by the region they corrupted. Spec §3's `"tree child[i] …"` names are dropped. The span `"tree child"` still attributes the body's rows.
 - **R2 — three key digests, not two.** Spec §4 recomputes level 1 with `vk_leaf` and every level ≥ 2 with `vk_int`. But level 2's children are `rv32t_leaf` proofs and level 3's are `rv32t_int` proofs. Those are two programs, so they have two preprocessed caps and two key digests. Let `S_T` be the step shape. The chain pins `vk_leaf` (= `inner_vk_digest(S_L, cap(rv32n))`, used at level 1), `vk_t_leaf` (= `inner_vk_digest(S_T, cap(rv32t_leaf))`, used at level 2) and `vk_int` (= `inner_vk_digest(S_T, cap(rv32t_int))`, used at levels ≥ 3). `TreeKeys::at_level` is the one place that selects among them.
-- **R3 — the fixed point is a measured condition, not an assumption.** `rv32t_int` is `verify_rv32t(S_T)`, where `S_T` is the declared shape of an `rv32t_leaf` proof. It verifies its *own* proofs only if they declare the same shape words: `RvmShape::same_step_words(S_int_out, S_T)`. The two programs' workloads differ (their children differ), so their outputs need not agree. Task 1b checks this at the test profile and Task 2 at production, from the depth-2 root's own header. If it fails on a profile, that profile's `max_depth` is 2: depth 2 needs only `rv32t_leaf` children. The failure is recorded in docs/07, and no third program is added (spec ruling 2's reason).
+- **R3 — the fixed point is a measured condition, not an assumption.** `rv32t_int` is `verify_rv32t(S_T)`, where `S_T` is the declared shape of an `rv32t_leaf` proof. It verifies its *own* proofs only if they declare the same shape words: `RvmShape::same_step_words(S_int_out, S_T)`. The two programs' workloads differ (their children differ), so their outputs need not agree. Task 1b checks this at the test profile and Task 2 at production, from the depth-2 root's own header. If it fails on a profile, that profile's `max_depth` is 2: depth 2 needs only `rv32t_leaf` children. The failure is recorded in docs/08, and no third program is added (spec ruling 2's reason).
 - **R4 — the genesis carries the leaf and step heights, in a top-level `aggregation_tree` section that names its admitted shape.** The node rebuilds `rv32n`, `rv32t_leaf` and `rv32t_int` and their three keys from `(admitted shape, leaf heights, step heights)`. Without the heights it could not. The section is top-level and appended last to the genesis commitment (`genesis.rs:1535` pattern), so `AggregationConfig`'s bincode bytes — hashed into the genesis — do not move. The spec's "under the admitted shape" is the section's `shape` field, which must equal an `admitted_shapes[i].shape`.
 - **R5 — the wrong-cap tamper is two tests.** A wrong hinted cap with *honest* children is refused in-program at `"quotient identity[0]"`, because the transcript observes the cap in phase 2. Children of a *foreign program of identical shape words*, with that program's honest cap, are accepted in-program and publish a different `vk_c`, so the root recompute refuses them. The second is the binding claim spec §6 means by "must fail at the root recompute". The foreign program is the leaf program with one unreachable `HALT` appended: the execution and heights are unchanged, but the digest and cap differ.
 - **R6 — `TreeTier` is exact.** An honest root is a fixed workload, so its tier is the pinned `step.tier`. The chain refuses any other tier before building anything (AGG-3's purpose, tightened). The flat path keeps `admitted_tiers`.
@@ -43,8 +43,8 @@ Every pin below is a *measured* value: run the command, read the value off the o
 - **M1 — emulate before proving.** Each production proof's rows and tier are asserted by emulation inside the same test, before `prove` starts. A drift fails in minutes, not in hours of proving.
 - **M2 — log.** On a droplet, every run goes through `step.sh`. Copy its log to `recursion/docs/measurements/$(date -u +%F)-tree-<what>.log` with `scp root@$HOST:/root/out/<name>.log recursion/docs/measurements/$(date -u +%F)-tree-<what>.log`. Read off: the `== <what>: <rows> rows, tier <t>, proof <bytes> B, prove <s> s; peak live heap <GB> GB …` line, the `verify <s> s` line, the `== heights:` line, and `/usr/bin/time -v`'s `Maximum resident set size (kbytes)` and `Elapsed (wall clock) time`.
 - **M3 — `tests/pins.json` blocks.** `tree_measure` (production; Tasks 0 and 2) and `tree_test` (test profile; Tasks 1a and 1b) are hand-written nested blocks of integers. Write them with an editor and keep the file valid JSON. `common::aggregate_pins()` preserves every nested block across a re-measure (Task 0 makes that generic). `common::pin(block, key)` reads one. Live heap is recorded in MB (`round(GB × 1000)`), times in whole seconds.
-- **M4 — digests.** Test-profile program digests are hex literals in `tests/tree.rs` with a history comment, like `tests/self_verify.rs:122-143`. Production digests, keys and heights go in docs/07 §4 as the chain's genesis values.
-- **M5 — bands and stops.** The interior step's band (docs/07 §2) is `[0.85·(2C + O), 1.15·(2C + O)]`, where C is Task 0's child rows and O the step overhead (projected 300, measured by Task 1a). Outside the band: write the measured value and the correction into docs/07 §2 and spec §3's cost line, then continue. The band is not a gate. **Stops:** C > 1 500 000 (Task 0, spec §5), and an out-of-memory kill on the 503 GB box (Task 2). Each records the point reached in docs/07 and halts the plan for a decision.
+- **M4 — digests.** Test-profile program digests are hex literals in `tests/tree.rs` with a history comment, like `tests/self_verify.rs:122-143`. Production digests, keys and heights go in docs/08 §4 as the chain's genesis values.
+- **M5 — bands and stops.** The interior step's band (docs/08 §2) is `[0.85·(2C + O), 1.15·(2C + O)]`, where C is Task 0's child rows and O the step overhead (projected 300, measured by Task 1a). Outside the band: write the measured value and the correction into docs/08 §2 and spec §3's cost line, then continue. The band is not a gate. **Stops:** C > 1 500 000 (Task 0, spec §5), and an out-of-memory kill on the 503 GB box (Task 2). Each records the point reached in docs/08 and halts the plan for a decision.
 - **M6 — the suite.** `cargo test --release --no-fail-fast -- --skip a_one_proof_aggregate_round_trips --skip two_test_profile_bundle_proofs_aggregate_and_verify_natively 2>&1 | tee target/tree-suite.txt | grep -E '^test result|FAILED'`. Expected: 0 failed.
 
 ## Review Focus
@@ -70,7 +70,7 @@ No `rv32r` run over a real verifier proof exists (spec ruling 5). This task prod
 - Modify: `src/shape.rs` (`RvmShape::of_proof`, after `RvmShape::try_of` ends at `:997`)
 - Modify: `tests/common/mod.rs` (`aggregate_pins` keeps every nested block, `:249-271`; new `pin_block`, `pin`)
 - Modify: `tests/pins.json` (the `tree_measure` block)
-- Create: `docs/07-tree-aggregation.md` (the skeleton; §1–§2 filled), and two logs under `docs/measurements/`
+- Create: `docs/08-tree-aggregation.md` (the skeleton; §1–§2 filled), and two logs under `docs/measurements/`
 
 **Interfaces:**
 - Produces: `RvmShape::of_proof(profile: FriProfile, program: &Arc<isa::Program>, proof: &machine::Proof) -> RvmShape`.
@@ -190,7 +190,7 @@ Expected: PASS, and `git diff --stat tests/pins.json` shows nothing (the file ro
 //! existing k = 1 self-verifier `rv32r`, with its cap baked, is then run over that leaf proof on
 //! the 503 GB droplet: emulated first (the stop rule), then proved under the heap profiler. Every
 //! run is logged under `docs/measurements/`. The numbers land in `tests/pins.json`'s
-//! `tree_measure` block and `docs/07-tree-aggregation.md` §1–§2. All tests here are ignored and
+//! `tree_measure` block and `docs/08-tree-aggregation.md` §1–§2. All tests here are ignored and
 //! run on a droplet, one per process.
 mod common;
 mod heap;
@@ -239,7 +239,7 @@ fn inner(p: &Proof) -> InnerVerifierKey {
 fn load(name: &str, program: &Program, n: u64) -> recursion::machine::Proof {
     let path = tree_file(name);
     let bytes = std::fs::read(&path)
-        .unwrap_or_else(|_| panic!("{} is missing: run the test that writes it (docs/07 §1) and copy the file here", path.display()));
+        .unwrap_or_else(|_| panic!("{} is missing: run the test that writes it (docs/08 §1) and copy the file here", path.display()));
     let p: recursion::machine::Proof = postcard::from_bytes(&bytes).expect("a cached rVM proof decodes");
     Machine::new(P).verify_n(program, &p, n).expect("the cached proof verifies");
     p
@@ -313,7 +313,7 @@ fn production_rv32r_over_the_leaf_emulates() {
     println!("-- phases {:?}", vp.phase_rows);
     assert!(child <= STOP_CHILD_ROWS,
         "STOP (spec §5): one child verification is {child} rows, above {STOP_CHILD_ROWS}: the k = 2 step exceeds tier 22. \
-         Record it in docs/07 §2 and stop for a decision (k = 1 chains, a bigger tier, or the memory track first)");
+         Record it in docs/08 §2 and stop for a decision (k = 1 chains, a bigger tier, or the memory track first)");
 }
 
 /// Task 0, run 3 (the 503 GB droplet, hours): the same program proved, under the heap profiler.
@@ -374,7 +374,7 @@ ssh root@$H 'source /root/.cargo/env && cd /root/circuits/recursion && cargo tes
 ssh root@$H 'RAYON_NUM_THREADS=32 nohup /root/scripts/step.sh 20-tree-leaf-l2 cargo test --release --features parallel --test tree_measure production_leaf_l2 -- --ignored --exact --nocapture >/dev/null 2>&1 &'
 ```
 
-(`step.sh` sources the toolchain and sets `RECURSION_FIXTURES=/root/recursion-fixtures`. If `rustup` is absent on a fresh box, first run `curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.98.1 && apt-get install -y build-essential pkg-config time`.) Wait for `/root/out/20-tree-leaf-l2.done`, which holds the exit code; poll with `ssh root@$H cat /root/out/20-tree-leaf-l2.done`. Expected: `0`. A non-zero code with `Maximum resident set size` near 256 GB means the L = 2 leaf does not fit the class. Record it in docs/07 §1 as a measured point and stop: spec ruling 6 is re-decided with that number. Then fetch:
+(`step.sh` sources the toolchain and sets `RECURSION_FIXTURES=/root/recursion-fixtures`. If `rustup` is absent on a fresh box, first run `curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.98.1 && apt-get install -y build-essential pkg-config time`.) Wait for `/root/out/20-tree-leaf-l2.done`, which holds the exit code; poll with `ssh root@$H cat /root/out/20-tree-leaf-l2.done`. Expected: `0`. A non-zero code with `Maximum resident set size` near 256 GB means the L = 2 leaf does not fit the class. Record it in docs/08 §1 as a measured point and stop: spec ruling 6 is re-decided with that number. Then fetch:
 
 ```bash
 scp root@$H:/root/out/20-tree-leaf-l2.log docs/measurements/$(date -u +%F)-tree-leaf-l2-production.log
@@ -396,7 +396,7 @@ ssh root@$H '/root/scripts/step.sh 21-tree-rv32r-emulate cargo test --release --
 ssh root@$H 'grep -E "^== rv32r|STOP|test result" /root/out/21-tree-rv32r-emulate.log'
 ```
 
-Expected: `== rv32r over the production leaf: <rows> rows, tier Some(Tier(<t>)), child <C> rows, …` and `test result: ok`. If the log says `STOP`: copy the log to `docs/measurements/$(date -u +%F)-tree-rv32r-emulate-production.log`, write C and the stop into docs/07 §2, commit (Step 10's message with "STOPPED at the child rule"), and **halt the plan**.
+Expected: `== rv32r over the production leaf: <rows> rows, tier Some(Tier(<t>)), child <C> rows, …` and `test result: ok`. If the log says `STOP`: copy the log to `docs/measurements/$(date -u +%F)-tree-rv32r-emulate-production.log`, write C and the stop into docs/08 §2, commit (Step 10's message with "STOPPED at the child rule"), and **halt the plan**.
 
 - [ ] **Step 8: `rv32r` over the leaf, proved**
 
@@ -412,7 +412,7 @@ scp root@$HOST503:/root/out/22-tree-rv32r-prove.log docs/measurements/$(date -u 
 
 Read off (M2): rows (equal to Step 7's), tier, proof bytes, prove s, verify s, peak live heap, maximum RSS, and the `== heights` line.
 
-- [ ] **Step 9: Pins and the docs/07 skeleton**
+- [ ] **Step 9: Pins and the docs/08 skeleton**
 
 Add to `tests/pins.json` before its closing `}`, after a `,` on the last block. Every value is from Steps 6–8. Compute the band with the formula, with `O = 300` (spec §3's projected overhead; Task 1a replaces it with the measured value):
 
@@ -434,7 +434,7 @@ Add to `tests/pins.json` before its closing `}`, after a `,` on the last block. 
   }
 ```
 
-Then create `docs/07-tree-aggregation.md`:
+Then create `docs/08-tree-aggregation.md`:
 
 ````markdown
 # 07 — Tree aggregation: a leaf of L bundle proofs, 2-to-1 interior steps, every level recomputed
@@ -476,12 +476,12 @@ Expected: both PASS.
 - [ ] **Step 10: Commit**
 
 ```bash
-git add tests/pins.json docs/07-tree-aggregation.md docs/measurements/
+git add tests/pins.json docs/08-tree-aggregation.md docs/measurements/
 git commit -m "recursion: tree Task 0 — the production L = 2 leaf <rows> rows tier <t>, rv32r over it <rows> rows tier <t>; child C = <C>
 
 Leaf: prove <s> s, <GB> GB live, <bytes> B (256 GB droplet). rv32r: prove <s> s, <GB> GB live,
 <bytes> B (503 GB droplet). Stop rule (C ≤ 1.5 M) held; the interior step's band is
-[<lo>, <hi>] (2C + 300 ± 15 %), tier <t>. docs/07 §1–§2, pins tree_measure.
+[<lo>, <hi>] (2C + 300 ± 15 %), tier <t>. docs/08 §1–§2, pins tree_measure.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
@@ -499,7 +499,7 @@ Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
 - Modify: `src/witness.rs` (new `WitnessTape::build_tree_step` after `build_n_for`, `:256-282`; new `pub const TREE_TAPE_PREAMBLE`)
 - Modify: `src/shape.rs` (`RvmShape::same_step_words`, beside Task 0's `of_proof`)
 - Create: `tests/tree.rs`
-- Modify: `tests/pins.json` (the `tree_test` block), `docs/07-tree-aggregation.md` (§2's O, §5's first rows)
+- Modify: `tests/pins.json` (the `tree_test` block), `docs/08-tree-aggregation.md` (§2's O, §5's first rows)
 
 **Interfaces:**
 - Produces: `pub(super) fn emit_proof_with<S: VerifierShape>(b: &mut Builder, shape: &S, cap_of: impl FnOnce(&mut Builder) -> [Digest; 4]) -> (Array<Felt>, Vec<Phase5Cost>)`; `emit_proof(b, shape, key)` is `emit_proof_with(b, shape, |b| constant_cap(b, key.cap()))`, so it emits the same instructions in the same order.
@@ -561,7 +561,7 @@ fn load_or_prove(name: &str, program: &Program, n: u64, may_prove: bool, prove: 
         }
     }
     assert!(may_prove, "{} is missing or stale: run `cargo test --release --test tree generate_test_tree_fixtures \
-        -- --ignored --nocapture` on a host with the docs/07 §5 memory and copy tree/ into $RECURSION_FIXTURES", tree_file(name).display());
+        -- --ignored --nocapture` on a host with the docs/08 §5 memory and copy tree/ into $RECURSION_FIXTURES", tree_file(name).display());
     let p = prove();
     m.verify_n(program, &p, n).expect("a freshly proved tree proof verifies");
     let path = tree_file(name);
@@ -662,7 +662,7 @@ fn the_tree_step_program_reads_the_child_shape_words_only() {
 
 /// Two real leaves, in order: accepted, the whole tape consumed, and exactly the host's
 /// `[vk_leaf ‖ 2 ‖ B ‖ D_0 ‖ D_1]` published. Measures C (the k = 1 self-verifier over one leaf,
-/// less phase 8) and the step's overhead O = rows − 2C (docs/07 §2's band term).
+/// less phase 8) and the step's overhead O = rows − 2C (docs/08 §2's band term).
 #[test]
 fn the_tree_step_accepts_two_real_leaves_and_publishes_the_host_digest() {
     let l = leaves();
@@ -1099,14 +1099,14 @@ Expected: the first run proves the four leaves (about 2.5 min each on 16 threads
 
 Re-run the same command. Expected: `test result: ok. 8 passed`.
 
-- [ ] **Step 8: docs/07 §2 and §5**
+- [ ] **Step 8: docs/08 §2 and §5**
 
-In docs/07 §2, replace "O = 300 projected" with the measured O, recompute `[lo, hi]` and the tier with it, and update `tree_measure.step_band_lo/hi` in `tests/pins.json` to match. Under §5, write: the test-profile C, the step's rows, O and tier, the program's instruction count, and the memory projection for proving that tier (docs/06 §3's table: tier 18 = 26.88 GB measured, tier 19 ≈ 52 GB projected). The projection decides where Task 1b proves (R7).
+In docs/08 §2, replace "O = 300 projected" with the measured O, recompute `[lo, hi]` and the tier with it, and update `tree_measure.step_band_lo/hi` in `tests/pins.json` to match. Under §5, write: the test-profile C, the step's rows, O and tier, the program's instruction count, and the memory projection for proving that tier (docs/06 §3's table: tier 18 = 26.88 GB measured, tier 19 ≈ 52 GB projected). The projection decides where Task 1b proves (R7).
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/programs/rv32.rs src/programs/rv32t.rs src/programs/mod.rs src/public_values.rs src/witness.rs src/shape.rs tests/tree.rs tests/pins.json docs/07-tree-aggregation.md
+git add src/programs/rv32.rs src/programs/rv32t.rs src/programs/mod.rs src/public_values.rs src/witness.rs src/shape.rs tests/tree.rs tests/pins.json docs/08-tree-aggregation.md
 git commit -m "recursion: rv32t — the tree step, two rVM proofs of one shape, vk_c in-program over the hinted cap; <rows> rows at the test profile, tier <t>
 
 rv32n's counted loop with the constant count 2 (verify_n(…, 2) canonical), the cap a tape
@@ -1127,12 +1127,12 @@ The depth-2 test tree is **7 proofs**: 4 leaves (`rv32n`, L = 1, bundle fixtures
 **Files:**
 - Modify: `tests/tree.rs` (the `TestTree` fixture, the generator, five tests)
 - Modify: `tests/pins.json` (`tree_test`: `step_int_cpu_rows`, `step_int_tier`, `step_proof_bytes`)
-- Modify: `docs/07-tree-aggregation.md` §5
+- Modify: `docs/08-tree-aggregation.md` §5
 
 **Interfaces:**
 - Consumes: Task 1a's `verify_rv32t`, `rv32t_leaf`, `rv32t_int`, `build_tree_step`, `tree_step_words`, `same_step_words`; Task 0's `RvmShape::of_proof`.
 - Produces: `$RECURSION_FIXTURES/tree/Test-{leaf-0..3, step-0, step-1, root, foreign-0}.rvmproof`.
-- Produces: the test-profile digests `T_LEAF_TEST` and `T_INT_TEST` (hex literals in `tests/tree.rs`), and the fixed-point verdict (docs/07 §5).
+- Produces: the test-profile digests `T_LEAF_TEST` and `T_INT_TEST` (hex literals in `tests/tree.rs`), and the fixed-point verdict (docs/08 §5).
 
 - [ ] **Step 1: The fixture and the five tests**
 
@@ -1189,7 +1189,7 @@ fn u64s(v: &[F]) -> Vec<u64> {
     v.iter().map(|f| f.as_canonical_u64()).collect()
 }
 
-/// The generator (R7): proves whatever `tree/` lacks. Run it once where docs/07 §5 says, then
+/// The generator (R7): proves whatever `tree/` lacks. Run it once where docs/08 §5 says, then
 /// copy `$RECURSION_FIXTURES/tree/` to every box that runs the suite.
 #[test]
 #[ignore = "tree Task 1b: proves the test tree's steps and root (tier per tests/pins.json tree_test.step_leaf_tier; ≈ 52 GB projected at tier 19) — the 256 GB droplet"]
@@ -1230,7 +1230,7 @@ fn the_interior_step_verifies_its_own_output() {
     let t = test_tree();
     assert!(
         t.s_root.same_step_words(&t.s_step),
-        "R3: rv32t_int's own proofs declare another shape: {:?} vs {:?}. Record both in docs/07 §5 and set the test \
+        "R3: rv32t_int's own proofs declare another shape: {:?} vs {:?}. Record both in docs/08 §5 and set the test \
          profile's max_depth to 2 (no third program)",
         t.s_root.header_words(),
         t.s_step.header_words()
@@ -1296,22 +1296,22 @@ scp root@$H:/root/out/30-tree-test-fixtures.log docs/measurements/$(date -u +%F)
 rsync -a root@$H:/root/recursion-fixtures/tree/ $RECURSION_FIXTURES/tree/
 ```
 
-Expected: `30-tree-test-fixtures.done` holds `0`, and the log has four `TREE_TEST_FIXTURE` lines. Read off (M2) the maximum RSS and the wall time. The log covers three proofs (step-0, step-1, root) in one process. This is the generator, not a profile, and docs/07 §5 says so.
+Expected: `30-tree-test-fixtures.done` holds `0`, and the log has four `TREE_TEST_FIXTURE` lines. Read off (M2) the maximum RSS and the wall time. The log covers three proofs (step-0, step-1, root) in one process. This is the generator, not a profile, and docs/08 §5 says so.
 
 - [ ] **Step 4: Pin, and run the whole binary**
 
 Run: `cargo test --release --test tree -- --nocapture 2>&1 | grep -E '^TREE_TEST_(INT|DIGESTS)|panicked|test result'`
 Expected: `TREE_TEST_INT rows <r> tier <t> step_bytes <s> root_bytes <q>` and `TREE_TEST_DIGESTS t_leaf <hex> t_int <hex>`, then panics at the missing pins. Add `"step_int_cpu_rows": <r>`, `"step_int_tier": <t>` and `"step_proof_bytes": <s>` to the `tree_test` block. Set `T_LEAF_TEST` and `T_INT_TEST` to the two printed hex strings. Re-run.
-Expected: `test result: ok. 12 passed; 0 failed; 1 ignored`. If `the_interior_step_verifies_its_own_output` fails at its first assertion, R3 applies: copy the two header-word lists it printed into docs/07 §5, mark the test `#[ignore = "R3: the test-profile fixed point does not hold (docs/07 §5); max_depth 2"]`, and continue. That is a recorded result, not a defect to fix here.
+Expected: `test result: ok. 12 passed; 0 failed; 1 ignored`. If `the_interior_step_verifies_its_own_output` fails at its first assertion, R3 applies: copy the two header-word lists it printed into docs/08 §5, mark the test `#[ignore = "R3: the test-profile fixed point does not hold (docs/08 §5); max_depth 2"]`, and continue. That is a recorded result, not a defect to fix here.
 
-- [ ] **Step 5: docs/07 §5**
+- [ ] **Step 5: docs/08 §5**
 
 Under §5, add: the 8 proofs and where each was proved, with its rows, tier, bytes and the generator's maximum RSS; `rv32t_leaf` vs `rv32t_int` rows (the workloads differ: children of `rv32n` vs children of `rv32t`); the fixed-point verdict (S_T's header words, and the root's); the two test digests; and the four test-profile key digests, printed by adding `eprintln!` of `inner_vk_digest` for `vk_leaf`, `vk_t_leaf` and `vk_int` once and removing it after reading.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tests/tree.rs tests/pins.json docs/07-tree-aggregation.md docs/measurements/
+git add tests/tree.rs tests/pins.json docs/08-tree-aggregation.md docs/measurements/
 git commit -m "recursion: the depth-2 test tree proved — 4 leaves, 2 rv32t_leaf, 1 rv32t_int; rv32t_int verifies its own output (fixed point <holds / does not hold>)
 
 rv32t_leaf <rows> rows, rv32t_int <rows> rows, tier <t>, <bytes> B a step; every level publishes
@@ -1330,7 +1330,7 @@ Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
 **Files:**
 - Modify: `src/aggregate.rs` (after `verify_aggregate`, `:132-168`: `TreeKeys`, `TreeShapes`, `VerifyTreeError`, `tree_root_digest`, `verify_tree`, `prove_tree_step`, `aggregate_tree`; `AggregateError` `:50-68` gains `TreeLayout` and `TreeShape`)
 - Modify: `src/shape.rs` (`RvmHeights`, `RvmHeights::of_proof`, `RvmShape::heights`, `RvmShape::try_of_heights`)
-- Modify: `tests/tree.rs` (four tests), `tests/tree_measure.rs` (the production tree runs), `tests/pins.json` (`tree_measure` gains the step and root), `docs/07-tree-aggregation.md` §3–§4
+- Modify: `tests/tree.rs` (four tests), `tests/tree_measure.rs` (the production tree runs), `tests/pins.json` (`tree_measure` gains the step and root), `docs/08-tree-aggregation.md` §3–§4
 
 **Interfaces:**
 - Produces, in `shape.rs`: `pub struct RvmHeights { pub tier: crate::machine::Tier, pub reg_log_height: u8, pub ram_log_height: u8, pub poseidon2_log_height: u8, pub reduce_log_height: u8 }` (`Clone, Copy, Debug, PartialEq, Eq`); `RvmHeights::of_proof(&machine::Proof) -> RvmHeights`; `RvmShape::heights(&self) -> RvmHeights`; `RvmShape::try_of_heights(profile, program: &Arc<Program>, h: RvmHeights) -> Result<RvmShape, ShapeError>`.
@@ -1750,7 +1750,7 @@ fn production_leaf_shape() -> (InnerVerifierKey, Arc<Program>, RvmShape) {
 }
 
 /// Step `TREE_STEP=k` ∈ {0, 1}: `rv32t_leaf` over leaves (2k, 2k + 1). Emulated first, against
-/// docs/07 §2's band (M5), then proved under the heap profiler. The 503 GB droplet.
+/// docs/08 §2's band (M5), then proved under the heap profiler. The 503 GB droplet.
 #[test]
 #[ignore = "tree Task 2: production rv32t_leaf step k (TREE_STEP=0|1), 1.7-2.9 M rows projected, 290-500 GB — the 503 GB droplet"]
 fn production_tree_step() {
@@ -1763,7 +1763,7 @@ fn production_tree_step() {
     let rows = execute(&vp.program, &tape.words, MAX_CYCLES).expect("rv32t_leaf accepts two production leaves").cpu_rows();
     let (lo, hi) = (common::pin("tree_measure", "step_band_lo"), common::pin("tree_measure", "step_band_hi"));
     println!("== step {k} emulated: {rows} rows, tier {:?}, band [{lo}, {hi}] {}", Tier::for_cycles(rows),
-        if (lo..=hi).contains(&rows) { "IN" } else { "OUT: write the correction into docs/07 §2 (M5)" });
+        if (lo..=hi).contains(&rows) { "IN" } else { "OUT: write the correction into docs/08 §2 (M5)" });
     let t0 = install();
     let m = Machine::new(P);
     let t = Instant::now();
@@ -1812,7 +1812,7 @@ fn production_tree_root() {
     report("tree root: rv32t_int (production)", t0, rows, root.tier, root.size(), prove_s);
 }
 
-/// The chain's genesis values (docs/07 §4; Task 3a's `aggregation_tree`), printed from the cached
+/// The chain's genesis values (docs/08 §4; Task 3a's `aggregation_tree`), printed from the cached
 /// leaf, step and root: the heights, the two program digests, the three key digests.
 #[test]
 #[ignore = "tree Task 2: prints the production aggregation_tree genesis values from the cached tree"]
@@ -1865,11 +1865,11 @@ for n in 41-tree-step-0 41-tree-step-1 42-tree-root 43-tree-genesis; do scp root
 rsync -a root@$H:/root/recursion-fixtures/tree/ $RECURSION_FIXTURES/tree/
 ```
 
-Expected: every `.done` holds `0`. `41-tree-step-0` prints `== step 0 emulated: … band [lo, hi] IN`. `42-tree-root` prints `verify_tree … s` and `== fixed point (R3): HOLDS`. **Stop:** a step or the root killed for memory on the 503 GB box. Record the peak it reached (the `.rss` file's last line) in docs/07 §3 and halt for a decision (spec ruling 1: the memory track first).
+Expected: every `.done` holds `0`. `41-tree-step-0` prints `== step 0 emulated: … band [lo, hi] IN`. `42-tree-root` prints `verify_tree … s` and `== fixed point (R3): HOLDS`. **Stop:** a step or the root killed for memory on the 503 GB box. Record the peak it reached (the `.rss` file's last line) in docs/08 §3 and halt for a decision (spec ruling 1: the memory track first).
 
-- [ ] **Step 7: Pins, docs/07 §3–§4**
+- [ ] **Step 7: Pins, docs/08 §3–§4**
 
-Add to the `tree_measure` block (M3): `step_cpu_rows`, `step_tier`, `step_peak_live_mb`, `step_prove_s`, `step_proof_bytes` (from step 0; step 1 must have equal rows, which docs/07 records), and `root_cpu_rows`, `root_tier`, `root_peak_live_mb`, `root_prove_s`, `root_proof_bytes`, `verify_tree_ms`. Add to `tests/tree_measure.rs`:
+Add to the `tree_measure` block (M3): `step_cpu_rows`, `step_tier`, `step_peak_live_mb`, `step_prove_s`, `step_proof_bytes` (from step 0; step 1 must have equal rows, which docs/08 records), and `root_cpu_rows`, `root_tier`, `root_peak_live_mb`, `root_prove_s`, `root_proof_bytes`, `verify_tree_ms`. Add to `tests/tree_measure.rs`:
 
 ```rust
 #[test]
@@ -1884,7 +1884,7 @@ fn the_production_step_rows_are_pinned() {
 }
 ```
 
-docs/07 §3: one table row per proof (4 leaves, 2 steps, 1 root) with host, rows, tier, the heights, prove, verify, proof bytes, peak live and maximum RSS, plus the log path. §4: the step measured against Task 0's band (in or out, and the correction if out); the root against the step (`rv32t_int` vs `rv32t_leaf` rows); the fixed-point verdict and the production `max_depth` it implies (3 if it holds, 2 if not); the genesis values, verbatim from `43-tree-genesis` (aggregate program digest, leaf and step heights, `t_leaf_digest`, `t_int_digest`, `vk_leaf`, `vk_t_leaf`, `vk_int`); the host class each proof needs; and the gate's circuits half met (depth 2, real bundle proofs, every step measured).
+docs/08 §3: one table row per proof (4 leaves, 2 steps, 1 root) with host, rows, tier, the heights, prove, verify, proof bytes, peak live and maximum RSS, plus the log path. §4: the step measured against Task 0's band (in or out, and the correction if out); the root against the step (`rv32t_int` vs `rv32t_leaf` rows); the fixed-point verdict and the production `max_depth` it implies (3 if it holds, 2 if not); the genesis values, verbatim from `43-tree-genesis` (aggregate program digest, leaf and step heights, `t_leaf_digest`, `t_int_digest`, `vk_leaf`, `vk_t_leaf`, `vk_int`); the host class each proof needs; and the gate's circuits half met (depth 2, real bundle proofs, every step measured).
 
 Run on `$HOST503`: `step.sh 44-tree-pins cargo test --release --test tree_measure the_production_step_rows_are_pinned -- --ignored --exact`
 Expected: PASS.
@@ -1892,12 +1892,12 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add tests/tree_measure.rs tests/pins.json docs/07-tree-aggregation.md docs/measurements/
+git add tests/tree_measure.rs tests/pins.json docs/08-tree-aggregation.md docs/measurements/
 git commit -m "recursion: the production depth-2 tree — 4 leaves (L = 2), 2 rv32t_leaf at <rows> rows tier <t>, rv32t_int root <rows> rows; verify_tree accepts it
 
 Steps: prove <s> s, <GB> GB live, <bytes> B (503 GB droplet); band [<lo>, <hi>]: <in/out>.
 Root: prove <s> s, <GB> GB live; verify_tree <ms> ms. Fixed point <holds/fails> → production
-max_depth <3/2>. Genesis values in docs/07 §4.
+max_depth <3/2>. Genesis values in docs/08 §4.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
@@ -2048,7 +2048,7 @@ In `aggregation.rs`, after `AdmittedShape`:
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RvmHeights { pub tier: u8, pub reg_log_height: u8, pub ram_log_height: u8, pub poseidon2_log_height: u8, pub reduce_log_height: u8 }
 
-/// Tree aggregation (circuits `docs/07-tree-aggregation.md` §4, plan R2/R4): the leaf size, the
+/// Tree aggregation (circuits `docs/08-tree-aggregation.md` §4, plan R2/R4): the leaf size, the
 /// deepest tree, the leaf and step heights the node rebuilds the three programs from, and the
 /// five digests it must rebuild to (two programs, three child keys).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -2253,7 +2253,7 @@ In `agg_executor.rs`, memoise one `TreeShapes` per `TreeConfig` beside `programs
 
 `aggregate_header_tree` is `aggregate_header` (`:116-140`) with the tier compared against the pinned `step.tier` instead of `admitted_tiers`: the decode, the canonical bytes, then the exact tier. `check_tree_pins` compares `built_tree(tree)?.digests` with all five pins (levels 0–2, and both programs, whatever the depth), so the startup check is stricter than admission's per-depth one. In `node.rs`, after `check_build_runs_genesis` and before the warm thread, `if let Some(t) = gs.ledger.aggregation_tree() { agg_executor::check_tree_pins(&ex, t).map_err(|e| anyhow::anyhow!("aggregation_tree pins: {e}; refusing to start"))?; }`. That builds the three programs and keys once, *projected* at a few minutes at production. `warm_aggregation` then also warms the root's key at `step.tier` and the canonical reduce height (`canonical_reduce_log_height(t_int, 2)`).
 
-Tests, with crafted roots in `crafted_proof`'s pattern (a decodable, canonical `machine::Proof` with the header fields given, the recomputed root digest as its public values, the degree bits `log_ext_degrees` wants, and an all-zero batch). Build the test `TreeConfig` from docs/07 §5's test-profile heights and digests:
+Tests, with crafted roots in `crafted_proof`'s pattern (a decodable, canonical `machine::Proof` with the header fields given, the recomputed root digest as its public values, the degree bits `log_ext_degrees` wants, and an all-zero batch). Build the test `TreeConfig` from docs/08 §5's test-profile heights and digests:
 
 ```rust
     /// The test-profile tree section, built the way a genesis cut computes it: the heights read
@@ -2332,13 +2332,13 @@ Expected: 0 failed.
 
 `rand_status.aggregation` gains `"tree": { "leaf_size", "max_depth", "leaf": {…heights}, "step": {…} }` when the section is set. `rand-node aggregate --layout tree|flat` (default `flat`). With `tree`, `aggregate_pass` takes `n = L·2^d` covers for the largest `d ≤ max_depth` with `L·2^d ≤` the unsealed work list, and returns `None` if fewer than `2L` are unsealed. `prove_aggregate` calls `randprotocol_rvm::aggregate::aggregate_tree(&m, &vk, &TreeShapes::build(…)?, &proofs, binding, L)`. The action carries `layout: AggregateLayout::Tree` and signs with `aggregate_tree_signing_hash`. Add to `aggregate_pass`'s existing test: a `tree` status with 5 unsealed and L = 1, max_depth 2 takes 4 covers.
 
-`tests/cluster.rs`: add `a_tree_aggregate_over_four_bundles_commits_with_one_rvm_verify`, the capstone's flow with four bundles, `aggregation_tree` from docs/07 §5 (test profile, L = 1, max_depth 2) and `--layout tree`. Mark it `#[ignore]` with the capstone's own reason (aggregation is refused at startup until the admitted shape is re-measured). It is un-ignored with the capstone, and it needs a ≥ 256 GB host for the test-profile steps (docs/07 §5). In `docs/deploy.md` §"Chain 9 activation", add step 5a: on a tree chain, aggregators run `rand-node aggregate --watch --layout tree` on a host of docs/07 §4's step class (503 GB at production by Task 2's measurement), and the ops check is `rand_status.aggregation.tree` plus the startup log's `aggregation_tree pins: ok` line.
+`tests/cluster.rs`: add `a_tree_aggregate_over_four_bundles_commits_with_one_rvm_verify`, the capstone's flow with four bundles, `aggregation_tree` from docs/08 §5 (test profile, L = 1, max_depth 2) and `--layout tree`. Mark it `#[ignore]` with the capstone's own reason (aggregation is refused at startup until the admitted shape is re-measured). It is un-ignored with the capstone, and it needs a ≥ 256 GB host for the test-profile steps (docs/08 §5). In `docs/deploy.md` §"Chain 9 activation", add step 5a: on a tree chain, aggregators run `rand-node aggregate --watch --layout tree` on a host of docs/08 §4's step class (503 GB at production by Task 2's measurement), and the ops check is `rand_status.aggregation.tree` plus the startup log's `aggregation_tree pins: ok` line.
 
 - [ ] **Step 4: The docs**
 
-`docs/aggregation.md`: add §"Trees". It covers the layout rule (exactly `L·2^d` covers, `1 ≤ d ≤ max_depth`, else the flat path at N ≤ 5), the bottom-up recompute (leaf lists, then `[vk_c ‖ 2 ‖ B ‖ D_a ‖ D_b]` with `vk_leaf`/`vk_t_leaf`/`vk_int` by level), AGG-6 per level (step 7b), AGG-3 on the root's exact tier (7a), the signature domain, and the six errors. In "Before enabling aggregation" (`:195`), replace "The `rv32r` self-verifier's binding is not tied to the inner aggregate's (ZKQ-5): decide before trees of aggregates ship" with "ZKQ-5, decided 2026-09-28 and implemented for trees in circuits docs/07: no in-program `B_out == B_in`; admission recomputes every level from the covered bundles under the transaction's one binding (§Trees)". Add the measured tree numbers from circuits docs/07 §3 to §6's table.
+`docs/aggregation.md`: add §"Trees". It covers the layout rule (exactly `L·2^d` covers, `1 ≤ d ≤ max_depth`, else the flat path at N ≤ 5), the bottom-up recompute (leaf lists, then `[vk_c ‖ 2 ‖ B ‖ D_a ‖ D_b]` with `vk_leaf`/`vk_t_leaf`/`vk_int` by level), AGG-6 per level (step 7b), AGG-3 on the root's exact tier (7a), the signature domain, and the six errors. In "Before enabling aggregation" (`:195`), replace "The `rv32r` self-verifier's binding is not tied to the inner aggregate's (ZKQ-5): decide before trees of aggregates ship" with "ZKQ-5, decided 2026-09-28 and implemented for trees in circuits docs/08: no in-program `B_out == B_in`; admission recomputes every level from the covered bundles under the transaction's one binding (§Trees)". Add the measured tree numbers from circuits docs/08 §3 to §6's table.
 
-`docs/compute-optimization.md`: add a dated "Correction (2026-10-08, circuits docs/06–07)" note at the head of §4.2, listing the nine stale points it replaces. (1) §4.1's "two dedicated chips" are built: `SPONGE`/`COMPRESS` in the poseidon2 chip, and `FOLD`/`POW` row kinds in the reduce chip; one inner proof is 585 686 rows, tier 20 (docs/06). (2) §4.1's "N = 16 around 2^24" is unreachable: the reduce chip caps a flat aggregate at N ≤ 5 at production. (3) §4.2's "B = 16 per leaf" is L = 2 (spec ruling 6). (4) "memory per step is a constant" holds, but the constant is a 256 GB leaf and a 503 GB step (docs/07 §3), not a GPU host. (5) "The root's interface is unchanged … only N grows" is wrong: the root publishes `[vk_c ‖ 2 ‖ B ‖ D_a ‖ D_b]`, admission recomputes every level, and the action carries a layout. (6) "ZKQ-5, still open" was decided 2026-09-28 (the chain's recompute). (7) §4.3's "32 inner verifications per leaf" is at most 2 bundle + 2 auth proofs under the reduce ceiling (spec ruling 7, sub-project 3). (8) §4.4's ≤ 64 GB leaf and step targets move to the memory track (spec ruling 1). (9) §4.4's "80 queries, rate ½" is rate ⅛ (`log_blowup 3`), and rate ¼ needs ~120 queries at the same proven bound, not 40 (docs/06 §7 item 2). The old N = 1 "377 GB" is ≈ 110–130 GB projected since phase 3.
+`docs/compute-optimization.md`: add a dated "Correction (2026-10-08, circuits docs/06–08)" note at the head of §4.2, listing the nine stale points it replaces. (1) §4.1's "two dedicated chips" are built: `SPONGE`/`COMPRESS` in the poseidon2 chip, and `FOLD`/`POW` row kinds in the reduce chip; one inner proof is 585 686 rows, tier 20 (docs/06). (2) §4.1's "N = 16 around 2^24" is unreachable: the reduce chip caps a flat aggregate at N ≤ 5 at production. (3) §4.2's "B = 16 per leaf" is L = 2 (spec ruling 6). (4) "memory per step is a constant" holds, but the constant is a 256 GB leaf and a 503 GB step (docs/08 §3), not a GPU host. (5) "The root's interface is unchanged … only N grows" is wrong: the root publishes `[vk_c ‖ 2 ‖ B ‖ D_a ‖ D_b]`, admission recomputes every level, and the action carries a layout. (6) "ZKQ-5, still open" was decided 2026-09-28 (the chain's recompute). (7) §4.3's "32 inner verifications per leaf" is at most 2 bundle + 2 auth proofs under the reduce ceiling (spec ruling 7, sub-project 3). (8) §4.4's ≤ 64 GB leaf and step targets move to the memory track (spec ruling 1). (9) §4.4's "80 queries, rate ½" is rate ⅛ (`log_blowup 3`), and rate ¼ needs ~120 queries at the same proven bound, not 40 (docs/06 §7 item 2). The old N = 1 "377 GB" is ≈ 110–130 GB projected since phase 3.
 
 - [ ] **Step 5: Run and commit**
 
@@ -2352,7 +2352,7 @@ git commit -m "node, rvm: tree aggregation — re-vendor circuits <sha>, AggExec
 verify_tree forwards to the rVM's bottom-up recompute and verify_n(…, 2) and names
 TreeRootDigest; the node refuses to start on an aggregation_tree pin this build does not
 rebuild. docs/aggregation.md gains §Trees (ZKQ-5 implemented); compute-optimization §4.2–4.4
-corrected on nine points from circuits docs/06–07.
+corrected on nine points from circuits docs/06–08.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
@@ -2360,28 +2360,28 @@ Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
 
 ---
 
-### Task 4: The landing — docs/07 in full, docs/02 and docs/03, AGENTS.md, the suite
+### Task 4: The landing — docs/08 in full, docs/02 and docs/03, AGENTS.md, the suite
 
 **Files:**
-- Modify: `recursion/docs/07-tree-aggregation.md` (§6, §7, a conclusion), `recursion/docs/02-aggregate.md` (§"ZKQ-5" `:315-348`'s last paragraph; §"The API" `:435`), `recursion/docs/03-gpu-and-self-recursion.md` (§"The self-verifier, measured" `:106`; `:229-232`'s "tree-of-aggregates question"), `research/AGENTS.md` (the recursion paragraph, `:19-55`)
+- Modify: `recursion/docs/08-tree-aggregation.md` (§6, §7, a conclusion), `recursion/docs/02-aggregate.md` (§"ZKQ-5" `:315-348`'s last paragraph; §"The API" `:435`), `recursion/docs/03-gpu-and-self-recursion.md` (§"The self-verifier, measured" `:106`; `:229-232`'s "tree-of-aggregates question"), `research/AGENTS.md` (the recursion paragraph, `:19-55`)
 
-- [ ] **Step 1: docs/07 in full**
+- [ ] **Step 1: docs/08 in full**
 
 §6: the chain rules as Task 3a built them, and the fullnode commits. §7: a "What moved" table: new files; the `emit_proof`/`emit_proof_with` split with every digest unchanged; the new pins (`tree_measure`, `tree_test`, `T_LEAF_TEST`, `T_INT_TEST`); the three production digests and the five genesis values; no opcode, AIR or key-shape change. Then the suite counts from Step 3. Conclusion: whether the gate was met. Its circuits half is Task 2 Step 7. Its chain half is the node's `verify_tree` over the production root (run `cargo test -p randprotocol-node --release agg_executor -- --ignored production_tree` on `$HOST503` if Task 3b added that ignored check; otherwise say so). The cluster run is blocked by the pre-existing startup refusal of any aggregation genesis (`docs/aggregation.md` "Before enabling aggregation"). Also: the host classes, the fixed point, and the memory track as the next lever (spec ruling 1).
 
 - [ ] **Step 2: docs/02, docs/03, AGENTS.md**
 
-docs/02 §ZKQ-5: replace "The rule for whoever registers a tree (no chain does today …)" with the implemented rule and a pointer to docs/07 §4 and `aggregate::verify_tree`. §"The API" gains `verify_tree`, `tree_root_digest`, `prove_tree_step`, `aggregate_tree`, `TreeKeys`, `TreeShapes`. docs/03 §"The self-verifier, measured": `rv32r` is the k = 1 case and stays with its tests; `rv32t` is its k = 2 loop (docs/07); add the measured production child from Task 0 beside the toy and busy pins. Rewrite `:229-232`'s "the tree-of-aggregates question answered to a number" with docs/07 §3's measured step class. `research/AGENTS.md`: after the phase-3 sentence, add "and tree aggregation (2026-10, branch `feat/tree-aggregation`, `recursion/docs/07`): `rv32t`, the 2-to-1 step over a compile-time child shape with the child key a published tape value, `verify_tree`'s bottom-up recompute, and a production depth-2 tree measured on the 256/503 GB droplets", and add `07` to the list of measured records.
+docs/02 §ZKQ-5: replace "The rule for whoever registers a tree (no chain does today …)" with the implemented rule and a pointer to docs/08 §4 and `aggregate::verify_tree`. §"The API" gains `verify_tree`, `tree_root_digest`, `prove_tree_step`, `aggregate_tree`, `TreeKeys`, `TreeShapes`. docs/03 §"The self-verifier, measured": `rv32r` is the k = 1 case and stays with its tests; `rv32t` is its k = 2 loop (docs/08); add the measured production child from Task 0 beside the toy and busy pins. Rewrite `:229-232`'s "the tree-of-aggregates question answered to a number" with docs/08 §3's measured step class. `research/AGENTS.md`: after the phase-3 sentence, add "and tree aggregation (2026-10, branch `feat/tree-aggregation`, `recursion/docs/08`): `rv32t`, the 2-to-1 step over a compile-time child shape with the child key a published tape value, `verify_tree`'s bottom-up recompute, and a production depth-2 tree measured on the 256/503 GB droplets", and add `07` to the list of measured records.
 
 - [ ] **Step 3: The suite**
 
-Run M6. Expected: 0 failed. Record the passed / ignored / skipped counts in docs/07 §7 (phase 3's are in docs/06 §6).
+Run M6. Expected: 0 failed. Record the passed / ignored / skipped counts in docs/08 §7 (phase 3's are in docs/06 §6).
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add docs/ ../research/AGENTS.md
-git commit -m "recursion docs: tree aggregation landed — docs/07 in full; rv32r the k = 1 case, rv32t k = 2; ZKQ-5's tree rule implemented
+git commit -m "recursion docs: tree aggregation landed — docs/08 in full; rv32r the k = 1 case, rv32t k = 2; ZKQ-5's tree rule implemented
 
 Production depth-2 tree: leaf <rows>/<t>, step <rows>/<t>, root <rows>/<t>; fixed point
 <holds/fails>. Suite: <passed> passed, 0 failed, <ignored> ignored.
@@ -2395,7 +2395,7 @@ Claude-Session: https://claude.ai/code/session_01AUWKAos28PQquiLZRVC6jP"
 ## Self-review notes
 
 - **Spec coverage.** §2 (the leaf, the interior step, the layout rule, depth sizing): Tasks 1a, 2 (`tree_root_digest`, `aggregate_tree`) and 3a (`tree_depth`). §3 (the tape, the hinted `B` and cap, the in-program `vk_c`, the two children, the 21-word list, no `B_out == B_in`): Task 1a, with R1 and R5 recording the departures. §4 (the action, the genesis pins, the recompute, steps 4/6/7/7a/7b/8, `verify_tree`, the errors, the docs): Tasks 2, 3a and 3b, with R2, R4, R6, R8 and R9 recording the departures. §5 (Tasks 0–4, the gate, the stop rule): Task 0 (stop rule), Task 2 Step 6 (the 503 GB stop), and Task 4 Step 1 (the gate's two halves, with the cluster run's pre-existing blocker named). §6: `tests/tree.rs` (end to end, the tamper table — swapped order, a wrong cap both ways, a wrong `B`, a flat proof as a tree, a wrong-shape child — the k = 1 tests untouched, the digest and shape pins, the canonical reduce height at N = 2); the fullnode admission tests per error, the startup pin check and the runbook step; and logs under `docs/measurements/`, never macOS RSS.
-- **Placeholder scan.** `grep -nE 'TBD|TODO|similar to Task|add validation' <this file>` returns nothing. Angle-bracket slots appear only in commit messages, pin JSON, docs/07 text and the measured digest literals (`T_LEAF_TEST`/`T_INT_TEST`, empty until Task 1b Step 4). Each is a measured value, and the step around it names the command and the line to read. `$HOST256`/`$HOST503` are the user's droplet addresses (spec §7).
+- **Placeholder scan.** `grep -nE 'TBD|TODO|similar to Task|add validation' <this file>` returns nothing. Angle-bracket slots appear only in commit messages, pin JSON, docs/08 text and the measured digest literals (`T_LEAF_TEST`/`T_INT_TEST`, empty until Task 1b Step 4). Each is a measured value, and the step around it names the command and the line to read. `$HOST256`/`$HOST503` are the user's droplet addresses (spec §7).
 - **Type consistency.** `verify_rv32t(child: &RvmShape, cp)` returns `VerifierProgram<RvmShape>` throughout. `build_tree_step(profile, child, [&Proof; 2], binding)` is the same in Tasks 1a, 1b and 2. `TreeKeys { vk_leaf, vk_t_leaf, vk_int }` and `at_level` are the same in Task 2's code, its tests and the production run. Core mirrors them as `TreeConfig`/`TreeDigests` (Task 3a) and the node maps one onto the other (3b). `RvmHeights` exists twice by design: rVM (`tier: Tier`) and core (`tier: u8`). `VerifyTreeError::TreeRootDigest` → `ConfidentialError::TreeRootDigest` → `AggregationError::TreeRootDigest` is the one path. `TREE_ARITY = 2` is the `n` of every step's `verify_n`.
 - **Review Focus pinned.** 1 → Task 1b `a_foreign_program_child_pair_passes_in_program_and_fails_the_root_recompute`. 2 → Task 1b `the_interior_step_verifies_its_own_output`. 3 → Task 1a `a_tamper_in_either_child_is_refused_at_the_named_step`. 4 → Task 2 `verify_tree_selects_vk_leaf_vk_t_leaf_vk_int_by_level`. 5 → Task 3a `tree_layout_boundaries_are_named`.
 - **Not pinned down from the code:** the fullnode post-re-vendor signatures are docs/06 §5's, not read (fullnode `main` lacks them). The exact `rand_status` emitter line for `aggregation` in `rpc.rs` was not located (only its test at `:4568`). The cluster test needs `aggregation` genesis startup, which `check_build_runs_genesis` refuses today.

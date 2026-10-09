@@ -30,17 +30,17 @@
   "tree_measure": {
     "leaf_cpu_rows_emulated": 1171511,
     "leaf_tier_emulated": 21,
-    "rv32r_cpu_rows_emulated": 575638,
-    "child_cpu_rows_emulated": 575246,
+    "rv32r_cpu_rows_emulated": 648910,
+    "child_cpu_rows_emulated": 648518,
     "rv32r_tier_emulated": 20,
-    "step_band_lo": 977893,
-    "step_band_hi": 1323033,
-    "step_cpu_rows_emulated": 1148417,
+    "step_band_lo": 1102455,
+    "step_band_hi": 1491559,
+    "step_cpu_rows_emulated": 1294577,
     "step_tier_emulated": 21
   },
   "tree_test": {
-    "child_cpu_rows": 144829,
-    "step_leaf_cpu_rows": 289629,
+    "child_cpu_rows": 143568,
+    "step_leaf_cpu_rows": 287107,
     "step_overhead": -29,
     "step_leaf_tier": 19
   }
