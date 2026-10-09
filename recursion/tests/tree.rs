@@ -363,7 +363,7 @@ fn generate_test_tree_fixtures() {
     ALLOW_STEP_PROVING.store(true, Ordering::SeqCst);
     let t = test_tree();
     let l = leaves();
-    for (name, p) in [("leaf-0", &l.proofs[0]), ("step-0", &t.steps[0]), ("root", &t.root), ("foreign-0", &t.foreign)] {
+    for (name, p) in [("leaf-0", &l.proofs[0]), ("step-0", &t.steps[0]), ("step-1", &t.steps[1]), ("root", &t.root), ("foreign-0", &t.foreign)] {
         eprintln!("TREE_TEST_FIXTURE {name}: tier {} reg {} ram {} poseidon2 {} reduce {} bytes {}",
             p.tier.0, p.reg_log_height, p.ram_log_height, p.poseidon2_log_height, p.reduce_log_height, p.size());
     }
@@ -384,31 +384,78 @@ fn the_test_tree_proves_and_every_level_publishes_the_host_digest() {
     }
     assert_eq!(t.root.public_values, u64s(&host_step(&vk_t_leaf, B, &t.steps[0], &t.steps[1])), "the root");
     let exec = emulate_step(&t.s_step, &t.t_int, &t.steps[0], &t.steps[1], B).expect("rv32t_int accepts the two steps");
-    eprintln!("TREE_TEST_INT rows {} tier {} step_bytes {} root_bytes {}", exec.cpu_rows(), t.root.tier.0, t.steps[0].size(), t.root.size());
+    eprintln!("TREE_TEST_INT rows {} tier {} step_bytes {} {} root_bytes {}", exec.cpu_rows(), t.root.tier.0,
+        t.steps[0].size(), t.steps[1].size(), t.root.size());
     assert_eq!(exec.cpu_rows(), common::pin("tree_test", "step_int_cpu_rows"));
     assert_eq!(t.root.tier.0, common::pin("tree_test", "step_int_tier"));
-    assert_eq!(t.steps[0].size(), common::pin("tree_test", "step_proof_bytes"));
+    for p in t.steps.iter().chain(std::iter::once(&t.root)) {
+        assert!(p.size() <= common::pin("tree_test", "step_proof_bytes_max"), "a step proof grew: {} bytes", p.size());
+    }
 }
 
-/// Review Focus 2 (R3): `rv32t_int` is built for S_T, the shape of an `rv32t_leaf` proof, and
-/// must verify proofs of *itself* at level 3. Its own root declares S_T's words, so the root
-/// twice over is a valid level-3 pair: accepted, publishing `vk_int`, which is not `vk_t_leaf`.
+/// The shape a proof of `program` over this run would declare, without proving: the tier the
+/// run's rows need and the heights `build_traces` sizes from the workload (the declared-height
+/// rule, which `prove` applies verbatim), read through `RvmShape::of`.
+fn emulated_shape(program: &Arc<Program>, exec: &Execution) -> RvmShape {
+    let tier = Tier::for_cycles(exec.cpu_rows()).expect("the run fits a tier");
+    let tr = recursion::machine::build_traces(program, exec, tier).expect("the run's traces build");
+    RvmShape::of(P, program, tier, tr.reg_log_height, tr.ram_log_height, tr.poseidon2_log_height, tr.reduce_log_height)
+}
+
+/// R3 (amended, fix round 1), the recorded verdict: `rv32t_int`, built for S_T, does *not* verify
+/// its own output at the test profile. Its two passes over tier-19 children run more reduce rows
+/// than `rv32t_leaf`'s two over tier-18 leaves (each child one more FRI fold level), the reduce
+/// table crosses 2^16, and the root declares another reduce height and arity schedule. The tape
+/// builder refuses the root as a child of S_T. Both header-word lists are pinned (docs/08 §5).
 #[test]
-#[ignore = "R3: the test-profile fixed point does not hold (docs/08 §5); max_depth 2"]
-fn the_interior_step_verifies_its_own_output() {
+fn the_interior_step_does_not_verify_its_own_output_at_the_test_profile() {
+    use recursion::tables::reduce::program_rows;
     let t = test_tree();
-    assert!(
-        t.s_root.same_step_words(&t.s_step),
-        "R3: rv32t_int's own proofs declare another shape: {:?} vs {:?}. Record both in docs/08 §5 and set the test \
-         profile's max_depth to 2 (no third program)",
-        t.s_root.header_words(),
-        t.s_step.header_words()
+    let (per_leaf, per_int) = (program_rows(&t.t_leaf), program_rows(&t.t_int));
+    eprintln!("TREE_TEST_R3 reduce rows per child: rv32t_leaf {per_leaf} (x2 = {}), rv32t_int {per_int} (x2 = {}); \
+        S_T {:?} root {:?}", 2 * per_leaf, 2 * per_int, t.s_step.header_words(), t.s_root.header_words());
+    assert_eq!(per_leaf as usize, common::pin("tree_test", "step_leaf_reduce_rows_per_child"));
+    assert_eq!(per_int as usize, common::pin("tree_test", "step_int_reduce_rows_per_child"));
+    assert!(2 * per_leaf < 1 << 16 && 2 * per_int > 1 << 16, "the crossing: rv32t_leaf under 2^16, rv32t_int over it");
+    let words = |s: &RvmShape| u64s(&s.header_words());
+    assert_eq!(words(&t.s_step), [19, 20, 20, 15, 16, 18, 16, 1, 1, 2, 1, 3, 3, 1, 3, 2, 3, 1], "S_T");
+    assert_eq!(words(&t.s_root), [19, 20, 20, 15, 17, 18, 16, 1, 1, 1, 2, 3, 3, 1, 3, 2, 3, 1], "the root");
+    assert!(!t.s_root.same_step_words(&t.s_step), "R3: rv32t_int's own proofs declare another shape");
+    assert_eq!(
+        WitnessTape::build_tree_step(P, &t.s_step, [&t.root, &t.root], B).err(),
+        Some(TapeError::Replay(recursion::reference::ReplayError::Shape)),
+        "rv32t_int cannot take its own proofs as children"
     );
+}
+
+/// R3 (amended): the fixed point is reached at level 3. A third step program, built for the
+/// root's shape S_root, emulated over (root, root): accepted, publishing `[vk_int ‖ 2 ‖ B ‖ D ‖ D]`,
+/// and its own proofs would declare S_root's words again, so it is the program for every level
+/// ≥ 3 (it verifies itself). Emulation only: the heights are `build_traces`' over the run, the
+/// rule `prove` uses; the same method reproduces the proved root's shape from (step-0, step-1).
+/// The test profile's lists: 3 step programs, 4 keys (`vk_leaf`, `vk_t_leaf`, `vk_int`, `vk_fix`).
+#[test]
+fn a_third_step_program_at_the_roots_shape_is_the_fixed_point() {
+    let t = test_tree();
+    let int_run = emulate_step(&t.s_step, &t.t_int, &t.steps[0], &t.steps[1], B).expect("rv32t_int accepts the steps");
+    assert_eq!(emulated_shape(&t.t_int, &int_run).header_words(), t.s_root.header_words(),
+        "the emulated shape method reproduces the proved root's");
+
+    let t_fix = Arc::new(verify_rv32t(&t.s_root, Checkpoints::Off).program);
+    assert_ne!(t_fix.digest(), t.t_int.digest(), "a third program");
+    let exec = emulate_step(&t.s_root, &t_fix, &t.root, &t.root, B).expect("the level-3 program accepts two roots");
     let vk_int = inner_vk_digest(&t.s_root, &RvmKey::of(P, &t.s_root));
-    let vk_t_leaf = inner_vk_digest(&t.s_step, &RvmKey::of(P, &t.s_step));
-    assert_ne!(vk_int, vk_t_leaf, "level 2 and level 3 publish different child keys (R2)");
-    let exec = emulate_step(&t.s_root, &t.t_int, &t.root, &t.root, B).expect("rv32t_int accepts two of its own proofs");
-    assert_eq!(exec.public, host_step(&vk_int, B, &t.root, &t.root));
+    assert_eq!(exec.public, host_step(&vk_int, B, &t.root, &t.root), "it publishes vk_int, the root's key");
+    let s_fix = emulated_shape(&t_fix, &exec);
+    let reduce_rows = recursion::tables::reduce::program_rows(&t_fix);
+    eprintln!("TREE_TEST_FIX rows {} tier {} reduce rows per child {reduce_rows} t_fix {} vk_fix {:?} S_fix {:?}",
+        exec.cpu_rows(), s_fix.tier, recursion::programs::digest_hex(&t_fix),
+        u64s(&inner_vk_digest(&s_fix, &RvmKey::of(P, &s_fix))), u64s(&s_fix.header_words()));
+    assert!(s_fix.same_step_words(&t.s_root), "level 3 is a fixed point: {:?} vs {:?}", s_fix.header_words(), t.s_root.header_words());
+    assert_eq!(verify_rv32t(&s_fix, Checkpoints::Off).program.digest(), t_fix.digest(),
+        "the program for its own proofs is itself");
+    assert_eq!(exec.cpu_rows(), common::pin("tree_test", "step_fix_cpu_rows"));
+    assert_eq!(recursion::programs::digest_hex(&t_fix), T_FIX_TEST, "the fixed-point step program at S_root");
 }
 
 /// Review Focus 1 (R5, second half): children of a foreign program with identical shape words,
@@ -433,6 +480,8 @@ fn a_foreign_program_child_pair_passes_in_program_and_fails_the_root_recompute()
 /// Task 1b.
 const T_LEAF_TEST: &str = "2c586636c4c0f94cdf13b410154679d995eefad11e27371e0786e89e206ccd34";
 const T_INT_TEST: &str = "04b1677122526e51c0d278375b0c30ebd37f94ba8a2afed3cd3e019ecdc3c226";
+/// The level-3 program, `rv32t` at the root's shape S_root: the fixed point (R3 amended, fix round 1).
+const T_FIX_TEST: &str = "08abf188e201e55d7b494f89394651f3ef10c6ebdfd00f825ce4c7b0795ff396";
 
 #[test]
 fn the_test_tree_program_digests_are_pinned() {

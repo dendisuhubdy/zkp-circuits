@@ -141,12 +141,12 @@ this 48 GB laptop (below).
 one proving process at a time, cached as `$RECURSION_FIXTURES/tree/Test-*.rvmproof` (git-ignored;
 `generate_test_tree_fixtures` proves whatever `tree/` lacks, and the suite never proves a step).
 
-| proof | program | over | rows | tier | heights reg/ram/p2/reduce | bytes | max RSS (process, measured) | prove time |
+| proof | program | over | rows | tier | heights reg/ram/p2/reduce | bytes | max RSS (process, measured) | process wall (log) |
 |---|---|---|---|---|---|---|---|---|
 | leaf-0..3 | `rv32n`, L = 1 | bundle fixtures 0–3 | 169 640 | 18 | 19/19/14/16 | 262 377–264 907 | (Task 1a; 15.64 GB live, docs/07) | (Task 1a) |
-| step-0, step-1 | `rv32t_leaf` | leaves 0–1, 2–3 | 287 107 | 19 | 20/20/15/16 | 280 133 (step-0) | **34.35 GB** (step-1 alone) | ≈ 2 min 15 s |
-| root | `rv32t_int` | step-0, step-1 | 306 985 | 19 | 20/20/15/17 | 283 172 | **33.21 GB** (alone) | ≈ 2 min 25 s |
-| foreign-0 | leaf program + one `HALT` (R5) | bundle fixture 0 | 169 640 | 18 | 19/19/14/16 | 264 267 | **21.39 GB** (alone) | ≈ 1 min 15 s |
+| step-0, step-1 | `rv32t_leaf` | leaves 0–1, 2–3 | 287 107 | 19 | 20/20/15/16 | 280 133, 280 772 | **34.35 GB** (step-1 alone) | 177 s (step-1 alone) |
+| root | `rv32t_int` | step-0, step-1 | 306 985 | 19 | 20/20/15/17 | 283 172 | **33.21 GB** (alone) | 182 s (alone) |
+| foreign-0 | leaf program + one `HALT` (R5) | bundle fixture 0 | 169 640 | 18 | 19/19/14/16 | 264 267 | **21.39 GB** (alone) | 114 s (alone) |
 
 The generator's first run proved step-0, step-1, the root and the foreign leaf in one process:
 513 s wall, **34.11 GB** maximum RSS (`/usr/bin/time -l`). Each kind's own peak was then measured
@@ -158,9 +158,11 @@ plus loading and verifying the cached rest): step 34.35 GB / 177 s, root 33.21 G
 profile. Log: `docs/measurements/2026-10-09-tree-test-fixtures-laptop.log`. The root and the foreign
 leaf in the cache are the isolation runs' (byte counts above); step-0 is the first run's.
 
-`rv32t_leaf` 287 107 rows vs `rv32t_int` 306 985 (+19 878): the same pipeline twice over another
-child shape. A step child is a tier-19 proof, its traces twice a tier-18 leaf's height, so each
-pass of the loop opens longer Merkle paths and folds further.
+Process wall times include building the programs and loading and verifying the cached rest; the
+log has no prove-only times. `rv32t_leaf` 287 107 rows vs `rv32t_int` 306 985 (+19 878): the same
+pipeline twice over another child shape. A step child is a tier-19 proof, its traces twice a
+tier-18 leaf's height, so each pass of the loop opens longer Merkle paths and folds one bit
+further.
 
 Every level publishes exactly the host's `[vk_c ‖ 2 ‖ B ‖ D_a ‖ D_b]` in cover order: `vk_leaf` at
 level 1 (both steps), `vk_t_leaf` at level 2 (the root). The child keys are computed by the test
@@ -168,33 +170,55 @@ level 1 (both steps), `vk_t_leaf` at level 2 (the root). The child keys are comp
 program's children (R5, second half) pass every in-program check, publish `vk_foreign`, and fail
 the recompute with `vk_leaf`.
 
-**The fixed point (R3) does not hold at the test profile.** `rv32t_int` is built for S_T (an
-`rv32t_leaf` proof's shape). Its own root declares other header words:
+**The fixed point (R3, amended in fix round 1) is reached at level 3, not level 2.** `rv32t_int`
+is built for S_T (an `rv32t_leaf` proof's shape). Its own root declares other header words, and a
+third program, `rv32t` at the root's shape S_root, reproduces S_root over (root, root):
 
 | | tier, reg, ram, p2, **reduce**, program, queries | log arities |
 |---|---|---|
-| S_T (`rv32t_leaf` proof) | 19, 20, 20, 15, **16**, 18, 16 | 1, 1, **2, 1**, 3, 3, 1, 3, 2, 3, 1 |
-| root (`rv32t_int` proof) | 19, 20, 20, 15, **17**, 18, 16 | 1, 1, **1, 2**, 3, 3, 1, 3, 2, 3, 1 |
+| S_T (`rv32t_leaf` proof, proved) | 19, 20, 20, 15, **16**, 18, 16 | 1, 1, **2, 1**, 3, 3, 1, 3, 2, 3, 1 |
+| S_root (`rv32t_int` proof, proved) | 19, 20, 20, 15, **17**, 18, 16 | 1, 1, **1, 2**, 3, 3, 1, 3, 2, 3, 1 |
+| S_fix (`rv32t` at S_root over (root, root), emulated) | 19, 20, 20, 15, **17**, 18, 16 | 1, 1, **1, 2**, 3, 3, 1, 3, 2, 3, 1 |
 
-The interior step's two passes over tier-19 children run more reduce rows than `rv32t_leaf`'s
-two over tier-18 leaves, so the reduce table crosses 2^16 into 2^17. That moves the distinct degree
-bits and so the FRI arity schedule. `rv32t_int` cannot verify its own output, so the test profile's
-`max_depth` is 2 (no third program). `the_interior_step_verifies_its_own_output` is ignored with
-that reason. The production profile's verdict is Task 2's (§4).
+The cause is the reduce table, whose height is static (`program_rows × 2`, `canonical_reduce_log_height`).
+`rv32t_leaf` runs 2 × 32 272 = **64 544** reduce rows, 991 under 2^16 = 65 536. `rv32t_int`'s
+children are tier-19 proofs with one more FRI fold bit than a tier-18 leaf, which costs exactly
+1 024 reduce rows a pass: 2 × 33 296 = **66 592**, over 2^16, so the table is 2^17. That moves
+the distinct degree bits and so the arity schedule. Every other height is unchanged. The level-3
+program (2 × 33 328 = 66 656 reduce rows, still 2^17; 306 923 cpu rows, tier 19) declares
+S_root again, so the program built for its own proofs is itself: the fixed point.
+
+So the test profile's lists are **3 step programs** (`rv32t_leaf`, `rv32t_int`, `rv32t_fix`) and **4 keys**
+(`vk_leaf`, `vk_t_leaf`, `vk_int`, `vk_fix`), the last entry of each repeating for every deeper level.
+`max_depth` is not capped by R3. Spec §4.1 R2–R4 and R6 are amended to per-level lists. Two live
+tests guard this, both on cached fixtures with no proving (≈ 2.1 GB max RSS for the whole tree binary):
+- `the_interior_step_does_not_verify_its_own_output_at_the_test_profile` pins both header-word
+  lists and the reduce rows, and checks the tape builder refuses the root as a child of S_T.
+- `a_third_step_program_at_the_roots_shape_is_the_fixed_point` emulates the level-3 program over
+  (root, root) and sizes its tables with `build_traces`. It checks the method first: the same
+  emulation over (step-0, step-1) reproduces the proved root's shape.
+
+The fixed point rests on emulation, not on a proved level-3 step. Production's list length is
+decided by the same emulation over Task 2's proved production depth-2 tree.
 
 | digest | value |
 |---|---|
 | `T_LEAF_TEST` (`rv32t_leaf` at the test leaf shape) | `2c586636c4c0f94cdf13b410154679d995eefad11e27371e0786e89e206ccd34` |
 | `T_INT_TEST` (`rv32t_int` at S_T) | `04b1677122526e51c0d278375b0c30ebd37f94ba8a2afed3cd3e019ecdc3c226` |
-| `vk_leaf` (the test leaf's key) | `188d4b1498d166b041fa080181c893e7e200202ac0ad28e7ab79ef9dd2acfdcb` |
-| `vk_t_leaf` (S_T's key) | `6b04244466ffac1c530e8b70b4907c2dedcb2964466a9589234843eab8d8507a` |
-| `vk_int` (the root's key) | `a92a0baa3ae1888f61a35820655f0d6cadf7b2de2ca48a6f434a0c4ca3efbb70` |
+| `T_FIX_TEST` (`rv32t` at S_root, the fixed point) | `08abf188e201e55d7b494f89394651f3ef10c6ebdfd00f825ce4c7b0795ff396` |
+| `vk_leaf` (the test leaf's key; children of level 1) | `188d4b1498d166b041fa080181c893e7e200202ac0ad28e7ab79ef9dd2acfdcb` |
+| `vk_t_leaf` (S_T's key; children of level 2) | `6b04244466ffac1c530e8b70b4907c2dedcb2964466a9589234843eab8d8507a` |
+| `vk_int` (S_root's key; children of level 3) | `a92a0baa3ae1888f61a35820655f0d6cadf7b2de2ca48a6f434a0c4ca3efbb70` |
+| `vk_fix` (S_fix's key; children of levels ≥ 4) | `4203726cfe1113e0ffe095a42dc3e2e7be94c18134327268963a4b43b7e6e355` |
 | `vk_foreign` (the foreign leaf's key) | `989ff1e996cd551191590f5603626615e66f1a73e4cc820a111713073815cc2f` |
 
-(Key digests are the four `inner_vk_digest` limbs as canonical u64, 16 hex digits each, printed once.)
-Pins: `tree_test.{step_int_cpu_rows 306 985, step_int_tier 19, step_proof_bytes 280 133}`.
-`step_proof_bytes` is the cached step-0's size. A re-proved step has fresh ZK randomness and may
-differ by a few hundred bytes, so it moves with a regenerated fixture.
+(Key digests are the four `inner_vk_digest` limbs as canonical u64, 16 hex digits each.)
+Pins: `tree_test.{step_int_cpu_rows 306 985, step_int_tier 19, step_leaf_reduce_rows_per_child 32 272,
+step_int_reduce_rows_per_child 33 296, step_fix_cpu_rows 306 923, step_proof_bytes_max 290 000}`.
+Proof sizes are not pinned exactly: postcard's varint length moves with the ZK randomness (root
+280 804 → 283 172 on a re-proof). `step_proof_bytes_max` bounds every step and the root at
+290 000 B, about 2.4 % over the largest seen (283 172), and catches a real growth such as more
+openings or a wider table. The test prints the actual sizes.
 
 ## 6. The chain (Tasks 3a, 3b)
 

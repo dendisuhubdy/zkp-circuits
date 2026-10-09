@@ -45,6 +45,9 @@
     "step_leaf_tier": 19,
     "step_int_cpu_rows": 306985,
     "step_int_tier": 19,
-    "step_proof_bytes": 280133
+    "step_proof_bytes_max": 290000,
+    "step_leaf_reduce_rows_per_child": 32272,
+    "step_int_reduce_rows_per_child": 33296,
+    "step_fix_cpu_rows": 306923
   }
 }

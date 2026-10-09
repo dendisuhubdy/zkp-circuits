@@ -93,7 +93,7 @@ pub fn interface_words_bound<S: VerifierShape>(shape: &S, key: &S::Key, binding:
 /// ‖ D_b(4)]`, 21 words, `N = TREE_ARITY = 2` and `D_a`, `D_b` the two children's published
 /// digests in cover order.
 /// `rv32t`'s staged sponge absorbs exactly this; the chain recomputes it at every level ≥ 1 with
-/// that level's pinned `vk_c` (`aggregate::TreeKeys::at_level`).
+/// that level's pinned `vk_c` (Task 2: the per-level key list, docs/08 §5).
 pub fn tree_step_words(vk_c: &[F; 4], binding: &[u32; 8], d_a: &[F; 4], d_b: &[F; 4]) -> Vec<F> {
     let mut w = vk_c.to_vec();
     w.push(F::from_u64(crate::programs::TREE_ARITY));
