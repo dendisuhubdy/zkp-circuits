@@ -105,12 +105,12 @@ cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/cuda"]
 # are siblings; either one turns on `Backend::Cuda`.
 mock-cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/mock-driver"]
 
-# `required-features` lets a consumer that builds these tests without the `cheating` feature (the
-# fullnode's vendored copy) skip the target instead of failing; inside research/ the self
+# `required-features` lets a consumer that builds this test without the `cheating` feature skip the
+# target instead of failing (`cheating.rs`, vendored by the fullnode, needs no feature); inside research/ the self
 # dev-dependency always enables it. Every other test target stays implicit (auto-discovered).
 [[test]]
-name = "cheating"
-path = "tests/cheating.rs"
+name = "modq_cheating"
+path = "tests/modq_cheating.rs"
 required-features = ["cheating"]
 
 [profile.release]
