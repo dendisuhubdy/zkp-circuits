@@ -18,6 +18,9 @@ pub mod sbpf_elf_builder;
 /// library code; only `tests/sbpf_interp.rs` and `tests/sbpf_elf.rs` use it.
 pub mod sbpf_oracle;
 
+/// MODQ phase 3: the chip's standalone harness (`tests/modq.rs`, `tests/cheating.rs`).
+pub mod modq_harness;
+
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// The panic `p3-batch-stark`'s debug constraint checker raises when a row violates a

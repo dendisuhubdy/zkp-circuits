@@ -175,6 +175,19 @@ impl Args {
         Some(Args { op, out, a, b })
     }
 
+    /// Cheating-suite hook (spec §5): the valid fields of `a1`, reserved bits ignored and a
+    /// transform's `A`/`B` kept — what `call_unchecked` and `tables::modq::forge_block` decode.
+    #[doc(hidden)]
+    pub fn decode_unchecked(a1: u32) -> Args {
+        let op = match a1 & 0b11 {
+            0 => Op::Ntt,
+            1 => Op::Intt,
+            2 => Op::Dot4,
+            _ => Op::Msub4,
+        };
+        Args { op, out: a1 >> 8 & 0x1f, a: a1 >> 16 & 0x1f, b: a1 >> 24 & 0x1f }
+    }
+
     /// The aliasing rules (spec §5): no word is read twice at one timestamp.
     /// - `DOT4`: the two read spans `[a, a+4)` and `[b, b+4)` are disjoint (`out` is only written).
     /// - `MSUB4`: `[out, out+4)`, `[b, b+4)` and `{a}` are pairwise disjoint.
@@ -217,11 +230,23 @@ fn poly_addr(base: u32, poly: u32, c: usize) -> u32 {
 /// The syscall's semantics: decode `a1`, check aliasing, read every input word (refusing the
 /// first `≥ 2^24`), compute, and list the writes. Reads all happen before any write, so an
 /// in-place op sees the pre-call state.
-pub fn call(base: u32, a1: u32, mut read: impl FnMut(u32) -> u32) -> Result<CallIo, ModqError> {
+pub fn call(base: u32, a1: u32, read: impl FnMut(u32) -> u32) -> Result<CallIo, ModqError> {
     let args = Args::decode(a1).ok_or(ModqError::Args(a1))?;
     if !args.aliasing_ok() {
         return Err(ModqError::Alias(a1));
     }
+    call_args(base, args, read)
+}
+
+/// Cheating-suite hook (spec §5): `call` without the `Args` and `Alias` refusals — reserved bits
+/// ignored, a transform's `A`/`B` ignored by the computation, overlapping operands read twice — so
+/// a test can reach the chip with what the emulator refuses. Still refuses coefficients `>= 2^24`.
+#[doc(hidden)]
+pub fn call_unchecked(base: u32, a1: u32, read: impl FnMut(u32) -> u32) -> Result<CallIo, ModqError> {
+    call_args(base, Args::decode_unchecked(a1), read)
+}
+
+fn call_args(base: u32, args: Args, mut read: impl FnMut(u32) -> u32) -> Result<CallIo, ModqError> {
     let in_polys: Vec<u32> = match args.op {
         Op::Ntt | Op::Intt => vec![args.out],
         Op::Dot4 => (0..4).map(|k| args.a + k).chain((0..4).map(|k| args.b + k)).collect(),

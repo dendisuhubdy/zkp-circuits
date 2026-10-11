@@ -225,71 +225,15 @@ mod emulator {
 mod harness {
     use super::common::rejects;
     use super::emulator::{DOT_8_0_4, INTT1, MSUB_0_8_4, NTT0};
-    use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder, WindowAccess};
-    use p3_batch_stark::{prove_batch, verify_batch, ProverData, StarkInstance};
-    use p3_field::{Field, PrimeCharacteristicRing};
-    use p3_lookup::{Count, InteractionBuilder};
+    use super::common::modq_harness::run_raw;
+    use p3_field::PrimeCharacteristicRing;
     use p3_matrix::dense::RowMajorMatrix;
     use rand_zkvm::emulator::SPACE_RAM;
-    use rand_zkvm::machine::{make_config, FriProfile, VerifyError};
+    use rand_zkvm::machine::VerifyError;
     use rand_zkvm::modq::{self, CallIo};
     use rand_zkvm::tables::modq::{col, limbs_value, modq_log_height, modq_trace, pre, ModqAir, ModqEvent, BLOCK};
-    use rand_zkvm::tables::range::{range_trace, RangeAir, RangeCounts};
-    use rand_zkvm::tables::{bus, F};
-
-    #[derive(Clone)]
-    struct Asker;
-    impl<Fld> BaseAir<Fld> for Asker { fn width(&self) -> usize { 4 } }
-    impl<AB: AirBuilder + InteractionBuilder> Air<AB> for Asker where AB::F: Field {
-        fn eval(&self, b: &mut AB) {
-            let m = b.main();
-            let v = |i: usize| -> AB::Expr { m.current(i).unwrap().into() };
-            b.assert_bool(v(0));
-            bus::MODQ.lookup_key(b, [v(1), v(2), v(3)], Count::bounded(v(0), 1));
-        }
-    }
-    #[derive(Clone)]
-    struct MemoryTwin;
-    impl<Fld> BaseAir<Fld> for MemoryTwin { fn width(&self) -> usize { 6 } }
-    impl<AB: AirBuilder + InteractionBuilder> Air<AB> for MemoryTwin where AB::F: Field {
-        fn eval(&self, b: &mut AB) {
-            let m = b.main();
-            let v = |i: usize| -> AB::Expr { m.current(i).unwrap().into() };
-            b.assert_bool(v(0));
-            bus::MEMORY.receive(b, [v(1), v(2), v(3), v(4), v(5)], Count::bounded(v(0), 1));
-        }
-    }
-    #[derive(Clone)]
-    enum T { S(ModqAir, usize), A(Asker), M(MemoryTwin), R(RangeAir) }
-    impl<Fld: Field> BaseAir<Fld> for T {
-        fn width(&self) -> usize {
-            match self {
-                T::S(a, _) => <ModqAir as BaseAir<Fld>>::width(a),
-                T::A(a) => <Asker as BaseAir<Fld>>::width(a),
-                T::M(a) => <MemoryTwin as BaseAir<Fld>>::width(a),
-                T::R(a) => <RangeAir as BaseAir<Fld>>::width(a),
-            }
-        }
-        fn preprocessed_width(&self) -> usize {
-            match self {
-                T::S(a, _) => <ModqAir as BaseAir<Fld>>::preprocessed_width(a),
-                T::R(a) => <RangeAir as BaseAir<Fld>>::preprocessed_width(a),
-                _ => 0,
-            }
-        }
-        fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Fld>> {
-            match self {
-                T::S(_, h) => Some(ModqAir::preprocessed_trace_at(*h)),
-                T::R(a) => <RangeAir as BaseAir<Fld>>::preprocessed_trace(a),
-                _ => None,
-            }
-        }
-    }
-    impl<AB: AirBuilder + PermutationAirBuilder + InteractionBuilder> Air<AB> for T where AB::F: Field {
-        fn eval(&self, b: &mut AB) {
-            match self { T::S(a, _) => a.eval(b), T::A(a) => a.eval(b), T::M(a) => a.eval(b), T::R(a) => a.eval(b) }
-        }
-    }
+    use rand_zkvm::tables::range::RangeCounts;
+    use rand_zkvm::tables::F;
 
     /// Four calls at clk 11..15 on one deterministic RAM (no call's outputs feed another here).
     pub fn calls() -> Vec<(ModqEvent, CallIo)> {
@@ -313,23 +257,8 @@ mod harness {
     }
 
     pub fn run(trace: &RowMajorMatrix<F>, range: &RangeCounts, calls: &[(ModqEvent, CallIo)], twin: &RowMajorMatrix<F>) -> Result<(), VerifyError> {
-        let mut asker = F::zero_vec(calls.len().next_power_of_two().max(4) * 4);
-        for (i, (ev, _)) in calls.iter().enumerate() {
-            asker[i * 4..i * 4 + 4].copy_from_slice(&[F::ONE, F::from_u32(ev.clk), F::from_u32(ev.base), F::from_u32(ev.a1)]);
-        }
-        let asker = RowMajorMatrix::new(asker, 4);
-        let range_t = range_trace(range);
-        let airs = vec![T::S(ModqAir, trace.values.len() / col::WIDTH), T::A(Asker), T::M(MemoryTwin), T::R(RangeAir)];
-        let instances = vec![
-            StarkInstance { air: &airs[0], trace, public_values: vec![] },
-            StarkInstance { air: &airs[1], trace: &asker, public_values: vec![] },
-            StarkInstance { air: &airs[2], trace: twin, public_values: vec![] },
-            StarkInstance { air: &airs[3], trace: &range_t, public_values: vec![] },
-        ];
-        let config = make_config(FriProfile::Test);
-        let pd = ProverData::from_instances(&config, &instances);
-        let proof = prove_batch(&config, &instances, &pd);
-        verify_batch(&config, &airs, &proof, &[vec![], vec![], vec![], vec![]], &pd.common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
+        let asks: Vec<(u32, u32, u32)> = calls.iter().map(|(ev, _)| (ev.clk, ev.base, ev.a1)).collect();
+        run_raw(trace, range, &asks, twin, None)
     }
 
     fn built() -> (Vec<(ModqEvent, CallIo)>, RowMajorMatrix<F>, RangeCounts) {

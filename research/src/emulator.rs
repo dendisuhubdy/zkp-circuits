@@ -177,6 +177,18 @@ pub const KECCAK_PTR_LIMIT: u32 = 0x3000_0000 - KECCAK_WORDS;
 pub const SHA256_PTR_LIMIT: u32 = 0x3000_0000 - SHA256_WORDS;
 
 pub fn execute(program: &Program, inputs: &[u32], public: &[u32], max_cycles: usize) -> Result<Execution, ExecError> {
+    execute_inner(program, inputs, public, max_cycles, false)
+}
+
+/// Cheating-suite hook (spec §5): `execute` with `SYS_MODQ` through `modq::call_unchecked` — no
+/// `ModqArgs`/`ModqAlias` refusal — so a test can hand the chip a reserved `a1` bit, a transform
+/// naming `A`, or overlapping operands. Every other refusal stands.
+#[doc(hidden)]
+pub fn execute_unchecked_modq(program: &Program, inputs: &[u32], public: &[u32], max_cycles: usize) -> Result<Execution, ExecError> {
+    execute_inner(program, inputs, public, max_cycles, true)
+}
+
+fn execute_inner(program: &Program, inputs: &[u32], public: &[u32], max_cycles: usize, unchecked_modq: bool) -> Result<Execution, ExecError> {
     let mut regs = [0u32; 32];
     let mut ram: HashMap<u32, u32> = HashMap::new(); // word address -> value; unwritten reads are 0
     let mut outputs = [0u32; NUM_OUTPUTS];
@@ -434,7 +446,9 @@ pub fn execute(program: &Program, inputs: &[u32], public: &[u32], max_cycles: us
                 } else if num == SYS_MODQ {
                     let (base, a1) = (arg0, arg1);
                     if base > MODQ_PTR_LIMIT { return Err(ExecError::ModqPtrOutOfRange(base)); }
-                    let io = crate::modq::call(base, a1, |w| *ram.get(&w).unwrap_or(&0)).map_err(|e| match e {
+                    let read = |w: u32| *ram.get(&w).unwrap_or(&0);
+                    let io = if unchecked_modq { crate::modq::call_unchecked(base, a1, read) } else { crate::modq::call(base, a1, read) };
+                    let io = io.map_err(|e| match e {
                         crate::modq::ModqError::Args(w) => ExecError::ModqArgs(w),
                         crate::modq::ModqError::Alias(w) => ExecError::ModqAlias(w),
                         crate::modq::ModqError::Coefficient { addr, value } => ExecError::ModqCoefficient { addr, value },
