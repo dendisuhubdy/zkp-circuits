@@ -1,6 +1,6 @@
 # rVM `MODQ` chip: Dilithium2's ring arithmetic as a coprocessor (private multisig, phase 3)
 
-> Status: **design, 2026-10-11.** Nothing here is built. Parent spec:
+> Status: **built on feat/private-multisig (2026-10-11); Production msauth prove pending.** Parent spec:
 > `docs/superpowers/specs/2026-10-11-private-multisig-design.md` (§6 cost, §7 phase 3). Plan:
 > `docs/superpowers/plans/2026-10-11-rvm-modq-chip.md`.
 
@@ -413,6 +413,8 @@ public and mem heights of `hc_auth_multisig` are compared exactly, not bounded. 
 height is refused even though it would verify. Every multisig spend, **1-of-N included, pays
 `M_MAX`'s tier.**
 
+**Accepted gap (BASE window).** The AIR admits a `BASE` in `(MODQ_PTR_LIMIT, 0x3000_0000)` that the emulator refuses (the same pattern as `SHA256` and `KECCAK`); memory stays below `2^30` either way, so the gap costs nothing.
+
 ## 6. Fork impact (question 6)
 
 - **Constraint set.** The cpu gains one column and one lookup, so every verifier key's `common` digest
@@ -473,6 +475,20 @@ height is refused even though it would verify. Every multisig spend, **1-of-N in
      `clients/core/vendor/fullnode`. They only need the new `Proof` field and the re-pinned keys.
   8. Re-pin `CIRCUITS_PIN` (it lives in the fullnode), the verifier-key digests and
      `aggregate_program_digest`. Mirror `MODQ_GAS` in the fee schedule.
+
+**Final-review handoff (11 steps, the complete re-vendor list for the cut):**
+
+1. Vendor `dilithium-core` (add to `for CRATE in evm-core sbpf-core` + the uncommitted check + a path dep in `crates/randprotocol-zkvm/Cargo.toml`).
+2. `lib.rs` gains `pub mod modq; pub mod msauth; pub mod dilithium_host;`.
+3. Mirror into the excluded files: `asm.rs` `ops::call_modq`, `guests.rs` `compiled::{dilithium_verify, msauth}`, the two bins + `.sha256`.
+4. Dev-deps `crystals-dilithium = "=2.0.0"`, `sha3 = "=0.10.9"` for `tests/{dilithium,msauth,modq_reference}.rs` (or exclude them).
+5. Exclude `tests/modq_cheating.rs`; assert the vendored `tests/cheating.rs` compiles without any feature.
+6. Assert domain tags `AUTH == 65` equals the local auth domain, and 66–69 are distinct from hidden (64) and perps (21–23).
+7. Admission pins exact tier 18, heights 12/12/14/0/16/7/20, `pv::GAS == 436 159`, never proof length; off-by-one refused.
+8. `_with_modq` everywhere on the multisig path, including the canonicality count via `chips_with_modq`.
+9. `modq_log_height == 0` pinned in every other program record and on the aggregate/tree paths.
+10. Measure the msauth Production size before the cut.
+11. Re-pin `inner_vk_digest` 1b0c4b00…, `verify_rv32.digest` 79ebe02b…, `aggregate_program_digest` 8bc2cecb…, drop every phase-4 and pre-phase-4 digest/key, and mirror `MODQ_GAS = 168` in the fee schedule.
 
 ### 6.1 Shared files, for merge planning
 

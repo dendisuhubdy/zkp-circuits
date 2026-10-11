@@ -1,6 +1,6 @@
 # Private multisig: the M-of-N check inside the auth proof
 
-> Status: **design, 2026-10-11.** Nothing here is built. The public multisig register
+> Status: **built on feat/private-multisig (2026-10-11); Production msauth prove pending.** The public multisig register
 > (`docs/superpowers/specs/2026-10-08-multisig-design.md`, `docs/multisig.md`) is unchanged by
 > this design and stays the treasury's home until phase 5.
 
@@ -172,10 +172,13 @@ Tier 20 holds 1 048 575 cycles, so software verification fits about **two signat
 tier-20 proof does not fit a 48 GB laptop. The target is **`M_MAX = 3` at tier ≤ 19** (measured: tier 18), so a strong
 prover-pool machine can prove it. If phase 2 misses that, phase 3 adds a coprocessor.
 
-Wire size: the multisig auth proof is one proof at its pinned tier (~1.6–2 MB at Production FRI,
-measured in phase 2), replacing the 1.37 MB single-key auth proof. A transfer with it is about
-3.1–3.5 MB, which fits the 4 MiB default with no `Call`. `Genesis::validate`'s
-`3 · max_proof_bytes + 1 MiB` rule already covers it if `max_proof_bytes` does.
+Wire size: **UNMEASURED** on this laptop (three Production attempts were killed). The estimate from
+measured parts: the msauth proof carries the keccak table (2 711 columns, about +1.9 MB at Production
+per `research/docs/05-roadmap.md:130`) plus one modq block (+153 KB, measured at tier 10) over a
+chip-free base of about 1.37 MB, so it is **at least 3.4 MB** at tier-10 shapes and more at tier 18.
+Auth proof plus bundle is about 4.8 MB, over the 4 MiB default. Phase 4 must measure it and gate
+`max_proof_bytes` (likely 6 MiB), the block size and `Genesis::validate`'s
+`3 · max_proof_bytes + 1 MiB` rule on the measured value.
 
 ## 7. Phases
 
@@ -184,7 +187,7 @@ measured in phase 2), replacing the 1.37 MB single-key auth proof. A transfer wi
 | 1 | circuits | `dilithium-core` (`no_std` round-3 Dilithium2 verify over a `Keccak` trait) and a `dilithium-verify` measurement guest | known-answer agreement with `crystals-dilithium` 2.0.0 on ≥ 200 seeded cases plus every malformed class; cycles and permutations per verification recorded in `research/docs/04-guests.md` |
 | 2 | circuits | `research/src/msauth.rs` (host model, tags, witness layout) and the `msauth` guest; cheating suite; proofs at `M_MAX` ∈ {2, 3, 5} | the tier at `M_MAX = 3`. ≤ 19: skip phase 3. Otherwise phase 3 |
 | 3 | circuits | a `MODQ`/NTT chip for `q = 8 380 417` (one cpu row per 256-coefficient NTT layer, or per butterfly row), syscall 8, optional per proof like keccak's (design: [`2026-10-11-rvm-modq-chip-design.md`](2026-10-11-rvm-modq-chip-design.md)) | `M_MAX = 3` at tier 18, measured (251 946 cycles at `M = 3`) |
-| 4 | fullnode | re-vendor; genesis `hc_auth_multisig` (requires `hc_auth`); admission dispatches on the auth proof's declared heights (single-key shape → `hc_auth`, multisig shape → `hc_auth_multisig`, otherwise `InvalidAuthProof`), so there is no wire or txid change; prover witness kind `MultisigAuth`; `rand multisig-private address / prepare / sign / prove / submit`; wallet scanning by `nk` | real-proof e2e: a 2-of-3 private address receives, spends with signers 0 and 2, rotates; a 1-signature attempt is refused |
+| 4 | fullnode | re-vendor; genesis `hc_auth_multisig` (requires `hc_auth`); admission dispatches on the auth proof's declared heights (single-key shape → `hc_auth`, multisig shape → `hc_auth_multisig`, otherwise `InvalidAuthProof`), so there is no wire or txid change; prover witness kind `MultisigAuth`; `rand multisig-private address / prepare / sign / prove / submit`; wallet scanning by `nk` | real-proof e2e: a 2-of-3 private address receives, spends with signers 0 and 2, rotates; a 1-signature attempt is refused; the msauth Production wire size is measured and `max_proof_bytes`, the block size and `Genesis::validate` are gated on it (§6) |
 | 5 | cut | `hc_auth_multisig` in a chain's genesis | the treasury may move into a private account with an ordinary `MultisigPay` |
 
 Each phase gets its own implementation plan when the one before has passed its gate. Phase 1 and

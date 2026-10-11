@@ -439,6 +439,20 @@ extra header byte). It is a hard fork, and the fullnode re-vendor is pending.
 8. Re-pin `CIRCUITS_PIN` (in the fullnode), the verifier-key digests and
    `aggregate_program_digest`. Mirror `MODQ_GAS` in the fee schedule.
 
+**Final-review handoff (11 steps, the complete re-vendor list for the cut):**
+
+1. Vendor `dilithium-core` (add to `for CRATE in evm-core sbpf-core` + the uncommitted check + a path dep in `crates/randprotocol-zkvm/Cargo.toml`).
+2. `lib.rs` gains `pub mod modq; pub mod msauth; pub mod dilithium_host;`.
+3. Mirror into the excluded files: `asm.rs` `ops::call_modq`, `guests.rs` `compiled::{dilithium_verify, msauth}`, the two bins + `.sha256`.
+4. Dev-deps `crystals-dilithium = "=2.0.0"`, `sha3 = "=0.10.9"` for `tests/{dilithium,msauth,modq_reference}.rs` (or exclude them).
+5. Exclude `tests/modq_cheating.rs`; assert the vendored `tests/cheating.rs` compiles without any feature.
+6. Assert domain tags `AUTH == 65` equals the local auth domain, and 66–69 are distinct from hidden (64) and perps (21–23).
+7. Admission pins exact tier 18, heights 12/12/14/0/16/7/20, `pv::GAS == 436 159`, never proof length; off-by-one refused.
+8. `_with_modq` everywhere on the multisig path, including the canonicality count via `chips_with_modq`.
+9. `modq_log_height == 0` pinned in every other program record and on the aggregate/tree paths.
+10. Measure the msauth Production size before the cut.
+11. Re-pin `inner_vk_digest` 1b0c4b00…, `verify_rv32.digest` 79ebe02b…, `aggregate_program_digest` 8bc2cecb…, drop every phase-4 and pre-phase-4 digest/key, and mirror `MODQ_GAS = 168` in the fee schedule.
+
 **Production prove at `M = 3`: pending.** The cause of the roughly 1300 s kill of three attempts on a
 48 GB laptop is under investigation; see `docs/04-guests.md`.
 
@@ -470,10 +484,7 @@ accounted for exactly: +178 (phase 5, the new cpu constraints), +60 (phase 6 pre
 
 **Stale until a RAM window or a 256 GB machine.**
 
-- `tests/tree.rs`: twelve tests need `generate_test_tree_fixtures`. That run proves the test tree
-  at about 34 GB, which is over this session's memory budget, so `pins.json` `tree_test`
-  (`vk_leaf_*`, `vk_t_leaf_*`, `vk_int_*`, the step rows) and `tests/tree-test-genesis.json` still
-  hold phase 4's values.
+- `tree_test` and `tests/tree-test-genesis.json` were re-recorded in 1ed3d69 (no longer stale).
 - `pins.json` `tree_measure` (the production leaf, at 632 175 rows, is now 631 053 by the N=2
   emulation).
 - `tree_measure.rs`'s `production_leaf_l2` and `production_rv32r_over_the_leaf_proves`, which need
