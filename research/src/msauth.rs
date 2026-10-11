@@ -103,3 +103,34 @@ pub fn msauth_inputs(msk: &Word8, salt: &Word8, threshold: u32, active: &[Slot])
     debug_assert_eq!(v.len(), MSAUTH_WORDS);
     v
 }
+
+/// The tier every msauth proof declares, whatever the number of active signers (R-hide). Tier 18
+/// only: `Tier::for_workload` at `M_MAX` active signers, cycles and Poseidon2 permutations both
+/// counted (`tests/msauth.rs::m_max_fits_tier_18_counting_cycles_and_poseidon2_permutations`).
+pub const MSAUTH_TIER: crate::machine::Tier = crate::machine::Tier(18);
+
+/// The Poseidon2 permutations a run asks of the proof, counted as `machine::build_traces_inner`
+/// counts them: the program-digest, input-digest and public-digest rows, plus one per `Absorb` row.
+pub fn poseidon2_permutations(program: &crate::isa::Program, n_inputs: usize, exec: &crate::emulator::Execution) -> usize {
+    let absorb = exec.events.iter().filter(|e| matches!(e.hash_row, Some(crate::emulator::HashRow::Absorb { .. }))).count();
+    program.digest_rows() + crate::hash::input_digest_row_count(n_inputs) + crate::hash::public_digest_row_count(8) + absorb
+}
+
+/// The msauth prover's options: every variable table height floored at its `M_MAX` value, so the
+/// proof header is identical for every `M <= M_MAX` (R-hide), and `gas_limit: None` so the public
+/// gas word is the header ceiling and does not leak `M` (R-gas). The literals are what
+/// `build_traces_salted_with(.., MSAUTH_TIER, ProveOptions::default())` declares for a full
+/// `M_MAX` run; `tests/msauth.rs::pinned_heights_are_what_a_full_run_declares` recomputes them.
+pub fn pinned_options() -> crate::machine::ProveOptions {
+    crate::machine::ProveOptions {
+        min_modq_log_height: PINNED_MODQ_LOG_HEIGHT,
+        min_keccak_log_height: PINNED_KECCAK_LOG_HEIGHT,
+        min_mem_log_height: PINNED_MEM_LOG_HEIGHT,
+        gas_limit: None,
+        ..Default::default()
+    }
+}
+// Measured: a full M_MAX = 3 run at tier 18 with default options (Task 8): 297 keccak perms -> 14, 54 MODQ calls -> 16, memory 20 (the tier's t + 2 floor).
+pub const PINNED_MODQ_LOG_HEIGHT: u8 = 16;
+pub const PINNED_KECCAK_LOG_HEIGHT: u8 = 14;
+pub const PINNED_MEM_LOG_HEIGHT: u8 = 20;

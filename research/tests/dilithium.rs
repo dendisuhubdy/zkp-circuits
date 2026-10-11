@@ -370,7 +370,7 @@ fn the_guest_verifies_like_the_host_and_reports_its_cycles() {
         assert!(exec.halted);
         assert_eq!(exec.outputs[0], (!flip) as u32);
         let perms = exec.events.iter().filter(|e| matches!(e.sys, Some(Syscall::Keccak { .. }))).count();
-        assert!(exec.cycles() < 1_048_575, "one signature must fit tier 20 (2^20 - 1 cycles)");
+        assert!(exec.cycles() < 110_000, "one verification with the MODQ chip and trims: {} cycles (spec §4.2 expects ≈ 79 k)", exec.cycles());
         assert!(perms > 0);
         let modq_calls = exec.events.iter().filter(|e| matches!(e.sys, Some(Syscall::Modq { .. }))).count();
         assert_eq!(modq_calls, 18, "9 NTT + 4 DOT4 + 1 MSUB4 + 4 INTT");

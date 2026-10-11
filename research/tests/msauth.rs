@@ -421,3 +421,76 @@ fn public_multisig_message_format_is_not_accepted() {
     let ok = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 0, &BINDING), slot(&f, 1, &BINDING)]);
     assert_eq!(run(&ok, &BINDING), expected(&f, 2));
 }
+
+// ---- MODQ phase 3, Task 8: the tier-18 gate and the pinned shape ----------------------------
+
+fn full_run(k: usize) -> (rand_zkvm::isa::Program, Vec<u32>, rand_zkvm::emulator::Execution) {
+    let f = fixture(M_MAX);
+    let slots: Vec<Slot> = (0..k).map(|i| slot(&f, i, &BINDING)).collect();
+    let input = msauth_inputs(&MSK, &SALT, 1, &slots);
+    let e = exec(&input, &BINDING);
+    (compiled::msauth(), input, e)
+}
+
+fn workload(k: usize) -> (usize, usize) {
+    let (p, input, e) = full_run(k);
+    let cycles = e.cycles() + p.digest_rows() + rand_zkvm::hash::input_digest_row_count(input.len()) + rand_zkvm::hash::public_digest_row_count(8);
+    (cycles, poseidon2_permutations(&p, input.len(), &e))
+}
+
+#[test]
+fn m_max_fits_tier_18_counting_cycles_and_poseidon2_permutations() {
+    use rand_zkvm::emulator::Syscall;
+    for k in 1..=3 {
+        let (p, input, e) = full_run(k);
+        let (cycles, perms) = workload(k);
+        let keccak = e.events.iter().filter(|ev| matches!(ev.sys, Some(Syscall::Keccak { .. }))).count();
+        let modq = e.events.iter().filter(|ev| matches!(ev.sys, Some(Syscall::Modq { .. }))).count();
+        let accesses: usize = e.events.iter().map(|ev| ev.accesses.len()).sum();
+        let modq_acc: usize = e.events.iter().filter_map(|ev| ev.modq.as_ref()).map(|m| m.accesses.len()).sum();
+        let t = rand_zkvm::machine::build_traces_salted_with(&p, &input, &BINDING, [0; 4], &e, Tier(18), Default::default());
+        let heights = t.as_ref().map(|t| (t.keccak_log_height, t.modq_log_height, t.mem_log_height)).ok();
+        eprintln!("GATE: M = {k}: {cycles} cycles, {perms} Poseidon2 permutations, {keccak} keccak, {modq} modq calls, {accesses} cpu mem accesses + {modq_acc} modq accesses, (keccak,modq,mem) log heights {heights:?} -> {:?}", Tier::for_workload(cycles, perms));
+    }
+    let (cycles, perms) = workload(M_MAX);
+    assert_eq!(Tier::for_workload(cycles, perms), Some(MSAUTH_TIER), "ruling: M_MAX must fit tier 18 — if this fails at M_MAX = 3, set M_MAX = 2");
+}
+
+fn declared(k: usize, opts: rand_zkvm::machine::ProveOptions) -> (Vec<u8>, String) {
+    let (p, input, e) = full_run(k);
+    let t = rand_zkvm::machine::build_traces_salted_with(&p, &input, &BINDING, [0; 4], &e, MSAUTH_TIER, opts).unwrap();
+    let h = vec![t.program_log_height, t.input_log_height, t.keccak_log_height, t.sha256_log_height, t.modq_log_height, t.public_log_height, t.mem_log_height];
+    (h, format!("{:?}", t.public_values[rand_zkvm::tables::cpu::pv::GAS]))
+}
+
+#[test]
+fn pinned_heights_are_what_a_full_run_declares() {
+    let (h, _) = declared(M_MAX, Default::default());
+    let o = pinned_options();
+    eprintln!("PINNED: keccak {} modq {} mem {} (all heights {h:?})", h[2], h[4], h[6]);
+    assert_eq!((o.min_keccak_log_height, o.min_modq_log_height, o.min_mem_log_height), (h[2], h[4], h[6]));
+    assert_eq!(o.gas_limit, None);
+}
+
+#[test]
+fn proof_shape_is_the_same_for_every_m() {
+    let shapes: Vec<_> = (1..=M_MAX).map(|k| declared(k, pinned_options())).collect();
+    assert!(shapes.windows(2).all(|w| w[0] == w[1]), "every M declares M_MAX's shape and the header-ceiling gas word: {shapes:?}");
+    // and without the floors the shapes differ, so the test has teeth
+    let loose: Vec<_> = (1..=M_MAX).map(|k| declared(k, Default::default()).0).collect();
+    assert!(loose.windows(2).any(|w| w[0] != w[1]), "unfloored heights should differ across M: {loose:?}");
+}
+
+#[test]
+#[ignore = "MODQ Task 8: one Production proof at M_MAX, tier 18 — run under /usr/bin/time -l and record peak RSS, mem_log_height, proof bytes and prove time"]
+fn msauth_proves_at_m_max_production() {
+    use rand_zkvm::machine::{FriProfile, Machine};
+    let (p, input, _) = full_run(M_MAX);
+    let m = Machine::new(FriProfile::Production);
+    let t0 = std::time::Instant::now();
+    let (proof, _) = m.prove_with_options(&p, &input, &BINDING, Some(MSAUTH_TIER), pinned_options()).unwrap();
+    let prove = t0.elapsed();
+    m.verify_public(&p.digest(), &BINDING, &proof).unwrap();
+    eprintln!("msauth M_MAX = {M_MAX} Production: tier {:?}, mem_log_height {}, keccak {}, modq {}, proof {} B, prove {prove:?}",
+              proof.tier, proof.mem_log_height, proof.keccak_log_height, proof.modq_log_height, proof.size());
+}

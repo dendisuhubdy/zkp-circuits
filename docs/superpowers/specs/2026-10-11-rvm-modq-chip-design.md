@@ -333,6 +333,10 @@ digests plus `POSEIDON2` absorbs). At `M = 3` that is ≈ 1.2 k + 0.73 k + 3 + �
 tier 18's 32 768 slots, so it does not bind, but Task 8 computes the tier from both numbers, as the
 prover does.
 
+**Measured (Task 8, `GATE:` lines in `research/tests/msauth.rs`):** 85 830 / 169 068 / 251 946 cycles
+at `M = 1 / 2 / 3` (estimate ≈ 87 k / 170 k / 253 k), 1 736 / 1 839 / 1 942 Poseidon2 permutations,
+all tier 18; the memory table stays at 2^20. **Outcome: `M_MAX = 3` at tier 18; `UNIFORM` is not needed.**
+
 **The gate (controller ruling, 2026-10-11).** The target is **tier 18 only**: never 19, never 20.
 Tier 18 is what a 48 GB laptop proves (≈ 33 GB measured), and the private multisig's privacy rests on
 users proving their own auth proofs.

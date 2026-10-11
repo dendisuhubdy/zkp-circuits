@@ -263,9 +263,37 @@ against 2^17 = 131 072 slots at tier 20. The Keccak table needs 99 of its permut
 each, so the cycle budget already bounds it. The cost is the ring arithmetic in plain RV32IM
 (NTTs, 32-bit modular multiplies), not hashing: Keccak is about 0.01% of the rows.
 
-**Verdict:** one verification is over the 600 k-cycle line the plan set (880 k, 84% of tier 20),
-and any M >= 2 is out of the tier ladder. A coprocessor chip (NTT / modular multiply) must be
-raised in phase 3, before phase 2.
+That table is the phase-1 history (plain RV32IM ring arithmetic). With the `MODQ` chip and the
+dilithium-core trims (MODQ phase 3, Tasks 6-7) one verification is **80 572 cycles**, 99 `KECCAK`
+permutations and **18 `MODQ` calls** (9 NTT + 4 DOT4 + 1 MSUB4 + 4 INTT), against 880 102 in phase 1.
+
+### `msauth` with the `MODQ` chip — the tier-18 gate (MODQ Task 8)
+
+Measured by `research/tests/msauth.rs::m_max_fits_tier_18_counting_cycles_and_poseidon2_permutations`
+(`--nocapture`, `GATE:` lines). Cycles include the program, input and public digest rows, as the
+prover counts them; permutations are `msauth::poseidon2_permutations`.
+
+| M active | cycles | Poseidon2 perms | KECCAK perms | MODQ calls | mem accesses (cpu + modq) | declared (keccak, modq, mem) log heights, unpinned | tier |
+|---|---:|---:|---:|---:|---:|---|---|
+| 1 | 85 830 | 1 736 | 99 | 18 | 262 408 + 19 200 | 12, 15, 20 | 18 |
+| 2 | 169 068 | 1 839 | 198 | 36 | 521 560 + 38 400 | 13, 16, 20 | 18 |
+| 3 | 251 946 | 1 942 | 297 | 54 | 779 638 + 57 600 | 14, 16, 20 | 18 |
+
+Tier 18 holds 262 143 cycles: `M = 3` fits with 10 197 cycles (3.9%) to spare, and the Poseidon2
+budget (1 942 permutations) is nowhere near binding. **`M_MAX = 3` at tier 18; `UNIFORM` is not
+needed.** The memory table does not double: its declared height is 2^20, the tier's own `t + 2`
+floor at every `M`; `M = 3` uses about 837 k rows of it from the cpu and modq tables (plus the
+keccak table's), under 1 048 576.
+
+**Pinned shape (R-hide, R-gas).** The prover pins `tier = MSAUTH_TIER` (18) and
+`msauth::pinned_options()`: `min_keccak_log_height = 14`, `min_modq_log_height = 16`,
+`min_mem_log_height = 20`, `gas_limit = None` (the header ceiling, so the public gas word does not
+leak `M`). Every `M <= 3` then declares program 12, input 12, keccak 14, sha256 0, modq 16,
+public 7, memory 20 and the same gas word (`proof_shape_is_the_same_for_every_m`; without the
+floors the heights and the gas word differ per `M`, e.g. gas 357 471 / 387 263 / 436 159 at
+`M = 1 / 2 / 3`).
+
+Production prove at `M = 3` (peak RSS, `mem_log_height`, proof bytes, wall time): pending.
 
 ### The `evm` guest — M4.3's exit test
 
