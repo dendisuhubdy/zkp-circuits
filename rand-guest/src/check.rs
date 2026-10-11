@@ -28,7 +28,7 @@ impl Report {
 }
 
 /// The syscall numbers the machine implements (research/docs/01-isa.md "Syscall ABI").
-pub const SYSCALLS: [(u32, &str); 7] = [(0, "HALT"), (1, "WRITE_OUTPUT"), (2, "READ_INPUT"), (3, "POSEIDON2"), (4, "KECCAK"), (5, "SHA256"), (6, "READ_PUBLIC")];
+pub const SYSCALLS: [(u32, &str); 8] = [(0, "HALT"), (1, "WRITE_OUTPUT"), (2, "READ_INPUT"), (3, "POSEIDON2"), (4, "KECCAK"), (5, "SHA256"), (6, "READ_PUBLIC"), (8, "MODQ")];
 
 const OP_MISC_MEM: u32 = 0x0f;
 const OP_SYSTEM: u32 = 0x73;

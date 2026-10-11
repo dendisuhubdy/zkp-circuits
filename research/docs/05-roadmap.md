@@ -372,6 +372,124 @@ table) — `tests/verifier_key.rs` re-pinned, in the same shape as constraint se
 widening. **Every verifier key changed; ships only with a chain cut** — chain 18 in the fullnode's
 plan, alongside Phase 1's per-instruction fee schedule.
 
+## Constraint set: the MODQ chip
+
+Not a finding from any review: the private multisig's phase 3 (`docs/superpowers/specs/2026-10-11-private-multisig-design.md`
+§7), designed in `docs/superpowers/specs/2026-10-11-rvm-modq-chip-design.md`. Dilithium2's ring
+arithmetic over `q = 8 380 417` becomes a coprocessor, so a threshold-signature verification fits
+a tier a prover pool can prove.
+
+**What moved.**
+
+- **`SYS_MODQ = 8`** with ops `NTT`, `INTT`, `DOT4`, `MSUB4`; `MODQ_GAS = 168`; the cpu table gains
+  the column `SYS_MODQ` (`WIDTH` 282 to 283) and one `bus::MODQ` lookup.
+- **The `modq` table**: 1 024-row blocks, 59 main + 16 preprocessed columns, AIR degree 3 and
+  instance degree 4, 16 lookup groups in the machine. New buses `MODQ` and `MODQ_WIRE`. Optional
+  per proof (`modq_log_height = 0` absent), appended after sha256 and before `public`.
+- **API.** `Proof::modq_log_height` after `sha256_log_height`; the verifier-key tuple grows from
+  6 to 7 (`(tier, program, input, keccak, sha256, modq, public)`); the legacy entry points keep their
+  signatures and delegate with `modq_log_height = 0`, and `_with_modq` siblings take the eighth
+  argument. `ProveOptions::min_modq_log_height` is the explicit floor.
+- **Measured effect** (this branch): Dilithium2 verification 880 102 cycles in software, 348 967
+  with the chip, **80 572** with the dilithium-core trims (99 `KECCAK` permutations and 18 `MODQ`
+  calls). The `msauth` guest at `M_MAX = 3` is 251 946 cycles at tier 18 (`docs/04-guests.md`).
+- **Tests.** 22 `modq_*` cheating tests, each AIR-level forgery accepted with only its defence off and
+  rejected with it on; the hooks sit behind the `cheating` cargo feature, `tests/common/modq_run.rs`
+  is always compiled and `tests/common/modq_harness.rs` is gated; the two share one `run_raw_on`,
+  generic over the modq AIR.
+
+**Proof-size deltas (measured, tier 10).** Means of four runs each, bytes, `postcard` proof size.
+Per-run sizes vary by about ±1% (the four Test "before" runs span 312 329 to 317 289 bytes; the
+random H_IN salt and commitment randomness change the opened paths). Before = merge-base `c83b1c7` (no chip); after = this
+branch with `modq_log_height = 0`; one block = a guest making one `NTT0` call (three `li`, the
+ecall, halt; one 1 024-row block, memory table at its tier-10 floor 2^12, asserted), measured by `tests/modq.rs::measure_modq_proof_sizes_at_tier_10` (`--ignored`).
+
+| Profile | Chip-free before | Chip-free after | one modq block, after | Chip-free delta | One block vs. before |
+|---|---|---|---|---|---|
+| Test (27 queries) | 315 265 | 317 330 | 350 329 | +2 065 (+0.7%, noise) | +35 064 (+11.1%) |
+| Production (80 queries) | 1 368 675 | 1 372 580 | 1 521 236 | +3 905 (+0.3%, noise) | +152 561 (+11.1%) |
+
+Runs (before Test / before Production / after Test / after Production chip-free / one block Test / one block Production):
+312 329, 317 289, 316 361, 315 081 / 1 367 466, 1 362 603, 1 374 731, 1 369 898 / 316 810, 318 153, 316 617, 317 738 /
+1 371 947, 1 374 636, 1 368 588, 1 375 148 / 351 017, 350 986, 349 864, 349 450 / 1 518 795, 1 519 884, 1 526 700, 1 519 564.
+The chip-free deltas (+0.7% and +0.3%) are indistinguishable from run-to-run noise; they do not
+confirm or refute the estimated +1 KB. A chip-bearing proof costs
+about twice the estimated +75 KB at Production FRI (+153 KB measured, +35 KB at the Test profile).
+
+**Every verifier key changed; ships only with a chain cut.** The cpu's extra column and lookup move
+every key's `common` digest, chip-free shapes included (`tests/verifier_key.rs`, plus a fifth
+shape, "tier 10, one modq block"). Program digests `hc` do not move. Old proofs do not decode (the
+extra header byte). It is a hard fork, and the fullnode re-vendor is pending.
+
+**Sync-zkvm steps (spec §6), at the cut.**
+
+1. `deploy/sync-zkvm.sh` rsyncs `src/modq.rs`, `src/tables/modq.rs` and `tests/modq.rs` (keep
+   `tests/modq.rs` free of `dilithium-core`; its docs check skips itself where `docs/` is absent).
+2. Add `pub mod modq;` by hand to the fullnode's `crates/randprotocol-zkvm/src/lib.rs`.
+3. The `verifier_key` anchor and the `notes::domain` patch need no change; assert it.
+4. `ZkExecutor::decode_and_check` keeps the modq-free calls, so a modq-bearing proof is refused
+   until multisig phase 4 switches the auth-proof path to the `*_with_modq` calls.
+5. In `executor.rs` add `const NO_MODQ: u8 = 0;` beside `NO_KECCAK` and `NO_SHA256`, and pin
+   `modq_log_height == 0` in every non-multisig program record, next to the keccak/sha256 checks.
+6. `ProveOptions::pad_absent_hash_tables` does **not** pad the modq table: a chip-free proof keeps
+   `modq_log_height = 0`, and only the explicit `min_modq_log_height` floor declares an idle one.
+7. `TIERS` does not change. Re-check its client-side users (`clients/core/crates/wallet-core`,
+   and the vendored `randprotocol-client` and `randprotocol-rvm` under `clients/core/vendor/fullnode`):
+   they need only the new `Proof` field and the re-pinned keys.
+8. Re-pin `CIRCUITS_PIN` (in the fullnode), the verifier-key digests and
+   `aggregate_program_digest`. Mirror `MODQ_GAS` in the fee schedule.
+
+**Final-review handoff (11 steps, the complete re-vendor list for the cut):**
+
+1. Vendor `dilithium-core` (add to `for CRATE in evm-core sbpf-core` + the uncommitted check + a path dep in `crates/randprotocol-zkvm/Cargo.toml`).
+2. `lib.rs` gains `pub mod modq; pub mod msauth; pub mod dilithium_host;`.
+3. Mirror into the excluded files: `asm.rs` `ops::call_modq`, `guests.rs` `compiled::{dilithium_verify, msauth}`, the two bins + `.sha256`.
+4. Dev-deps `crystals-dilithium = "=2.0.0"`, `sha3 = "=0.10.9"` for `tests/{dilithium,msauth,modq_reference}.rs` (or exclude them).
+5. Exclude `tests/modq_cheating.rs`; assert the vendored `tests/cheating.rs` compiles without any feature.
+6. Assert domain tags `AUTH == 65` equals the local auth domain, and 66–69 are distinct from hidden (64) and perps (21–23).
+7. Admission pins exact tier 18, heights 12/12/14/0/16/7/20, `pv::GAS == 436 159`, never proof length; off-by-one refused.
+8. `_with_modq` everywhere on the multisig path, including the canonicality count via `chips_with_modq`.
+9. `modq_log_height == 0` pinned in every other program record and on the aggregate/tree paths.
+10. Measure the msauth Production size before the cut.
+11. Re-pin `inner_vk_digest` 1b0c4b00…, `verify_rv32.digest` 79ebe02b…, `aggregate_program_digest` 8bc2cecb…, drop every phase-4 and pre-phase-4 digest/key, and mirror `MODQ_GAS = 168` in the fee schedule.
+
+**Production prove at `M = 3`: pending.** The cause of the roughly 1300 s kill of three attempts on a
+48 GB laptop is under investigation; see `docs/04-guests.md`.
+
+**Recursion: re-pinned once, after rVM phase 4 (2026-10-11).** rVM phase 4 (`bba7875`, the Merkle
+spans) and `origin/main` (`9a1cba6`) were merged into this branch (merges, never a rebase; `26f547e`,
+the scan-compact merge, survives), and the recursion pins were re-recorded once, after both, from
+measured runs. Phase 4's rule carries over: opcodes 25 (`SPONGE`) and 27 (`COMPRESS`) read their
+fourth word as an absolute address under an unchanged rVM verifier key, so every pre-phase-4 program
+digest, aggregate or tree digest and key must be dropped at the cut, with none surviving in its old
+meaning (`recursion/docs/09-phase4-spans.md` §5–6). The MODQ cpu column then moved every inner pin
+again, so the phase-4 values below are stale too: the fullnode re-vendor greps for both columns.
+
+| pin | before MODQ (phase 4) | after | where |
+|---|---|---|---|
+| `verify_rv32.digest` (production) | `6a70c377…d344` (`cf5a350a…1788` before phase 4) | `79ebe02b…283b` | `recursion/src/programs/verify_rv32.digest` |
+| production `aggregate_program_digest` | `e0eede8b…b6c3` (`dc350ecf…8ba0` before phase 4) | `8bc2cecb…d8c7` | `tests/aggregate.rs` |
+| test-shape aggregate digest | `1bcbcec9…1fba` | `e26f37e3…41a0` | `tests/verifier.rs` |
+| Off-replay digest | `759b015d…9b4e` | `ac1f08cf…d406` | `tests/verifier.rs` |
+| `inner_vk_digest` (test fixture shape) | `346ee184…5fb9` | `1b0c4b00…ddc7` | `tests/aggregate.rs`, `recursion/docs/02-aggregate.md` |
+| one production inner verification | 315 952 rows, tier 19 | 315 391, tier 19 | `pins.json`, `tests/exit.rs` |
+| test-profile single verification | 104 150 rows, 11 875 permutations | 104 229, 11 894 | `tests/verifier.rs`, `tests/exit.rs` |
+| test aggregates N=1/2/3 | 104 477 / 208 571 / 312 665 | 104 556 / 208 729 / 312 902 (tiers 18/18/19) | `pins.json`, `N3_ROWS` |
+| production aggregates N=1/2/3 (emulated) | 316 279 / 632 175 / 948 071 | 315 718 / 631 053 / 946 388 (tiers 19/20/20) | `tests/aggregate.rs` |
+| reduce rows a proof, test / production | 39 296 / 196 480 | 39 392 / 196 960 (heights and N ceilings unchanged) | `tests/aggregate.rs` |
+
+No recursion tier moved. `LOOP_OVERHEAD` stays 327, and the rVM verifier keys
+(`tests/verifier_key.rs`) are unchanged. Production rows fell by 561 even though the opened row is one column wider, and the fall is
+accounted for exactly: +178 (phase 5, the new cpu constraints), +60 (phase 6 preamble: one more main and one more permutation column opened at ζ, ζg), −720 (tape reads), −79 (`input_root`'s sponge tail). The −720 is `Builder::hint_array` (`recursion/src/dsl/builder.rs`): one HINTN per full 8-word block but a HINT+STORE pair per tail word. The cpu's extra main and LogUp aux column move two height-18 `row ‖ salt` buffers (words incl. 4 salt): the main group 295 → 296 (tail 7 → 0: HINT −7, STORE −7, HINTN +1 = −13 rows a query) and the permutation group 80 → 82 (tail 0 → 2: +4), net −9 rows × 80 queries (measured with a temporary `eprintln!` in `read_input_openings`, `tests/profile.rs` `where_the_rows_go`, at `bba7875` and at HEAD; every other group is unchanged). The −79 is `input_root`'s padding-free sponge (`dsl/hash.rs`, rate 4): the wider row adds one full SPONGE that replaces LOAD/STORE tail copies, −1 a query. In `tests/profile.rs` it falls in the `(none)` call site (98 609 → 98 127) and in `input_root` (90 329 → 90 250).
+
+**Stale until a RAM window or a 256 GB machine.**
+
+- `tree_test` and `tests/tree-test-genesis.json` were re-recorded in 1ed3d69 (no longer stale).
+- `pins.json` `tree_measure` (the production leaf, at 632 175 rows, is now 631 053 by the N=2
+  emulation).
+- `tree_measure.rs`'s `production_leaf_l2` and `production_rv32r_over_the_leaf_proves`, which need
+  the 256 GB droplet.
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency

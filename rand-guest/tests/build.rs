@@ -38,7 +38,7 @@ fn build_reproduces_every_committed_image_and_reports_hc() {
     // `keccak256` are pinned as headerless flat binaries (`objcopy -O binary`, loaded by
     // `Program::from_flat_binary(0x1000, …)`), so the image `build` writes for them is gated at
     // the program level instead — same `base_pc`, same `words`, same `digest()`.
-    for name in ["fib", "keccak256", "evm", "sbpf"] {
+    for name in ["fib", "keccak256", "evm", "sbpf", "dilithium-verify", "msauth"] {
         let out = tmp.path().join(format!("{name}.bin"));
         // 65535, not the default 4096: the two interpreters are far over the deploy cap and
         // `build` exits non-zero on a rejected image. The cap itself is what `info` below checks.

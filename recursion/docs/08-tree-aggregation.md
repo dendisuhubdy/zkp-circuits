@@ -162,6 +162,8 @@ held by `the_test_tree_genesis_section_prints_as_the_nodes_tree_config`. Then th
 
 ## 5. The test-profile tree (Tasks 1a, 1b)
 
+> Superseded by phase 4: fixed point at level 2, see docs/09. The tables below are the historical record.
+
 **Task 1a (laptop, 2026-10-09): the step by emulation over real leaves.** Four test-profile
 leaves (`rv32n` over bundle fixtures k = 0..3, L = 1, `TEST_BINDING`) were proved here, one at a
 time, and cached as `$RECURSION_FIXTURES/tree/Test-leaf-{0..3}.rvmproof`. `rv32t_leaf` was then

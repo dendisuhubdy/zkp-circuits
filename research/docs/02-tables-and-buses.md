@@ -77,9 +77,19 @@ balances globally.
                     SYS_SHA256 rows, and likewise *sends* its own MEMORY
                     traffic: 24 reads of the message block and chaining state,
                     8 write-backs of the new state, per 64-row block (M4.4)
+
+                        ┌─────────────┐
+                        │    MODQ     │  main; OPTIONAL the same way, and
+                        └─────────────┘  independently — present only when
+                                         Proof::modq_log_height != 0
+                    provides MODQ (clk, base, a1) (lookup); consumed by cpu's
+                    SYS_MODQ rows. Sends its own MEMORY traffic (reads of the
+                    inputs, write-backs of the outputs) and carries the
+                    transforms' inter-stage hand-offs on its own MODQ_WIRE
+                    permutation bus, off memory (MODQ phase 3)
 ```
 
-Sixteen buses in total: `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
+Nineteen buses in total: sixteen through M4.4, `BLIND` in constraint set 7, then `MODQ` and `MODQ_WIRE` (appended after `BLIND`): `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
 `INPUT_READ` (M4.1, carried by the new `input` table), `PUBLIC_DIGEST`,
 `PUBLIC_READ` (constraint set 6, carried by the `public` table — the same
 two-bus split, for the same reason, one segment over), `MEMORY`, `ALU`,
@@ -88,8 +98,8 @@ two-bus split, for the same reason, one segment over), `MEMORY`, `ALU`,
 table), `KECCAK` (M4.2, carried by the keccak table — and so declared but
 **unprovided** in a proof that has no keccak table, which is exactly what
 makes a `SYS_KECCAK` cpu row unprovable there) and `SHA256` (M4.4, carried by
-the sha256 table on exactly those terms). Every one of these
-except `MEMORY` is a `LookupBus` (a subset
+the sha256 table on exactly those terms), `MODQ` (MODQ phase 3, carried by the modq table on the same terms: declared and unprovided without it, so a `SYS_MODQ` cpu row is unprovable there) and `MODQ_WIRE` (the modq table's own `PermutationCheckBus`, sent and received only by that table). Every one of these
+except `MEMORY`, `BLIND` and `MODQ_WIRE` (the permutation buses) is a `LookupBus` (a subset
 check: every value a consumer sends must appear, with enough multiplicity,
 in the provider's table). `MEMORY` is a `PermutationCheckBus` — both sides
 are prover-supplied main-trace rows, and the argument proved is multiset
@@ -387,7 +397,7 @@ separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 exactly one traversal of the whole program for `hc`, regardless of how the
 program actually ran.
 
-## `cpu` — main, `col::WIDTH = 282` (275 through constraint set 6, 277 through set 7)
+## `cpu` — main, `col::WIDTH = 283` (275 through constraint set 6, 277 through set 7, 282 through set 8; `SYS_MODQ` is the 283rd)
 
 (The heading read `222` from M4.1 until M4.4 corrected it: M4.2's `SYS_KECCAK`
 column took the table to 223 without the heading following, and M4.4's
@@ -1826,13 +1836,96 @@ keccak's +1.91 MB is 0.21, close to the 476/2 711 column ratio — the arithmeti
 `sha256_demo` proof (116 program words, 116 cycles, one compression) is 1 615 520
 bytes at the production profile.
 
+### MODQ phase 3: the `SYS_MODQ` ecall row
+
+The `SHA256` row a third time. One appended column, `SYS_MODQ` (`WIDTH` 282 to 283, `SELECTORS`
+31 to 32), joins the ecall one-hot and the padding-row `SELECTORS` gate. Its rules are
+`SYS_SHA256`'s, copied:
+
+- `A = 8` (`SYS_MODQ · (A − 8) = 0`) and `HASH_PTR = B` (`a0`, the arena base), bounded by adding
+  `SYS_MODQ` to `hp_gate` plus the cubic `HP3_HI` rule, so `base < 0x3000_0000`. The emulator
+  refuses the marginally tighter `MODQ_PTR_LIMIT = 0x3000_0000 − 8 960`
+  (`ExecError::ModqPtrOutOfRange`), so the highest word the chip touches stays below `2^30`.
+- `HASH_N`, `HASH_LEFT`, `HASH_IDX` and `HS0..7` pinned to zero; `off_cpu · SYS_MODQ = 0`;
+  `SYS_MODQ` in `sys_sum`; gas weight `MODQ_GAS − 1` added to `w_next`.
+- `bus::MODQ.lookup_key([CLK, HASH_PTR, MEM_VAL], count = SYS_MODQ)`. `MEM_VAL` is the `a1`
+  register read, the op word; it is bound to the register file by the ordinary ecall slot read
+  and is not pinned, for the reason `SYS_SHA256`'s row gives. Unlike `KECCAK` and `SHA256` the
+  bus message carries three values, because the op word selects the block's behaviour.
+
+None of the coefficients read or written appear on the cpu row: they are the `modq` table's own
+`MEMORY` sends.
+
+## `modq` — main, `col::WIDTH = 59` + preprocessed, `pre::WIDTH = 16` (MODQ phase 3)
+
+Dilithium2's ring arithmetic over `q = 8 380 417` as a hand-written AIR in fixed **1 024-row
+blocks**, one block per `MODQ` call. Four operations share the block: `NTT` and `INTT` (a full
+256-point transform, 8 stages of 128 butterflies, in place) and the pointwise `DOT4` (a sum of four
+products) and `MSUB4` (four multiply-subtracts by a broadcast polynomial). The block is read two
+ways at once. Transform view: stage `p = r >> 7`, butterfly `b = r & 127`. Pointwise view:
+coefficient `c = r >> 2`, poly `k = r & 3`, `k` fastest, so a `DOT4` sum is four adjacent rows.
+The full derivation, ABI and soundness argument are in
+`docs/superpowers/specs/2026-10-11-rvm-modq-chip-design.md` (§3 and §5).
+
+Height is `1 << Proof::modq_log_height`: one block per call, floored at `MIN_LOG_HEIGHT = 10` (one
+block), capped at the flat `MAX_LOG_HEIGHT = 20`, and by `Tier::max_modq_log_height = min(t + 10,
+20)` (a call costs one cpu row, so `2^t` cycles bound the blocks at `2^t`, the rows at `2^(t+10)`).
+Since the flat cap is 20 the tier bound never binds for `TIERS` (a tier-10 header may declare a
+2^20 modq table, the same as the existing flat caps).
+`check_declared_heights_with_modq` runs the flat range check first: a declaration outside is
+`VerifyError::ModqHeight` (there is no separate tier variant: the tier bound is folded into the one range, and never binds).
+
+**The table is optional per proof**, keccak's and sha256's pattern applied independently:
+`modq_log_height = 0` is the declaration "no modq table" and `machine::chips` then omits the
+instance. The `MODQ` bus then has no provider and a `SYS_MODQ` cpu row cannot be proven. The
+chip is appended after sha256's and before `public`, so the public-values slot moves to
+`8 + (klh≠0) + (slh≠0) + (mlh≠0)`; `i == 1` (cpu) and `i == 2` (memory) do not move. The legacy
+entry points (`chips`, `check_declared_heights`, `verifier_key`, `gas_max`, ...) delegate with
+`modq_log_height = 0`; the `_with_modq` siblings take it as an eighth argument.
+
+**Preprocessed columns** (period 1 024, `pre::WIDTH = 16`): `IS_FIRST`, `IS_LAST`, `STAGE` (`p`),
+`S_FIRST`, `S_LAST` (`p = 0`, `p = 7`), the NTT pair `JF`/`VF` and INTT pair `JI`/`VI`
+(`(j, j+len)` at stage `p`), the twiddles `ZF` (NTT `ζ`), `FI` (INTT outer factor, `f = 256⁻¹` on
+stage 7) and `ZI` (INTT `ζ'`, folded with `f` on stage 7), the pointwise indices `PK` (`k`) and
+`PC` (`c`), and `K_FIRST`, `K_LAST` (`k = 0`, `k = 3`). All depend only on the height, hence the
+height-carrying `ModqAir::preprocessed_trace_at`.
+
+**Main columns** (`col::WIDTH = 59`):
+
+| columns | what |
+|---|---|
+| `IS_REAL`, `CLK`, `BASE`, `A1` | 4 — block-constant; the `MODQ` handshake |
+| `IS_NTT`, `IS_INTT`, `IS_DOT`, `IS_MSUB` | 4 — block-constant one-hot op, sum = `IS_REAL` |
+| `OUT_BITS`, `A_BITS`, `B_BITS` | 15 — block-constant 5-bit poly offsets |
+| `U_L`, `V_L`, `W_L` | 9 — byte limbs of the inputs `U`, `V` and the multiplier `W` (each `< 2^24`) |
+| `O0_L`, `D0_L`, `K0_L`, `O1_L`, `D1_L`, `K1_L` | 3 + 3 + 4 per output — output, `q − 1 − O`, and the quotient |
+| `IDX_U`, `IDX_V` | 2 — the op-selected pair indices (keep bus messages degree 1) |
+| `ADDR_U`, `ADDR_V`, `ADDR_W`, `ADDR_O0`, `ADDR_O1` | 5 — the op-selected memory addresses |
+
+**Constraints**, in brief (spec §3.4): booleans and block constancy of the 23 block-constant
+columns; the arithmetic `O0 + q·K0 = α0·U + β0·V`, `O1 + q·K1 = α1·U + β1·V + γ1` with
+`γ1 = IS_MSUB·q·2^26` offsetting the negative term, so each field identity is an integer
+identity and `O = RHS mod q` is unique (`O` canonical via `D = q − 1 − O` being non-negative);
+index and address selection; `DOT4`'s running sum and `MSUB4`'s carried `ĉ`; the `A1` word
+rebuilt from the op bits and offsets (a reserved bit set has no satisfying assignment).
+
+**Buses.** `MODQ_WIRE` (`PermutationCheckBus`) carries a transform's seven inter-stage hand-offs
+without touching memory: each `(CLK, stage, index)` key is sent once at stage `p` and received
+once at stage `p + 1`, `CLK` being unique per real block. `MEMORY` sends, as `sha256`: inputs at
+slot 0 (`4·CLK`), outputs at slot 1 (`4·CLK + 1`), counted per op. `MODQ` is provided as a
+`table_entry([CLK, BASE, A1], IS_REAL·IS_FIRST)` with no `MULT`, so a real block is always
+claimed. `RANGE8` receives the 29 limb columns.
+
+**Gas.** `MODQ_GAS = 168` (1 024 × (59 + 16) = 76 800 committed cells at about 460 cells per gas,
+`KECCAK`'s and `SHA256`'s implied rate). `gas::gas_max_with_modq` adds `(2^mlh / 1024) · 167`.
+
 ## Constraint degree budget
 
 Measured (`p3_batch_stark::symbolic::get_max_constraint_degree`, pinned by
 `tests/tables.rs::alu_max_constraint_degree_is_pinned`) against the real,
 same-bus-packed lookup contexts (M4.1, `machine::chips()` order): `program`
 2, `cpu` 8, `memory` 4, `alu` 8, `range` 2, `nibble` 2, `poseidon2` 4,
-`input` 2, `keccak` 3 (M4.2), `sha256` 4 (M4.4) and `public` 2 (CS6; the two
+`input` 2, `keccak` 3 (M4.2), `sha256` 4 (M4.4), `modq` (MODQ phase 3: AIR degree 3, instance degree 4, as `sha256`; it adds 16 lookup groups to the machine) and `public` 2 (CS6; the two
 hash entries exist only when the proof declares those tables, and `public` is
 last in `chips()` order, so dropping both moves it from index 10 to index 8 —
 the pin test asserts the **nine-chip** and **eleven-chip** shapes, that the

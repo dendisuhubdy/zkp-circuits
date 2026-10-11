@@ -718,6 +718,10 @@ gate**. In order of leverage:
    a level — the `MERKLE` that docs/00 still leaves absent. Halving the two spans' reloads alone
    (≈ −67 000) would cross the gate; whether any one candidate does is a measurement, not this
    record's claim.
+   **Done (2026-10-11, phase 4, `docs/09`):** the cap select, allocator re-homing, the in-place
+   walk and immediate-address `SPONGE`/`COMPRESS` took one inner verification to 315 952 rows,
+   tier 19 (the spans 368 791 → 125 289 rows, reloads 176 283 → 23 500); the path-level
+   precompile was not built.
 2. **The inner FRI profile decision, with the query count corrected.** docs/04's item 3 read
    "rate ¼ with about 40 queries halves everything in the query phase". The count is wrong. The
    production profile is rate ⅛ (`log_blowup 3`), 80 queries and 20 PoW bits, chosen for its

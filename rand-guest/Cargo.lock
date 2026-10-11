@@ -359,6 +359,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dilithium-core"
+version = "0.1.0"
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1047,7 +1051,9 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 name = "rand_zkvm"
 version = "0.1.0"
 dependencies = [
+ "chacha20",
  "chacha20poly1305",
+ "dilithium-core",
  "evm-core",
  "ml-kem",
  "p3-air",
@@ -1067,6 +1073,7 @@ dependencies = [
  "p3-uni-stark",
  "postcard",
  "rand",
+ "rand_core",
  "sbpf-core",
  "serde",
 ]

@@ -224,6 +224,77 @@ guest's byte-at-a-time input unpacking (one `READ_INPUT` per four bytes plus
 a per-byte shift/store loop), not by the hash: the permutation itself is a
 single cpu row.
 
+### `dilithium-verify` — phase 1 of private multisig
+
+`guests-compiled/dilithium-verify` runs `dilithium-core::verify` (a `no_std`, non-allocating
+Dilithium2 verifier, tested against `crystals-dilithium`) as a compiled guest, with every
+Keccak-f[1600] permutation on the `KECCAK` syscall (`guest_sdk::SyscallKeccak`, behind the
+`dilithium` feature so no other guest's pinned image moves). Input: words `0..328` the 1 312-byte
+public key, `328..933` the 2 420-byte signature, `933` the message byte length (`<= 64`), `934..`
+the message; output slot 0 is 1 on a valid signature, else 0. It is an image container
+(`bin/dilithium-verify.bin`, the NTT `ZETAS` table is `.rodata`), linked with its own
+`dilithium-verify.ld` (`guest.ld` with `ORIGIN` at `0x10000`, as `evm.ld`). The stack stays
+64 KiB: `verify`'s frame is about 24 KB and `main`'s buffers about 4 KB, so no static is needed.
+
+Measured by `research/tests/dilithium.rs`'s
+`the_guest_verifies_like_the_host_and_reports_its_cycles` (`cargo +1.98.1 test --release --test
+dilithium the_guest -- --nocapture`), for a 45-byte message, host `execute` with the tier-22 cap:
+
+| quantity | phase 1 (software) | `MODQ` chip | chip + trims |
+|---|---:|---:|---:|
+| program words | 4 943 (`hc b651b1bc…4b5`) | — | — |
+| cycles, valid signature | 880 102 | 348 967 | **80 572** |
+| cycles, invalid signature (one flipped byte) | 879 970 | — | — |
+| `KECCAK` permutations (syscall rows) | 99, both cases (45-byte message) | 99 | 99 |
+| `MODQ` calls | 0 | 18 | 18 (9 NTT + 4 DOT4 + 1 MSUB4 + 4 INTT) |
+
+The `MODQ` columns are MODQ phase 3, Tasks 4-7 (the chip, then the dilithium-core trims). Cycles
+for M signatures in one proof are M times the per-verification figure; tier `t` holds `2^t - 1`
+(`TIERS` stop at 20 = 1 048 575):
+
+| M | phase 1 cycles | tier | chip + trims cycles (verification alone) | tier |
+|---|---:|---|---:|---|
+| 1 | 880 102 | 20 | 80 572 | 17 |
+| 2 | 1 760 204 | over tier 20 | 161 144 | 18 |
+| 3 | 2 640 306 | over tier 20 | 241 716 | 18 |
+| 5 | 4 400 510 | over tier 20 | 402 860 | 19 |
+
+The Poseidon2 budget (ZH1, `Tier::for_workload`) is not the binding one: the guest makes no
+`POSEIDON2` calls, and the program digest costs about 1 236 permutations (4 943 words / 4)
+against 2^17 = 131 072 slots at tier 20. The Keccak table needs 99 of its permutations, one cycle
+each, so the cycle budget already bounds it. The cost is the ring arithmetic in plain RV32IM
+(NTTs, 32-bit modular multiplies), not hashing: Keccak is about 0.01% of the rows.
+
+The full `msauth` guest, with the rest of its work, is the next section.
+
+### `msauth` with the `MODQ` chip — the tier-18 gate (MODQ Task 8)
+
+Measured by `research/tests/msauth.rs::m_max_fits_tier_18_counting_cycles_and_poseidon2_permutations`
+(`--nocapture`, `GATE:` lines). Cycles include the program, input and public digest rows, as the
+prover counts them; permutations are `msauth::poseidon2_permutations`.
+
+| M active | cycles | Poseidon2 perms | KECCAK perms | MODQ calls | mem accesses (cpu + modq) | declared (keccak, modq, mem) log heights, unpinned | tier |
+|---|---:|---:|---:|---:|---:|---|---|
+| 1 | 85 830 | 1 736 | 99 | 18 | 262 408 + 19 200 | 12, 15, 20 | 18 |
+| 2 | 169 068 | 1 839 | 198 | 36 | 521 560 + 38 400 | 13, 16, 20 | 18 |
+| 3 | 251 946 | 1 942 | 297 | 54 | 779 638 + 57 600 | 14, 16, 20 | 18 |
+
+Over five further random fixtures at `M = 3` (other keys for all three signers, msk, salt, binding; threshold 2; `the_gate_holds_over_random_fixtures`) cycles ranged 250 685 to 252 775 (the data-dependent `rej_uniform` / `SampleInBall` spread is about 2 k) and Poseidon2 permutations were 1 942 in every one; every fixture's natural heights equal the pinned ones. Tier 18 holds 262 143 cycles: `M = 3` fits with at least 9 368 cycles (3.6%, at the observed maximum) to spare, and the Poseidon2
+budget (1 942 permutations) is nowhere near binding. **`M_MAX = 3` at tier 18; `UNIFORM` is not
+needed.** The memory table does not double: its declared height is 2^20, the tier's own `t + 2`
+floor at every `M`; `M = 3` uses about 837 k rows of it from the cpu and modq tables (plus the
+keccak table's), under 1 048 576.
+
+**Pinned shape (R-hide, R-gas).** The prover pins `tier = MSAUTH_TIER` (18) and
+`msauth::pinned_options()`: `min_keccak_log_height = 14`, `min_modq_log_height = 16`,
+`min_mem_log_height = 20`, `gas_limit = None` (the header ceiling, so the public gas word does not
+leak `M`). Every `M <= 3` then declares program 12, input 12, keccak 14, sha256 0, modq 16,
+public 7, memory 20 and the same gas word (`proof_shape_is_the_same_for_every_m`; without the
+floors the heights and the gas word differ per `M`, e.g. gas 357 471 / 387 263 / 436 159 at
+`M = 1 / 2 / 3`).
+
+Production prove at `M = 3` (peak RSS, proof bytes, wall time): **pending.** Three attempts on the 48 GB laptop were SIGKILLed at about 1300 s wall (true peak RSS 24 to 31 GB; 8 GB resident at death; no kernel memory kill logged; a detached CPU burner survived 1400 s). These were not memory kills (no kernel kill logged); re-run on a host with at least 64 GB or once the cause is found.
+
 ### The `evm` guest — M4.3's exit test
 
 `guests-compiled/evm` is the Solidity path made executable: **an ERC-20

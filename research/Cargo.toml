@@ -49,6 +49,8 @@ rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
 # `tests/evm_*.rs` link `rand_zkvm` as an external crate, so a dev-dependency could not appear in its
 # public API.
 evm-core = { path = "../guests-compiled/evm-core" }
+# The no_std Dilithium2 verifier core (private multisig): host-side Keccak lives in `src/dilithium_host.rs`.
+dilithium-core = { path = "../guests-compiled/dilithium-core" }
 # The sBPF interpreter core (M4.4): a no_std library with its own workspace root, compiled into the
 # `sbpf` guest on riscv32im and run natively here. A normal dependency, not a dev-dependency,
 # because `src/sbpf.rs` (the host side: `HostRef`, the aligned serializer, `SbpfCall`) is part of
@@ -61,6 +63,10 @@ sbpf-core = { path = "../guests-compiled/sbpf-core" }
 # (`evm_sload`/`evm_sstore`/`evm_keccak256`) `evm2rv`'s translated contracts call.
 evm-core = { path = "../guests-compiled/evm-core", features = ["ffi"] }
 hex = "0.4"
+# The oracle for `dilithium-core` (keygen, signing, reference verify) — host tests only.
+crystals-dilithium = "=2.0.0"
+# Independent SHAKE oracle for `dilithium-core`'s sponge — host tests only.
+sha3 = "=0.10.9"
 # The oracle for `evm-core`'s 256-bit arithmetic — host tests only, never in a guest.
 num-bigint = "0.4"
 # The oracle for `evm-core`'s opcode semantics and gas (`tests/evm_interp.rs`) — host tests only,
@@ -75,9 +81,17 @@ sha2 = { version = "=0.10.9", features = ["compress"] }
 # drops the crate's default `jit` feature, which is x86_64-only and irrelevant here: what is
 # compared is interpreter against interpreter.
 solana-sbpf = { version = "=0.11.1", default-features = false }
+# This crate itself with `cheating` on, for its own tests only: the MODQ cheating suite's forge
+# hooks (`tables::modq::forge_block`, `ModqAirWithout`, `machine::build_traces_forged`, …) exist
+# only under that feature, so the library a dependent (the fullnode) builds never carries them.
+rand_zkvm = { path = ".", features = ["cheating"] }
 
 [features]
 default = []
+# Test-only hooks for the cheating suite (spec §5 of the MODQ chip design): forged traces and
+# constraint groups switched off. Never enabled by a prover or verifier build; `research`'s own
+# tests turn it on through the self dev-dependency above.
+cheating = []
 # The GPU backend's CPU-twin engines: same Merkle/NTT code paths, no device needed.
 reference-backend = ["dep:rand-zkvm-cuda"]
 # `cuda` and `mock-cuda` are mutually exclusive: enabling both is a hard `compile_error!` in
@@ -90,6 +104,14 @@ cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/cuda"]
 # enabling it would put a CUDA toolkit back in the way of a no-GPU test run. The two features
 # are siblings; either one turns on `Backend::Cuda`.
 mock-cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/mock-driver"]
+
+# `required-features` lets a consumer that builds this test without the `cheating` feature skip the
+# target instead of failing (`cheating.rs`, vendored by the fullnode, needs no feature); inside research/ the self
+# dev-dependency always enables it. Every other test target stays implicit (auto-discovered).
+[[test]]
+name = "modq_cheating"
+path = "tests/modq_cheating.rs"
+required-features = ["cheating"]
 
 [profile.release]
 opt-level = 3

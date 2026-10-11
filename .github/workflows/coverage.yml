@@ -13,8 +13,9 @@
 # and the C runtimes (no cargo tests).
 #
 # The upload needs `CODECOV_TOKEN` (an organisation secret on randprotocol, or this repository's):
-# Codecov refuses a push upload without it, so until the secret exists the job runs the suite under
-# instrumentation and fails at the upload step. Every `uses:` is pinned by commit sha with its
+# Codecov refuses a push upload without it. The job runs only on randprotocol/zkp-circuits: Codecov
+# knows no other copy (a fork's upload is refused "Repository not found"), and a mirror of the same
+# commits would only measure them again. Every `uses:` is pinned by commit sha with its
 # tag in the trailing comment, as fullnode's ci.yml does.
 name: coverage
 
@@ -34,6 +35,7 @@ concurrency:
 
 jobs:
   coverage:
+    if: github.repository == 'randprotocol/zkp-circuits'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:

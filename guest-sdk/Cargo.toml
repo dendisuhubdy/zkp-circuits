@@ -6,3 +6,11 @@ license = "GPL-3.0-only"
 
 [lib]
 crate-type = ["rlib"]
+
+[dependencies]
+# Optional: only the dilithium-verify guest takes it (`SyscallKeccak`), so no other guest's
+# pinned image changes.
+dilithium-core = { path = "../guests-compiled/dilithium-core", optional = true }
+
+[features]
+dilithium = ["dep:dilithium-core"]

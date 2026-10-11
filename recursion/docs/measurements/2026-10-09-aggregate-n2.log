@@ -1,0 +1,11 @@
+   Compiling recursion v0.1.0 (/Users/dendisuhubdy/rand-worktrees/circuits-phase4/recursion)
+    Finished `release` profile [optimized] target(s) in 4.97s
+     Running tests/aggregate.rs (target/release/deps/aggregate-6f6452b931f07a00)
+
+running 1 test
+test two_test_profile_bundle_proofs_aggregate_and_verify_natively has been running for over 60 seconds
+N=2 aggregate proof: 273961 bytes
+test two_test_profile_bundle_proofs_aggregate_and_verify_natively ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 124.32s
+
