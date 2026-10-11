@@ -362,7 +362,9 @@ impl Tier {
     }
     /// Private multisig phase 3 (spec §3.4): the modq table's analogue — one call is one cycle
     /// and one 1 024-row block, so `mlh ≤ t + 10`, folded with the flat
-    /// `tables::modq::MAX_LOG_HEIGHT` the way `max_sha256_log_height` folds its own.
+    /// `tables::modq::MAX_LOG_HEIGHT` the way `max_sha256_log_height` folds its own. The tier
+    /// bound `min(t + 10, 20)` never binds for `TIERS` (`t + 10 >= 20` from tier 10), so a tier-10
+    /// header may declare a 2^20 modq table, the same as the existing flat caps.
     pub fn max_modq_log_height(self) -> u8 {
         ((self.0 + crate::tables::modq::MIN_LOG_HEIGHT as usize) as u8).min(crate::tables::modq::MAX_LOG_HEIGHT)
     }
@@ -486,8 +488,8 @@ where
 /// `Chip::Input` where it structurally belongs, for the reason every chip since M4.2 has gone
 /// last: `i == 1` (`Cpu`) is the public-values slot `prove_traces`/`verify` hard-code and
 /// `i == 2` (`Memory`) is indexed directly by `tests/cheating.rs`, and inserting in the middle
-/// would move both. Its own index is therefore `8 + (klh != 0) + (slh != 0)` — 8, 9 or 10 — and
-/// the batch carries nine, ten or eleven instances.
+/// would move both. Its own index is therefore `8 + (klh != 0) + (slh != 0) + (mlh != 0)` — 8 to 11 — and
+/// the batch carries nine to twelve instances.
 pub fn chips(tier: Tier, keccak_log_height: u8, sha256_log_height: u8) -> Vec<Chip> {
     chips_with_modq(tier, keccak_log_height, sha256_log_height, 0)
 }
@@ -569,8 +571,8 @@ pub struct Traces {
 impl Traces {
     /// The traces in `chips()` order — eight entries, plus one per optional hash table this proof
     /// declares (M4.2, Task 6: a `Vec`, not a fixed-size array, because the batch's instance count
-    /// is now per-proof; M4.4 adds the sha256 table as the second such, so the count is 8, 9 or
-    /// 10). The `i`-th entry pairs with the `i`-th chip, which is what keeps `i == 1`'s
+    /// is now per-proof; M4.4 adds the sha256 table as the second such and private multisig phase 3
+    /// the modq table as the third, so the count is 8 to 11). The `i`-th entry pairs with the `i`-th chip, which is what keeps `i == 1`'s
     /// public-values slot correct in every shape.
     pub fn as_slice(&self) -> Vec<&RowMajorMatrix<Val>> {
         let mut v = vec![&self.program, &self.cpu, &self.memory, &self.alu, &self.range, &self.nibble, &self.poseidon2, &self.input];
@@ -1087,7 +1089,7 @@ pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32
 }
 
 /// The one trace builder. `gas_limit: None` = the header's ceiling, resolved once the declared
-/// keccak/sha256 heights are known.
+/// keccak/sha256/modq heights are known.
 #[allow(clippy::too_many_arguments)]
 /// `forge`: `build_traces_forged`'s override, `None` on every prover path.
 #[allow(clippy::too_many_arguments)]
@@ -1494,8 +1496,11 @@ const KEY_CACHE_CAPACITY: usize = 64;
 /// `TIERS.len() * (program::MAX_LOG_HEIGHT − program::MIN_LOG_HEIGHT + 1) *
 /// (input::MAX_LOG_HEIGHT − input::MIN_LOG_HEIGHT + 1) *
 /// (keccak range, `min(t + 5, keccak::MAX_LOG_HEIGHT) − keccak::MIN_LOG_HEIGHT + 2` = 17 at
-/// tier 20, the `+ 2` counting M4.2 Task 6's `klh = 0`, "no keccak table", as its own value)` distinct
-/// keys in the worst case —
+/// tier 20, the `+ 2` counting M4.2 Task 6's `klh = 0`, "no keccak table", as its own value) *
+/// (the sha256 range, counted the same way) *
+/// (modq range, `min(t + 10, modq::MAX_LOG_HEIGHT) − modq::MIN_LOG_HEIGHT + 2` = 12 at any tier
+/// from 10, the `+ 2` counting `mlh = 0`, "no modq table", as its own value) *
+/// (the public range)` distinct keys in the worst case —
 /// comfortably able to exceed `KEY_CACHE_CAPACITY` if a caller proves at many different
 /// program/input sizes, unlike the tier-only cache this replaces, so the eviction here is
 /// a real policy again, not just defense in depth.
@@ -1687,7 +1692,7 @@ impl Machine {
     }
 
     /// Number of `(tier, program_log_height, input_log_height, keccak_log_height,
-    /// sha256_log_height, public_log_height)` verifier keys
+    /// sha256_log_height, modq_log_height, public_log_height)` verifier keys
     /// currently cached.
     pub fn cached_keys(&self) -> usize { self.keys.lock().unwrap().built() }
 
@@ -1773,7 +1778,7 @@ impl Machine {
         // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
         // traces, so the two must agree — a mismatch would `zip` short and silently prove a
         // different batch than the degree bits describe.
-        assert_eq!(airs.len(), traces.as_slice().len(), "one trace per chip: the declared keccak/sha256 heights and Traces::keccak/sha256 disagree");
+        assert_eq!(airs.len(), traces.as_slice().len(), "one trace per chip: the declared keccak/sha256/modq heights and Traces::keccak/sha256 disagree");
         assert_eq!(airs.len(), blinds.len(), "one blind per instance");
         let wide: Vec<RowMajorMatrix<Val>> = traces.as_slice().iter().zip(blinds).map(|(m, b)| crate::tables::blind::widen(m, b)).collect();
         let mats: Vec<&RowMajorMatrix<Val>> = wide.iter().collect();
@@ -1884,7 +1889,7 @@ impl Machine {
         // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
         // traces, so the two must agree — a mismatch would `zip` short and silently prove a
         // different batch than the degree bits describe.
-        assert_eq!(airs.len(), traces.as_slice().len(), "one trace per chip: the declared keccak/sha256 heights and Traces::keccak/sha256 disagree");
+        assert_eq!(airs.len(), traces.as_slice().len(), "one trace per chip: the declared keccak/sha256/modq heights and Traces::keccak/sha256 disagree");
         // Constraint set 7: fresh blinds, appended — `prove_traces`' step, duplicated with it.
         let blinds = crate::tables::blind::fresh(airs.len());
         let wide: Vec<RowMajorMatrix<Val>> = traces.as_slice().iter().zip(&blinds).map(|(m, b)| crate::tables::blind::widen(m, b)).collect();

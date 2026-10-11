@@ -105,6 +105,13 @@ cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/cuda"]
 # are siblings; either one turns on `Backend::Cuda`.
 mock-cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/mock-driver"]
 
+# The cheating suite needs the hooks above, so a plain `cargo test` without the feature skips it
+# cleanly; every other test target stays implicit (auto-discovered).
+[[test]]
+name = "cheating"
+path = "tests/cheating.rs"
+required-features = ["cheating"]
+
 [profile.release]
 opt-level = 3
 
