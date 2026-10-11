@@ -1,0 +1,127 @@
+//! `MODQ` (private multisig phase 3): the host reference semantics, the emulator syscall, the chip
+//! standalone, and the machine wiring. Free of `dilithium-core` so the fullnode can vendor it.
+use rand_zkvm::modq::{self, Args, ModqError, Op, Poly, Q};
+
+pub fn rng(seed: u64) -> impl FnMut() -> u64 {
+    let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    move || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x }
+}
+pub fn poly(next: &mut impl FnMut() -> u64, bound: u32) -> Poly {
+    core::array::from_fn(|_| (next() % bound as u64) as u32)
+}
+fn pow(b: u64, mut e: u64) -> u64 {
+    let (mut r, mut b) = (1u64, b % Q as u64);
+    while e > 0 { if e & 1 == 1 { r = r * b % Q as u64; } b = b * b % Q as u64; e >>= 1; }
+    r
+}
+fn brv8(k: usize) -> u64 { (k as u8).reverse_bits() as u64 }
+
+#[test]
+fn zeta_is_1753_to_the_bit_reversed_index() {
+    for k in 1..256 { assert_eq!(modq::zeta(k) as u64, pow(1753, brv8(k)), "k = {k}"); }
+}
+
+#[test]
+fn ntt_evaluates_at_the_odd_powers_of_psi() {
+    let mut next = rng(1);
+    let a = poly(&mut next, Q);
+    let mut hat = a;
+    modq::ntt(&mut hat);
+    for i in (0..256).step_by(17) {
+        let r = pow(1753, 2 * brv8(i) + 1);
+        let (mut acc, mut x) = (0u64, 1u64);
+        for j in 0..256 { acc = (acc + a[j] as u64 * x) % Q as u64; x = x * r % Q as u64; }
+        assert_eq!(hat[i] as u64, acc, "index {i}");
+    }
+}
+
+#[test]
+fn intt_inverts_ntt_and_every_output_is_canonical() {
+    let mut next = rng(2);
+    for _ in 0..50 {
+        let a = poly(&mut next, Q);
+        let mut x = a;
+        modq::ntt(&mut x);
+        assert!(x.iter().all(|&c| c < Q));
+        modq::intt(&mut x);
+        assert_eq!(x, a);
+    }
+}
+
+#[test]
+fn inputs_below_2_pow_24_are_read_mod_q() {
+    let mut next = rng(3);
+    let raw = poly(&mut next, modq::INPUT_BOUND);
+    let reduced: Poly = core::array::from_fn(|i| raw[i] % Q);
+    let (mut x, mut y) = (raw, reduced);
+    modq::ntt(&mut x);
+    modq::ntt(&mut y);
+    assert_eq!(x, y);
+    let (mut x, mut y) = (raw, reduced);
+    modq::intt(&mut x);
+    modq::intt(&mut y);
+    assert_eq!(x, y);
+}
+
+#[test]
+fn dot4_and_msub4_match_schoolbook_mod_q() {
+    let mut next = rng(4);
+    let a: [Poly; 4] = core::array::from_fn(|_| poly(&mut next, modq::INPUT_BOUND));
+    let b: [Poly; 4] = core::array::from_fn(|_| poly(&mut next, modq::INPUT_BOUND));
+    let c = poly(&mut next, modq::INPUT_BOUND);
+    let d = modq::dot4(&a, &b);
+    let mut w = a;
+    modq::msub4(&mut w, &c, &b);
+    let q = Q as u64;
+    for i in 0..256 {
+        let want: u64 = (0..4).map(|k| (a[k][i] as u64 % q) * (b[k][i] as u64 % q) % q).sum::<u64>() % q;
+        assert_eq!(d[i] as u64, want);
+        for k in 0..4 {
+            let sub = (c[i] as u64 % q) * (b[k][i] as u64 % q) % q;
+            assert_eq!(w[k][i] as u64, (a[k][i] as u64 % q + q - sub) % q);
+        }
+    }
+}
+
+#[test]
+fn the_stages_start_at_the_input_and_end_at_the_transform() {
+    let mut next = rng(5);
+    let a = poly(&mut next, modq::INPUT_BOUND);
+    let (s, t) = (modq::ntt_stages(&a), modq::intt_stages(&a));
+    let (mut x, mut y) = (a, a);
+    modq::ntt(&mut x);
+    modq::intt(&mut y);
+    assert_eq!((s[0], s[8], t[0], t[8]), (a, x, a, y));
+    for p in 1..9 { assert!(s[p].iter().chain(t[p].iter()).all(|&c| c < Q), "stage {p} canonical"); }
+}
+
+#[test]
+fn args_round_trip_and_reject_every_reserved_bit() {
+    for (op, out, a, b) in [(Op::Ntt, 3, 0, 0), (Op::Intt, 31, 0, 0), (Op::Dot4, 8, 0, 4), (Op::Msub4, 0, 8, 4)] {
+        let args = Args { op, out, a, b };
+        assert_eq!(Args::decode(args.encode()), Some(args));
+    }
+    for bit in [2u32, 7, 13, 15, 21, 23, 29, 31] {
+        assert_eq!(Args::decode(Args { op: Op::Dot4, out: 8, a: 0, b: 4 }.encode() | 1 << bit), None, "bit {bit}");
+    }
+    assert_eq!(Args::decode(Args { op: Op::Ntt, out: 0, a: 1, b: 0 }.encode()), None, "a transform names one poly");
+}
+
+#[test]
+fn call_reads_each_input_once_and_refuses_what_the_air_cannot_prove() {
+    let base = 0x1000;
+    let ram = |a: u32| (a.wrapping_mul(2_654_435_761) >> 9) % modq::INPUT_BOUND;
+    let io = modq::call(base, Args { op: Op::Dot4, out: 8, a: 0, b: 4 }.encode(), ram).unwrap();
+    assert_eq!((io.inputs.len(), io.reads.len(), io.writes.len()), (8, 2048, 256));
+    let mut addrs: Vec<u32> = io.reads.iter().map(|r| r.0).collect();
+    addrs.sort();
+    addrs.dedup();
+    assert_eq!(addrs.len(), 2048, "no address is read twice at one timestamp");
+    let dot = Args { op: Op::Dot4, out: 8, a: 0, b: 3 }.encode();
+    assert_eq!(modq::call(base, dot, ram), Err(ModqError::Alias(dot)));
+    let msub = Args { op: Op::Msub4, out: 0, a: 2, b: 4 }.encode();
+    assert_eq!(modq::call(base, msub, ram), Err(ModqError::Alias(msub)));
+    let big = |a: u32| if a == base + 7 { 1 << 24 } else { 0 };
+    assert_eq!(modq::call(base, 0, big), Err(ModqError::Coefficient { addr: base + 7, value: 1 << 24 }));
+    assert_eq!(modq::call(base, 1 << 2, ram), Err(ModqError::Args(1 << 2)));
+}
