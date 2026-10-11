@@ -485,4 +485,63 @@ mod machine {
         assert_eq!(rand_zkvm::gas::row_gas(row), rand_zkvm::gas::MODQ_GAS);
         assert_eq!(rand_zkvm::gas::gas_max_with_modq(Tier(10), 0, 0, 10) - rand_zkvm::gas::gas_max(Tier(10), 0, 0), rand_zkvm::gas::MODQ_GAS - 1);
     }
+
+    /// The `MODQ` bus has no provider when the batch declares no modq table, so a cpu `SYS_MODQ`
+    /// row's claim cannot balance: dropping the table from an honest trace set (with the gas limit
+    /// set to the run's own gas, so the header's gas ceiling is not what refuses it) leaves a
+    /// batch that either fails to prove or fails to verify.
+    #[test]
+    fn a_modq_row_without_a_modq_table_is_rejected() {
+        use rand_zkvm::machine::build_traces_salted_with;
+        use p3_field::PrimeCharacteristicRing;
+        use rand_zkvm::tables::cpu::col;
+        let m = Machine::new(FriProfile::Test);
+        let p = modq_program(&[NTT0]);
+        let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(14).max_cycles()).unwrap();
+        let gas = rand_zkvm::gas::gas_of(&p, &[], &[], &exec.events);
+        let opts = ProveOptions { gas_limit: Some(gas), ..Default::default() };
+        let mut t = build_traces_salted_with(&p, &[], &[], [0; 4], &exec, Tier(14), opts).unwrap();
+        assert_eq!(t.modq_log_height, 10);
+        let w = col::WIDTH;
+        assert!((0..t.cpu.values.len() / w).any(|r| t.cpu.values[r * w + col::SYS_MODQ] == rand_zkvm::tables::F::ONE), "the syscall row stays");
+        // Non-vacuity: the same traces, untampered, prove and verify at this gas limit.
+        m.verify(&p.digest(), &m.prove_traces(&p, &t, Tier(14))).expect("the honest traces verify");
+        t.modq = None;
+        t.modq_log_height = 0;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let pr = m.prove_traces(&p, &t, Tier(14));
+            assert_eq!(pr.modq_log_height, 0);
+            m.verify(&p.digest(), &pr)
+        }));
+        eprintln!("modq-less outcome: {:?}", outcome.as_ref().map(|r| r.as_ref().map_err(|e| format!("{e:?}").chars().take(200).collect::<String>())));
+        assert!(!matches!(outcome, Ok(Ok(()))), "a SYS_MODQ row with no modq table must not verify");
+    }
+
+    /// `modq_log_height` is untrusted: a non-zero value outside `[MIN_LOG_HEIGHT,
+    /// Tier::max_modq_log_height]` is `ModqHeight`, and `verify` refuses it before building a key.
+    #[test]
+    fn an_out_of_range_modq_height_is_rejected() {
+        use rand_zkvm::machine::{check_declared_heights_with_modq, VerifyError};
+        use rand_zkvm::tables::modq::{MAX_LOG_HEIGHT, MIN_LOG_HEIGHT};
+        let c = |t: usize, mlh: u8| check_declared_heights_with_modq(Tier(t), 7, 7, 0, 0, mlh, 7, (t + 2) as u8);
+        for t in [10, 20] {
+            assert_eq!(c(t, 0), Ok(()), "0 is no modq table");
+            assert_eq!(c(t, MIN_LOG_HEIGHT), Ok(()));
+            assert_eq!(c(t, MAX_LOG_HEIGHT), Ok(()));
+            for bad in [1, MIN_LOG_HEIGHT - 1, MAX_LOG_HEIGHT + 1, 40, 255] {
+                assert_eq!(c(t, bad), Err(VerifyError::ModqHeight), "tier {t}, mlh {bad}");
+            }
+        }
+        // Through `verify`, on a modq-free proof whose header (and degree bits) claim a 2^21 table.
+        let prover = Machine::new(FriProfile::Test);
+        let p = guests::fib(10);
+        let (mut proof, _) = prover.prove(&p, &[], &[], Some(Tier(10))).unwrap();
+        proof.modq_log_height = MAX_LOG_HEIGHT + 1;
+        let public = proof.batch.degree_bits.pop().unwrap();
+        proof.batch.degree_bits.push(MAX_LOG_HEIGHT as usize + 2);
+        proof.batch.degree_bits.push(public);
+        let verifier = Machine::new(FriProfile::Test);
+        assert_eq!(verifier.verify(&p.digest(), &proof), Err(VerifyError::ModqHeight));
+        assert_eq!(verifier.cached_keys(), 0, "the range check precedes the verifier key");
+    }
 }
