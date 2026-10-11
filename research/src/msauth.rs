@@ -164,8 +164,33 @@ pub fn check_pinned_shape_with(program: &crate::isa::Program, input: &[u32], bin
 }
 
 /// The msauth prover: refuses unless the shape is the pinned one, then proves at `MSAUTH_TIER`
-/// with `pinned_options()`.
+/// with `pinned_options()`, then checks the returned `Proof`'s own header against the pins (a hard
+/// error naming the field), so the artifact is verified, not only the pre-flight.
+///
+/// The tier-18 traces are built twice (once by the pre-flight, once inside `prove_with_options`):
+/// `Machine` exposes no entry that proves from already-built traces under `ProveOptions`, and the
+/// pre-flight is what keeps a wrong-shaped witness from reaching the (minutes-long) prover.
 pub fn prove_msauth(machine: &crate::machine::Machine, program: &crate::isa::Program, input: &[u32], binding: &[u32; 8]) -> Result<crate::machine::Proof, String> {
     check_pinned_shape_with(program, input, binding, pinned_options())?;
-    machine.prove_with_options(program, input, binding, Some(MSAUTH_TIER), pinned_options()).map(|(p, _)| p).map_err(|e| format!("prove: {e:?}"))
+    let proof = machine.prove_with_options(program, input, binding, Some(MSAUTH_TIER), pinned_options()).map(|(p, _)| p).map_err(|e| format!("prove: {e:?}"))?;
+    check_proof_header(&proof)?;
+    Ok(proof)
+}
+
+/// A proof's declared tier and seven log heights against the pins; the error names the field.
+pub fn check_proof_header(proof: &crate::machine::Proof) -> Result<(), String> {
+    if proof.tier != MSAUTH_TIER { return Err(format!("msauth proof header mismatch: tier = {:?}, pinned {:?}", proof.tier, MSAUTH_TIER)); }
+    let fields: [(&str, u8, u8); 7] = [
+        ("program_log_height", proof.program_log_height, PINNED_PROGRAM_LOG_HEIGHT),
+        ("input_log_height", proof.input_log_height, PINNED_INPUT_LOG_HEIGHT),
+        ("keccak_log_height", proof.keccak_log_height, PINNED_KECCAK_LOG_HEIGHT),
+        ("sha256_log_height", proof.sha256_log_height, 0),
+        ("modq_log_height", proof.modq_log_height, PINNED_MODQ_LOG_HEIGHT),
+        ("public_log_height", proof.public_log_height, PINNED_PUBLIC_LOG_HEIGHT),
+        ("mem_log_height", proof.mem_log_height, PINNED_MEM_LOG_HEIGHT),
+    ];
+    for (name, got, want) in fields {
+        if got != want { return Err(format!("msauth proof header mismatch: {name} = {got}, pinned {want}")); }
+    }
+    Ok(())
 }
