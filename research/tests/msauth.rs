@@ -484,30 +484,51 @@ fn proof_shape_is_the_same_for_every_m() {
     assert!(loose.windows(2).any(|w| w[0] != w[1]), "unfloored heights should differ across M: {loose:?}");
 }
 
+const PROOF_DIR: &str = "/private/tmp/claude-501";
+
+/// One Production proof, ONE M per process (`MSAUTH_PROVE_M`=1 or 3, default 3), so no process holds
+/// two proofs. Prints one parseable `PROOF` line and writes `msauth-proof-M<m>.json` (sha256, size,
+/// tier, the seven heights, the GAS word) for `msauth_proof_headers_match_across_m`.
 #[test]
-#[ignore = "MODQ Task 8: Production proofs at M = 1 and M = M_MAX, tier 18, pinned shape — run under /usr/bin/time -l and record peak RSS, proof bytes and prove time"]
-fn msauth_proves_at_m_max_production() {
+#[ignore = "MODQ Task 8: Production proof of ONE M (env MSAUTH_PROVE_M, default 3) at the pinned shape — run under /usr/bin/time -l"]
+fn msauth_proves_at_m_production() {
     use rand_zkvm::machine::{FriProfile, Machine};
     use rand_zkvm::tables::cpu::pv;
+    use sha2::{Digest, Sha256};
+    let k: usize = std::env::var("MSAUTH_PROVE_M").ok().map_or(M_MAX, |v| v.parse().expect("MSAUTH_PROVE_M"));
+    assert!((1..=M_MAX).contains(&k));
+    let (p, input) = { let (p, input, _exec) = full_run(k); (p, input) }; // the Execution is dropped here
     let m = Machine::new(FriProfile::Production);
-    let mut proofs = Vec::new();
-    for k in [1, M_MAX] {
-        let (p, input, _) = full_run(k);
-        let t0 = std::time::Instant::now();
-        let proof = prove_msauth(&m, &p, &input, &BINDING).unwrap();
-        let prove = t0.elapsed();
-        m.verify_public(&p.digest(), &BINDING, &proof).unwrap();
-        eprintln!("msauth M = {k} Production: tier {:?}, mem_log_height {}, keccak {}, modq {}, proof {} B, prove {prove:?}",
-                  proof.tier, proof.mem_log_height, proof.keccak_log_height, proof.modq_log_height, proof.size());
-        proofs.push(proof);
+    let t0 = std::time::Instant::now();
+    let proof = prove_msauth(&m, &p, &input, &BINDING).unwrap();
+    let prove = t0.elapsed();
+    m.verify_public(&p.digest(), &BINDING, &proof).unwrap();
+    let bytes = proof.to_bytes();
+    let heights = [proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.sha256_log_height, proof.modq_log_height, proof.public_log_height, proof.mem_log_height];
+    let gas = format!("{:?}", proof.public_values[pv::GAS]);
+    let sha: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    let line = format!("{{\"m\":{k},\"size\":{},\"tier\":{},\"heights\":{heights:?},\"gas\":\"{gas}\",\"sha256\":\"{sha}\",\"prove_secs\":{:.1}}}", bytes.len(), proof.tier.0, prove.as_secs_f64());
+    eprintln!("PROOF {line}");
+    std::fs::write(format!("{PROOF_DIR}/msauth-proof-M{k}.json"), format!("{line}\n")).unwrap();
+}
+
+/// Cheap: reads the two JSON files the one-M proves wrote and asserts the proofs are indistinguishable
+/// by size, tier, heights and GAS word.
+#[test]
+#[ignore = "MODQ Task 8: run after msauth_proves_at_m_production has run for M=1 and M=3"]
+fn msauth_proof_headers_match_across_m() {
+    let field = |s: &str, key: &str| -> String {
+        let at = s.find(&format!("\"{key}\":")).unwrap_or_else(|| panic!("no {key} in {s}")) + key.len() + 3;
+        let rest = &s[at..];
+        let end = if rest.starts_with('[') { rest.find(']').unwrap() + 1 } else if rest.starts_with('"') { rest[1..].find('"').unwrap() + 2 } else { rest.find(|c| c == ',' || c == '}').unwrap() };
+        rest[..end].to_string()
+    };
+    let read = |k: usize| std::fs::read_to_string(format!("{PROOF_DIR}/msauth-proof-M{k}.json")).unwrap_or_else(|e| panic!("M{k}: {e}"));
+    let (a, b) = (read(1), read(M_MAX));
+    for key in ["size", "tier", "heights", "gas"] {
+        assert_eq!(field(&a, key), field(&b, key), "{key} must not leak M\n{a}{b}");
     }
-    let (a, b) = (&proofs[0], &proofs[1]);
-    assert_eq!(a.size(), b.size(), "proof size must not leak M");
-    assert_eq!(a.tier, b.tier);
-    assert_eq!(
-        (a.program_log_height, a.input_log_height, a.keccak_log_height, a.sha256_log_height, a.modq_log_height, a.public_log_height, a.mem_log_height),
-        (b.program_log_height, b.input_log_height, b.keccak_log_height, b.sha256_log_height, b.modq_log_height, b.public_log_height, b.mem_log_height));
-    assert_eq!(a.public_values[pv::GAS], b.public_values[pv::GAS]);
+    eprintln!("HEADERS MATCH: size {} tier {} heights {} gas {}", field(&a, "size"), field(&a, "tier"), field(&a, "heights"), field(&a, "gas"));
 }
 
 #[test]
