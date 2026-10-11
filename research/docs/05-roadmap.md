@@ -372,7 +372,7 @@ table) — `tests/verifier_key.rs` re-pinned, in the same shape as constraint se
 widening. **Every verifier key changed; ships only with a chain cut** — chain 18 in the fullnode's
 plan, alongside Phase 1's per-instruction fee schedule.
 
-## Constraint set: the MODQ chip
+## Constraint set 9: the MODQ chip
 
 Not a finding from any review: the private multisig's phase 3 (`docs/superpowers/specs/2026-10-11-private-multisig-design.md`
 §7), designed in `docs/superpowers/specs/2026-10-11-rvm-modq-chip-design.md`. Dilithium2's ring

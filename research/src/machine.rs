@@ -1510,8 +1510,10 @@ type KeyShape = (usize, u8, u8, u8, u8, u8, u8);
 type KeySlot = Arc<std::sync::OnceLock<Arc<CommonData<Config>>>>;
 
 struct KeyCache {
-    /// Each shape's slot and the tick of its last use.
-    map: HashMap<KeyShape, (KeySlot, u64)>,
+    /// Each shape's slot, the tick of its last use, and whether it is pinned: a key installed by
+    /// `Machine::install_verifier_key` is never evicted (a consumer that installs a key never
+    /// rebuilds it).
+    map: HashMap<KeyShape, (KeySlot, u64, bool)>,
     tick: u64,
     capacity: usize,
 }
@@ -1522,32 +1524,37 @@ impl KeyCache {
     /// The slot for `key`, marked used now — an existing one (built, or being built by another
     /// caller) or a fresh, empty one, making room first by evicting the least recently used
     /// entries. An evicted slot that is still being built is only dropped from the map: its
-    /// builder holds its own handle and returns the key it builds.
+    /// builder holds its own handle and returns the key it builds. Pinned entries are never
+    /// evicted; when only pinned entries remain, the cache grows past `capacity` instead.
     fn slot(&mut self, key: KeyShape) -> KeySlot {
         self.tick += 1;
         let now = self.tick;
-        if let Some((slot, used)) = self.map.get_mut(&key) {
+        if let Some((slot, used, _)) = self.map.get_mut(&key) {
             *used = now;
             return slot.clone();
         }
         while self.map.len() >= self.capacity {
-            let lru = *self.map.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k).expect("capacity > 0");
+            let Some(lru) = self.map.iter().filter(|(_, (_, _, pinned))| !*pinned).min_by_key(|(_, (_, used, _))| *used).map(|(k, _)| *k) else { break };
             self.map.remove(&lru);
         }
         let slot = KeySlot::default();
-        self.map.insert(key, (slot.clone(), now));
+        self.map.insert(key, (slot.clone(), now, false));
         slot
+    }
+    /// Marks `key`'s entry (which must exist) as never evictable.
+    fn pin(&mut self, key: &KeyShape) {
+        if let Some(e) = self.map.get_mut(key) { e.2 = true; }
     }
     /// Whether `key`'s slot is present and built (a lookup, not a use).
     fn is_built(&self, key: &KeyShape) -> bool {
-        self.map.get(key).is_some_and(|(slot, _)| slot.get().is_some())
+        self.map.get(key).is_some_and(|(slot, _, _)| slot.get().is_some())
     }
     /// The number of built keys held.
-    fn built(&self) -> usize { self.map.values().filter(|(slot, _)| slot.get().is_some()).count() }
+    fn built(&self) -> usize { self.map.values().filter(|(slot, _, _)| slot.get().is_some()).count() }
 }
 
 /// The constraint set this crate's AIRs implement: 9 is the MODQ chip (`docs/05-roadmap.md`,
-/// "Constraint set: the MODQ chip", after constraint set 8's gas meter). It is stamped into every
+/// "Constraint set 9: the MODQ chip", after constraint set 8's gas meter). It is stamped into every
 /// [`VerifierKeyBlob`] and checked on install, so a key exported by one constraint set is never
 /// installed by a machine of another (whose `CommonData` for the same shape differs —
 /// `tests/verifier_key.rs` pins those digests). Bump it with every chain-cut re-pin there.
@@ -1598,13 +1605,18 @@ impl VerifierKeyShape {
 /// `CommonData` (the preprocessed commitment, each instance's preprocessed placement and every
 /// instance's packed lookups). The whole blob is postcard ([`Self::to_bytes`]).
 ///
-/// **Trust.** `install_verifier_key` checks the header and the structure of `common` against what
-/// this machine's chips say for `shape` (instance count, preprocessed widths and degree bits), but
-/// it cannot check the commitment or the lookups without the build the blob exists to avoid. The
-/// consumer must therefore pin the blob's digest (blake3/sha256 of `to_bytes()`) out of band —
-/// that pin is what makes an installed key the key. A changed commitment makes every honest proof
-/// fail (`tests/key_blob.rs`); `verify`'s own declared-height and degree-bit checks still run on
-/// every proof, so a key is only ever used for the shape in its header.
+/// **Trust: the blob is a trust root.** `install_verifier_key` checks the header, the structure of
+/// `common` (instance count, preprocessed widths and degree bits, the matrix map) and the packed
+/// lookups — recomputed from this machine's chips, cheaply, with no trace or commitment — so after
+/// those checks the only unchecked part is the preprocessed **commitment**, which cannot be checked
+/// without the build the blob exists to avoid. A crafted commitment is not merely a key that makes
+/// honest proofs fail: it fixes the "preprocessed" columns (range, nibble, round constants, periodic
+/// tables) to whatever its author committed, and a prover who knows those columns can make FORGED
+/// proofs verify. The consumer must therefore pin the SHA-256 of the whole `to_bytes()` out of band
+/// and check it on the raw bytes *before* decoding anything — [`Machine::install_verifier_key_pinned`]
+/// does exactly that (the decoded lookups are recursive symbolic expressions of unbounded depth, so
+/// unpinned bytes should never reach the decoder). `verify`'s own declared-height and degree-bit
+/// checks still run on every proof, so a key is only ever used for the shape in its header.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifierKeyBlob {
     pub format_version: u32,
@@ -1642,6 +1654,8 @@ pub enum InstallKeyError {
     Structure(String),
     /// The slot for `shape` already holds a *different* key; it is never replaced.
     SlotFilled,
+    /// `install_verifier_key_pinned`: the raw bytes' SHA-256 is not the expected pin.
+    Pin { got: [u8; 32] },
 }
 
 /// The serialisable mirror of `CommonData<Config>` (Plonky3's own type derives no serde; its
@@ -1668,6 +1682,32 @@ fn common_to_bytes(c: &CommonData<Config>) -> Vec<u8> {
         lookups: c.lookups.clone(),
     };
     postcard::to_allocvec(&wire).expect("CommonData serialises")
+}
+/// Each instance's packed lookups, exactly as `ProverData::from_airs_and_degrees` derives them
+/// (p3-batch-stark 0.7.0 `common.rs`, the lookups loop with every budget override `0`):
+/// `Lookups::from_air` → `get_log_num_quotient_chunks` → `pack_same_bus` at the free budget.
+/// Symbolic only — no trace, no commitment. `install_verifier_key` checks a blob's against it;
+/// `tests/key_blob.rs` checks it against a real build.
+fn lookups_for_airs_and_degrees(airs: &[Chip], trace_ext_degree_bits: &[usize], is_zk: usize) -> Vec<p3_lookup::Lookups<Val>> {
+    use p3_lookup::{LogUpGadget, Lookups};
+    let gadget = LogUpGadget::new();
+    airs.iter()
+        .zip(trace_ext_degree_bits)
+        .map(|(air, &ext_db)| {
+            let trace_len = 1usize << (ext_db - is_zk);
+            let unpacked = Lookups::<Val>::from_air::<Challenge, Chip>(air);
+            let log_chunks = p3_batch_stark::symbolic::get_log_num_quotient_chunks::<Val, Challenge, Chip, LogUpGadget>(
+                air,
+                p3_air::symbolic::AirLayout::from_air(air),
+                trace_len,
+                &unpacked,
+                is_zk,
+                &gadget,
+            );
+            let free_budget = (1usize << log_chunks) + 1 - is_zk;
+            unpacked.pack_same_bus(&gadget, free_budget)
+        })
+        .collect()
 }
 fn common_from_bytes(bytes: &[u8]) -> Result<CommonData<Config>, InstallKeyError> {
     let (wire, rest) = postcard::take_from_bytes::<CommonDataWire>(bytes).map_err(|e| InstallKeyError::Decode(format!("common: {e}")))?;
@@ -1883,15 +1923,35 @@ impl Machine {
             }
         }
         if pre.matrix_to_instance.len() != next { return bad("matrix_to_instance length".into()); }
-        let slot = self.keys.lock().unwrap().slot(s.key());
-        let common = Arc::new(common);
-        match slot.set(common) {
+        // The packed lookups are derivable without a trace or a commitment: recompute them and
+        // require the blob's to be byte-identical, so the commitment is the only trusted part.
+        let want = lookups_for_airs_and_degrees(&chips, &degrees, self.config.is_zk());
+        for (i, (got, want)) in common.lookups.iter().zip(&want).enumerate() {
+            if postcard::to_allocvec(got).expect("lookups serialise") != postcard::to_allocvec(want).expect("lookups serialise") {
+                return bad(format!("instance {i}: packed lookups disagree with the chip"));
+            }
+        }
+        let key = s.key();
+        let slot = self.keys.lock().unwrap().slot(key);
+        let result = match slot.set(Arc::new(common)) {
             Ok(()) => Ok(()),
             Err(_) => {
                 let held = slot.get().expect("set failed, so the slot is filled");
                 if common_to_bytes(held) == blob.common { Ok(()) } else { Err(InstallKeyError::SlotFilled) }
             }
-        }
+        };
+        if result.is_ok() { self.keys.lock().unwrap().pin(&key); }
+        result
+    }
+
+    /// [`Self::install_verifier_key`] from raw blob bytes, refusing them unless their SHA-256
+    /// (`crate::sha256::sha256` over the whole `VerifierKeyBlob::to_bytes()`) is `expected` —
+    /// checked BEFORE the bytes are decoded, so unpinned input never reaches the decoder. This is
+    /// the entry a consumer should use (`VerifierKeyBlob`'s trust paragraph).
+    pub fn install_verifier_key_pinned(&self, bytes: &[u8], expected: &[u8; 32]) -> Result<(), InstallKeyError> {
+        let got = crate::sha256::sha256(bytes);
+        if &got != expected { return Err(InstallKeyError::Pin { got }); }
+        self.install_verifier_key(&VerifierKeyBlob::from_bytes(bytes)?)
     }
 
     /// Draws a fresh per-proof salt from OS entropy and delegates to [`Self::prove_salted`] —
@@ -2225,6 +2285,28 @@ pub fn max_constraint_degrees_with_modq(tier: Tier, program_log_height: u8, inpu
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod key_cache_tests {
+    use super::*;
+
+    /// Installed (pinned) entries survive any amount of churn past capacity; unpinned ones go LRU.
+    #[test]
+    fn a_pinned_entry_is_never_evicted() {
+        let mut c = KeyCache { capacity: 4, ..KeyCache::default() };
+        let k = |i: u8| (10usize, i, 7, 0, 0, 0, 7);
+        c.slot(k(0));
+        c.pin(&k(0));
+        for i in 1..100 { c.slot(k(i)); }
+        assert!(c.map.contains_key(&k(0)), "the pinned entry survived 99 other shapes");
+        assert_eq!(c.map.len(), 4);
+        assert!(c.map.contains_key(&k(99)) && !c.map.contains_key(&k(1)), "unpinned entries still go LRU");
+        // All pinned: the cache grows past capacity rather than evict one.
+        for i in 96..100 { c.pin(&k(i)); }
+        c.slot(k(200));
+        assert_eq!(c.map.len(), 5);
+    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,28 @@ use rand_zkvm::machine::{
     FriProfile, InstallKeyError, Machine, Proof, Tier, VerifierKeyBlob, VerifierKeyShape, VerifyError, CONSTRAINT_SET,
     VERIFIER_KEY_BLOB_FORMAT,
 };
+use rand_zkvm::machine::{Config, Val};
+use p3_batch_stark::{config::Commitment, CommonData};
+use p3_lookup::Lookup;
 use sha2::{Digest, Sha256};
+
+/// `common`'s postcard layout, structurally (postcard has no field names): the preprocessed
+/// `(commitment, per-instance (matrix_index, width, degree_bits), matrix_to_instance)` and each
+/// instance's packed lookups (`Lookups` is serde-transparent over its `Vec<Lookup>`).
+type Wire = (Option<(Commitment<Config>, Vec<Option<(u64, u64, u64)>>, Vec<u64>)>, Vec<Vec<Lookup<Val>>>);
+
+/// Field-by-field equality of two `CommonData`s (Plonky3's type has no `PartialEq`).
+fn assert_same_key(x: &CommonData<Config>, y: &CommonData<Config>) {
+    let (px, py) = (x.preprocessed.as_ref().unwrap(), y.preprocessed.as_ref().unwrap());
+    assert_eq!(postcard::to_allocvec(&px.commitment).unwrap(), postcard::to_allocvec(&py.commitment).unwrap(), "commitment");
+    assert_eq!(px.instances.len(), py.instances.len());
+    for (i, (a, b)) in px.instances.iter().zip(&py.instances).enumerate() {
+        let f = |m: &Option<p3_batch_stark::common::PreprocessedInstanceMeta>| m.as_ref().map(|m| (m.matrix_index, m.width, m.degree_bits));
+        assert_eq!(f(a), f(b), "instance {i} placement");
+    }
+    assert_eq!(px.matrix_to_instance, py.matrix_to_instance, "matrix_to_instance");
+    assert_eq!(postcard::to_allocvec(&x.lookups).unwrap(), postcard::to_allocvec(&y.lookups).unwrap(), "lookups");
+}
 
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
 
@@ -59,9 +80,53 @@ fn a_blob_round_trips_and_the_installing_machine_builds_nothing() {
     b.verify(&hc, &proof).unwrap();
     b.verify_public(&hc, &[], &proof).unwrap();
     assert_eq!(b.key_builds(), 0, "verify used the installed key");
-    // The installed key is byte-identical to a fresh build's.
-    assert_eq!(export_for(&b, &proof), blob);
+    // The installed key equals a fresh build's, on a separate machine that really builds it.
+    let c = Machine::new(FriProfile::Test);
+    let s = VerifierKeyShape::of_proof(&proof);
+    let key = |m: &Machine| m.verifier_key_with_modq(s.tier, s.program_log_height, s.input_log_height, s.keccak_log_height, s.sha256_log_height, s.modq_log_height, s.public_log_height);
+    assert_same_key(&key(&b), &key(&c));
+    assert_eq!(c.key_builds(), 1, "c built its own");
     assert_eq!(b.key_builds(), 0);
+    assert_eq!(export_for(&c, &proof), blob);
+}
+
+#[test]
+fn the_pinned_install_hashes_raw_bytes_before_decoding() {
+    let a = Machine::new(FriProfile::Test);
+    let blob = a.export_verifier_key_with_modq(Tier(10), 7, 7, 0, 0, 10, 7);
+    let bytes = blob.to_bytes();
+    let pin: [u8; 32] = Sha256::digest(&bytes).into();
+    assert_eq!(rand_zkvm::sha256::sha256(&bytes), pin, "the crate's sha256 is SHA-256");
+
+    // A wrong pin, and bytes that would not even decode: refused by the hash, not the decoder.
+    let b = Machine::new(FriProfile::Test);
+    assert!(matches!(b.install_verifier_key_pinned(&bytes, &[0; 32]), Err(InstallKeyError::Pin { got }) if got == pin));
+    let garbage = vec![0xff; 64];
+    assert!(matches!(b.install_verifier_key_pinned(&garbage, &pin), Err(InstallKeyError::Pin { .. })));
+    let mut flipped = bytes.clone();
+    flipped[bytes.len() / 2] ^= 1;
+    assert!(matches!(b.install_verifier_key_pinned(&flipped, &pin), Err(InstallKeyError::Pin { .. })));
+    assert_eq!(b.cached_keys(), 0);
+
+    b.install_verifier_key_pinned(&bytes, &pin).unwrap();
+    assert_eq!((b.cached_keys(), b.key_builds()), (1, 0));
+}
+
+#[test]
+fn a_tampered_lookup_multiplicity_is_refused_on_install() {
+    let a = Machine::new(FriProfile::Test);
+    let blob = a.export_verifier_key_with_modq(Tier(10), 7, 7, 0, 0, 10, 7);
+    let (pre, mut lookups): Wire = postcard::from_bytes(&blob.common).unwrap();
+    // Round-trip check of the structural decode itself.
+    assert_eq!(postcard::to_allocvec(&(&pre, &lookups)).unwrap(), blob.common);
+    let m = &mut lookups[1][0].multiplicities[0];
+    *m = -m.clone();
+    let mut bad = blob.clone();
+    bad.common = postcard::to_allocvec(&(&pre, &lookups)).unwrap();
+    let b = Machine::new(FriProfile::Test);
+    assert!(matches!(b.install_verifier_key(&bad), Err(InstallKeyError::Structure(e)) if e.contains("lookups")));
+    assert_eq!(b.cached_keys(), 0);
+    b.install_verifier_key(&blob).unwrap();
 }
 
 #[test]
@@ -183,6 +248,6 @@ fn export_the_production_msauth_key() {
         PINNED_PUBLIC_LOG_HEIGHT, PINNED_MEM_LOG_HEIGHT, bytes.len(), wall.as_secs_f64(), hex(&Sha256::digest(&bytes)),
     );
     let fresh = Machine::new(FriProfile::Production);
-    fresh.install_verifier_key(&VerifierKeyBlob::from_bytes(&bytes).unwrap()).unwrap();
+    fresh.install_verifier_key_pinned(&bytes, &Sha256::digest(&bytes).into()).unwrap();
     assert_eq!(fresh.key_builds(), 0);
 }
