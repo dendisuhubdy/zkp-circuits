@@ -81,9 +81,17 @@ sha2 = { version = "=0.10.9", features = ["compress"] }
 # drops the crate's default `jit` feature, which is x86_64-only and irrelevant here: what is
 # compared is interpreter against interpreter.
 solana-sbpf = { version = "=0.11.1", default-features = false }
+# This crate itself with `cheating` on, for its own tests only: the MODQ cheating suite's forge
+# hooks (`tables::modq::forge_block`, `ModqAirWithout`, `machine::build_traces_forged`, …) exist
+# only under that feature, so the library a dependent (the fullnode) builds never carries them.
+rand_zkvm = { path = ".", features = ["cheating"] }
 
 [features]
 default = []
+# Test-only hooks for the cheating suite (spec §5 of the MODQ chip design): forged traces and
+# constraint groups switched off. Never enabled by a prover or verifier build; `research`'s own
+# tests turn it on through the self dev-dependency above.
+cheating = []
 # The GPU backend's CPU-twin engines: same Merkle/NTT code paths, no device needed.
 reference-backend = ["dep:rand-zkvm-cuda"]
 # `cuda` and `mock-cuda` are mutually exclusive: enabling both is a hard `compile_error!` in

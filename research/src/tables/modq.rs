@@ -300,37 +300,54 @@ where
     }
 }
 
-/// Cheating-suite hook (spec §5, pre-flight ruling 1): one constraint group of `ModqAir`, named
-/// for the defence it is. `ModqAirWithout(Some(d))` evaluates every constraint but `d`'s, so a
-/// test can show a forgery accepted with only `d` off and rejected with it on.
+/// Cheating-suite hook (spec §5, pre-flight ruling 1): one soundness-bearing line of `ModqAir`,
+/// named for the defence it is. `ModqAirWithout(Some(d))` (`cheating` feature) evaluates every
+/// constraint but `d`'s, so a test can show a forgery accepted with only `d` off and rejected with
+/// it on. `eval_minus(None)` — `ModqAir` itself — names none of these.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "cheating"), allow(dead_code))]
 pub enum Defence {
-    /// Rule 2's two `O + q·K` identities.
-    OutputIdentity,
-    /// Rule 2's two `D = q − 1 − O` identities and rule 8's six `D` limb lookups.
-    Canonical,
-    /// Rule 8's nine `U`/`V`/`W` limb lookups.
-    InputRange,
-    /// Rule 5's four `MODQ_WIRE` interactions.
+    /// Rule 2's `O0 + q·K0` identity.
+    OutputIdentityO0,
+    /// Rule 2's `O1 + q·K1` identity.
+    OutputIdentityO1,
+    /// Rule 2's `D0 = q − 1 − O0` identity and rule 8's three `D0` limb lookups.
+    CanonicalO0,
+    /// Rule 2's `D1 = q − 1 − O1` identity and rule 8's three `D1` limb lookups.
+    CanonicalO1,
+    /// Rule 8's three `U` limb lookups.
+    InputRangeU,
+    /// Rule 8's three `V` limb lookups.
+    InputRangeV,
+    /// Rule 8's three `W` limb lookups.
+    InputRangeW,
+    /// Rule 5's four `MODQ_WIRE` interactions (one permutation argument; no line of it is
+    /// separable).
     Wire,
-    /// Rule 4's two `DOT4` lines (start at 0, carry).
+    /// Rule 4's `DOT4` start: `IS_DOT·K_FIRST·U = 0`.
+    DotStart,
+    /// Rule 4's `DOT4` carry: `U' = O0` within a coefficient.
     DotCarry,
     /// Rule 4's `MSUB4` broadcast line.
     MsubCarry,
     /// Rule 1's `A1` identity.
     A1Decomposition,
-    /// Rule 1's `T·A = T·B = 0`.
-    CanonicalArgs,
+    /// Rule 1's `T·A = 0`.
+    CanonicalArgsA,
+    /// Rule 1's `T·B = 0`.
+    CanonicalArgsB,
 }
 
-/// Cheating-suite hook: `ModqAir` minus one [`Defence`]. `ModqAirWithout(None)` evaluates exactly
+/// Cheating-suite hook (`cheating` feature only): `ModqAir` minus one [`Defence`]. `ModqAirWithout(None)` evaluates exactly
 /// `ModqAir`'s constraints (a unit test checks it symbolically). `chips()` never builds this type;
 /// the production machine cannot reach it.
+#[cfg(feature = "cheating")]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ModqAirWithout(pub Option<Defence>);
 
+#[cfg(feature = "cheating")]
 impl<Fld: Field> BaseAir<Fld> for ModqAirWithout {
     fn width(&self) -> usize {
         col::WIDTH
@@ -343,6 +360,7 @@ impl<Fld: Field> BaseAir<Fld> for ModqAirWithout {
     }
 }
 
+#[cfg(feature = "cheating")]
 impl<AB: AirBuilder + InteractionBuilder> Air<AB> for ModqAirWithout
 where
     AB::F: Field,
@@ -400,8 +418,10 @@ where
                     + bb.clone() * c(1 << 24),
             );
         }
-        if on(Defence::CanonicalArgs) {
+        if on(Defence::CanonicalArgsA) {
             b.assert_zero(t.clone() * a.clone());
+        }
+        if on(Defence::CanonicalArgsB) {
             b.assert_zero(t.clone() * bb.clone());
         }
         {
@@ -422,12 +442,16 @@ where
         let alpha1 = ntt.clone() + intt.clone() * zi.clone() + msub.clone();
         let beta1 = ntt.clone() * (q() - zf) + intt.clone() * (q() - zi) - msub.clone() * w.clone();
         let gamma1 = msub.clone() * c(MSUB_OFFSET);
-        if on(Defence::OutputIdentity) {
+        if on(Defence::OutputIdentityO0) {
             b.assert_eq(o0.clone() + q() * k0, alpha0 * u.clone() + beta0 * vv.clone());
+        }
+        if on(Defence::OutputIdentityO1) {
             b.assert_eq(o1.clone() + q() * k1, alpha1 * u.clone() + beta1 * vv.clone() + gamma1);
         }
-        if on(Defence::Canonical) {
+        if on(Defence::CanonicalO0) {
             b.assert_eq(d0, q() - one.clone() - o0.clone());
+        }
+        if on(Defence::CanonicalO1) {
             b.assert_eq(d1, q() - one.clone() - o1.clone());
         }
         b.assert_zero(t.clone() * w.clone());
@@ -465,7 +489,7 @@ where
 
         // --- 4. Pointwise chaining: the `DOT4` running sum, the `MSUB4` broadcast. -----------
         let (k_first, k_last) = (pc(pre::K_FIRST), pc(pre::K_LAST));
-        if on(Defence::DotCarry) {
+        if on(Defence::DotStart) {
             b.assert_zero(dot.clone() * k_first.clone() * u.clone());
         }
         {
@@ -530,8 +554,11 @@ where
 /// Whether rule 8 looks up the limb group starting at `start` with `off` switched off.
 fn limb_group_on(start: usize, off: Option<Defence>) -> bool {
     match off {
-        Some(Defence::InputRange) => ![col::U_L, col::V_L, col::W_L].contains(&start),
-        Some(Defence::Canonical) => ![col::D0_L, col::D1_L].contains(&start),
+        Some(Defence::InputRangeU) => start != col::U_L,
+        Some(Defence::InputRangeV) => start != col::V_L,
+        Some(Defence::InputRangeW) => start != col::W_L,
+        Some(Defence::CanonicalO0) => start != col::D0_L,
+        Some(Defence::CanonicalO1) => start != col::D1_L,
         _ => true,
     }
 }
@@ -597,12 +624,16 @@ fn split(rhs: u128) -> (u64, u64) {
 /// The value-level lie `forge_block` plants in one block (spec §5). `Honest` is `modq_trace`'s
 /// witness. Whatever a lie changes, every later value of the block is recomputed from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "cheating"), allow(dead_code))]
 enum BlockLie {
     Honest,
     NonCanonicalO0 { stage: usize },
+    NonCanonicalO1 { stage: usize },
     SwapUV { stage: usize },
     ButterflyOutput { stage: usize, delta: u32 },
+    ButterflyOutputO1 { stage: usize, delta: u32 },
     ReadValue { delta: u32 },
+    DotStart { coefficient: usize, delta: u32 },
     DotCarry { coefficient: usize, k: usize, delta: u32 },
     MsubBroadcast { coefficient: usize, k: usize, delta: u32 },
 }
@@ -653,15 +684,24 @@ fn block_rows(ev: &ModqEvent, args: Args, zeta: &dyn Fn(usize) -> u32, lie: Bloc
                         fired = true;
                     }
                     let (mut o0, mut k0) = split(a0 as u128 * u as u128 + b0 as u128 * v as u128);
-                    let (o1, k1) = split(a1 as u128 * u as u128 + b1 as u128 * v as u128);
+                    let (mut o1, mut k1) = split(a1 as u128 * u as u128 + b1 as u128 * v as u128);
                     match lie {
                         BlockLie::NonCanonicalO0 { stage } if stage == p && !fired && k0 >= 1 => {
                             o0 += QU;
                             k0 -= 1;
                             fired = true;
                         }
+                        BlockLie::NonCanonicalO1 { stage } if stage == p && !fired && k1 >= 1 => {
+                            o1 += QU;
+                            k1 -= 1;
+                            fired = true;
+                        }
                         BlockLie::ButterflyOutput { stage, delta } if stage == p && !fired => {
                             o0 = addmod(o0, delta);
+                            fired = true;
+                        }
+                        BlockLie::ButterflyOutputO1 { stage, delta } if stage == p && !fired => {
+                            o1 = addmod(o1, delta);
                             fired = true;
                         }
                         _ => {}
@@ -675,7 +715,13 @@ fn block_rows(ev: &ModqEvent, args: Args, zeta: &dyn Fn(usize) -> u32, lie: Bloc
                     rows.push(Row { u, v, w: 0, o0, k0, o1, k1, idx: (j, jl), addr: [au, av, 0, au, av] });
                 }
                 match lie {
-                    BlockLie::NonCanonicalO0 { stage } | BlockLie::SwapUV { stage } | BlockLie::ButterflyOutput { stage, .. } if stage == p => {
+                    BlockLie::NonCanonicalO0 { stage }
+                    | BlockLie::NonCanonicalO1 { stage }
+                    | BlockLie::SwapUV { stage }
+                    | BlockLie::ButterflyOutput { stage, .. }
+                    | BlockLie::ButterflyOutputO1 { stage, .. }
+                        if stage == p =>
+                    {
                         assert!(fired, "forge_block: {lie:?} found no row to land on");
                     }
                     _ => {}
@@ -691,15 +737,15 @@ fn block_rows(ev: &ModqEvent, args: Args, zeta: &dyn Fn(usize) -> u32, lie: Bloc
             }
         }
         Op::Dot4 => {
-            assert!(matches!(lie, BlockLie::Honest | BlockLie::DotCarry { .. }), "forge_block: {lie:?} on a DOT4 block");
+            assert!(matches!(lie, BlockLie::Honest | BlockLie::DotCarry { .. } | BlockLie::DotStart { .. }), "forge_block: {lie:?} on a DOT4 block");
             let mut acc = 0u64; // the running sum
             for r in 0..BLOCK {
                 let (k, c) = (r & 3, r >> 2);
                 let mut u = if k == 0 { 0 } else { acc };
-                if let BlockLie::DotCarry { coefficient, k: kk, delta } = lie {
-                    if coefficient == c && kk == k {
-                        u = addmod(u, delta);
-                    }
+                match lie {
+                    BlockLie::DotCarry { coefficient, k: kk, delta } if coefficient == c && kk == k => u = addmod(u, delta),
+                    BlockLie::DotStart { coefficient, delta } if coefficient == c && k == 0 => u = delta as u64 % QU,
+                    _ => {}
                 }
                 let (v, w) = (ev.inputs[k][c] as u64, ev.inputs[4 + k][c] as u64);
                 let (o0, k0) = split(u as u128 + w as u128 * v as u128);
@@ -790,19 +836,31 @@ fn fill_padding(rows: &mut [F]) {
 // ---- Cheating-suite hooks (spec §5, pre-flight ruling 1) ------------------------------------
 // Nothing in `chips()`, `build_traces` or `verify` reaches these.
 
-/// One forgery for `forge_block`. Each names the block (event index) it lands in.
+/// One forgery for `forge_block` (`cheating` feature only). Each names the block (event index)
+/// it lands in.
+#[cfg(feature = "cheating")]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lie {
     None,
     /// First row of `stage` with `K0 >= 1`: `O0 += q`, `K0 -= 1`.
     NonCanonicalO0 { block: usize, stage: usize },
+    /// First row of `stage` with `K1 >= 1`: `O1 += q`, `K1 -= 1`.
+    NonCanonicalO1 { block: usize, stage: usize },
     /// First row of `stage` with `U != V`: swap them.
     SwapUV { block: usize, stage: usize },
     /// `O0 += delta mod q` on the stage's first row, `K0` kept.
     ButterflyOutput { block: usize, stage: usize, delta: u32 },
+    /// `O1 += delta mod q` on the stage's first row, `K1` kept.
+    ButterflyOutputO1 { block: usize, stage: usize, delta: u32 },
     /// First stage-0 row with `U_L[1] >= 1`: `U_L[0] += 256`, `U_L[1] -= 1` (the value `U` kept).
     InputLimbCarry { block: usize },
+    /// `InputLimbCarry` on `V_L`: the block's first row with `V_L[1] >= 1`.
+    InputLimbCarryV { block: usize },
+    /// `InputLimbCarry` on `W_L`: the block's first row with `W_L[1] >= 1` (a `DOT4`/`MSUB4` block).
+    InputLimbCarryW { block: usize },
+    /// `DOT4` row `(coefficient, 0)`: `U = delta mod q` instead of 0, the sum carrying it.
+    DotStart { block: usize, coefficient: usize, delta: u32 },
     /// Stage-0 row 0: `U += delta mod q`, a read memory never held.
     ReadValue { block: usize, delta: u32 },
     /// `DOT4` row `(coefficient, k)`: `U += delta mod q`, the running sum broken.
@@ -815,11 +873,15 @@ pub enum Lie {
     ShiftedZetas,
     /// `IS_REAL = IS_NTT = 1` on a padding block: the zero NTT at `(CLK, BASE, A1) = (0, 0, 0)`.
     RealPadding { block: usize },
+    /// `machine::build_traces_forged` only: no modq table at all, and none of its memory traffic
+    /// or range counts.
+    NoModqTable,
 }
 
 /// A forged modq trace, consistent everywhere but the lie: its `RANGE8` counts (every in-range
 /// limb of every real row; an out-of-range limb is omitted) and the `MEMORY` accesses its rows
 /// send, per block as `(CLK, accesses)`, carrying the forged values.
+#[cfg(feature = "cheating")]
 #[doc(hidden)]
 pub struct Forged {
     pub trace: RowMajorMatrix<F>,
@@ -831,6 +893,7 @@ pub struct Forged {
 /// every row, a transform's later stages and the block's memory writes are re-derived from the
 /// lie, and the range counts and memory accesses are read back off the forged trace. `a1` is
 /// decoded as `modq::call_unchecked` does (valid fields only).
+#[cfg(feature = "cheating")]
 #[doc(hidden)]
 pub fn forge_block(events: &[ModqEvent], log_height: u8, lie: Lie) -> Forged {
     assert!((MIN_LOG_HEIGHT..=MAX_LOG_HEIGHT).contains(&log_height), "modq log height {log_height}");
@@ -838,6 +901,7 @@ pub fn forge_block(events: &[ModqEvent], log_height: u8, lie: Lie) -> Forged {
     assert!(events.len() <= height / BLOCK, "modq table needs {} blocks, height {height}", events.len());
     let shifted = |k: usize| modq::zeta(k % 255 + 1);
     let zeta: &dyn Fn(usize) -> u32 = if lie == Lie::ShiftedZetas { &shifted } else { &modq::zeta };
+    assert_ne!(lie, Lie::NoModqTable, "forge_block: NoModqTable is build_traces_forged's");
     let zero_ntt = ModqEvent { clk: 0, base: 0, a1: 0, inputs: vec![[0; N]] };
     if let Lie::RealPadding { block } = lie {
         assert!(block >= events.len() && block < height / BLOCK, "forge_block: block {block} is not padding");
@@ -853,10 +917,13 @@ pub fn forge_block(events: &[ModqEvent], log_height: u8, lie: Lie) -> Forged {
                 continue;
             }
         };
-        let mut args = Args::decode_unchecked(ev.a1);
+        let mut args = Args::decode_fields(ev.a1);
         let here = |b: usize| b == blk;
         let block_lie = match lie {
             Lie::NonCanonicalO0 { block, stage } if here(block) => BlockLie::NonCanonicalO0 { stage },
+            Lie::NonCanonicalO1 { block, stage } if here(block) => BlockLie::NonCanonicalO1 { stage },
+            Lie::ButterflyOutputO1 { block, stage, delta } if here(block) => BlockLie::ButterflyOutputO1 { stage, delta },
+            Lie::DotStart { block, coefficient, delta } if here(block) => BlockLie::DotStart { coefficient, delta },
             Lie::SwapUV { block, stage } if here(block) => BlockLie::SwapUV { stage },
             Lie::ButterflyOutput { block, stage, delta } if here(block) => BlockLie::ButterflyOutput { stage, delta },
             Lie::ReadValue { block, delta } if here(block) => BlockLie::ReadValue { delta },
@@ -872,12 +939,18 @@ pub fn forge_block(events: &[ModqEvent], log_height: u8, lie: Lie) -> Forged {
         }
         let vals = block_rows(ev, args, zeta, block_lie);
         write_block(rows, ev, args, &vals, &mut scratch);
-        if lie == (Lie::InputLimbCarry { block: blk }) {
-            let r = (0..HALF)
-                .find(|r| rows[r * col::WIDTH + col::U_L + 1] != F::ZERO)
-                .expect("forge_block: no stage-0 row with U_L[1] >= 1");
-            rows[r * col::WIDTH + col::U_L] += F::from_u32(256);
-            rows[r * col::WIDTH + col::U_L + 1] -= F::ONE;
+        let carry = match lie {
+            Lie::InputLimbCarry { block } if here(block) => Some((col::U_L, HALF)),
+            Lie::InputLimbCarryV { block } if here(block) => Some((col::V_L, BLOCK)),
+            Lie::InputLimbCarryW { block } if here(block) => Some((col::W_L, BLOCK)),
+            _ => None,
+        };
+        if let Some((limb, within)) = carry {
+            let r = (0..within)
+                .find(|r| rows[r * col::WIDTH + limb + 1] != F::ZERO)
+                .unwrap_or_else(|| panic!("forge_block: {lie:?} found no row with limb 1 >= 1"));
+            rows[r * col::WIDTH + limb] += F::from_u32(256);
+            rows[r * col::WIDTH + limb + 1] -= F::ONE;
         }
     }
     let trace = RowMajorMatrix::new(v, col::WIDTH);
@@ -887,6 +960,7 @@ pub fn forge_block(events: &[ModqEvent], log_height: u8, lie: Lie) -> Forged {
 /// The `RANGE8` counts rule 8 asks for with `off` switched off: every in-range limb of every real
 /// row, limb groups `off` skips left out. A limb `>= 256` is not counted, so its lookup (if on)
 /// cannot balance.
+#[cfg(feature = "cheating")]
 #[doc(hidden)]
 pub fn range_counts_without(trace: &RowMajorMatrix<F>, off: Option<Defence>) -> RangeCounts {
     let mut r = RangeCounts::default();
@@ -911,6 +985,7 @@ pub fn range_counts_without(trace: &RowMajorMatrix<F>, off: Option<Defence>) -> 
 
 /// The `MEMORY` sends of rule 6, read off a trace: per real block, `(CLK, reads at slot 0 then
 /// writes at slot 1)`.
+#[cfg(feature = "cheating")]
 fn accesses_of(trace: &RowMajorMatrix<F>) -> Vec<(u32, Vec<crate::emulator::MemAccess>)> {
     use crate::emulator::MemAccess;
     let mut out = Vec::new();
@@ -975,7 +1050,7 @@ pub fn modq_trace(events: &[ModqEvent], log_height: u8, range: &mut RangeCounts)
     modq_trace_with_zetas(events, log_height, range, &modq::zeta)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cheating"))]
 mod tests {
     use super::*;
     use crate::machine::{Challenge, Val};
@@ -998,14 +1073,20 @@ mod tests {
         let full = symbolic(&ModqAir);
         assert_eq!(symbolic(&ModqAirWithout(None)), full);
         for d in [
-            Defence::OutputIdentity,
-            Defence::Canonical,
-            Defence::InputRange,
+            Defence::OutputIdentityO0,
+            Defence::OutputIdentityO1,
+            Defence::CanonicalO0,
+            Defence::CanonicalO1,
+            Defence::InputRangeU,
+            Defence::InputRangeV,
+            Defence::InputRangeW,
             Defence::Wire,
+            Defence::DotStart,
             Defence::DotCarry,
             Defence::MsubCarry,
             Defence::A1Decomposition,
-            Defence::CanonicalArgs,
+            Defence::CanonicalArgsA,
+            Defence::CanonicalArgsB,
         ] {
             assert_ne!(symbolic(&ModqAirWithout(Some(d))), full, "{d:?} must switch something off");
         }

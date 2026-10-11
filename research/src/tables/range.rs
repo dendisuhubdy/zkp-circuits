@@ -64,9 +64,8 @@ impl RangeCounts {
     }
     pub fn range8(&mut self, x: u32) { self.ensure(); assert!(x < 256); self.range[x as usize] += 1; }
     pub fn pow2(&mut self, s: u32) { self.ensure(); assert!(s < 32); self.pow2[s as usize] += 1; }
-    /// Cheating-suite hook (`machine::build_traces_forged`): add another builder's counts.
-    #[doc(hidden)]
-    pub fn absorb(&mut self, other: &RangeCounts) {
+    /// Add another builder's counts (the cheating suite's forged modq block).
+    pub(crate) fn absorb(&mut self, other: &RangeCounts) {
         if other.range.is_empty() { return; }
         self.ensure();
         for (a, b) in self.range.iter_mut().zip(&other.range) { *a += b; }

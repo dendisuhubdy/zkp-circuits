@@ -77,17 +77,20 @@ pub fn memory_trace(events: &[CycleEvent], clk_offset: u32, height: usize, count
     memory_trace_inner(events, clk_offset, height, counts, &[], true)
 }
 
-/// Cheating-suite hook (`machine::build_traces_forged`, spec §5): `memory_trace` plus `extra`
+/// Cheating-suite hook (`machine::build_traces_forged`, spec §5; `cheating` feature only): `memory_trace` plus `extra`
 /// accesses at absolute (digest-prefix shifted) clocks, with the builder's own consistency
 /// `assert!`s off — a duplicate `(addr, ts)` gets the wrapped delta limbs and a read that does not
 /// match the last write is recorded as is — so the memory AIR, not this builder, is what refuses
 /// them. Never used by a prover path.
+#[cfg(feature = "cheating")]
 #[doc(hidden)]
 pub fn memory_trace_forged(events: &[CycleEvent], clk_offset: u32, height: usize, counts: &mut RangeCounts, extra: &[(u32, MemAccess)]) -> RowMajorMatrix<F> {
     memory_trace_inner(events, clk_offset, height, counts, extra, false)
 }
 
-fn memory_trace_inner(events: &[CycleEvent], clk_offset: u32, height: usize, counts: &mut RangeCounts, extra: &[(u32, MemAccess)], checked: bool) -> RowMajorMatrix<F> {
+/// `memory_trace` with `extra` accesses (absolute clocks); `checked = false` turns the builder's
+/// consistency asserts off. Only the cheating suite's forged traces pass anything but `(&[], true)`.
+pub(crate) fn memory_trace_inner(events: &[CycleEvent], clk_offset: u32, height: usize, counts: &mut RangeCounts, extra: &[(u32, MemAccess)], checked: bool) -> RowMajorMatrix<F> {
     // (key, ts, space, addr, value, is_write)
     let mut rows: Vec<(u64, u64, u32, u32, u32, bool)> = Vec::new();
     for (clk, a) in extra {

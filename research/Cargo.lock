@@ -2950,6 +2950,7 @@ dependencies = [
  "rand 0.10.2",
  "rand-zkvm-cuda",
  "rand_core 0.10.1",
+ "rand_zkvm",
  "revm",
  "sbpf-core",
  "serde",

@@ -1042,17 +1042,41 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
     build_traces_inner(program, inputs, public, salt, exec, tier, ProveOptions::default(), Some(gas_limit), None)
 }
 
-/// Cheating-suite hook (spec §5, pre-flight ruling 1): [`build_traces_salted`] with the modq
-/// table forged by `tables::modq::forge_block(events, height, lie)` over the run's own
-/// (clk-offset) events. The memory table records the forged block's own accesses in place of the
-/// emulator's — through `tables::memory::memory_trace_forged`, whose builder-side consistency
-/// asserts are off so the memory AIR is what judges them — and the forged `RangeCounts` join the
-/// range table. Everything else is `build_traces_salted`'s. No prover path calls this.
+/// Cheating-suite hook (spec §5, pre-flight ruling 1; `cheating` feature only):
+/// [`build_traces_salted`] with the modq table forged by `tables::modq::forge_block(events,
+/// height, lie)` over the run's own (clk-offset) events. The memory table records the forged
+/// block's own accesses in place of the emulator's — with the builder's consistency asserts off
+/// (`tables::memory::memory_trace_forged`'s terms), so the memory AIR is what judges them — and the
+/// forged `RangeCounts` join the range table. `Lie::NoModqTable` instead declares no modq table at
+/// all, its memory traffic and range counts left out with it. Everything else is
+/// `build_traces_salted`'s. No prover path calls this.
+#[cfg(feature = "cheating")]
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_traces_forged(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier, gas_limit: u64, lie: crate::tables::modq::Lie) -> Result<Traces, ProveError> {
-    build_traces_inner(program, inputs, public, salt, exec, tier, ProveOptions::default(), Some(gas_limit), Some(lie))
+    use crate::tables::modq::{forge_block, Lie};
+    let forge = |events: &[crate::tables::modq::ModqEvent], log_height: u8| {
+        if lie == Lie::NoModqTable || log_height == 0 {
+            return ModqOverride { log_height: 0, trace: None, range: RangeCounts::default(), accesses: Vec::new() };
+        }
+        let f = forge_block(events, log_height, lie);
+        let accesses = f.accesses.iter().flat_map(|(clk, acc)| acc.iter().map(move |a| (*clk, *a))).collect();
+        ModqOverride { log_height, trace: Some(f.trace), range: f.range, accesses }
+    };
+    build_traces_inner(program, inputs, public, salt, exec, tier, ProveOptions::default(), Some(gas_limit), Some(&forge))
 }
+
+/// What the cheating suite puts in place of the run's modq table (`build_traces_forged`): the
+/// declared height, the table (`None`: no table), its range counts, and the memory accesses it
+/// sends at absolute clocks, which replace the emulator's modq accesses in the memory table.
+#[cfg_attr(not(feature = "cheating"), allow(dead_code))]
+struct ModqOverride {
+    log_height: u8,
+    trace: Option<RowMajorMatrix<Val>>,
+    range: RangeCounts,
+    accesses: Vec<(u32, crate::emulator::MemAccess)>,
+}
+type ModqForge<'a> = &'a dyn Fn(&[crate::tables::modq::ModqEvent], u8) -> ModqOverride;
 
 /// [`build_traces_salted`] under explicit [`ProveOptions`]: `opts.gas_limit` is the declared
 /// limit, `None` meaning the header's own ceiling (`gas::gas_max`) — what every `Machine::prove*`
@@ -1065,8 +1089,9 @@ pub fn build_traces_salted_with(program: &Program, inputs: &[u32], public: &[u32
 /// The one trace builder. `gas_limit: None` = the header's ceiling, resolved once the declared
 /// keccak/sha256 heights are known.
 #[allow(clippy::too_many_arguments)]
-/// `forge`: `build_traces_forged`'s lie, `None` on every prover path.
-fn build_traces_inner(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier, opts: ProveOptions, gas_limit: Option<u64>, forge: Option<crate::tables::modq::Lie>) -> Result<Traces, ProveError> {
+/// `forge`: `build_traces_forged`'s override, `None` on every prover path.
+#[allow(clippy::too_many_arguments)]
+fn build_traces_inner(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier, opts: ProveOptions, gas_limit: Option<u64>, forge: Option<ModqForge>) -> Result<Traces, ProveError> {
     // M3.4: digest rows count as cycles too — the digest prefix is part of every proof's cpu
     // table, not just `exec.events`. M4.1: so does the input-digest prefix.
     let input_digest_rows = crate::hash::input_digest_row_count(inputs.len());
@@ -1188,6 +1213,9 @@ fn build_traces_inner(program: &Program, inputs: &[u32], public: &[u32], salt: [
     if modq_log_height != 0 && modq_log_height > tier.max_modq_log_height() {
         return Err(ProveError::TooManyModqCalls { calls: modq_events.len(), log_height: modq_log_height });
     }
+    // The cheating suite's override (`build_traces_forged`): a forged modq block, or none at all.
+    let forged = forge.map(|f| f(&modq_events, modq_log_height));
+    if let Some(f) = &forged { modq_log_height = f.log_height; }
     // Constraint set 8: the declared gas limit sits between what this run spends and what its
     // header could ever need — refused here, before the cpu trace (whose `HALT` row encodes the
     // difference in four byte limbs) is built. `gas_max` < 2^32 at every admissible header
@@ -1209,13 +1237,8 @@ fn build_traces_inner(program: &Program, inputs: &[u32], public: &[u32], salt: [
     // all recorded here. Expressed as the plan's formula, the table holds
     // `4·cycles + 100·n_keccak + 32·n_sha256` accesses; counted here the way `memory_trace` will
     // actually consume them, which is per event rather than per formula.
-    // The cheating suite's forged modq block (`build_traces_forged`): its accesses replace the
-    // emulator's modq accesses in the memory table.
-    let forged = forge.filter(|_| modq_log_height != 0).map(|lie| crate::tables::modq::forge_block(&modq_events, modq_log_height, lie));
-    let forged_accesses: Vec<(u32, crate::emulator::MemAccess)> = forged.iter()
-        .flat_map(|f| f.accesses.iter().flat_map(|(clk, acc)| acc.iter().map(move |a| (*clk, *a))))
-        .collect();
-    let mem_accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len() + e.sha256_accesses.len() + if forged.is_some() { 0 } else { e.modq.as_ref().map_or(0, |m| m.accesses.len()) }).sum::<usize>() + forged_accesses.len();
+    // An override's accesses replace the emulator's modq accesses in the memory table.
+    let mem_accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len() + e.sha256_accesses.len() + if forged.is_some() { 0 } else { e.modq.as_ref().map_or(0, |m| m.accesses.len()) }).sum::<usize>() + forged.as_ref().map_or(0, |f| f.accesses.len());
     // Private multisig phase 3: and the prover-side floor `ProveOptions::min_mem_log_height`.
     let mem_log_height = tier
         .min_mem_log_height()
@@ -1224,10 +1247,10 @@ fn build_traces_inner(program: &Program, inputs: &[u32], public: &[u32], salt: [
     if mem_log_height > MAX_MEM_LOG_HEIGHT {
         return Err(ProveError::TooManyMemoryAccesses { accesses: mem_accesses, log_height: mem_log_height });
     }
-    let memory = if forged.is_some() {
+    let memory = if let Some(f) = &forged {
         let mut events = exec.events.clone();
         for m in events.iter_mut().filter_map(|e| e.modq.as_mut()) { m.accesses.clear(); }
-        crate::tables::memory::memory_trace_forged(&events, clk_offset, 1usize << mem_log_height, &mut range, &forged_accesses)
+        crate::tables::memory::memory_trace_inner(&events, clk_offset, 1usize << mem_log_height, &mut range, &f.accesses, false)
     } else {
         memory_trace(&exec.events, clk_offset, 1usize << mem_log_height, &mut range)
     };
@@ -1245,7 +1268,7 @@ fn build_traces_inner(program: &Program, inputs: &[u32], public: &[u32], salt: [
     let modq_t = match forged {
         Some(f) => {
             range.absorb(&f.range);
-            Some(f.trace)
+            f.trace
         }
         None => (modq_log_height != 0).then(|| crate::tables::modq::modq_trace(&modq_events, modq_log_height, &mut range)),
     };
