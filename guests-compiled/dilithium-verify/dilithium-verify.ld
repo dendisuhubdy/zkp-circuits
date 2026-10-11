@@ -3,8 +3,9 @@
    (`Program::from_flat_image`).
 
    Stack: 64 KiB, unchanged. dilithium_core::verify's measured frame is about 24 KB on RV32 and
-   `main` adds the pk/sig/msg buffers (about 4 KB), so the stack peaks near 28 KB; the 64 KiB
-   the SDK script reserves has more than 2x headroom and nothing is kept in statics. */
+   `main` adds the pk/sig/msg buffers (about 4 KB), so the stack peaks near 28 KB (less now: the ring arrays live in the arena); the 64 KiB
+   the SDK script reserves has more than 2x headroom. The 21 KiB ring Arena is a .bss static
+   (before the stack, inside the 1 MiB RAM), so the stack was not raised. */
 
 ENTRY(_start)
 

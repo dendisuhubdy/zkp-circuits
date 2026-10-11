@@ -16,8 +16,12 @@
 //! `H(AUTH, nk ‖ salt)`. Anything else panics: the SDK's handler writes `0xdead_beef` to output
 //! slot 7 and halts (no output slot is written before the last check).
 
-use dilithium_core::verify;
-use guest_sdk::{halt, poseidon2, read_input, read_public, write_output, SyscallKeccak};
+use dilithium_core::ring::Arena;
+use dilithium_core::verify_with;
+use guest_sdk::{halt, poseidon2, read_input, read_public, write_output, SyscallKeccak, SyscallRing};
+
+/// The ring arena (21 KiB), in `.bss`, shared by the (sequential) signature checks.
+static mut ARENA: Arena = Arena::new();
 
 const M_MAX: usize = 3;
 const SLOT: usize = 967;
@@ -113,7 +117,9 @@ pub extern "C" fn main() -> ! {
         }
         let pk: [u8; 1312] = words_to_bytes(base + 2);
         let sig: [u8; 2420] = words_to_bytes(base + 330);
-        if !verify(&mut SyscallKeccak, &pk, &msg, &sig) {
+        // SAFETY: single-threaded; this is the only reference to ARENA and it ends with the call.
+        let ar = unsafe { &mut *core::ptr::addr_of_mut!(ARENA) };
+        if !verify_with(&mut SyscallKeccak, &mut SyscallRing, ar, &pk, &msg, &sig) {
             panic!()
         }
         count += 1;

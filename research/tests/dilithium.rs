@@ -106,7 +106,42 @@ fn case(seed: u64, msg_len: usize) -> (Keypair, Vec<u8>) {
 }
 
 fn ours(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-    dilithium_core::verify(&mut HostKeccak, pk.try_into().unwrap(), msg, sig.try_into().unwrap())
+    use dilithium_core::ring::{Arena, SoftRing};
+    use rand_zkvm::dilithium_host::HostModq;
+    let (pk, sig) = (pk.try_into().unwrap(), sig.try_into().unwrap());
+    let reference = dilithium_core::verify_reference(&mut HostKeccak, pk, msg, sig);
+    let soft = dilithium_core::verify_with(&mut HostKeccak, &mut SoftRing, &mut Box::new(Arena::new()), pk, msg, sig);
+    let chip = dilithium_core::verify_with(&mut HostKeccak, &mut HostModq, &mut Box::new(Arena::new()), pk, msg, sig);
+    assert_eq!((soft, chip), (reference, reference), "three backends disagree");
+    assert_eq!(dilithium_core::verify(&mut HostKeccak, pk, msg, sig), reference);
+    reference
+}
+
+#[test]
+fn soft_ring_and_host_modq_agree_op_by_op() {
+    use dilithium_core::ring::{modq_a1, slot, Arena, Ring, SoftRing};
+    use rand_zkvm::dilithium_host::HostModq;
+    let mut s = 11u64;
+    let mut next = move || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; s };
+    let mut a = Box::new(Arena::new());
+    for p in a.p.iter_mut() { for c in p.iter_mut() { *c = (next() % (1 << 24)) as u32; } }
+    let mut b = Box::new(Arena { p: a.p });
+    for (soft, host) in [
+        (|r: &mut SoftRing, x: &mut Arena| r.ntt(x, slot::Z)) as fn(&mut SoftRing, &mut Arena),
+        |r, x| r.intt(x, slot::W),
+        |r, x| r.dot4(x, slot::W, slot::ROW, slot::Z),
+        |r, x| r.msub4(x, slot::W, slot::C, slot::T1),
+    ].into_iter().zip([
+        (|r: &mut HostModq, x: &mut Arena| r.ntt(x, slot::Z)) as fn(&mut HostModq, &mut Arena),
+        |r, x| r.intt(x, slot::W),
+        |r, x| r.dot4(x, slot::W, slot::ROW, slot::Z),
+        |r, x| r.msub4(x, slot::W, slot::C, slot::T1),
+    ]) {
+        soft(&mut SoftRing, &mut a);
+        host(&mut HostModq, &mut b);
+        assert_eq!(a.p, b.p);
+    }
+    assert_eq!(modq_a1(2, slot::W, slot::ROW, slot::Z), rand_zkvm::modq::Args { op: rand_zkvm::modq::Op::Dot4, out: 12, a: 4, b: 0 }.encode());
 }
 
 fn theirs(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
@@ -334,6 +369,8 @@ fn the_guest_verifies_like_the_host_and_reports_its_cycles() {
         let perms = exec.events.iter().filter(|e| matches!(e.sys, Some(Syscall::Keccak { .. }))).count();
         assert!(exec.cycles() < 1_048_575, "one signature must fit tier 20 (2^20 - 1 cycles)");
         assert!(perms > 0);
+        let modq_calls = exec.events.iter().filter(|e| matches!(e.sys, Some(Syscall::Modq { .. }))).count();
+        assert_eq!(modq_calls, 18, "9 NTT + 4 DOT4 + 1 MSUB4 + 4 INTT");
         eprintln!("dilithium2 verify in the rVM: {} cycles, {} keccak permutations (valid = {})", exec.cycles(), perms, !flip);
         for m in [1usize, 2, 3, 5] {
             eprintln!("  M = {m}: {} cycles -> {:?}", m * exec.cycles(), Tier::for_workload(m * exec.cycles(), 0));

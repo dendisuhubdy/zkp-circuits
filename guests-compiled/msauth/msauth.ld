@@ -4,7 +4,7 @@
 
    Stack: 64 KiB. dilithium_core::verify's frame is about 24 KB on RV32; `main` adds the pk/sig
    byte arrays (3.7 KB), the 328-word pk buffer, the 330-word hash buffer and the message, so
-   the measured peak (task-5 report) stays well under half the reserve. Nothing is in statics. */
+   the measured peak (task-5 report) stays well under half the reserve. The 21 KiB ring Arena is the one .bss static (before the stack, inside the 1 MiB RAM). */
 
 ENTRY(_start)
 

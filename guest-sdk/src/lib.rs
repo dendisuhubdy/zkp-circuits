@@ -16,6 +16,8 @@ const SYS_KECCAK: u32 = 4;
 const SYS_SHA256: u32 = 5;
 const SYS_READ_PUBLIC: u32 = 6;
 const SYS_POSEIDON2_LEN: u32 = 7;
+#[cfg(feature = "dilithium")]
+const SYS_MODQ: u32 = 8;
 /// `research/src/isa.rs`'s `POSEIDON2_MAX_WORDS`.
 const POSEIDON2_MAX_WORDS: usize = 4096;
 
@@ -331,5 +333,49 @@ impl dilithium_core::Keccak for SyscallKeccak {
             s[i] = (w[2 * i] as u64) | ((w[2 * i + 1] as u64) << 32);
             i += 1;
         }
+    }
+}
+
+/// `dilithium_core::ring::Ring` over the `MODQ` syscall: one `ecall` per operation, `a0` the
+/// arena's word address, `a1` the packed op and poly indices (`dilithium_core::ring::modq_a1`).
+#[cfg(feature = "dilithium")]
+pub struct SyscallRing;
+
+#[cfg(feature = "dilithium")]
+#[inline(always)]
+fn modq_call(ar: &mut dilithium_core::ring::Arena, a1: u32) {
+    // SAFETY: the syscall reads and writes only polys inside the arena's `ARENA_POLYS * 256`
+    // words (every caller's index span is asserted `< ARENA_POLYS` below); `&mut Arena` is
+    // 4-aligned, exclusively borrowed and live for the whole call; no register is written.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") SYS_MODQ,
+            in("a0") (ar as *mut dilithium_core::ring::Arena as u32) / 4,
+            in("a1") a1,
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(feature = "dilithium")]
+impl dilithium_core::ring::Ring for SyscallRing {
+    fn ntt(&mut self, ar: &mut dilithium_core::ring::Arena, p: usize) {
+        debug_assert!(p < dilithium_core::ring::ARENA_POLYS);
+        modq_call(ar, dilithium_core::ring::modq_a1(0, p, 0, 0));
+    }
+    fn intt(&mut self, ar: &mut dilithium_core::ring::Arena, p: usize) {
+        debug_assert!(p < dilithium_core::ring::ARENA_POLYS);
+        modq_call(ar, dilithium_core::ring::modq_a1(1, p, 0, 0));
+    }
+    fn dot4(&mut self, ar: &mut dilithium_core::ring::Arena, out: usize, a: usize, b: usize) {
+        debug_assert!(out < dilithium_core::ring::ARENA_POLYS);
+        debug_assert!(a + 4 <= dilithium_core::ring::ARENA_POLYS && b + 4 <= dilithium_core::ring::ARENA_POLYS);
+        modq_call(ar, dilithium_core::ring::modq_a1(2, out, a, b));
+    }
+    fn msub4(&mut self, ar: &mut dilithium_core::ring::Arena, out: usize, c: usize, t: usize) {
+        debug_assert!(out + 4 <= dilithium_core::ring::ARENA_POLYS && t + 4 <= dilithium_core::ring::ARENA_POLYS);
+        debug_assert!(c < dilithium_core::ring::ARENA_POLYS);
+        modq_call(ar, dilithium_core::ring::modq_a1(3, out, c, t));
     }
 }

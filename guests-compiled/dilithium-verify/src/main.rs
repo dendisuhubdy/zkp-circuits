@@ -1,14 +1,18 @@
 #![no_std]
 #![no_main]
 
-use guest_sdk::{halt, read_input, write_output, SyscallKeccak};
+use dilithium_core::ring::Arena;
+use guest_sdk::{halt, read_input, write_output, SyscallKeccak, SyscallRing};
+
+/// The ring arena (21 KiB), in `.bss`: the stack stays at 64 KiB.
+static mut ARENA: Arena = Arena::new();
 
 /// Dilithium2 verification, the phase-1 measurement guest of the private multisig.
 ///
 /// Input words: `0..328` the 1 312-byte public key, `328..933` the 2 420-byte signature,
 /// `933` the message byte length `n` (`n <= 64`), `934..` the message. Four bytes per word,
 /// little-endian. Output slot 0 is `1` on a valid signature and `0` otherwise (also `0` for
-/// `n > 64`). Every Keccak-f permutation is the `KECCAK` syscall.
+/// `n > 64`). Every Keccak-f permutation is the `KECCAK` syscall, every ring operation the `MODQ` syscall.
 #[no_mangle]
 pub extern "C" fn main() -> ! {
     let n = read_input(933) as usize;
@@ -34,7 +38,11 @@ pub extern "C" fn main() -> ! {
         msg[i] = (read_input(934 + (i / 4) as u32) >> (8 * (i % 4))) as u8;
         i += 1;
     }
-    let ok = dilithium_core::verify(&mut SyscallKeccak, &pk, &msg[..n], &sig);
+    let ok = {
+        // SAFETY: single-threaded, and this is the only reference to ARENA, live for this call.
+        let ar = unsafe { &mut *core::ptr::addr_of_mut!(ARENA) };
+        dilithium_core::verify_with(&mut SyscallKeccak, &mut SyscallRing, ar, &pk, &msg[..n], &sig)
+    };
     write_output(0, ok as u32);
     halt();
 }

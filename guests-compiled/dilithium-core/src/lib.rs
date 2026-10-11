@@ -9,11 +9,12 @@ pub mod packing;
 pub mod params;
 pub mod poly;
 pub mod reduce;
+pub mod ring;
 pub mod rounding;
 pub mod verify;
 
 pub use fips202::{shake256, Shake};
-pub use verify::verify;
+pub use verify::{verify, verify_reference, verify_with};
 
 /// Round-3 Dilithium2 public-key bytes (`rho` ‖ packed `t1`).
 pub const PK_BYTES: usize = 1312;
