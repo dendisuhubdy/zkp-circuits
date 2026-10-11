@@ -562,6 +562,12 @@ fn a_multi_cell_access_whose_base_wraps_below_zero_is_refused() {
         let (mut cur, next) = (row(k), row(k + 1));
         assert!(common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_ok(), "the honest row {k} is admitted");
         cur[col] = value;
+        // Phase 4 B/B′: SPONGE's source and COMPRESS's sibling are the immediate, `B0 = B`. The
+        // single-row harness does not see the PROGRAM lookup that fixes `B`, so move `B` with
+        // `B0` — the row a malicious *program* word would give — and let the limbs answer.
+        if col == B0 {
+            cur[B] = value;
+        }
         let diff = cur[D0] - cur[A0];
         (cur[EQ_AUX], cur[EQ_INV]) = if diff == F::ZERO { (F::ONE, F::ZERO) } else { (F::ZERO, diff.inverse()) };
         if common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_ok() {
@@ -585,6 +591,9 @@ fn a_multi_cell_access_whose_base_wraps_below_zero_is_refused() {
     for (col, what) in [(A0, "state"), (B0, "sibling")] {
         let (mut cur, next) = (row(10), row(11));
         cur[col] = F::from_u64((1 << 24) - 3);
+        if col == B0 {
+            cur[B] = cur[B0]; // the immediate form holds, so only group 2 can refuse (see above)
+        }
         let diff = cur[D0] - cur[A0];
         (cur[EQ_AUX], cur[EQ_INV]) = if diff == F::ZERO { (F::ONE, F::ZERO) } else { (F::ZERO, diff.inverse()) };
         assert!(common::admits_byte_limbs(&constraints, &cur, &next, &limbs).is_err(), "a COMPRESS whose {what}'s top cell is 2^24 is refused");
