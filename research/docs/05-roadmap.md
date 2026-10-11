@@ -390,6 +390,9 @@ a tier a prover pool can prove.
   6 to 7 (`(tier, program, input, keccak, sha256, modq, public)`); the legacy entry points keep their
   signatures and delegate with `modq_log_height = 0`, and `_with_modq` siblings take the eighth
   argument. `ProveOptions::min_modq_log_height` is the explicit floor.
+- **Verifier-key blobs: export/install, format v1** (`Machine::export_verifier_key_with_modq`,
+  `Machine::install_verifier_key`, `CONSTRAINT_SET = 9`; `docs/02-tables-and-buses.md`), so the
+  fullnode ships the tier-18 `msauth` key instead of building it on 4 GB validators.
 - **Measured effect** (this branch): Dilithium2 verification 880 102 cycles in software, 348 967
   with the chip, **80 572** with the dilithium-core trims (99 `KECCAK` permutations and 18 `MODQ`
   calls). The `msauth` guest at `M_MAX = 3` is 251 946 cycles at tier 18 (`docs/04-guests.md`).

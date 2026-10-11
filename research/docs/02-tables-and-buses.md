@@ -375,6 +375,27 @@ isn't) before using it to size anything, exactly as it already bounds
 program_log_height)` accordingly (still program-*content*-independent —
 computable from the tier and the declared height alone).
 
+**Verifier-key blobs (format v1).** A key can be built once and shipped
+instead of rebuilt: `Machine::export_verifier_key_with_modq(tier, plh, ilh,
+klh, slh, mlh, publh)` returns a `VerifierKeyBlob` — a header
+(`format_version = VERIFIER_KEY_BLOB_FORMAT`, the FRI `profile`, the 7-tuple
+`shape`, `constraint_set = CONSTRAINT_SET`) and the postcard bytes of the
+shape's `CommonData` (preprocessed cap, per-instance placement, packed
+lookups); `to_bytes`/`from_bytes` are postcard, trailing bytes refused.
+`Machine::install_verifier_key(&blob)` refuses another format, profile or
+constraint set, a shape `check_declared_heights_with_modq` refuses, and a
+`CommonData` whose structure (instance count, preprocessed widths, degree
+bits) disagrees with the machine's chips for that shape; it then fills the
+cache slot for `blob.shape` without building (`key_builds` does not move).
+An identical re-install is a no-op; a different key over a filled slot is
+`InstallKeyError::SlotFilled`, never a replacement. The commitment and
+lookups themselves cannot be checked without the build the blob avoids, so
+the consumer pins the blob's digest out of band; a changed commitment fails
+every honest proof, and `verify` still runs its declared-height and
+degree-bit checks on each proof (`tests/key_blob.rs`). The use is the
+fullnode's tier-18 `msauth` key (~80 s, ~4 GB to build). A Test-profile
+tier-10 one-modq-block blob is 15 526 bytes.
+
 Soundness does not depend on the verifier checking the declared height
 against the program in any other way, because `hc` already does: it binds
 `(base_pc, len, words)` via the capacity-lane header
