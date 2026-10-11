@@ -332,6 +332,8 @@ fn the_guest_verifies_like_the_host_and_reports_its_cycles() {
         assert!(exec.halted);
         assert_eq!(exec.outputs[0], (!flip) as u32);
         let perms = exec.events.iter().filter(|e| matches!(e.sys, Some(Syscall::Keccak { .. }))).count();
+        assert!(exec.cycles() < 1_048_575, "one signature must fit tier 20 (2^20 - 1 cycles)");
+        assert!(perms > 0);
         eprintln!("dilithium2 verify in the rVM: {} cycles, {} keccak permutations (valid = {})", exec.cycles(), perms, !flip);
         for m in [1usize, 2, 3, 5] {
             eprintln!("  M = {m}: {} cycles -> {:?}", m * exec.cycles(), Tier::for_workload(m * exec.cycles(), 0));

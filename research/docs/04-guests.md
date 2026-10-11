@@ -238,14 +238,14 @@ the message; output slot 0 is 1 on a valid signature, else 0. It is an image con
 
 Measured by `research/tests/dilithium.rs`'s
 `the_guest_verifies_like_the_host_and_reports_its_cycles` (`cargo +1.98.1 test --release --test
-dilithium the_guest -- --nocapture`), a 45-byte message, host `execute` with the tier-22 cap:
+dilithium the_guest -- --nocapture`), for a 45-byte message, host `execute` with the tier-22 cap:
 
 | quantity | value |
 |---|---|
 | program words | 4 943 (`hc b651b1bc…4b5`) |
 | cycles, valid signature | 880 102 |
 | cycles, invalid signature (one flipped byte) | 879 970 |
-| `KECCAK` permutations (syscall rows) | 99 per verification, both cases |
+| `KECCAK` permutations (syscall rows) | 99 per verification, both cases (45-byte message) |
 
 Implied tier for M signatures in one proof (cycles = M x 880 102; tier `t` holds `2^t - 1`;
 `TIERS` stop at 20 = 1 048 575):
