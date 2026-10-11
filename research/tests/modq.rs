@@ -425,3 +425,64 @@ mod harness {
         assert!(rejects(|| run(&t, &range, &c, &tw)));
     }
 }
+
+mod machine {
+    use super::common::modq_program;
+    use super::emulator::{DOT_8_0_4, INTT1, MSUB_0_8_4, NTT0};
+    use rand_zkvm::guests;
+    use rand_zkvm::machine::{FriProfile, Machine, ProveOptions, Tier};
+
+    #[test]
+    fn a_guest_calling_every_op_proves_and_verifies() {
+        let m = Machine::new(FriProfile::Test);
+        let p = modq_program(&[NTT0, INTT1, DOT_8_0_4, MSUB_0_8_4]);
+        let (proof, exec) = m.prove(&p, &[], &[], Some(Tier(14))).unwrap();
+        assert_eq!(exec.events.iter().filter(|e| e.modq.is_some()).count(), 4);
+        assert_eq!(proof.modq_log_height, 12, "four 1024-row blocks");
+        m.verify(&p.digest(), &proof).unwrap();
+    }
+
+    #[test]
+    fn a_modq_free_proof_declares_no_modq_table() {
+        let m = Machine::new(FriProfile::Test);
+        let p = guests::fib(10);
+        let (proof, _) = m.prove(&p, &[], &[], Some(Tier(10))).unwrap();
+        assert_eq!(proof.modq_log_height, 0);
+        assert_eq!(proof.batch.degree_bits.len(), 9, "program, cpu, memory, alu, range, nibble, poseidon2, input, public");
+        m.verify(&p.digest(), &proof).unwrap();
+    }
+
+    #[test]
+    fn height_floors_pin_the_declared_shape() {
+        let m = Machine::new(FriProfile::Test);
+        let p = modq_program(&[NTT0]);
+        let opts = ProveOptions { min_modq_log_height: 13, min_keccak_log_height: 9, min_mem_log_height: 18, ..Default::default() };
+        let (proof, _) = m.prove_with_options(&p, &[], &[], Some(Tier(14)), opts).unwrap();
+        assert_eq!(proof.modq_log_height, 13, "one call padded to eight blocks");
+        assert_eq!(proof.keccak_log_height, 9, "a keccak-free run declares an idle table at the floor");
+        assert_eq!(proof.mem_log_height, 18, "above the tier floor t + 2 = 16");
+        m.verify(&p.digest(), &proof).unwrap();
+    }
+
+    #[test]
+    fn the_old_key_api_is_the_modq_free_case_of_the_new_one() {
+        let m = Machine::new(FriProfile::Test);
+        let a = m.verifier_key(Tier(10), 7, 7, 0, 0, 7);
+        let b = m.verifier_key_with_modq(Tier(10), 7, 7, 0, 0, 0, 7);
+        assert!(std::sync::Arc::ptr_eq(&a, &b), "one cache slot");
+        let c = m.verifier_key_with_modq(Tier(10), 7, 7, 0, 0, 10, 7);
+        assert!(!std::sync::Arc::ptr_eq(&a, &c));
+        assert_eq!(m.cached_keys(), 2);
+        assert_eq!(rand_zkvm::gas::gas_max(Tier(12), 5, 0), rand_zkvm::gas::gas_max_with_modq(Tier(12), 5, 0, 0));
+        assert_eq!(Tier(10).max_modq_log_height(), 20);
+    }
+
+    #[test]
+    fn a_modq_row_costs_modq_gas() {
+        let p = modq_program(&[NTT0]);
+        let e = rand_zkvm::emulator::execute(&p, &[], &[], 1 << 16).unwrap();
+        let row = e.events.iter().find(|e| e.modq.is_some()).unwrap();
+        assert_eq!(rand_zkvm::gas::row_gas(row), rand_zkvm::gas::MODQ_GAS);
+        assert_eq!(rand_zkvm::gas::gas_max_with_modq(Tier(10), 0, 0, 10) - rand_zkvm::gas::gas_max(Tier(10), 0, 0), rand_zkvm::gas::MODQ_GAS - 1);
+    }
+}
