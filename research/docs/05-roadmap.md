@@ -372,6 +372,69 @@ table) — `tests/verifier_key.rs` re-pinned, in the same shape as constraint se
 widening. **Every verifier key changed; ships only with a chain cut** — chain 18 in the fullnode's
 plan, alongside Phase 1's per-instruction fee schedule.
 
+## Constraint set: the MODQ chip
+
+Not a finding from any review: the private multisig's phase 3 (`docs/superpowers/specs/2026-10-11-private-multisig-design.md`
+§7), designed in `docs/superpowers/specs/2026-10-11-rvm-modq-chip-design.md`. Dilithium2's ring
+arithmetic over `q = 8 380 417` becomes a coprocessor, so a threshold-signature verification fits
+a tier a prover pool can prove.
+
+**What moved.**
+
+- **`SYS_MODQ = 8`** with ops `NTT`, `INTT`, `DOT4`, `MSUB4`; `MODQ_GAS = 168`; the cpu table gains
+  the column `SYS_MODQ` (`WIDTH` 282 to 283) and one `bus::MODQ` lookup.
+- **The `modq` table**: 1 024-row blocks, 59 main + 16 preprocessed columns, AIR degree 3 and
+  instance degree 4, 16 lookup groups in the machine. New buses `MODQ` and `MODQ_WIRE`. Optional
+  per proof (`modq_log_height = 0` absent), appended after sha256 and before `public`.
+- **API.** `Proof::modq_log_height` after `sha256_log_height`; the verifier-key tuple grows from
+  6 to 7 (`(tier, program, input, keccak, sha256, modq, public)`); the legacy entry points keep their
+  signatures and delegate with `modq_log_height = 0`, and `_with_modq` siblings take the eighth
+  argument. `ProveOptions::min_modq_log_height` is the explicit floor.
+- **Measured effect** (this branch): Dilithium2 verification 880 102 cycles in software, 348 967
+  with the chip, **80 572** with the dilithium-core trims (99 `KECCAK` permutations and 18 `MODQ`
+  calls). The `msauth` guest at `M_MAX = 3` is 251 946 cycles at tier 18 (`docs/04-guests.md`).
+- **Tests.** 22 `modq_*` cheating tests, each AIR-level forgery accepted with only its defence off and
+  rejected with it on; the hooks sit behind the `cheating` cargo feature, `tests/common/modq_run.rs`
+  is always compiled and `tests/modq_harness.rs` is gated.
+
+**Proof-size deltas.** Not re-measured with `e2e.rs::measure_production_profile` for this note; the
+design's estimates are: a chip-free proof gains about **+1 KB (+0.07% of 1.37 MB)**: one header
+byte, the one new cpu column over 80 queries, at most one LogUp group. A chip-bearing proof gains
+about **+75 KB** at Production FRI (about 107 opened base columns at 80 queries). Record the measured
+pair (a chip-free tier-10 proof, and a one-modq-block tier-10 proof, each against `main`) when the
+production-profile test next runs.
+
+**Every verifier key changed; ships only with a chain cut.** The cpu's extra column and lookup move
+every key's `common` digest, chip-free shapes included (`tests/verifier_key.rs`, plus a fifth
+shape, "tier 10, one modq block"). Program digests `hc` do not move. Old proofs do not decode (the
+extra header byte). It is a hard fork, and the fullnode re-vendor is pending.
+
+**Sync-zkvm steps (spec §6), at the cut.**
+
+1. `deploy/sync-zkvm.sh` rsyncs `src/modq.rs`, `src/tables/modq.rs` and `tests/modq.rs` (keep
+   `tests/modq.rs` free of `dilithium-core`; its docs check skips itself where `docs/` is absent).
+2. Add `pub mod modq;` by hand to the fullnode's `crates/randprotocol-zkvm/src/lib.rs`.
+3. The `verifier_key` anchor and the `notes::domain` patch need no change; assert it.
+4. `ZkExecutor::decode_and_check` keeps the modq-free calls, so a modq-bearing proof is refused
+   until multisig phase 4 switches the auth-proof path to the `*_with_modq` calls.
+5. In `executor.rs` add `const NO_MODQ: u8 = 0;` beside `NO_KECCAK` and `NO_SHA256`, and pin
+   `modq_log_height == 0` in every non-multisig program record, next to the keccak/sha256 checks.
+6. `ProveOptions::pad_absent_hash_tables` does **not** pad the modq table: a chip-free proof keeps
+   `modq_log_height = 0`, and only the explicit `min_modq_log_height` floor declares an idle one.
+7. `TIERS` does not change. Re-check its client-side users (`clients/core/crates/wallet-core`,
+   and the vendored `randprotocol-client` and `randprotocol-rvm` under `clients/core/vendor/fullnode`):
+   they need only the new `Proof` field and the re-pinned keys.
+8. Re-pin `CIRCUITS_PIN` (in the fullnode), the verifier-key digests and
+   `aggregate_program_digest`. Mirror `MODQ_GAS` in the fee schedule.
+
+**Production prove at `M = 3`: pending.** The cause of the roughly 1300 s kill of three attempts on a
+48 GB laptop is under investigation; see `docs/04-guests.md`.
+
+**Recursion.** Not re-pinned by this note. The inner cpu width moved, so `verify_rv32.digest`,
+`tests/pins.json`, `inner_vk_digest` and the row and tier literals re-pin after rVM phase 4 is merged
+into this branch (a merge, never a rebase). `tree_measure.rs`'s `production_leaf_l2` and
+`production_rv32r_over_the_leaf_proves` stay stale until a 256 GB machine exists.
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency

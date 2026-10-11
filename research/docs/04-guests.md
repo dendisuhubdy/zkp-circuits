@@ -240,22 +240,24 @@ Measured by `research/tests/dilithium.rs`'s
 `the_guest_verifies_like_the_host_and_reports_its_cycles` (`cargo +1.98.1 test --release --test
 dilithium the_guest -- --nocapture`), for a 45-byte message, host `execute` with the tier-22 cap:
 
-| quantity | value |
-|---|---|
-| program words | 4 943 (`hc b651b1bc…4b5`) |
-| cycles, valid signature | 880 102 |
-| cycles, invalid signature (one flipped byte) | 879 970 |
-| `KECCAK` permutations (syscall rows) | 99 per verification, both cases (45-byte message) |
+| quantity | phase 1 (software) | `MODQ` chip | chip + trims |
+|---|---:|---:|---:|
+| program words | 4 943 (`hc b651b1bc…4b5`) | — | — |
+| cycles, valid signature | 880 102 | 348 967 | **80 572** |
+| cycles, invalid signature (one flipped byte) | 879 970 | — | — |
+| `KECCAK` permutations (syscall rows) | 99, both cases (45-byte message) | 99 | 99 |
+| `MODQ` calls | 0 | 18 | 18 (9 NTT + 4 DOT4 + 1 MSUB4 + 4 INTT) |
 
-Implied tier for M signatures in one proof (cycles = M x 880 102; tier `t` holds `2^t - 1`;
-`TIERS` stop at 20 = 1 048 575):
+The `MODQ` columns are MODQ phase 3, Tasks 4-7 (the chip, then the dilithium-core trims). Cycles
+for M signatures in one proof are M times the per-verification figure; tier `t` holds `2^t - 1`
+(`TIERS` stop at 20 = 1 048 575):
 
-| M | cycles | tier |
-|---|---|---|
-| 1 | 880 102 | 20 |
-| 2 | 1 760 204 | over tier 20 |
-| 3 | 2 640 306 | over tier 20 |
-| 5 | 4 400 510 | over tier 20 |
+| M | phase 1 cycles | tier | chip + trims cycles (verification alone) | tier |
+|---|---:|---|---:|---|
+| 1 | 880 102 | 20 | 80 572 | 17 |
+| 2 | 1 760 204 | over tier 20 | 161 144 | 18 |
+| 3 | 2 640 306 | over tier 20 | 241 716 | 18 |
+| 5 | 4 400 510 | over tier 20 | 402 860 | 19 |
 
 The Poseidon2 budget (ZH1, `Tier::for_workload`) is not the binding one: the guest makes no
 `POSEIDON2` calls, and the program digest costs about 1 236 permutations (4 943 words / 4)
@@ -263,9 +265,7 @@ against 2^17 = 131 072 slots at tier 20. The Keccak table needs 99 of its permut
 each, so the cycle budget already bounds it. The cost is the ring arithmetic in plain RV32IM
 (NTTs, 32-bit modular multiplies), not hashing: Keccak is about 0.01% of the rows.
 
-That table is the phase-1 history (plain RV32IM ring arithmetic). With the `MODQ` chip and the
-dilithium-core trims (MODQ phase 3, Tasks 6-7) one verification is **80 572 cycles**, 99 `KECCAK`
-permutations and **18 `MODQ` calls** (9 NTT + 4 DOT4 + 1 MSUB4 + 4 INTT), against 880 102 in phase 1.
+The full `msauth` guest, with the rest of its work, is the next section.
 
 ### `msauth` with the `MODQ` chip — the tier-18 gate (MODQ Task 8)
 
@@ -293,7 +293,7 @@ public 7, memory 20 and the same gas word (`proof_shape_is_the_same_for_every_m`
 floors the heights and the gas word differ per `M`, e.g. gas 357 471 / 387 263 / 436 159 at
 `M = 1 / 2 / 3`).
 
-Production prove at `M = 3` (peak RSS, proof bytes, wall time): **pending, needs a host with at least 64 GB.** Two attempts on the 48 GB laptop were killed (signal 9, 26.1 GB peak RSS after 1325 s; and a Test-profile M = 3 run, which peaked at 31.2 GB RSS at about 100 s and died after 1270 s with no proof). The Test-profile prove is not cheaper in memory than it should be for the Production decision: the peak comes early (trace build / commit), well before the FRI queries.
+Production prove at `M = 3` (peak RSS, proof bytes, wall time): **pending.** Three attempts on the 48 GB laptop were SIGKILLed at about 1300 s wall (true peak RSS 24 to 31 GB; 8 GB resident at death; no kernel memory kill logged; a detached CPU burner survived 1400 s). The cause of the about 1300 s kill is under investigation; run outside the agent harness or on a host with at least 64 GB.
 
 ### The `evm` guest — M4.3's exit test
 

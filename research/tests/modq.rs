@@ -474,3 +474,19 @@ mod machine {
         assert_eq!(verifier.cached_keys(), 0, "the range check precedes the verifier key");
     }
 }
+
+/// Reads the docs at run time, not with `include_str!`: `deploy/sync-zkvm.sh` vendors this file into
+/// the fullnode, where `docs/` does not exist, and the check is skipped there.
+#[test]
+fn the_docs_name_the_chip_where_the_isa_and_tables_are_documented() {
+    let doc = |f: &str| std::fs::read_to_string(format!("{}/docs/{f}", env!("CARGO_MANIFEST_DIR")));
+    let (Ok(isa), Ok(tables)) = (doc("01-isa.md"), doc("02-tables-and-buses.md")) else {
+        eprintln!("docs/ not present (a vendored copy): skipped");
+        return;
+    };
+    assert!(isa.contains("| 8 | `MODQ base a1`"), "01-isa.md syscall table row 8");
+    assert!(tables.contains("## `modq` — main, `col::WIDTH = 59`"), "02-tables-and-buses.md modq section");
+    assert!(tables.contains("`MODQ_WIRE`"), "the bus catalogue");
+    assert_eq!(rand_zkvm::tables::modq::col::WIDTH, 59);
+    assert_eq!(rand_zkvm::tables::cpu::col::WIDTH, 283);
+}
