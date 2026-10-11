@@ -1,0 +1,9 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/aggregate.rs (target/release/deps/aggregate-319fdbb0983634e6)
+
+running 1 test
+issue45 B3: production N=3 aggregate emulation — 948071 cpu rows (tier 20), 163491 permutations, 5155151 mem accesses, 636618 witness words, max addr 4429080, max ts 15169151 (< 2^27)
+test production_n3_aggregate_emulates_within_bounds ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 9.50s
+
