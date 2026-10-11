@@ -63,6 +63,15 @@ pub mod compiled {
         Program::from_flat_image(BIN).expect("dilithium-verify.bin is a committed, known-good build")
     }
 
+    /// `guests-compiled/msauth`: the private multisig's M-of-N spend-authority relation
+    /// (`crate::msauth`'s layout). Private input `msauth_inputs`; public input `0..8` the
+    /// transaction binding. On a valid witness output `0..8` is `auth_commit(nk(msk, policy), salt)`;
+    /// on any other it panics (output slot 7 `0xdead_beef`). An image container.
+    pub fn msauth() -> Program {
+        const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/msauth.bin");
+        Program::from_flat_image(BIN).expect("msauth.bin is a committed, known-good build")
+    }
+
     /// M4.4's exit guest: an **sBPF interpreter**, compiled from `guests-compiled/sbpf` (see that
     /// Makefile's header for the exact `rustc +1.98.1` build) and committed as
     /// `guests-compiled/bin/sbpf.bin`. It reads **two** vectors: the public one is
