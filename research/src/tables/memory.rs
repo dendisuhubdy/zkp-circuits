@@ -83,7 +83,7 @@ pub fn memory_trace(events: &[CycleEvent], clk_offset: u32, height: usize, count
         // bus stop balancing and a permuted word could be read back as something else.
         // M4.4: `sha256_accesses` are the same thing for the `SHA256` compression — 24 reads of
         // the buffer at slot 0 and 8 state write-backs at slot 1, sent by the sha256 chip.
-        for a in e.accesses.iter().chain(e.keccak_accesses.iter()).chain(e.sha256_accesses.iter()) {
+        for a in e.accesses.iter().chain(e.keccak_accesses.iter()).chain(e.sha256_accesses.iter()).chain(e.modq.iter().flat_map(|m| m.accesses.iter())) {
             // Audit ZM2 (2026-09-12): the sort key must be computed exactly the way the AIR
             // recomputes it — `SPACE·2^30 + ADDR` (`eval`'s `key_l`/`key_n`), i.e. `+`, not
             // `|`. With `|`, any RAM address `>= 2^30` (reachable through `POSEIDON2`

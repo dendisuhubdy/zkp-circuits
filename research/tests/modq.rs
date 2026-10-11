@@ -125,3 +125,99 @@ fn call_reads_each_input_once_and_refuses_what_the_air_cannot_prove() {
     assert_eq!(modq::call(base, 0, big), Err(ModqError::Coefficient { addr: base + 7, value: 1 << 24 }));
     assert_eq!(modq::call(base, 1 << 2, ram), Err(ModqError::Args(1 << 2)));
 }
+
+#[test]
+#[should_panic]
+fn encode_refuses_a_field_that_would_spill_into_another() {
+    let _ = Args { op: Op::Ntt, out: 32, a: 0, b: 0 }.encode();
+}
+
+#[test]
+#[should_panic]
+fn zeta_refuses_an_index_past_255() {
+    let _ = modq::zeta(256);
+}
+
+mod common;
+
+mod emulator {
+    use super::common::modq_program;
+    use rand_zkvm::asm::{ops::*, Assembler};
+    use rand_zkvm::emulator::{execute, ExecError, Syscall, MODQ_PTR_LIMIT, SPACE_RAM};
+    use rand_zkvm::modq::{self, Args, Op};
+
+    pub const NTT0: u32 = 0;
+    pub const INTT1: u32 = 1 | 1 << 8;
+    pub const DOT_8_0_4: u32 = 2 | 8 << 8 | 4 << 24;
+    pub const MSUB_0_8_4: u32 = 3 | 8 << 16 | 4 << 24;
+
+    fn ram_after_fill(addr: u32) -> u32 {
+        let i = addr - 0x1000;
+        if i < 9 * 256 { 3 + 7001 * i } else { 0 }
+    }
+
+    #[test]
+    fn every_op_in_the_emulator_matches_the_host_model() {
+        for a1 in [NTT0, INTT1, DOT_8_0_4, MSUB_0_8_4] {
+            let e = execute(&modq_program(&[a1]), &[], &[], 1 << 16).unwrap();
+            let ev = e.events.iter().find(|e| e.modq.is_some()).expect("one MODQ row");
+            assert_eq!(ev.sys, Some(Syscall::Modq { base: 0x1000, a1 }));
+            let call = ev.modq.as_ref().unwrap();
+            let io = modq::call(0x1000, a1, ram_after_fill).unwrap();
+            assert_eq!(call.inputs, io.inputs, "a1 = {a1:#x}");
+            let writes: Vec<(u32, u32)> = call.accesses.iter().filter(|a| a.is_write).map(|a| (a.addr, a.value)).collect();
+            assert_eq!(writes, io.writes, "a1 = {a1:#x}");
+        }
+    }
+
+    #[test]
+    fn accesses_are_ram_reads_at_slot_0_then_writes_at_slot_1() {
+        let e = execute(&modq_program(&[MSUB_0_8_4]), &[], &[], 1 << 16).unwrap();
+        let call = e.events.iter().find_map(|e| e.modq.as_ref()).unwrap();
+        let first_write = call.accesses.iter().position(|a| a.is_write).unwrap();
+        assert_eq!((first_write, call.accesses.len()), (2304, 2304 + 1024));
+        assert!(call.accesses.iter().all(|a| a.space == SPACE_RAM && a.slot == a.is_write as u32));
+    }
+
+    #[test]
+    fn modq_refuses_reserved_bits() {
+        let bad = DOT_8_0_4 | 1 << 5;
+        assert_eq!(execute(&modq_program(&[bad]), &[], &[], 1 << 16).unwrap_err(), ExecError::ModqArgs(bad));
+    }
+
+    #[test]
+    fn modq_refuses_overlapping_dot_operands() {
+        let bad = Args { op: Op::Dot4, out: 8, a: 0, b: 2 }.encode();
+        assert_eq!(execute(&modq_program(&[bad]), &[], &[], 1 << 16).unwrap_err(), ExecError::ModqAlias(bad));
+    }
+
+    #[test]
+    fn modq_refuses_msub_aliasing() {
+        let bad = Args { op: Op::Msub4, out: 0, a: 4, b: 4 }.encode();
+        assert_eq!(execute(&modq_program(&[bad]), &[], &[], 1 << 16).unwrap_err(), ExecError::ModqAlias(bad));
+    }
+
+    #[test]
+    fn modq_refuses_a_coefficient_of_2_pow_24() {
+        let mut a = Assembler::new(0);
+        a.extend(li(5, 0x4000));
+        a.extend(li(8, 1 << 24));
+        a.push(sw(5, 8, 12));
+        a.extend(call_modq(0x1000, NTT0));
+        a.extend(halt());
+        let err = execute(&a.assemble(), &[], &[], 1 << 16).unwrap_err();
+        assert_eq!(err, ExecError::ModqCoefficient { addr: 0x1003, value: 1 << 24 });
+    }
+
+    #[test]
+    fn modq_refuses_a_base_past_the_limit() {
+        let mut a = Assembler::new(0);
+        a.extend(call_modq(MODQ_PTR_LIMIT + 1, NTT0));
+        a.extend(halt());
+        assert_eq!(execute(&a.assemble(), &[], &[], 1 << 16).unwrap_err(), ExecError::ModqPtrOutOfRange(MODQ_PTR_LIMIT + 1));
+        let mut a = Assembler::new(0);
+        a.extend(call_modq(MODQ_PTR_LIMIT, NTT0));
+        a.extend(halt());
+        assert!(execute(&a.assemble(), &[], &[], 1 << 16).is_ok(), "the limit itself is legal");
+    }
+}

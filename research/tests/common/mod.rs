@@ -315,3 +315,27 @@ pub fn repay_fixed_tables(t: &mut Traces, tier: Tier) -> Vec<String> {
     }
     unpaid
 }
+
+/// MODQ phase 3: a guest that fills polys 0..9 of an arena at word address `0x1000` with
+/// `3 + 7001·i` (some below q, some in [q, 2^24)), then makes one `MODQ` call per `a1`, then halts.
+#[allow(dead_code)]
+pub fn modq_program(calls: &[u32]) -> rand_zkvm::isa::Program {
+    use rand_zkvm::asm::{ops::*, Assembler};
+    use rand_zkvm::isa::BranchCond;
+    const ARENA_BYTES: i32 = 0x4000;
+    let mut a = Assembler::new(0);
+    a.extend(li(5, ARENA_BYTES));
+    a.extend(li(6, 0));
+    a.extend(li(7, 9 * 256));
+    a.extend(li(8, 3));
+    a.extend(li(9, 7001));
+    a.label("fill");
+    a.push(sw(5, 8, 0));
+    a.push(addi(5, 5, 4));
+    a.push(add(8, 8, 9));
+    a.push(addi(6, 6, 1));
+    a.branch(BranchCond::Ne, 6, 7, "fill");
+    for &a1 in calls { a.extend(call_modq(ARENA_BYTES as u32 / 4, a1)); }
+    a.extend(halt());
+    a.assemble()
+}

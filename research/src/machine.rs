@@ -1098,7 +1098,7 @@ fn build_traces_inner(program: &Program, inputs: &[u32], public: &[u32], salt: [
     // all recorded here. Expressed as the plan's formula, the table holds
     // `4·cycles + 100·n_keccak + 32·n_sha256` accesses; counted here the way `memory_trace` will
     // actually consume them, which is per event rather than per formula.
-    let mem_accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len() + e.sha256_accesses.len()).sum();
+    let mem_accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len() + e.sha256_accesses.len() + e.modq.as_ref().map_or(0, |m| m.accesses.len())).sum();
     let mem_log_height = tier
         .min_mem_log_height()
         .max((mem_accesses + 1).next_power_of_two().trailing_zeros() as u8);

@@ -1863,6 +1863,9 @@ pub fn cpu_trace(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 
             // `SYS_KECCAK` ecall row fills, since the AIR's "CRITICAL 1" bound is gated on all
             // three selectors. Everything else about the call — the 64 rounds and the 32 memory
             // accesses — belongs to the sha256 chip, not to this row.
+            // Private multisig phase 3: no cpu selector yet (a later task adds the chip and its
+            // selector); until then a `MODQ` row is emulated but unprovable, by construction.
+            Some(Syscall::Modq { .. }) => {}
             Some(Syscall::Sha256 { ptr }) => {
                 r[SYS_SHA256] = F::ONE;
                 r[HASH_PTR] = F::from_u32(ptr);

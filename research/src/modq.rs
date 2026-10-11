@@ -44,6 +44,7 @@ fn pow_mod(b: u64, mut e: u64) -> u64 {
 
 /// `ζ_k = 1753^{brv8(k)} mod q`, canonical (`k` in `1..256`; `k = 0` gives 1).
 pub fn zeta(k: usize) -> u32 {
+    assert!(k < 256, "zeta index {k} out of range");
     pow_mod(PSI, (k as u8).reverse_bits() as u64) as u32
 }
 
@@ -152,6 +153,7 @@ impl Args {
     /// `op | out << 8 | a << 16 | b << 24`. Fields are expected `< 32`; a wider one spills into a
     /// reserved bit and `decode` refuses it.
     pub fn encode(self) -> u32 {
+        assert!(self.out < 32 && self.a < 32 && self.b < 32, "poly index past 5 bits: {self:?}");
         self.op as u32 | self.out << 8 | self.a << 16 | self.b << 24
     }
 
