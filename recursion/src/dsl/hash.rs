@@ -325,6 +325,23 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
     b.copy_cells(out.0, 0, st, 0, DIGEST_ELEMS);
 }
 
+/// D1 (phase 4): the digest a walk reached, checked against the cap entry at index `b0 + 2·b1` by
+/// address, not by an indicator dot product: `off = 4·b0 + 8·b1`, then one register-offset `LOAD`
+/// a lane. `caps` is the four digests as sixteen contiguous cells. The bits must be boolean —
+/// `DslChallenger::sample_bits` constrains every bit where it is born — so `off ∈ {0, 4, 8, 12}`
+/// and the load stays inside the sixteen cells; the cpu AIR range-checks the address regardless.
+/// The pattern is the one `docs/06` Cut E1 ruled sound for the own-slot check.
+pub fn assert_cap_entry(b: &mut Builder, got: Digest, caps: Ptr, bits: [Felt; 2], name: &str) {
+    let o0 = b.mul_const(bits[0], F::from_u64(DIGEST_ELEMS as u64));
+    let o1 = b.mul_const(bits[1], F::from_u64(2 * DIGEST_ELEMS as u64));
+    let off = b.add(o0, o1);
+    for lane in 0..DIGEST_ELEMS as i64 {
+        let c = b.load_offset(caps, lane, off);
+        let g = b.load(got.0, lane);
+        b.assert_eq(g, c, name);
+    }
+}
+
 /// `[left ‖ right]` into the eight lanes, permuted; the result is lanes `0..4`.
 fn compress_into_state(b: &mut Builder, left: Digest, right: Digest) {
     let st = b.hash_scratch();

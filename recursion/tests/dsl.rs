@@ -472,3 +472,67 @@ fn a_reload_inside_a_span_is_tagged_a_reload_and_counted_to_that_span() {
     assert!(of_kind(PC_INSTR).iter().any(|&pc| p.instrs[pc].op == Op::Fadd && name(pc) == "sum"), "the adds are the span's own rows");
     assert_eq!(execute(&p, &[], 1_000_000).unwrap().public, vec![F::from_u64(40 * 41 / 2)]);
 }
+
+/// D1's gadget: a register offset picks one of four contiguous digests, for every bit pair, and a
+/// mismatch traps at the caller's name.
+#[test]
+fn assert_cap_entry_selects_each_of_the_four_digests_by_its_bits() {
+    use recursion::dsl::{hash, Digest};
+    for idx in 0..4u64 {
+        let mut b = Builder::new(Checkpoints::Off);
+        let caps = b.alloc(16);
+        for c in 0..16u64 {
+            let v = b.constant(F::from_u64(100 + c));
+            b.store(caps, c as i64, v);
+        }
+        let got = b.alloc(4);
+        for lane in 0..4u64 {
+            let v = b.constant(F::from_u64(100 + 4 * idx + lane));
+            b.store(got, lane as i64, v);
+        }
+        let b0 = b.constant(F::from_u64(idx & 1));
+        let b1 = b.constant(F::from_u64(idx >> 1));
+        hash::assert_cap_entry(&mut b, Digest(got), caps, [b0, b1], "cap entry");
+        let one = b.constant(F::ONE);
+        b.public(one);
+        assert_eq!(run(b, &[]), vec![F::ONE], "index {idx} selects digest {idx}");
+    }
+}
+
+#[test]
+fn assert_cap_entry_traps_at_its_name_on_the_wrong_digest() {
+    use recursion::dsl::{hash, Digest};
+    let mut b = Builder::new(Checkpoints::Off);
+    let caps = b.alloc(16);
+    for c in 0..16u64 {
+        let v = b.constant(F::from_u64(100 + c));
+        b.store(caps, c as i64, v);
+    }
+    let got = b.alloc(4);
+    for lane in 0..4u64 {
+        let v = b.constant(F::from_u64(100 + lane)); // digest 0
+        b.store(got, lane as i64, v);
+    }
+    let b0 = b.constant(F::ONE); // ...checked against digest 1
+    let b1 = b.constant(F::ZERO);
+    hash::assert_cap_entry(&mut b, Digest(got), caps, [b0, b1], "input opening root[main]");
+    let p = b.finish();
+    match execute(&p, &[], 1_000_000) {
+        Err(ExecError::InverseOfZero { pc }) => assert_eq!(p.checkpoint_at(pc), Some("input opening root[main]")),
+        other => panic!("expected a trap, got {other:?}"),
+    }
+}
+
+#[test]
+fn load_offset_adds_a_runtime_offset_to_a_compile_time_address() {
+    let mut b = Builder::new(Checkpoints::Off);
+    let p = b.alloc(16);
+    for c in 0..16u64 {
+        let v = b.constant(F::from_u64(7 * c));
+        b.store(p, c as i64, v);
+    }
+    let off = b.hint();
+    let x = b.load_offset(p, 3, off);
+    b.public(x);
+    assert_eq!(run(b, &[F::from_u64(8)]), vec![F::from_u64(7 * 11)]);
+}

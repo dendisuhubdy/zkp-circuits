@@ -575,6 +575,19 @@ impl Builder {
         Ext(id)
     }
 
+    /// `mem[addr_of(base) + k + off]`, `off` a runtime value: one `LOAD` with the offset's register
+    /// as `ra` and the compile-time address as the immediate. The cpu AIR range-checks the sum, so
+    /// an offset that leaves the address space is unprovable; the caller bounds `off` (D1's cap
+    /// select builds it from two constrained bits, `off ∈ {0, 4, 8, 12}`).
+    pub fn load_offset(&mut self, base: Ptr, k: i64, off: Felt) -> Felt {
+        self.begin();
+        let ro = self.materialise(off.0);
+        let at = imm(self.addr_of(base) as i64 + k);
+        let (id, rd) = self.new_handle(1);
+        self.emit(Op::Load, rd, ro, BRef::Imm(at));
+        Felt(id)
+    }
+
     pub fn store_ext(&mut self, p: Ptr, off: i64, v: Ext) {
         self.begin();
         let rv = self.materialise(v.0);
