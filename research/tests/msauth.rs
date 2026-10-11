@@ -253,3 +253,133 @@ fn cycles_at_one_two_and_three_signers() {
         eprintln!("msauth: {k} active slot(s): {} cycles; stack words {:#x}..={:#x} ({} B)", e.cycles(), low, top, 4 * (top - low + 1));
     }
 }
+
+// ---- Task 7: adversarial and edge-policy hardening ---------------------------------------------
+
+const REFUSED: u32 = 0xdead_beef;
+/// Witness word of slot `s`'s path, sibling `lvl`, word `w`.
+fn path_word(s: usize, lvl: usize, w: usize) -> usize { 17 + 967 * s + 935 + 8 * lvl + w }
+
+#[test]
+fn descending_indices_are_refused() {
+    let f = fixture(3);
+    let input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 2, &BINDING), slot(&f, 1, &BINDING)]);
+    assert_eq!(run(&input, &BINDING)[7], REFUSED);
+}
+
+#[test]
+fn corrupted_sibling_within_one_policy_is_refused() {
+    let f = fixture(3);
+    let mut input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 0, &BINDING), slot(&f, 1, &BINDING)]);
+    input[path_word(1, 2, 3)] ^= 1;
+    assert_eq!(run(&input, &BINDING)[7], REFUSED);
+}
+
+#[test]
+fn a_single_signer_with_a_corrupted_path_changes_the_commit() {
+    let f = fixture(3);
+    let mut input = msauth_inputs(&MSK, &SALT, 1, &[slot(&f, 1, &BINDING)]);
+    input[path_word(0, 1, 0)] ^= 0x8000_0000;
+    assert_ne!(run(&input, &BINDING), expected(&f, 1));
+}
+
+#[test]
+fn pk_from_one_index_with_the_path_of_another_is_refused() {
+    // Expectation corrected from the brief: a lone mismatched slot derives its own (bogus) root
+    // and publishes the commit of that other policy, which never equals the honest commit; only
+    // alongside an honest signer does the root disagree and the guest refuse.
+    let f = fixture(3);
+    let mut s = slot(&f, 0, &BINDING);
+    s.index = 1;
+    s.path = f.paths[1];
+    let input = msauth_inputs(&MSK, &SALT, 1, &[s.clone()]);
+    assert_ne!(run(&input, &BINDING), expected(&f, 1));
+    let input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 2, &BINDING), s]);
+    assert_eq!(run(&input, &BINDING)[7], REFUSED);
+}
+
+#[test]
+fn inactive_slots_are_ignored_even_with_garbage() {
+    let f = fixture(3);
+    let mut input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 0, &BINDING), slot(&f, 1, &BINDING)]);
+    let base = 17 + 967 * 2;
+    assert_eq!(input[base], 0);
+    for w in &mut input[base + 1..base + 967] { *w = 0xABAB_ABAB; }
+    assert_eq!(run(&input, &BINDING), expected(&f, 2));
+}
+
+#[test]
+fn edge_policies_publish_the_hosts_commit() {
+    // 1-of-1
+    let f = fixture(1);
+    let input = msauth_inputs(&MSK, &SALT, 1, &[slot(&f, 0, &BINDING)]);
+    assert_eq!(run(&input, &BINDING), expected(&f, 1), "1-of-1");
+    // 3-of-3
+    let f = fixture(3);
+    let all: Vec<Slot> = (0..3).map(|i| slot(&f, i, &BINDING)).collect();
+    assert_eq!(run(&msauth_inputs(&MSK, &SALT, 3, &all), &BINDING), expected(&f, 3), "3-of-3");
+    // 1-of-16 and 2-of-16 at the far end of the tree
+    let f = fixture(16);
+    let input = msauth_inputs(&MSK, &SALT, 1, &[slot(&f, 15, &BINDING)]);
+    assert_eq!(run(&input, &BINDING), expected(&f, 1), "1-of-16 at index 15");
+    let input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 0, &BINDING), slot(&f, 15, &BINDING)]);
+    assert_eq!(run(&input, &BINDING), expected(&f, 2), "2-of-16 at 0 and 15");
+}
+
+#[test]
+fn same_signatures_under_another_binding_are_refused() {
+    let f = fixture(3);
+    let input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 0, &BINDING), slot(&f, 1, &BINDING)]);
+    let other = [1u32, 2, 3, 4, 5, 6, 7, 8];
+    assert_eq!(run(&input, &other)[7], REFUSED);
+}
+
+#[test]
+fn msk_and_salt_each_change_the_commit() {
+    let f = fixture(3);
+    let s = [slot(&f, 0, &BINDING), slot(&f, 1, &BINDING)];
+    let honest = run(&msauth_inputs(&MSK, &SALT, 2, &s), &BINDING);
+    let by_msk = run(&msauth_inputs(&[7; 8], &SALT, 2, &s), &BINDING);
+    let by_salt = run(&msauth_inputs(&MSK, &[8; 8], 2, &s), &BINDING);
+    assert_eq!(honest, expected(&f, 2));
+    assert_ne!(by_msk, honest);
+    assert_ne!(by_salt, honest);
+    assert_ne!(by_msk, by_salt);
+    assert_ne!(by_msk[7], REFUSED);
+    assert_ne!(by_salt[7], REFUSED);
+}
+
+#[test]
+fn more_active_than_threshold_is_accepted() {
+    let f = fixture(3);
+    let all: Vec<Slot> = (0..3).map(|i| slot(&f, i, &BINDING)).collect();
+    assert_eq!(run(&msauth_inputs(&MSK, &SALT, 1, &all), &BINDING), expected(&f, 1));
+}
+
+#[test]
+fn threshold_above_the_active_count_is_refused() {
+    let f = fixture(3);
+    let input = msauth_inputs(&MSK, &SALT, 3, &[slot(&f, 0, &BINDING), slot(&f, 1, &BINDING)]);
+    assert_eq!(run(&input, &BINDING)[7], REFUSED);
+}
+
+#[test]
+fn a_signature_by_a_non_member_with_a_member_path_is_refused() {
+    let f = fixture(3);
+    let outsider = Keypair::generate(Some(&[0xEE; 32])).unwrap();
+    let mut s = slot(&f, 1, &BINDING);
+    s.sig = outsider.sign(&signing_message(&BINDING));
+    // (a) the outsider's signature under the member's pk fails the signature check
+    let input = msauth_inputs(&MSK, &SALT, 1, &[s.clone()]);
+    assert_eq!(run(&input, &BINDING)[7], REFUSED);
+    // (b) the outsider's own valid signature and pk with a member's path: alone it derives a
+    // different root (a different policy's commit, never the honest one); next to an honest
+    // signer the roots disagree and the guest refuses. (Brief expected the sentinel for the
+    // lone case; the guest cannot know the true root, so the commit mismatch is the defence.)
+    s.pk = outsider.public.to_bytes().try_into().unwrap();
+    s.sig = outsider.sign(&signing_message(&BINDING));
+    let input = msauth_inputs(&MSK, &SALT, 1, &[s.clone()]);
+    assert_ne!(run(&input, &BINDING), expected(&f, 1));
+    let input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 0, &BINDING), s]);
+    assert_eq!(run(&input, &BINDING)[7], REFUSED);
+}

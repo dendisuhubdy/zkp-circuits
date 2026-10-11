@@ -340,3 +340,79 @@ fn the_guest_verifies_like_the_host_and_reports_its_cycles() {
         }
     }
 }
+
+// ---- Task 7: length, cross-key and guest differential hardening -------------------------------
+
+#[test]
+fn message_lengths_agree_with_the_crate() {
+    for (k, len) in [0usize, 1, 63, 64, 65, 136, 137, 1000].into_iter().enumerate() {
+        let (kp, mut msg) = case(100 + k as u64, len);
+        let pk = kp.public.to_bytes();
+        let sig = kp.sign(&msg);
+        assert!(theirs(&pk, &msg, &sig), "crate accepts len {len}");
+        assert!(ours(&pk, &msg, &sig), "ours accepts len {len}");
+        if let Some(last) = msg.last_mut() {
+            *last ^= 1;
+            assert_eq!(ours(&pk, &msg, &sig), theirs(&pk, &msg, &sig), "flipped len {len}");
+            assert!(!ours(&pk, &msg, &sig), "flipped len {len} rejected");
+        }
+    }
+}
+
+#[test]
+fn a_signature_for_one_key_fails_under_every_other_key() {
+    let cs: Vec<_> = (0..10u64).map(|s| case(200 + s, 40)).collect();
+    let pks: Vec<_> = cs.iter().map(|(kp, _)| kp.public.to_bytes()).collect();
+    let sigs: Vec<_> = cs.iter().map(|(kp, m)| kp.sign(m)).collect();
+    for (i, (_, msg)) in cs.iter().enumerate() {
+        for (j, pk) in pks.iter().enumerate() {
+            let got = ours(pk, msg, &sigs[i]);
+            assert_eq!(got, theirs(pk, msg, &sigs[i]), "agree ({i},{j})");
+            assert_eq!(got, i == j, "matrix ({i},{j})");
+        }
+    }
+}
+
+fn guest_valid(p: &rand_zkvm::isa::Program, pk: &[u8], sig: &[u8], msg: &[u8]) -> u32 {
+    use rand_zkvm::machine::Tier;
+    let mut input = words(pk);
+    input.extend(words(sig));
+    input.push(msg.len() as u32);
+    input.extend(words(msg));
+    let exec = rand_zkvm::emulator::execute(p, &input, &[], Tier(22).max_cycles()).unwrap();
+    assert!(exec.halted);
+    exec.outputs[0]
+}
+
+#[test]
+fn the_guest_rejects_messages_over_64_bytes_and_accepts_64() {
+    let p = rand_zkvm::guests::compiled::dilithium_verify();
+    let (kp, msg) = case(300, 64);
+    let pk = kp.public.to_bytes();
+    let sig = kp.sign(&msg);
+    assert_eq!(guest_valid(&p, &pk, &sig, &msg), 1, "64 bytes accepted");
+    let (kp, msg) = case(301, 65);
+    let sig = kp.sign(&msg);
+    assert!(ours(&kp.public.to_bytes(), &msg, &sig), "the host accepts 65 bytes");
+    assert_eq!(guest_valid(&p, &kp.public.to_bytes(), &sig, &msg), 0, "65 bytes refused by the guest");
+}
+
+#[test]
+fn guest_and_host_agree_over_seeds() {
+    let p = rand_zkvm::guests::compiled::dilithium_verify();
+    for seed in 400..406u64 {
+        let (kp, msg) = case(seed, 20 + (seed as usize % 40));
+        let pk = kp.public.to_bytes();
+        let sig = kp.sign(&msg);
+        let off = (seed as usize * 397) % sig.len();
+        let mut bad_sig = sig.to_vec();
+        bad_sig[off] ^= 0x10;
+        let mut bad_pk = pk.to_vec();
+        bad_pk[(seed as usize * 211) % pk.len()] ^= 0x04;
+        for (name, pk, sig) in [("valid", pk.to_vec(), sig.to_vec()), ("sig", pk.to_vec(), bad_sig), ("pk", bad_pk, sig.to_vec())] {
+            let want = ours(&pk, &msg, &sig) as u32;
+            assert_eq!(guest_valid(&p, &pk, &sig, &msg), want, "seed {seed} {name}");
+            assert_eq!(want, (name == "valid") as u32, "seed {seed} {name} host");
+        }
+    }
+}
