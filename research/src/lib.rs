@@ -16,3 +16,4 @@ pub mod dilithium_host;
 pub mod evm;
 pub mod viewing;
 pub mod ledger;
+pub mod msauth;
