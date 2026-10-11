@@ -493,3 +493,31 @@ fn the_docs_name_the_chip_where_the_isa_and_tables_are_documented() {
     assert_eq!(rand_zkvm::tables::modq::col::WIDTH, 59);
     assert_eq!(rand_zkvm::tables::cpu::col::WIDTH, 283);
 }
+
+/// Measurement (not a gate): tier-10 proof sizes for the roadmap's "Proof-size deltas (measured)"
+/// table. Run with `-- --ignored --nocapture`; prints `MODQ-SIZE profile=<p> kind=<k> bytes=<n>`.
+#[test]
+#[ignore]
+fn measure_modq_proof_sizes_at_tier_10() {
+    use rand_zkvm::asm::{ops::*, Assembler};
+    use rand_zkvm::guests;
+    use rand_zkvm::machine::{FriProfile, Machine, Tier};
+    for (name, profile) in [("Test", FriProfile::Test), ("Production", FriProfile::Production)] {
+        let m = Machine::new(profile);
+        let p = guests::fib(10);
+        let (proof, _) = m.prove(&p, &[], &[], Some(Tier(10))).unwrap();
+        assert_eq!(proof.modq_log_height, 0);
+        m.verify(&p.digest(), &proof).unwrap();
+        println!("MODQ-SIZE profile={name} kind=chip-free bytes={}", proof.size());
+
+        // One NTT call over an all-zero arena: one cycle, one 1 024-row block, inside tier 10.
+        let mut a = Assembler::new(0);
+        a.extend(call_modq(0x1000, 0));
+        a.extend(halt());
+        let p = a.assemble();
+        let (proof, _) = m.prove(&p, &[], &[], Some(Tier(10))).unwrap();
+        assert_eq!(proof.modq_log_height, 10, "one block");
+        m.verify(&p.digest(), &proof).unwrap();
+        println!("MODQ-SIZE profile={name} kind=one-block bytes={}", proof.size());
+    }
+}

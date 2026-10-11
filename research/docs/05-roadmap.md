@@ -397,12 +397,23 @@ a tier a prover pool can prove.
   rejected with it on; the hooks sit behind the `cheating` cargo feature, `tests/common/modq_run.rs`
   is always compiled and `tests/modq_harness.rs` is gated.
 
-**Proof-size deltas (estimated; re-measure at the fullnode re-vendor).** Not re-measured with `e2e.rs::measure_production_profile` for this note; the
-design's estimates are: a chip-free proof gains about **+1 KB (+0.07% of 1.37 MB)**: one header
-byte, the one new cpu column over 80 queries, at most one LogUp group. A chip-bearing proof gains
-about **+75 KB** at Production FRI (about 107 opened base columns at 80 queries). Record the measured
-pair (a chip-free tier-10 proof, and a one-modq-block tier-10 proof, each against `main`) when the
-production-profile test next runs.
+**Proof-size deltas (measured, tier 10).** Means of four runs each, bytes, `postcard` proof size.
+Per-run sizes vary by about ±0.5% (salted commitments, random-length openings), so a chip-free
+delta below roughly 5 KB is within noise. Before = merge-base `c83b1c7` (no chip); after = this
+branch with `modq_log_height = 0`; one block = a guest making one `NTT0` call (one 1 024-row
+block), measured by `tests/modq.rs::measure_modq_proof_sizes_at_tier_10` (`--ignored`).
+
+| Profile | Chip-free before | Chip-free after | one modq block, after | Chip-free delta | One block vs. before |
+|---|---|---|---|---|---|
+| Test (27 queries) | 315 265 | 317 330 | 350 329 | +2 065 (+0.7%, noise) | +35 064 (+11.1%) |
+| Production (80 queries) | 1 368 675 | 1 372 580 | 1 521 236 | +3 905 (+0.3%, noise) | +152 561 (+11.1%) |
+
+Runs (before Test / before Production / after Test / after Production chip-free / one block Test / one block Production):
+312 329, 317 289, 316 361, 315 081 / 1 367 466, 1 362 603, 1 374 731, 1 369 898 / 316 810, 318 153, 316 617, 317 738 /
+1 371 947, 1 374 636, 1 368 588, 1 375 148 / 351 017, 350 986, 349 864, 349 450 / 1 518 795, 1 519 884, 1 526 700, 1 519 564.
+The chip-free cost is consistent with the estimate (about +1 KB: one header byte, one cpu column,
+at most one LogUp group) and is indistinguishable from run-to-run noise. A chip-bearing proof costs
+about twice the estimated +75 KB at Production FRI (+153 KB measured, +35 KB at the Test profile).
 
 **Every verifier key changed; ships only with a chain cut.** The cpu's extra column and lookup move
 every key's `common` digest, chip-free shapes included (`tests/verifier_key.rs`, plus a fifth

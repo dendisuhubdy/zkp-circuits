@@ -430,10 +430,14 @@ height is refused even though it would verify. Every multisig spend, **1-of-N in
 - **`Proof`.** It gains `modq_log_height: u8` after `sha256_log_height`. Postcard adds 1 byte to every
   proof, and old proofs do not decode (the cut again).
 - **Size of chip-free proofs:** +1 byte of header, plus one cpu column (8 B × 80 queries plus out-of-
-  domain values), plus at most one LogUp group, ≈ **+1 KB (+0.07% of 1.37 MB)**. Constraint set 8
+  domain values), plus at most one LogUp group, ≈ **+1 KB (+0.07% of 1.37 MB)** estimated. **Measured at tier 10
+  (mean of four runs): +2.1 KB at the Test profile (315 265 to 317 330 B) and +3.9 KB at Production
+  (1 368 675 to 1 372 580 B), both within the ±0.5% run-to-run noise.** Constraint set 8
   measured +2 KB for 5 columns and 4 lookups.
 - **Size of chip-bearing proofs:** about 107 opened base columns (64 main, 16 preprocessed, ≈ 27 aux)
-  × 80 queries × 8 B, plus quotient and out-of-domain values: **≈ +75 KB** at Production FRI. Keccak's
+  × 80 queries × 8 B, plus quotient and out-of-domain values: **≈ +75 KB** at Production FRI estimated; **measured: one modq
+  block at tier 10 costs +153 KB at Production (1 521 236 B vs. 1 368 675 B before) and +35 KB at the Test profile
+  (350 329 B vs. 315 265 B)**, about twice the estimate (`research/docs/05-roadmap.md`, "Proof-size deltas (measured)"). Keccak's
   2 711 columns cost +1.91 MB, about 0.7 KB per column.
 - **Gas.** `MODQ_GAS = 168`: 1 024 × (59 + 16) = 76 800 committed cells, at the ≈ 460 cells per gas
   that `KECCAK` (192) and `SHA256` (64) imply. `gas_max_with_modq` adds `(2^mlh / 1024)·167`.
