@@ -224,8 +224,11 @@ fn the_cycle_budget_per_inner_proof_is_pinned() {
     // Phase 4 (2026-10-09, the Merkle spans) re-recorded it: 585 686 → 315 952. That lever landed
     // (D1 the cap select by register-offset `LOAD`, A the re-homing reloads, D2 the in-place walk,
     // B/B′ `SPONGE`/`COMPRESS` immediates; docs/09): one production inner verification is now in
-    // tier 19, 208 335 rows under the 2^19 − 1 gate.
-    assert_eq!(r.cpu_rows, 315_952, "phase 4's landing: one production inner verification, 208 335 rows under the 2^19 − 1 gate (585 686 after phase 3, 61 399 above it)");
+    // tier 19, 208 335 rows under the 2^19 − 1 gate. MODQ chip (2026-10-11, private multisig
+    // phase 3): the inner cpu gained SYS_MODQ (283 columns): 315 952 → 315 391 (measured; the
+    // wider opened row moves `(none)` 98 609 → 98 127 and `input_root` 90 329 → 90 250 in
+    // `tests/profile.rs`, every other call site unchanged), still tier 19, 208 896 under the gate.
+    assert_eq!(r.cpu_rows, 315_391, "the MODQ chip's re-pin: one production inner verification, 208 896 rows under the 2^19 − 1 gate (315 952 after phase 4; 585 686 after phase 3, 61 399 above it)");
     assert_eq!(recursion::machine::Tier::for_cycles(r.cpu_rows), Some(recursion::machine::Tier(19)),
                "tier 19: under the 2^19 − 1 gate since phase 4 (tier 20 after phase 3) — docs/09 and docs/00 must move with it");
     assert!(r.cpu_rows <= (1 << 19) - 1, "above the 2^19 − 1 gate again: docs/09 and docs/00's decision paragraph must be updated");
@@ -305,10 +308,10 @@ fn the_committed_program_digest_is_reproducible() {
 // ── M5.2 Task 10: the test-profile exit twin ──────────────────────────────────────────────────
 
 /// The Task-10 twin: **the post-cut verifier program over one real test-profile bundle proof,
-/// proved and verified natively** — 104 150 rows since phase 4 (169 366 at phase 3's end, Cut F;
+/// proved and verified natively** — 104 229 rows since the MODQ chip (104 150 after phase 4; 169 366 at phase 3's end, Cut F;
 /// 202 198 after Cut D, 230 950 after phase 2's row cuts), tier 18 (461 988 rows at tier 19 in
 /// constraint set 8, 441 643 in constraint set 6; `TIERS` has no 17 rung, so phase 4 leaves it at
-/// 18), with the exact shape of Task 10's production exit (tier 19, 315 952 rows since phase 4;
+/// 18), with the exact shape of Task 10's production exit (tier 19, 315 391 rows since the MODQ chip, 315 952 after phase 4;
 /// tier 20, 585 686 after phase 3). `#[ignore]`d for its cost: the tier-19 twin was
 /// killed at 78.7 GB live on a 48 GB box (`recursion/docs/04-phase2-row-cuts.md` §"The prover's
 /// live heap", against a 94.2 GB Linux peak); one height shorter (all but the poseidon2 and reduce
@@ -323,7 +326,7 @@ fn the_committed_program_digest_is_reproducible() {
 /// here the R1 binding is checked at full scale: a proof of the verifier program never verifies
 /// against a *different* program's key.
 #[test]
-#[ignore = "the M5.2 Task-10 twin: post-cut program, 104 150 rows since phase 4 (169 366 after phase 3), tier 18; proved on this 48 GB box at 26.88 GB live, 2026-10-06, at phase 3's end (docs/06; 33.27 GB at the quotient-layout fork, docs/05; tier 19 was killed at 78.7 GB live, docs/04); run alone: cargo +1.98.1 test -p recursion --release --features parallel --test exit twin -- --ignored --nocapture"]
+#[ignore = "the M5.2 Task-10 twin: post-cut program, 104 229 rows since the MODQ chip (104 150 after phase 4; 169 366 after phase 3), tier 18; proved on this 48 GB box at 26.88 GB live, 2026-10-06, at phase 3's end (docs/06; 33.27 GB at the quotient-layout fork, docs/05; tier 19 was killed at 78.7 GB live, docs/04); run alone: cargo +1.98.1 test -p recursion --release --features parallel --test exit twin -- --ignored --nocapture"]
 fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_verifies_natively() {
     let p = common::bundle_proofs(FriProfile::Test, 1).pop().unwrap();
     let shape = InnerShape::of(FriProfile::Test, p.proof.tier, p.proof.program_log_height,
@@ -336,7 +339,7 @@ fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_ver
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 104_150, "the twin proves the post-cut program as measured (after phase 4 (104 150): the N=1 aggregate pin 104 477 less the 327-row loop overhead; 169 366 after phase 3's Cut F; 185 206 after Cut E2; 192 982 after Cut E1; 202 198 after Cut D; 230 950 after phase 2's row cuts; 461 988 at tier 19 in constraint set 8, 461 082 in constraint set 7 with VERIFIER-1, 441 643 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 104_229, "the twin proves the post-cut program as measured (after the MODQ chip (104 229): the N=1 aggregate pin 104 556 less the 327-row loop overhead; 104 150 after phase 4; 169 366 after phase 3's Cut F; 185 206 after Cut E2; 192 982 after Cut E1; 202 198 after Cut D; 230 950 after phase 2's row cuts; 461 988 at tier 19 in constraint set 8, 461 082 in constraint set 7 with VERIFIER-1, 441 643 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(18));
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();
@@ -364,9 +367,11 @@ fn twin_the_post_cut_verifier_program_over_one_test_profile_proof_proves_and_ver
 /// 123–127 GB from docs/05's 170–175 GB scaled by the cells phase 3 removed) — a ≥ 160 GB host.
 /// A projection until it runs; not attempted on this 48 GB box. Phase 4 (2026-10-09, the Merkle
 /// spans) re-recorded it: tier 20, 585 686 rows → tier 19, 315 952 rows (the tier-20 projection
-/// above is not re-taken here).
+/// above is not re-taken here). MODQ chip (2026-10-11, private multisig phase 3): the inner cpu
+/// gained SYS_MODQ: 315 952 → 315 391 rows, still tier 19 (emulated by
+/// `the_cycle_budget_per_inner_proof_is_pinned`; not proved here).
 #[test]
-#[ignore = "the M5.2 exit: production profile, post-cut program, tier 19, 315 952 rows since phase 4 (tier 20, 585 686 after phase 3); \
+#[ignore = "the M5.2 exit: production profile, post-cut program, tier 19, 315 391 rows since the MODQ chip (315 952 after phase 4; tier 20, 585 686 after phase 3); \
             ~110-130 GB projected at tier 20 (docs/06 §3, cell-weighted; tier 21 measured 376.9 GB), not re-projected for tier 19, a >= 160 GB host. \
             Run on the big machine: \
             cargo +1.98.1 test -p recursion --release --test exit -- --ignored --nocapture"]
@@ -384,7 +389,7 @@ fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 315_952, "the exit proves the post-cut program as measured (after phase 4 (315 952), `tests/pins.json`; 585 686 after phase 3's Cut F; 664 886 after Cut E2; 703 766 after Cut E1; 749 846 after Cut D; 893 606 after phase 2's row cuts; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 315_391, "the exit proves the post-cut program as measured (after the MODQ chip (315 391), `tests/pins.json`; 315 952 after phase 4; 585 686 after phase 3's Cut F; 664 886 after Cut E2; 703 766 after Cut E1; 749 846 after Cut D; 893 606 after phase 2's row cuts; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(19), "tier 19 since phase 4 (tier 20 after phase 3)");
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();

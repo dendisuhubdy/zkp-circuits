@@ -715,8 +715,10 @@ fn phase_5_costs_the_measured_number_of_rows_per_inner_proof() {
     // VERIFIER-1's per-round assertion hashes nothing; constraint set 8 moved it 11 852 → 11 875:
     // the cpu table's `GAS` column widens every opened main-trace leaf, and the 35th public value
     // is observed and sponged — phase 8's list is 40 words, still ten permutations); the
-    // production one lives in `docs/00-recursion-vm.md` and `pins.json`.
-    assert_eq!(exec.permutations(), 11_875, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
+    // production one lives in `docs/00-recursion-vm.md` and `pins.json`. MODQ chip (2026-10-11,
+    // private multisig phase 3): the inner cpu gained SYS_MODQ (283 columns), which widens every
+    // opened main-trace leaf: 11 875 → 11 894.
+    assert_eq!(exec.permutations(), 11_894, "51 transcript duplexes in phases 0–4, the rest is the query phase and phase 8's digest");
 }
 
 /// Every assertion phase 5 makes is a *named* checkpoint, and the names are the interface Task 6's
@@ -770,6 +772,8 @@ fn phase_5s_assertions_are_all_named() {
 /// `39bb6b8d…3352` → `af0c16e8…6c7b`. Phase 3's Cut E2 re-recorded it (2026-10-06: each committed row's
 /// buffer gains the two fold-result cells after its salts, `hint_array_padded`, in both builds, so
 /// every later cell address moves): `af0c16e8…6c7b` → `c580415b…5e6c`. Phase 4's D2 re-recorded it (2026-10-09: the walk returns its leaf, no out cell, in both builds): `c580415b…5e6c` → `759b015d…9b4e`.
+/// MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ (283 columns; the
+/// Off replay compiles the inner AIR and embeds its key): `759b015d…9b4e` → `ac1f08cf…d406`.
 #[test]
 fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     use recursion::dsl::Liveness;
@@ -785,7 +789,7 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
-        "759b015d89ac22193904761c8eb0f68f3c2f9973d38247f4c169fbc0e3c39b4e",
+        "ac1f08cfc4aa66420718102d8b2eef9e157fb0a3aa94568c762e1313364fd406",
         "the Off replay must reproduce the pre-Task-7 stream byte for byte (plus VERIFIER-1's \
          per-round assertions, and constraint set 7's and 8's inner changes)"
     );
@@ -833,13 +837,15 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// `f66aa580…6f63` → `df3a18b8…1073`. Phase 4 (2026-10-09, the Merkle spans) re-recorded it:
 /// `df3a18b8…1073` → `1bcbcec9…1fba` (program changes all four: the cap select by register-offset
 /// `LOAD`, the re-homing reloads, the in-place Merkle walk, `SPONGE`/`COMPRESS` immediates).
+/// MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ (283 columns; an
+/// inner shape and key change): `1bcbcec9…1fba` → `e26f37e3…41a0`.
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "1bcbcec900154ec2cb6084fca1a08e534bfb2f0d67e74a8e8deff1a15da81fba",
+        "e26f37e3682a42d2f9835dca49ac0ad7408ca27f24bc34867d5f2efb28a241a0",
         "the aggregate program's digest at the Test fixture shape, as re-registered for phase 4's Merkle spans"
     );
 }
