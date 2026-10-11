@@ -498,7 +498,12 @@ fn msauth_proves_at_m_production() {
     let k: usize = std::env::var("MSAUTH_PROVE_M").ok().map_or(M_MAX, |v| v.parse().expect("MSAUTH_PROVE_M"));
     assert!((1..=M_MAX).contains(&k));
     let (p, input) = { let (p, input, _exec) = full_run(k); (p, input) }; // the Execution is dropped here
-    let m = Machine::new(FriProfile::Production);
+    let profile = match std::env::var("MSAUTH_PROVE_PROFILE").as_deref() {
+        Ok("test") => FriProfile::Test,
+        Ok("production") | Err(_) => FriProfile::Production,
+        Ok(o) => panic!("MSAUTH_PROVE_PROFILE={o}: test|production"),
+    };
+    let m = Machine::new(profile);
     let t0 = std::time::Instant::now();
     let proof = prove_msauth(&m, &p, &input, &BINDING).unwrap();
     let prove = t0.elapsed();
@@ -507,9 +512,9 @@ fn msauth_proves_at_m_production() {
     let heights = [proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.sha256_log_height, proof.modq_log_height, proof.public_log_height, proof.mem_log_height];
     let gas = format!("{:?}", proof.public_values[pv::GAS]);
     let sha: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-    let line = format!("{{\"m\":{k},\"size\":{},\"tier\":{},\"heights\":{heights:?},\"gas\":\"{gas}\",\"sha256\":\"{sha}\",\"prove_secs\":{:.1}}}", bytes.len(), proof.tier.0, prove.as_secs_f64());
+    let line = format!("{{\"m\":{k},\"size\":{},\"tier\":{},\"heights\":{heights:?},\"gas\":\"{gas}\",\"sha256\":\"{sha}\",\"profile\":\"{profile:?}\",\"prove_secs\":{:.1}}}", bytes.len(), proof.tier.0, prove.as_secs_f64());
     eprintln!("PROOF {line}");
-    std::fs::write(format!("{PROOF_DIR}/msauth-proof-M{k}.json"), format!("{line}\n")).unwrap();
+    std::fs::write(format!("{PROOF_DIR}/msauth-proof-M{k}-{profile:?}.json"), format!("{line}\n")).unwrap();
 }
 
 /// Cheap: reads the two JSON files the one-M proves wrote and asserts the proofs are indistinguishable
@@ -523,7 +528,7 @@ fn msauth_proof_headers_match_across_m() {
         let end = if rest.starts_with('[') { rest.find(']').unwrap() + 1 } else if rest.starts_with('"') { rest[1..].find('"').unwrap() + 2 } else { rest.find(|c| c == ',' || c == '}').unwrap() };
         rest[..end].to_string()
     };
-    let read = |k: usize| std::fs::read_to_string(format!("{PROOF_DIR}/msauth-proof-M{k}.json")).unwrap_or_else(|e| panic!("M{k}: {e}"));
+    let read = |k: usize| std::fs::read_to_string(format!("{PROOF_DIR}/msauth-proof-M{k}-Production.json")).unwrap_or_else(|e| panic!("M{k}: {e}"));
     let (a, b) = (read(1), read(M_MAX));
     for key in ["size", "tier", "heights", "gas"] {
         assert_eq!(field(&a, key), field(&b, key), "{key} must not leak M\n{a}{b}");

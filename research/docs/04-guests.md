@@ -293,7 +293,7 @@ public 7, memory 20 and the same gas word (`proof_shape_is_the_same_for_every_m`
 floors the heights and the gas word differ per `M`, e.g. gas 357 471 / 387 263 / 436 159 at
 `M = 1 / 2 / 3`).
 
-Production prove at `M = 3` (peak RSS, `mem_log_height`, proof bytes, wall time): pending.
+Production prove at `M = 3` (peak RSS, proof bytes, wall time): **pending, needs a host with at least 64 GB.** Two attempts on the 48 GB laptop were killed (signal 9, 26.1 GB peak RSS after 1325 s; and a Test-profile M = 3 run, which peaked at 31.2 GB RSS at about 100 s and died after 1270 s with no proof). The Test-profile prove is not cheaper in memory than it should be for the Production decision: the peak comes early (trace build / commit), well before the FRI queries.
 
 ### The `evm` guest — M4.3's exit test
 
