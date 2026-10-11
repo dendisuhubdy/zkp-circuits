@@ -222,11 +222,14 @@ fn poseidon2_permutes_the_eight_cells_at_an_offset_pointer() {
 #[should_panic(expected = "the body moved handle")]
 fn a_loop_body_that_evicts_a_pre_existing_handle_is_refused() {
     let mut b = Builder::new(Checkpoints::Off);
+    // Phase 4 A: a body claim prefers any victim over a pre-loop resident, so these 24 constants,
+    // read after the loop, fill the registers with the counter and leave only pre-loop victims.
+    let keep: Vec<_> = (0..24u64).map(|k| b.constant(F::from_u64(100 + k))).collect();
     let n = b.constant(F::TWO);
     b.counted_loop(n, |b, _i| {
         // Thirty simultaneously-live handles (kept alive by the fold below) against 25
-        // allocatable registers: the counter is the farthest-next-use resident, so the replay
-        // evicts it — and a once-emitted body that spills its own counter would not count.
+        // allocatable registers, all held by pre-loop handles: the replay must evict one of
+        // them — and a once-emitted body that moves a pre-loop handle would not count.
         // (Pre-liveness, thirty dropped handles did the same; liveness frees dead-on-arrival
         // handles instantly, so the pressure now has to be *real*.)
         let vals: Vec<_> = (0..30u64).map(|k| b.constant(F::from_u64(k))).collect();
@@ -236,6 +239,9 @@ fn a_loop_body_that_evicts_a_pre_existing_handle_is_refused() {
         }
         let _ = s;
     });
+    for v in &keep {
+        b.public(*v);
+    }
     // The invariant is a replay-time property of the emitted-once body's allocation: it fires
     // when the program is built, where the pre-liveness builder caught it at emit time.
     let _ = b.finish();
