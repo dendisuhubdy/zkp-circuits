@@ -327,7 +327,7 @@ test-shape aggregate digest `1bcbcec9…` → `e26f37e3…`; the Off replay `759
 `inner_vk_digest` `346ee184…` → `1b0c4b00…`. That last one is the first move of the "asserted
 unchanged" value above since constraint set 8. One production verification goes from 315 952 to
 315 391 rows, still tier 19, and no tier moved. The full list is in
-`research/docs/05-roadmap.md`, "Constraint set: the MODQ chip". For the re-vendor this means the
+`research/docs/05-roadmap.md`, "Constraint set 9: the MODQ chip". For the re-vendor this means the
 phase-4 values in the §6 table are stale as well as the pre-phase-4 ones: drop both. The §7 test
 tree pins (`pins.json` `tree_test`) were **not** re-recorded there, because the fixtures need a
 RAM window.

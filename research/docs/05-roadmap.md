@@ -372,7 +372,7 @@ table) — `tests/verifier_key.rs` re-pinned, in the same shape as constraint se
 widening. **Every verifier key changed; ships only with a chain cut** — chain 18 in the fullnode's
 plan, alongside Phase 1's per-instruction fee schedule.
 
-## Constraint set: the MODQ chip
+## Constraint set 9: the MODQ chip
 
 Not a finding from any review: the private multisig's phase 3 (`docs/superpowers/specs/2026-10-11-private-multisig-design.md`
 §7), designed in `docs/superpowers/specs/2026-10-11-rvm-modq-chip-design.md`. Dilithium2's ring
@@ -390,6 +390,9 @@ a tier a prover pool can prove.
   6 to 7 (`(tier, program, input, keccak, sha256, modq, public)`); the legacy entry points keep their
   signatures and delegate with `modq_log_height = 0`, and `_with_modq` siblings take the eighth
   argument. `ProveOptions::min_modq_log_height` is the explicit floor.
+- **Verifier-key blobs: export/install, format v1** (`Machine::export_verifier_key_with_modq`,
+  `Machine::install_verifier_key`, `CONSTRAINT_SET = 9`; `docs/02-tables-and-buses.md`), so the
+  fullnode ships the tier-18 `msauth` key instead of building it on 4 GB validators.
 - **Measured effect** (this branch): Dilithium2 verification 880 102 cycles in software, 348 967
   with the chip, **80 572** with the dilithium-core trims (99 `KECCAK` permutations and 18 `MODQ`
   calls). The `msauth` guest at `M_MAX = 3` is 251 946 cycles at tier 18 (`docs/04-guests.md`).

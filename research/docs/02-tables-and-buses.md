@@ -375,6 +375,39 @@ isn't) before using it to size anything, exactly as it already bounds
 program_log_height)` accordingly (still program-*content*-independent —
 computable from the tier and the declared height alone).
 
+**Verifier-key blobs (format v1).** A key can be built once and shipped
+instead of rebuilt: `Machine::export_verifier_key_with_modq(tier, plh, ilh,
+klh, slh, mlh, publh)` returns a `VerifierKeyBlob` — a header
+(`format_version = VERIFIER_KEY_BLOB_FORMAT`, the FRI `profile`, the 7-tuple
+`shape`, `constraint_set = CONSTRAINT_SET`) and the postcard bytes of the
+shape's `CommonData` (preprocessed cap, per-instance placement, packed
+lookups); `to_bytes`/`from_bytes` are postcard, trailing bytes refused.
+`Machine::install_verifier_key(&blob)` refuses another format, profile or
+constraint set, a shape `check_declared_heights_with_modq` refuses, a
+`CommonData` whose structure (instance count, preprocessed widths, degree
+bits, matrix map) disagrees with the machine's chips for that shape, and
+packed lookups that differ from the ones it recomputes symbolically from
+those chips (no trace, no commitment); it then fills — and pins, so LRU
+eviction never drops it — the cache slot for `blob.shape` without building
+(`key_builds` does not move). An identical re-install is a no-op; a
+different key over a filled slot is `InstallKeyError::SlotFilled`, never a
+replacement.
+
+**The blob is a trust root.** After those checks the one unchecked part is
+the preprocessed commitment, and it cannot be checked without the build the
+blob avoids. A crafted commitment does not merely make honest proofs fail:
+it fixes the preprocessed columns (range, nibble, round constants, periodic
+tables) to whatever its author committed, and with those a prover can make
+FORGED proofs verify. The consumer therefore pins the SHA-256 of the whole
+`to_bytes()` and checks it on the raw bytes before decoding anything:
+`Machine::install_verifier_key_pinned(bytes, &sha256)` hashes with
+`crate::sha256::sha256` first and only then decodes (the lookups decode
+into recursive symbolic expressions of unbounded depth, so unpinned bytes
+must never reach the decoder). `verify` still runs its declared-height and
+degree-bit checks on each proof (`tests/key_blob.rs`). The use is the
+fullnode's tier-18 `msauth` key (~80 s, ~4 GB to build). A Test-profile
+tier-10 one-modq-block blob is 15 526 bytes.
+
 Soundness does not depend on the verifier checking the declared height
 against the program in any other way, because `hc` already does: it binds
 `(base_pc, len, words)` via the capacity-lane header
