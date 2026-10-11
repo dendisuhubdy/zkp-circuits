@@ -237,6 +237,10 @@ pub fn absorb_staged(b: &mut Builder, st: Ptr, cursor: Ptr, v: Felt) {
 /// (`input_root` 137 201 → 129 762, `commit_root` 56 560 → 43 520), about 18 per walk — the
 /// sixteen copy rows plus the stores and loads their cells no longer cost. `Off` keeps the copy
 /// out (into `leaf`) as the differential reference.
+///
+/// B (phase 4): the sibling is `COMPRESS`'s absolute immediate, so the per-level `FADDI` that
+/// folded the sibling `Ptr`'s offset into a register is gone too (`commit_root`'s FADDI rows at
+/// the production profile: 8 560 → 720).
 pub fn merkle_walk(b: &mut Builder, leaf: Digest, index_bits: &[Felt], siblings: Ptr, levels: usize)
                    -> Digest {
     merkle_walk_with_injections(b, leaf, index_bits, siblings, levels, &[])

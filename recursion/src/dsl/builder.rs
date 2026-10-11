@@ -516,7 +516,8 @@ impl Builder {
 
     /// Reserve `cells` cells addressed **absolutely**: no holder register at all — every
     /// `LOAD`/`STORE` compiles to `r0` plus the full address immediate, and a register-only
-    /// address operand (`POSEIDON2`, `SPONGE`) pays one `FADDI` into scratch per use. The
+    /// address operand (`POSEIDON2`, `SPONGE`'s and `COMPRESS`'s state) pays one `FADDI` into
+    /// scratch per use (their second address is an immediate since phase 4). The
     /// pointer therefore claims no register and has no allocation the replay's loop invariant
     /// could see moved — the shape M5.3's interface-sponge state and cursor need: they live
     /// across the counted loop while the body's register pressure churns underneath.
@@ -720,27 +721,32 @@ impl Builder {
     }
 
     /// One `SPONGE` instruction (Task 9): absorb the four cells at `src` into rate lanes 0–3 of
-    /// the state at `state`, permuted in place by the poseidon2 chip. `Ptr` deltas are folded
-    /// into the registers first, the `poseidon2` rule (`Builder::poseidon2`).
+    /// the state at `state`, permuted in place by the poseidon2 chip. The state's `Ptr` delta is
+    /// folded into a register first, the `poseidon2` rule (`Builder::poseidon2`); `src` is the
+    /// absolute immediate `addr_of(src)` (phase 4 B′), so it costs no register and no `FADDI`.
     pub fn sponge_absorb(&mut self, state: Ptr, src: Ptr) {
         self.begin();
         let ra = self.ptr_reg(state);
-        let rb = self.ptr_reg(src);
-        self.emit(Op::Sponge, RRef::Raw(0), ra, bref_of(rb));
+        // Phase 4 B′: the source block's address is a compile-time constant — an immediate.
+        let at = F::from_u64(self.addr_of(src));
+        self.emit(Op::Sponge, RRef::Raw(0), ra, BRef::Imm(at));
         self.stats.perms += 1;
     }
 
     /// One `COMPRESS` instruction (Cut C): the four-cell digest at `state` and the four-cell
     /// sibling at `sib`, ordered by `bit`, permuted by the poseidon2 chip, lanes 0–3 written back
-    /// over `state`. `bit` must be boolean — the emulator refuses anything else as a build error.
+    /// over `state`. `sib` is the absolute immediate `addr_of(sib)` (phase 4 B): no register, no
+    /// `FADDI` folding its offset. `bit` must be boolean — the emulator refuses anything else as a
+    /// build error.
     /// `bit` rides in the `rd` slot as a read, exactly as `STORE`'s value does: the handle's home
     /// register, or a reload into scratch if it was spilled (`r0` for [`Builder::zero`]).
     pub fn compress_step(&mut self, state: Ptr, sib: Ptr, bit: Felt) {
         self.begin();
         let ra = self.ptr_reg(state);
-        let rb = self.ptr_reg(sib);
+        // Phase 4 B: the sibling's address is a compile-time constant — an immediate.
+        let at = F::from_u64(self.addr_of(sib));
         let rd = self.materialise(bit.0);
-        self.emit(Op::Compress, rd, ra, bref_of(rb));
+        self.emit(Op::Compress, rd, ra, BRef::Imm(at));
         self.stats.perms += 1;
     }
 

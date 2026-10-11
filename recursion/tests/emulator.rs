@@ -277,7 +277,7 @@ fn compress_orders_the_children_by_the_bit_and_keeps_four_lanes() {
         let mut instrs = vec![i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 2, 0, 80), i(Op::Faddi, 3, 0, bit)];
         for k in 0..4 { instrs.push(i(Op::Faddi, 4, 0, 1 + k)); instrs.push(i(Op::Store, 4, 1, k)); }
         for k in 0..4 { instrs.push(i(Op::Faddi, 4, 0, 11 + k)); instrs.push(i(Op::Store, 4, 2, k)); }
-        instrs.push(ir(Op::Compress, 3, 1, 2));
+        instrs.push(i(Op::Compress, 3, 1, 80)); // phase 4 B: the sibling's address is the immediate
         for k in 0..4 { instrs.push(i(Op::Load, 5, 1, k)); instrs.push(i(Op::Public, 0, 5, 0)); }
         instrs.push(i(Op::Halt, 0, 0, 0));
         execute(&Program { instrs, checkpoints: vec![], reduce_layout: vec![] }, &[], 1000).unwrap()
@@ -295,7 +295,7 @@ fn compress_orders_the_children_by_the_bit_and_keeps_four_lanes() {
 
 #[test]
 fn compress_refuses_a_non_boolean_bit() {
-    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 2, 0, 80), i(Op::Faddi, 3, 0, 2), ir(Op::Compress, 3, 1, 2), i(Op::Halt, 0, 0, 0)], checkpoints: vec![], reduce_layout: vec![] };
+    let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 2, 0, 80), i(Op::Faddi, 3, 0, 2), i(Op::Compress, 3, 1, 80), i(Op::Halt, 0, 0, 0)], checkpoints: vec![], reduce_layout: vec![] };
     assert_eq!(execute(&p, &[], 100), Err(ExecError::NonBooleanBit { pc: 3 }));
 }
 
@@ -433,4 +433,32 @@ fn pow_refuses_a_non_boolean_bit_and_a_bad_shape() {
     assert_eq!(execute(&pow_prog(&bits, 0, 8, F::TWO, F::ONE), &[], 10_000).unwrap_err(), ExecError::NonBooleanBit { pc: 131 });
     let bits = vec![0u64; 64];
     assert!(matches!(execute(&pow_prog(&bits, 60, 8, F::TWO, F::ONE), &[], 10_000), Err(ExecError::PowShape { .. })));
+}
+
+/// Phase 4 B/B′: `SPONGE`'s source and `COMPRESS`'s sibling are absolute immediates.
+#[test]
+fn sponge_and_compress_read_their_second_address_from_the_immediate() {
+    // r8 holds an unrelated value: under the immediate form the address is the word, not a register.
+    let p = Program { instrs: vec![
+        i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 8, 0, 5000), i(Op::Faddi, 3, 0, 1),
+        i(Op::Sponge, 0, 1, 80),
+        i(Op::Compress, 3, 1, 96),
+        i(Op::Halt, 0, 0, 0),
+    ], checkpoints: vec![], reduce_layout: vec![] };
+    let ex = execute(&p, &[], 100).unwrap();
+    let sp = ex.events.iter().find(|e| e.instr.op == Op::Sponge).unwrap();
+    assert!(matches!(sp.perm.as_ref().unwrap().kind, PermKind::Sponge { src: 80 }));
+    let cp = ex.events.iter().find(|e| e.instr.op == Op::Compress).unwrap();
+    assert!(matches!(cp.perm.as_ref().unwrap().kind, PermKind::Compress { sib: 96, bit: true }));
+}
+
+/// Phase 4 B/B′ (Review Focus 5): an immediate whose top cell `b + 3` reaches `2^24` is refused.
+#[test]
+fn a_sponge_or_compress_immediate_past_the_address_space_is_refused_by_name() {
+    let top = (1u64 << 24) - 2; // top cell = top + 3 >= 2^24
+    for op in [Op::Sponge, Op::Compress] {
+        let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 64), i(op, 0, 1, top), i(Op::Halt, 0, 0, 0)],
+                          checkpoints: vec![], reduce_layout: vec![] };
+        assert!(matches!(execute(&p, &[], 100), Err(ExecError::AddressOutOfRange { pc: 1, .. })), "{op:?}");
+    }
 }

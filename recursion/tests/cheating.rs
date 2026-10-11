@@ -2594,3 +2594,52 @@ fn a_headless_pow_row_at_the_tables_first_row_is_rejected() {
     let t = traces_from_parts(&p, &exec, Tier(8), &reg, &ram, Some((red, lh)));
     assert!(rejects(|| prove_and_verify(&m, &p, &t)), "a headless pow row at the table's first row VERIFIED, writing 777 to cell 664");
 }
+
+// ── Phase 4 B/B′: SPONGE's source and COMPRESS's sibling as absolute immediates ───────────────
+
+/// Phase 4 B/B′: a program with one SPONGE and one COMPRESS at immediate addresses.
+fn hash_setup() -> (Machine, Program, Traces) {
+    let mut instrs = vec![i(Op::Faddi, 7, 0, 64), i(Op::Faddi, 9, 0, 1)];
+    for k in 0..8 { instrs.push(i(Op::Faddi, 2, 0, 10 + k)); instrs.push(i(Op::Store, 2, 0, 96 + k)); }
+    instrs.push(i(Op::Sponge, 0, 7, 96));       // SPONGE row
+    instrs.push(i(Op::Compress, 9, 7, 100));    // COMPRESS row
+    for k in 0..4 { instrs.push(i(Op::Load, 3, 7, k)); instrs.push(i(Op::Public, 0, 3, 0)); }
+    instrs.push(i(Op::Halt, 0, 0, 0));
+    let p = Program { instrs, checkpoints: vec![], reduce_layout: vec![] };
+    let m = Machine::new(FriProfile::Test);
+    let exec = execute(&p, &[], 10_000).unwrap();
+    let t = build_traces(&p, &exec, Tier(8)).unwrap();
+    (m, p, t)
+}
+
+fn row_of(p: &Program, op: Op) -> usize { p.instrs.iter().position(|x| x.op == op).unwrap() }
+
+#[test]
+fn honest_immediate_address_hash_traces_pass() {
+    let (m, p, t) = hash_setup();
+    prove_and_verify(&m, &p, &t).unwrap();
+}
+
+#[test]
+fn a_sponge_source_moved_off_its_immediate_is_rejected() {
+    let (m, p, mut t) = hash_setup();
+    let w = cpu::col::WIDTH;
+    t.cpu.values[row_of(&p, Op::Sponge) * w + cpu::col::B0] += F::from_u64(4); // another block
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_compress_sibling_moved_off_its_immediate_is_rejected() {
+    let (m, p, mut t) = hash_setup();
+    let w = cpu::col::WIDTH;
+    t.cpu.values[row_of(&p, Op::Compress) * w + cpu::col::B0] -= F::from_u64(4);
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}
+
+#[test]
+fn a_forged_second_pointer_limb_on_an_immediate_row_is_rejected() {
+    let (m, p, mut t) = hash_setup();
+    let w = cpu::col::WIDTH;
+    t.cpu.values[row_of(&p, Op::Sponge) * w + cpu::col::G2LIMB0] += F::ONE;
+    assert!(rejects(|| prove_and_verify(&m, &p, &t)));
+}

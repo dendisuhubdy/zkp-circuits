@@ -660,7 +660,7 @@ pub fn compress_program(bit: u64) -> recursion::isa::Program {
         instrs.push(i(Op::Faddi, 4, 0, 11 + k));
         instrs.push(i(Op::Store, 4, 2, k));
     }
-    instrs.push(i(Op::Compress, 3, 1, 2));
+    instrs.push(i(Op::Compress, 3, 1, 80)); // phase 4 B: the sibling's absolute address
     for k in 0..4 {
         instrs.push(i(Op::Load, 5, 1, k));
         instrs.push(i(Op::Public, 0, 5, 0));

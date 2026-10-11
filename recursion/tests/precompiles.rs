@@ -293,9 +293,9 @@ fn hint_array_via_hintn_matches_the_compiled_pairs() {
 
 /// Cut C: the walk with injections under `Precompiles::On` (one COMPRESS per level) computes the
 /// compiled walk's digest, for random leaves, siblings and index bits, 1..=12 levels, with and
-/// without an injection — and dispatches one `COMPRESS` per level and per injection. (A level's cpu
-/// cost is two rows, not one: `compress_step` also emits the `FADDI` that folds the sibling
-/// `Ptr`'s offset into a register; `merkle_walk`'s doc has the measured `2·levels + 15`.)
+/// without an injection — and dispatches one `COMPRESS` per level and per injection. (Since phase
+/// 4 B the sibling is `COMPRESS`'s absolute immediate, so `compress_step` no longer emits the
+/// `FADDI` that folded the sibling `Ptr`'s offset into a register.)
 #[test]
 fn merkle_walk_via_compress_matches_the_compiled_walk() {
     use recursion::dsl::{hash, Builder, Checkpoints, Digest, Liveness};
