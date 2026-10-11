@@ -89,7 +89,7 @@ balances globally.
                     permutation bus, off memory (MODQ phase 3)
 ```
 
-Eighteen buses in total (sixteen through M4.4, then `MODQ` and `MODQ_WIRE`): `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
+Nineteen buses in total: sixteen through M4.4, `BLIND` in constraint set 7, then `MODQ` and `MODQ_WIRE` (appended after `BLIND`): `PROGRAM`, `PROGRAM_WORD` (M3.4), `INPUT_DIGEST`,
 `INPUT_READ` (M4.1, carried by the new `input` table), `PUBLIC_DIGEST`,
 `PUBLIC_READ` (constraint set 6, carried by the `public` table — the same
 two-bus split, for the same reason, one segment over), `MEMORY`, `ALU`,
@@ -99,7 +99,7 @@ table), `KECCAK` (M4.2, carried by the keccak table — and so declared but
 **unprovided** in a proof that has no keccak table, which is exactly what
 makes a `SYS_KECCAK` cpu row unprovable there) and `SHA256` (M4.4, carried by
 the sha256 table on exactly those terms), `MODQ` (MODQ phase 3, carried by the modq table on the same terms: declared and unprovided without it, so a `SYS_MODQ` cpu row is unprovable there) and `MODQ_WIRE` (the modq table's own `PermutationCheckBus`, sent and received only by that table). Every one of these
-except `MEMORY` and `MODQ_WIRE` is a `LookupBus` (a subset
+except `MEMORY`, `BLIND` and `MODQ_WIRE` (the permutation buses) is a `LookupBus` (a subset
 check: every value a consumer sends must appear, with enough multiplicity,
 in the provider's table). `MEMORY` is a `PermutationCheckBus` — both sides
 are prover-supplied main-trace rows, and the argument proved is multiset

@@ -397,7 +397,7 @@ a tier a prover pool can prove.
   rejected with it on; the hooks sit behind the `cheating` cargo feature, `tests/common/modq_run.rs`
   is always compiled and `tests/modq_harness.rs` is gated.
 
-**Proof-size deltas.** Not re-measured with `e2e.rs::measure_production_profile` for this note; the
+**Proof-size deltas (estimated; re-measure at the fullnode re-vendor).** Not re-measured with `e2e.rs::measure_production_profile` for this note; the
 design's estimates are: a chip-free proof gains about **+1 KB (+0.07% of 1.37 MB)**: one header
 byte, the one new cpu column over 80 queries, at most one LogUp group. A chip-bearing proof gains
 about **+75 KB** at Production FRI (about 107 opened base columns at 80 queries). Record the measured

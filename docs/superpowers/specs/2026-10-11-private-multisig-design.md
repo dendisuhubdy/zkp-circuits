@@ -169,7 +169,7 @@ RV32IM:
 | **total** | **~400 k cycles, ~100 Keccak-f permutations** |
 
 Tier 20 holds 1 048 575 cycles, so software verification fits about **two signatures**, and a
-tier-20 proof does not fit a 48 GB laptop. The target is **`M_MAX = 3` at tier ≤ 19**, so a strong
+tier-20 proof does not fit a 48 GB laptop. The target is **`M_MAX = 3` at tier ≤ 19** (measured: tier 18), so a strong
 prover-pool machine can prove it. If phase 2 misses that, phase 3 adds a coprocessor.
 
 Wire size: the multisig auth proof is one proof at its pinned tier (~1.6–2 MB at Production FRI,

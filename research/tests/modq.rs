@@ -480,13 +480,16 @@ mod machine {
 #[test]
 fn the_docs_name_the_chip_where_the_isa_and_tables_are_documented() {
     let doc = |f: &str| std::fs::read_to_string(format!("{}/docs/{f}", env!("CARGO_MANIFEST_DIR")));
-    let (Ok(isa), Ok(tables)) = (doc("01-isa.md"), doc("02-tables-and-buses.md")) else {
+    let (Ok(isa), Ok(tables), Ok(roadmap)) = (doc("01-isa.md"), doc("02-tables-and-buses.md"), doc("05-roadmap.md")) else {
         eprintln!("docs/ not present (a vendored copy): skipped");
         return;
     };
     assert!(isa.contains("| 8 | `MODQ base a1`"), "01-isa.md syscall table row 8");
     assert!(tables.contains("## `modq` — main, `col::WIDTH = 59`"), "02-tables-and-buses.md modq section");
     assert!(tables.contains("`MODQ_WIRE`"), "the bus catalogue");
+    let row8 = isa.lines().find(|l| l.starts_with("| 8 | `MODQ base a1`")).unwrap();
+    assert!(row8.contains("| 168 |"), "row 8 carries MODQ_GAS");
+    assert!(roadmap.contains("## Constraint set: the MODQ chip"), "05-roadmap.md MODQ section");
     assert_eq!(rand_zkvm::tables::modq::col::WIDTH, 59);
     assert_eq!(rand_zkvm::tables::cpu::col::WIDTH, 283);
 }

@@ -293,7 +293,7 @@ public 7, memory 20 and the same gas word (`proof_shape_is_the_same_for_every_m`
 floors the heights and the gas word differ per `M`, e.g. gas 357 471 / 387 263 / 436 159 at
 `M = 1 / 2 / 3`).
 
-Production prove at `M = 3` (peak RSS, proof bytes, wall time): **pending.** Three attempts on the 48 GB laptop were SIGKILLed at about 1300 s wall (true peak RSS 24 to 31 GB; 8 GB resident at death; no kernel memory kill logged; a detached CPU burner survived 1400 s). The cause of the about 1300 s kill is under investigation; run outside the agent harness or on a host with at least 64 GB.
+Production prove at `M = 3` (peak RSS, proof bytes, wall time): **pending.** Three attempts on the 48 GB laptop were SIGKILLed at about 1300 s wall (true peak RSS 24 to 31 GB; 8 GB resident at death; no kernel memory kill logged; a detached CPU burner survived 1400 s). These were not memory kills (no kernel kill logged); re-run on a host with at least 64 GB or once the cause is found.
 
 ### The `evm` guest — M4.3's exit test
 

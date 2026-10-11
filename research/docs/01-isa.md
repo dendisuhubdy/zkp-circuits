@@ -208,7 +208,7 @@ decision, not a performance one: see `docs/03-privacy.md`.
 every ordinary RV32IM instruction — no row of the table above — costs 1. A syscall's own ecall row
 is one such row; `HALT`/`WRITE_OUTPUT`/`READ_INPUT`/`READ_PUBLIC` add nothing beyond it, so each is
 1. `KECCAK`, `SHA256` and `MODQ` are one cpu row each that pulls a whole chip instance behind it —
-`KECCAK_GAS = 192`, `SHA256_GAS = 64` and `MODQ_GAS = 168` are that row's *total* cost (base 1 folded in), not an
+`KECCAK_GAS = 192`, `SHA256_GAS = 64` and `MODQ_GAS = 168` (so `gas_max_with_modq` adds `(2^mlh/1024)·167`; see `02-tables-and-buses.md`, the `modq` section) are that row's *total* cost (base 1 folded in), not an
 addition to it. `POSEIDON2`/`POSEIDON2_LEN` spend their own ecall row (1) plus two write-out rows
 (1 each) plus `⌈n/4⌉` absorb rows at rate 4, each costing `POSEIDON2_ABSORB_GAS = 3` (base 1 +
 weight 2) — `3 + 3·⌈n/4⌉` for `n ≥ 1`, and for `n = 0` too under plain `POSEIDON2` (zero absorb
