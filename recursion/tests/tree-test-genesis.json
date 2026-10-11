@@ -3,7 +3,7 @@
   "leaf_size": 1,
   "max_depth": 2,
   "leaf": { "tier": 18, "reg_log_height": 19, "ram_log_height": 19, "poseidon2_log_height": 14, "reduce_log_height": 16 },
-  "vk_leaf": [10371521499933268732, 6779034006467745577, 10734910028436531405, 186560844574963578],
+  "vk_leaf": [8319022251449045440, 6921460171031583545, 12120586048388560564, 2237657693139026209],
   "steps": [
     {
       "heights": { "tier": 18, "reg_log_height": 19, "ram_log_height": 20, "poseidon2_log_height": 15, "reduce_log_height": 17 },
