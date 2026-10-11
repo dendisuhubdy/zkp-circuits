@@ -27,9 +27,9 @@ and N=3 20 (emulated) — and the production REG table from `2^21` to `2^20` (66
 On this box the test-profile proofs did not get lighter where their tier did not move: the exit
 twin (169 366 → 104 150 rows) is tier 18 on both sides, and its peak live heap read **16.75 GB
 before and 17.19 GB after** — the peak is a transient inside `compute quotient`, within the
-spread seen between runs of the same twin program (15.64 and 16.75 GB), while the committed
-terms fell (§4). The test N=2 aggregate dropped to tier 18
-and **proved and verified here**. The memory win is the tier: one rung down for every
+spread seen between two runs of the same twin program on two bases (15.64 GB on `2fbd45b`,
+16.75 GB on `c83b1c7`), while the committed terms fell (§4). The test N=2 aggregate dropped to
+tier 18 and **proved and verified here**. The memory win is the tier: one rung down for every
 production aggregate, projected in §5, measured nowhere yet.
 
 ## 1. Why
@@ -53,9 +53,9 @@ Production fixture, 80 queries, the baseline log's `== profile Production` secti
   tape for all 80 queries is read before any query runs. **176 283** reloads in all; **97 987** in
   `input_root` and **35 840** in `commit_root`.
 - **Pointers were registers.** A `Ptr` is a holder register plus a compile-time delta, and
-  `SPONGE`, `COMPRESS` and `POSEIDON2` took register addresses only (`POSEIDON2` still does, §9), so each use paid one `FADDI`
-  although every address is a compile-time constant: `FADDI` **41 521** rows in `input_root`,
-  **10 720** in `commit_root` (67 307 in the program).
+  `SPONGE`, `COMPRESS` and `POSEIDON2` took register addresses only (`POSEIDON2` still does,
+  §9), so each use paid one `FADDI` although every address is a compile-time constant:
+  `FADDI` **41 521** rows in `input_root`, **10 720** in `commit_root` (67 307 in the program).
 - **The cap check selected a cap entry by a dot product** over the four candidates, 88 rows a
   round over 14 rounds a query (the spike's count): `commit_root`'s `FMUL` 14 400, `FADD` 8 640
   and `FSUB` 4 320, `input_root`'s `FMUL` 8 000, `FADD` 4 800 and `FSUB` 2 400.
@@ -159,7 +159,7 @@ figure is the heap profiler's `peak live heap`; the logs' `rss` columns are not 
 | — peak live heap | 3.84 GB | 3.99 GB | ×1.04 |
 | — prove wall | 28.3 s | 28.0 s | ×0.99 |
 | — proof bytes | 219 442 B | 219 154 B | ×0.999 |
-| test N=2 aggregate | tier 19, 338 871 rows (proved at rate ¼, `docs/07` §3) | **tier 18**, 208 571 rows: proved, verified natively, eight outputs matched; 273 961 B, test wall 124.3 s | — |
+| test N=2 aggregate | tier 19, 338 871 rows (proved at rate ¼, `docs/07` §3) | **tier 18**, 208 571 rows (`pins.json` `aggregate_test_n2_cpu_rows`; the test's own `RvmTier(18)` assertion held): proved, verified natively, eight outputs matched; 273 961 B, test wall 124.3 s (the log's two figures) | — |
 | test N=3 aggregate | tier 19, 508 102 rows, not run | tier 19, 312 665 rows, **not run** (below) | — |
 
 **The twin's peak did not fall, and that is expected at an unchanged tier.** The cpu table is
@@ -167,15 +167,16 @@ figure is the heap profiler's `peak live heap`; the logs' `rss` columns are not 
 394 310) stay `2^19`; only the preprocessed program table halves (171 771 → 106 555
 instructions, `2^18` → `2^17`). The committed terms show that: live heap after the third main
 `build merkle tree` 7.38 → 6.97 GB, and at the end of the `FRI prover` 12.35 → 11.77 GB. The
-peak is set later, by a transient in the parallel `compute quotient` spans (the span that
-reaches it: Δlive +5.78 GB before, +8.61 GB after), whose height depends on how the nested work is scheduled — the same
-program read 15.64 GB on 2026-10-08 (`docs/07` §3, on `2fbd45b`) and 16.75 GB here on
-`c83b1c7`, so a 0.44 GB difference between two single runs is inside the spread; the
-tree-aggregation merge between those two bases is not traced as a cause either way. The verify
-drop (×0.63) follows the smaller program table, whose LDE and tree the verifier builds; the
-proof's +8.8 kB is **not traced** (one run a side).
+peak is set later, by a transient in the parallel `compute quotient` spans: the span that
+reaches it rose from Δlive +5.78 GB before to +8.61 GB after. Why is **not traced**; the likely
+cause is how the nested parallel work is scheduled, since the same program read 15.64 GB on
+2026-10-08 (`docs/07` §3, on `2fbd45b`) and 16.75 GB here on `c83b1c7`, so a 0.44 GB difference
+between two single runs is inside the spread; the tree-aggregation merge between those two
+bases is not traced as a cause either way. The verify drop (×0.63) follows the smaller program
+table, whose LDE and tree the verifier builds; the proof's +8.8 kB is **not traced** (one run a
+side).
 The tier-16 synthetic is a DSL program too, so B′'s immediates and re-homing cut it 63 762 →
-60 012 rows; its heap moved +0.15 GB inside the same spread (3.83 GB in `docs/07`).
+60 012 rows; its peak live heap moved +0.15 GB (+4 %), **not traced** (one run a side).
 
 **The test N=3 aggregate was not run.** The brief's condition is the N=2 run's peak live heap
 ≤ 30 GB, and `two_test_profile_bundle_proofs_aggregate_and_verify_natively` is not under the heap
@@ -204,8 +205,8 @@ by a production proof.
 
 ## 5. N-economics
 
-Production rows per aggregate, emulated (N=1 is Task 5's emulation for the `aggregate_program_digest`
-re-pin, 315 952 + 327; N=2 and N=3 are the B3 emulations above):
+Production rows per aggregate, emulated (N=1 is Task 5's emulation for the
+`aggregate_program_digest` re-pin, 315 952 + 327; N=2 and N=3 are the B3 emulations above):
 
 | N | cpu rows | tier | before phase 4 |
 |---:|---:|---:|---|

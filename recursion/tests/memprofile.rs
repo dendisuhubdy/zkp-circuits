@@ -73,14 +73,16 @@ fn tier8_toy() {
 }
 
 /// Threads (Task 6): a synthetic tier-16 program — 1 250 rounds of 16 hinted words stored and
-/// sponged (5 000 `SPONGE` absorbs; 63 762 rows, tier 16) — proved once and verified; prints the
+/// sponged (5 000 `SPONGE` absorbs; 60 012 rows, tier 16) — proved once and verified; prints the
 /// prove wall time and the peak live heap. Run it three ways (`docs/04-phase2-row-cuts.md`
 /// §"Threads"): without the feature (the baseline), then
 /// `RAYON_NUM_THREADS=1` and `=16 cargo test --release --features parallel --test memprofile
 /// tier16 -- --ignored --nocapture`. 2 000 rounds is 102 012 rows, past tier 16 (no tier 17 rung):
 /// the program is emulated and its tier asserted before anything is proved, so a row drift fails
 /// in seconds instead of starting a tier-18 proof. Measured 2026-10-04 on the 48 GB box: off
-/// 170.6 s, `RAYON_NUM_THREADS=1` 171.1 s, `=16` 36.4 s; peak live 9.09 GB all three.
+/// 170.6 s, `RAYON_NUM_THREADS=1` 171.1 s, `=16` 36.4 s; peak live 9.09 GB all three. Phase 4
+/// (2026-10-09, the Merkle spans) re-recorded it: 63 762 → 60 012 rows, still tier 16 (B′'s
+/// immediate `SPONGE` source and re-homing; `docs/09-phase4-spans.md` §4).
 #[test]
 #[ignore = "the thread benchmark: ~1-3 min; RAYON_NUM_THREADS=1 then 16, --features parallel"]
 fn tier16_synthetic_threads() {
