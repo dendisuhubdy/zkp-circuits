@@ -49,3 +49,27 @@ fn the_signing_message_is_prefix_then_binding() {
     assert_eq!(&m[..13], b"rand-msauth-1");
     assert_eq!(&m[13..17], &1u32.to_le_bytes());
 }
+
+#[test]
+fn the_witness_offsets_are_pinned() {
+    let s = |i| Slot { index: i, pk: [1; 1312], sig: [2; 2420], path: [[7; 8]; DEPTH] };
+    let w = msauth_inputs(&[3; 8], &[4; 8], 2, &[s(5), s(9)]);
+    assert_eq!(&w[0..8], &[3u32; 8]);
+    assert_eq!(&w[8..16], &[4u32; 8]);
+    assert_eq!(w[16], 2);
+    assert_eq!(w[17], 1);
+    assert_eq!(w[18], 5);
+    assert_eq!(w[19], 0x01010101);
+    assert_eq!(w[17 + 330], 0x02020202);
+    assert_eq!(w[17 + 935], 7);
+    assert_eq!(w[17 + 967], 1);
+    assert_eq!(w[17 + 967 + 1], 9);
+    assert!(w[17 + 2 * 967..].iter().all(|&x| x == 0));
+}
+
+#[test]
+#[should_panic]
+fn an_out_of_range_signer_index_is_refused() {
+    let s = Slot { index: 16, pk: [1; 1312], sig: [2; 2420], path: [[0; 8]; DEPTH] };
+    msauth_inputs(&[0; 8], &[0; 8], 1, &[s]);
+}

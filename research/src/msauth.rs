@@ -14,6 +14,7 @@ pub const PK_WORDS: usize = 328;
 pub const SIG_WORDS: usize = 605;
 pub const SLOT_WORDS: usize = 967;
 pub const MSAUTH_WORDS: usize = 17 + M_MAX * SLOT_WORDS;
+const _: () = assert!(SLOT_WORDS == 2 + PK_WORDS + SIG_WORDS + 8 * DEPTH);
 pub const MSG_PREFIX: &[u8; 13] = b"rand-msauth-1";
 
 fn pack(bytes: &[u8]) -> Vec<u32> {
@@ -89,6 +90,7 @@ pub fn msauth_inputs(msk: &Word8, salt: &Word8, threshold: u32, active: &[Slot])
     v.extend_from_slice(salt);
     v.push(threshold);
     for s in active {
+        assert!(s.index < N_MAX as u32);
         v.push(1);
         v.push(s.index);
         v.extend(pack(&s.pk));
