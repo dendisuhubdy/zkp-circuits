@@ -221,3 +221,207 @@ mod emulator {
         assert!(execute(&a.assemble(), &[], &[], 1 << 16).is_ok(), "the limit itself is legal");
     }
 }
+
+mod harness {
+    use super::common::rejects;
+    use super::emulator::{DOT_8_0_4, INTT1, MSUB_0_8_4, NTT0};
+    use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder, WindowAccess};
+    use p3_batch_stark::{prove_batch, verify_batch, ProverData, StarkInstance};
+    use p3_field::{Field, PrimeCharacteristicRing};
+    use p3_lookup::{Count, InteractionBuilder};
+    use p3_matrix::dense::RowMajorMatrix;
+    use rand_zkvm::emulator::SPACE_RAM;
+    use rand_zkvm::machine::{make_config, FriProfile, VerifyError};
+    use rand_zkvm::modq::{self, CallIo};
+    use rand_zkvm::tables::modq::{col, limbs_value, modq_log_height, modq_trace, pre, ModqAir, ModqEvent, BLOCK};
+    use rand_zkvm::tables::range::{range_trace, RangeAir, RangeCounts};
+    use rand_zkvm::tables::{bus, F};
+
+    #[derive(Clone)]
+    struct Asker;
+    impl<Fld> BaseAir<Fld> for Asker { fn width(&self) -> usize { 4 } }
+    impl<AB: AirBuilder + InteractionBuilder> Air<AB> for Asker where AB::F: Field {
+        fn eval(&self, b: &mut AB) {
+            let m = b.main();
+            let v = |i: usize| -> AB::Expr { m.current(i).unwrap().into() };
+            b.assert_bool(v(0));
+            bus::MODQ.lookup_key(b, [v(1), v(2), v(3)], Count::bounded(v(0), 1));
+        }
+    }
+    #[derive(Clone)]
+    struct MemoryTwin;
+    impl<Fld> BaseAir<Fld> for MemoryTwin { fn width(&self) -> usize { 6 } }
+    impl<AB: AirBuilder + InteractionBuilder> Air<AB> for MemoryTwin where AB::F: Field {
+        fn eval(&self, b: &mut AB) {
+            let m = b.main();
+            let v = |i: usize| -> AB::Expr { m.current(i).unwrap().into() };
+            b.assert_bool(v(0));
+            bus::MEMORY.receive(b, [v(1), v(2), v(3), v(4), v(5)], Count::bounded(v(0), 1));
+        }
+    }
+    #[derive(Clone)]
+    enum T { S(ModqAir, usize), A(Asker), M(MemoryTwin), R(RangeAir) }
+    impl<Fld: Field> BaseAir<Fld> for T {
+        fn width(&self) -> usize {
+            match self {
+                T::S(a, _) => <ModqAir as BaseAir<Fld>>::width(a),
+                T::A(a) => <Asker as BaseAir<Fld>>::width(a),
+                T::M(a) => <MemoryTwin as BaseAir<Fld>>::width(a),
+                T::R(a) => <RangeAir as BaseAir<Fld>>::width(a),
+            }
+        }
+        fn preprocessed_width(&self) -> usize {
+            match self {
+                T::S(a, _) => <ModqAir as BaseAir<Fld>>::preprocessed_width(a),
+                T::R(a) => <RangeAir as BaseAir<Fld>>::preprocessed_width(a),
+                _ => 0,
+            }
+        }
+        fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Fld>> {
+            match self {
+                T::S(_, h) => Some(ModqAir::preprocessed_trace_at(*h)),
+                T::R(a) => <RangeAir as BaseAir<Fld>>::preprocessed_trace(a),
+                _ => None,
+            }
+        }
+    }
+    impl<AB: AirBuilder + PermutationAirBuilder + InteractionBuilder> Air<AB> for T where AB::F: Field {
+        fn eval(&self, b: &mut AB) {
+            match self { T::S(a, _) => a.eval(b), T::A(a) => a.eval(b), T::M(a) => a.eval(b), T::R(a) => a.eval(b) }
+        }
+    }
+
+    /// Four calls at clk 11..15 on one deterministic RAM (no call's outputs feed another here).
+    pub fn calls() -> Vec<(ModqEvent, CallIo)> {
+        let ram = |a: u32| (a.wrapping_mul(2_654_435_761) >> 9) % modq::INPUT_BOUND;
+        [NTT0, INTT1, DOT_8_0_4, MSUB_0_8_4].iter().enumerate().map(|(i, &a1)| {
+            let io = modq::call(0x1000, a1, ram).unwrap();
+            (ModqEvent { clk: 11 + i as u32, base: 0x1000, a1, inputs: io.inputs.clone() }, io)
+        }).collect()
+    }
+
+    pub fn twin(calls: &[(ModqEvent, CallIo)]) -> RowMajorMatrix<F> {
+        let rows: Vec<(u32, u32, u32, bool)> = calls.iter().flat_map(|(ev, io)| {
+            io.reads.iter().map(move |&(a, x)| (a, 4 * ev.clk, x, false))
+                .chain(io.writes.iter().map(move |&(a, x)| (a, 4 * ev.clk + 1, x, true)))
+        }).collect();
+        let mut v = F::zero_vec(rows.len().next_power_of_two() * 6);
+        for (i, &(addr, ts, val, w)) in rows.iter().enumerate() {
+            v[i * 6..(i + 1) * 6].copy_from_slice(&[F::ONE, F::from_u32(SPACE_RAM), F::from_u32(addr), F::from_u32(ts), F::from_u32(val), F::from_bool(w)]);
+        }
+        RowMajorMatrix::new(v, 6)
+    }
+
+    pub fn run(trace: &RowMajorMatrix<F>, range: &RangeCounts, calls: &[(ModqEvent, CallIo)], twin: &RowMajorMatrix<F>) -> Result<(), VerifyError> {
+        let mut asker = F::zero_vec(calls.len().next_power_of_two().max(4) * 4);
+        for (i, (ev, _)) in calls.iter().enumerate() {
+            asker[i * 4..i * 4 + 4].copy_from_slice(&[F::ONE, F::from_u32(ev.clk), F::from_u32(ev.base), F::from_u32(ev.a1)]);
+        }
+        let asker = RowMajorMatrix::new(asker, 4);
+        let range_t = range_trace(range);
+        let airs = vec![T::S(ModqAir, trace.values.len() / col::WIDTH), T::A(Asker), T::M(MemoryTwin), T::R(RangeAir)];
+        let instances = vec![
+            StarkInstance { air: &airs[0], trace, public_values: vec![] },
+            StarkInstance { air: &airs[1], trace: &asker, public_values: vec![] },
+            StarkInstance { air: &airs[2], trace: twin, public_values: vec![] },
+            StarkInstance { air: &airs[3], trace: &range_t, public_values: vec![] },
+        ];
+        let config = make_config(FriProfile::Test);
+        let pd = ProverData::from_instances(&config, &instances);
+        let proof = prove_batch(&config, &instances, &pd);
+        verify_batch(&config, &airs, &proof, &[vec![], vec![], vec![], vec![]], &pd.common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
+    }
+
+    fn built() -> (Vec<(ModqEvent, CallIo)>, RowMajorMatrix<F>, RangeCounts) {
+        let c = calls();
+        let evs: Vec<ModqEvent> = c.iter().map(|x| x.0.clone()).collect();
+        let mut range = RangeCounts::default();
+        let t = modq_trace(&evs, modq_log_height(evs.len()), &mut range);
+        (c, t, range)
+    }
+
+    #[test]
+    fn modq_log_height_is_zero_without_calls_and_floors_at_one_block() {
+        assert_eq!([0, 1, 2, 3, 18, 36, 54].map(modq_log_height), [0, 10, 11, 12, 15, 16, 16]);
+    }
+
+    #[test]
+    fn the_trace_writes_exactly_what_the_host_model_computes() {
+        let (c, t, _) = built();
+        let p = ModqAir::preprocessed_trace_at::<F>(BLOCK);
+        for (b, (_, io)) in c.iter().enumerate() {
+            let mut got = Vec::new();
+            for r in 0..BLOCK {
+                let row = &t.values[(b * BLOCK + r) * col::WIDTH..(b * BLOCK + r + 1) * col::WIDTH];
+                let pr = &p.values[r * pre::WIDTH..(r + 1) * pre::WIDTH];
+                let is_t = row[col::IS_NTT] + row[col::IS_INTT] == F::ONE;
+                let w0 = (is_t && pr[pre::S_LAST] == F::ONE) || (row[col::IS_DOT] == F::ONE && pr[pre::K_LAST] == F::ONE);
+                let w1 = (is_t && pr[pre::S_LAST] == F::ONE) || row[col::IS_MSUB] == F::ONE;
+                if w0 { got.push((limbs_value(row, col::ADDR_O0, 1) as u32, limbs_value(row, col::O0_L, 3) as u32)); }
+                if w1 { got.push((limbs_value(row, col::ADDR_O1, 1) as u32, limbs_value(row, col::O1_L, 3) as u32)); }
+            }
+            got.sort();
+            let mut want = io.writes.clone();
+            want.sort();
+            assert_eq!(got, want, "block {b}");
+        }
+    }
+
+    /// The read side (Task 2 review minor): every `MEMORY` read the chip sends — address and value,
+    /// at the rule-6 counts — is exactly one of `modq::call`'s reads, and every one of those is sent.
+    #[test]
+    fn the_trace_reads_exactly_what_the_host_model_reads() {
+        let (c, t, _) = built();
+        let p = ModqAir::preprocessed_trace_at::<F>(BLOCK);
+        for (b, (_, io)) in c.iter().enumerate() {
+            let mut got = Vec::new();
+            for r in 0..BLOCK {
+                let row = &t.values[(b * BLOCK + r) * col::WIDTH..(b * BLOCK + r + 1) * col::WIDTH];
+                let pr = &p.values[r * pre::WIDTH..(r + 1) * pre::WIDTH];
+                let is_t = row[col::IS_NTT] + row[col::IS_INTT] == F::ONE;
+                let (dot, msub) = (row[col::IS_DOT] == F::ONE, row[col::IS_MSUB] == F::ONE);
+                let s_first = pr[pre::S_FIRST] == F::ONE;
+                let k_first = pr[pre::K_FIRST] == F::ONE;
+                if (is_t && s_first) || msub { got.push((limbs_value(row, col::ADDR_U, 1) as u32, limbs_value(row, col::U_L, 3) as u32)); }
+                if (is_t && s_first) || dot || msub { got.push((limbs_value(row, col::ADDR_V, 1) as u32, limbs_value(row, col::V_L, 3) as u32)); }
+                if dot || (msub && k_first) { got.push((limbs_value(row, col::ADDR_W, 1) as u32, limbs_value(row, col::W_L, 3) as u32)); }
+            }
+            got.sort();
+            let mut want = io.reads.clone();
+            want.sort();
+            assert_eq!(got, want, "block {b}");
+        }
+    }
+
+    #[test]
+    fn padding_blocks_are_all_zero_selectors() {
+        let c = calls();
+        let mut range = RangeCounts::default();
+        let t = modq_trace(&[c[0].0.clone()], 11, &mut range);
+        for r in BLOCK..2 * BLOCK {
+            let row = &t.values[r * col::WIDTH..(r + 1) * col::WIDTH];
+            assert!([col::IS_REAL, col::IS_NTT, col::IS_INTT, col::IS_DOT, col::IS_MSUB, col::A1].iter().all(|&i| row[i] == F::ZERO));
+        }
+    }
+
+    #[test]
+    fn the_modq_chip_proves_every_op_standalone() {
+        let (c, t, range) = built();
+        run(&t, &range, &c, &twin(&c)).unwrap();
+    }
+
+    #[test]
+    fn a_tampered_output_limb_is_rejected_standalone() {
+        let (c, mut t, range) = built();
+        t.values[(3 * 128 + 5) * col::WIDTH + col::O0_L] += F::ONE;
+        assert!(rejects(|| run(&t, &range, &c, &twin(&c))));
+    }
+
+    #[test]
+    fn a_memory_value_the_chip_did_not_read_is_rejected_standalone() {
+        let (c, t, range) = built();
+        let mut tw = twin(&c);
+        tw.values[4] += F::ONE;
+        assert!(rejects(|| run(&t, &range, &c, &tw)));
+    }
+}
