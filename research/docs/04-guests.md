@@ -279,7 +279,7 @@ prover counts them; permutations are `msauth::poseidon2_permutations`.
 | 2 | 169 068 | 1 839 | 198 | 36 | 521 560 + 38 400 | 13, 16, 20 | 18 |
 | 3 | 251 946 | 1 942 | 297 | 54 | 779 638 + 57 600 | 14, 16, 20 | 18 |
 
-Tier 18 holds 262 143 cycles: `M = 3` fits with 10 197 cycles (3.9%) to spare, and the Poseidon2
+Over five further random fixtures at `M = 3` (other keys for all three signers, msk, salt, binding; threshold 2; `the_gate_holds_over_random_fixtures`) cycles ranged 250 685 to 252 775 (the data-dependent `rej_uniform` / `SampleInBall` spread is about 2 k) and Poseidon2 permutations were 1 942 in every one; every fixture's natural heights equal the pinned ones. Tier 18 holds 262 143 cycles: `M = 3` fits with at least 9 368 cycles (3.6%, at the observed maximum) to spare, and the Poseidon2
 budget (1 942 permutations) is nowhere near binding. **`M_MAX = 3` at tier 18; `UNIFORM` is not
 needed.** The memory table does not double: its declared height is 2^20, the tier's own `t + 2`
 floor at every `M`; `M = 3` uses about 837 k rows of it from the cpu and modq tables (plus the

@@ -130,7 +130,42 @@ pub fn pinned_options() -> crate::machine::ProveOptions {
         ..Default::default()
     }
 }
-// Measured: a full M_MAX = 3 run at tier 18 with default options (Task 8): 297 keccak perms -> 14, 54 MODQ calls -> 16, memory 20 (the tier's t + 2 floor).
+/// Measured: a full M_MAX = 3 run at tier 18 with default options (Task 8): 297 keccak perms -> 14, 54 MODQ calls -> 16, memory 20 (the tier's t + 2 floor).
 pub const PINNED_MODQ_LOG_HEIGHT: u8 = 16;
+/// Keccak table height (297 perms at M_MAX = 3).
 pub const PINNED_KECCAK_LOG_HEIGHT: u8 = 14;
+/// Memory table height (the tier's own t + 2).
 pub const PINNED_MEM_LOG_HEIGHT: u8 = 20;
+/// Program table height (the guest's word count, fixed per image), input table height (the fixed
+/// `MSAUTH_WORDS` witness) and public table height (8 binding words): not floors, but part of the
+/// pinned header all the same.
+pub const PINNED_PROGRAM_LOG_HEIGHT: u8 = 12;
+pub const PINNED_INPUT_LOG_HEIGHT: u8 = 12;
+pub const PINNED_PUBLIC_LOG_HEIGHT: u8 = 7;
+
+/// Builds the traces under `opts` and refuses unless the declared header is exactly the pinned
+/// one: tier plus all seven log heights. A hard error names the field.
+pub fn check_pinned_shape_with(program: &crate::isa::Program, input: &[u32], binding: &[u32; 8], opts: crate::machine::ProveOptions) -> Result<(), String> {
+    let exec = crate::emulator::execute(program, input, binding, MSAUTH_TIER.max_cycles()).map_err(|e| format!("execute: {e:?}"))?;
+    let t = crate::machine::build_traces_salted_with(program, input, binding, [0; 4], &exec, MSAUTH_TIER, opts).map_err(|e| format!("build_traces: {e:?}"))?;
+    let fields: [(&str, u8, u8); 7] = [
+        ("program_log_height", t.program_log_height, PINNED_PROGRAM_LOG_HEIGHT),
+        ("input_log_height", t.input_log_height, PINNED_INPUT_LOG_HEIGHT),
+        ("keccak_log_height", t.keccak_log_height, PINNED_KECCAK_LOG_HEIGHT),
+        ("sha256_log_height", t.sha256_log_height, 0),
+        ("modq_log_height", t.modq_log_height, PINNED_MODQ_LOG_HEIGHT),
+        ("public_log_height", t.public_log_height, PINNED_PUBLIC_LOG_HEIGHT),
+        ("mem_log_height", t.mem_log_height, PINNED_MEM_LOG_HEIGHT),
+    ];
+    for (name, got, want) in fields {
+        if got != want { return Err(format!("msauth shape mismatch: {name} = {got}, pinned {want}")); }
+    }
+    Ok(())
+}
+
+/// The msauth prover: refuses unless the shape is the pinned one, then proves at `MSAUTH_TIER`
+/// with `pinned_options()`.
+pub fn prove_msauth(machine: &crate::machine::Machine, program: &crate::isa::Program, input: &[u32], binding: &[u32; 8]) -> Result<crate::machine::Proof, String> {
+    check_pinned_shape_with(program, input, binding, pinned_options())?;
+    machine.prove_with_options(program, input, binding, Some(MSAUTH_TIER), pinned_options()).map(|(p, _)| p).map_err(|e| format!("prove: {e:?}"))
+}

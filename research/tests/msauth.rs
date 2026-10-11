@@ -424,17 +424,18 @@ fn public_multisig_message_format_is_not_accepted() {
 
 // ---- MODQ phase 3, Task 8: the tier-18 gate and the pinned shape ----------------------------
 
-fn full_run(k: usize) -> (rand_zkvm::isa::Program, Vec<u32>, rand_zkvm::emulator::Execution) {
+fn full_run(k: usize) -> (rand_zkvm::isa::Program, Vec<u32>, rand_zkvm::emulator::Execution) { full_run_t(k, 1) }
+fn full_run_t(k: usize, threshold: u32) -> (rand_zkvm::isa::Program, Vec<u32>, rand_zkvm::emulator::Execution) {
     let f = fixture(M_MAX);
     let slots: Vec<Slot> = (0..k).map(|i| slot(&f, i, &BINDING)).collect();
-    let input = msauth_inputs(&MSK, &SALT, 1, &slots);
+    let input = msauth_inputs(&MSK, &SALT, threshold, &slots);
     let e = exec(&input, &BINDING);
     (compiled::msauth(), input, e)
 }
 
 fn workload(k: usize) -> (usize, usize) {
     let (p, input, e) = full_run(k);
-    let cycles = e.cycles() + p.digest_rows() + rand_zkvm::hash::input_digest_row_count(input.len()) + rand_zkvm::hash::public_digest_row_count(8);
+    let cycles = e.cycles() + p.digest_rows() + rand_zkvm::hash::input_digest_row_count(input.len()) + rand_zkvm::hash::public_digest_row_count(BINDING.len());
     (cycles, poseidon2_permutations(&p, input.len(), &e))
 }
 
@@ -456,8 +457,9 @@ fn m_max_fits_tier_18_counting_cycles_and_poseidon2_permutations() {
     assert_eq!(Tier::for_workload(cycles, perms), Some(MSAUTH_TIER), "ruling: M_MAX must fit tier 18 — if this fails at M_MAX = 3, set M_MAX = 2");
 }
 
-fn declared(k: usize, opts: rand_zkvm::machine::ProveOptions) -> (Vec<u8>, String) {
-    let (p, input, e) = full_run(k);
+fn declared(k: usize, opts: rand_zkvm::machine::ProveOptions) -> (Vec<u8>, String) { declared_t(k, 1, opts) }
+fn declared_t(k: usize, threshold: u32, opts: rand_zkvm::machine::ProveOptions) -> (Vec<u8>, String) {
+    let (p, input, e) = full_run_t(k, threshold);
     let t = rand_zkvm::machine::build_traces_salted_with(&p, &input, &BINDING, [0; 4], &e, MSAUTH_TIER, opts).unwrap();
     let h = vec![t.program_log_height, t.input_log_height, t.keccak_log_height, t.sha256_log_height, t.modq_log_height, t.public_log_height, t.mem_log_height];
     (h, format!("{:?}", t.public_values[rand_zkvm::tables::cpu::pv::GAS]))
@@ -474,7 +476,8 @@ fn pinned_heights_are_what_a_full_run_declares() {
 
 #[test]
 fn proof_shape_is_the_same_for_every_m() {
-    let shapes: Vec<_> = (1..=M_MAX).map(|k| declared(k, pinned_options())).collect();
+    let mut shapes: Vec<_> = (1..=M_MAX).map(|k| declared(k, pinned_options())).collect();
+    shapes.push(declared_t(M_MAX, 2, pinned_options())); // threshold 2 with all three signing
     assert!(shapes.windows(2).all(|w| w[0] == w[1]), "every M declares M_MAX's shape and the header-ceiling gas word: {shapes:?}");
     // and without the floors the shapes differ, so the test has teeth
     let loose: Vec<_> = (1..=M_MAX).map(|k| declared(k, Default::default()).0).collect();
@@ -482,15 +485,69 @@ fn proof_shape_is_the_same_for_every_m() {
 }
 
 #[test]
-#[ignore = "MODQ Task 8: one Production proof at M_MAX, tier 18 — run under /usr/bin/time -l and record peak RSS, mem_log_height, proof bytes and prove time"]
+#[ignore = "MODQ Task 8: Production proofs at M = 1 and M = M_MAX, tier 18, pinned shape — run under /usr/bin/time -l and record peak RSS, proof bytes and prove time"]
 fn msauth_proves_at_m_max_production() {
     use rand_zkvm::machine::{FriProfile, Machine};
-    let (p, input, _) = full_run(M_MAX);
+    use rand_zkvm::tables::cpu::pv;
     let m = Machine::new(FriProfile::Production);
-    let t0 = std::time::Instant::now();
-    let (proof, _) = m.prove_with_options(&p, &input, &BINDING, Some(MSAUTH_TIER), pinned_options()).unwrap();
-    let prove = t0.elapsed();
-    m.verify_public(&p.digest(), &BINDING, &proof).unwrap();
-    eprintln!("msauth M_MAX = {M_MAX} Production: tier {:?}, mem_log_height {}, keccak {}, modq {}, proof {} B, prove {prove:?}",
-              proof.tier, proof.mem_log_height, proof.keccak_log_height, proof.modq_log_height, proof.size());
+    let mut proofs = Vec::new();
+    for k in [1, M_MAX] {
+        let (p, input, _) = full_run(k);
+        let t0 = std::time::Instant::now();
+        let proof = prove_msauth(&m, &p, &input, &BINDING).unwrap();
+        let prove = t0.elapsed();
+        m.verify_public(&p.digest(), &BINDING, &proof).unwrap();
+        eprintln!("msauth M = {k} Production: tier {:?}, mem_log_height {}, keccak {}, modq {}, proof {} B, prove {prove:?}",
+                  proof.tier, proof.mem_log_height, proof.keccak_log_height, proof.modq_log_height, proof.size());
+        proofs.push(proof);
+    }
+    let (a, b) = (&proofs[0], &proofs[1]);
+    assert_eq!(a.size(), b.size(), "proof size must not leak M");
+    assert_eq!(a.tier, b.tier);
+    assert_eq!(
+        (a.program_log_height, a.input_log_height, a.keccak_log_height, a.sha256_log_height, a.modq_log_height, a.public_log_height, a.mem_log_height),
+        (b.program_log_height, b.input_log_height, b.keccak_log_height, b.sha256_log_height, b.modq_log_height, b.public_log_height, b.mem_log_height));
+    assert_eq!(a.public_values[pv::GAS], b.public_values[pv::GAS]);
+}
+
+#[test]
+fn the_wrapper_refuses_a_shape_that_is_not_the_pinned_one() {
+    let (p, input, _) = full_run(M_MAX);
+    check_pinned_shape_with(&p, &input, &BINDING, pinned_options()).unwrap();
+    // M = 1 with the modq floor lowered to 15: the declared modq height is 15, not the pinned 16.
+    let (p1, in1, _) = full_run(1);
+    let mut o = pinned_options();
+    o.min_modq_log_height = 15;
+    let err = check_pinned_shape_with(&p1, &in1, &BINDING, o).unwrap_err();
+    assert!(err.contains("modq_log_height = 15, pinned 16"), "{err}");
+    // no floors at all: M = 1 declares keccak 12
+    let err = check_pinned_shape_with(&p1, &in1, &BINDING, Default::default()).unwrap_err();
+    assert!(err.contains("keccak_log_height = 12, pinned 14"), "{err}");
+}
+
+/// The gate over five fixtures: different keys for all three signers, msk, salt and binding.
+#[test]
+fn the_gate_holds_over_random_fixtures() {
+    let (mut cmin, mut cmax, mut pmin, mut pmax) = (usize::MAX, 0, usize::MAX, 0);
+    for tag in 1u8..=5 {
+        let f = fixture_seeded(M_MAX, tag.wrapping_mul(37));
+        let binding: [u32; 8] = core::array::from_fn(|i| (tag as u32 + 1).wrapping_mul(0x9e37_79b9).wrapping_add(i as u32 * 7919));
+        let msk: Word8 = core::array::from_fn(|i| tag as u32 * 1000 + i as u32);
+        let salt: Word8 = core::array::from_fn(|i| tag as u32 * 77_777 + i as u32);
+        let slots: Vec<Slot> = (0..M_MAX).map(|i| slot(&f, i, &binding)).collect();
+        let input = msauth_inputs(&msk, &salt, 2, &slots);
+        let e = exec(&input, &binding);
+        let p = compiled::msauth();
+        let cycles = e.cycles() + p.digest_rows() + rand_zkvm::hash::input_digest_row_count(input.len()) + rand_zkvm::hash::public_digest_row_count(binding.len());
+        let perms = poseidon2_permutations(&p, input.len(), &e);
+        eprintln!("FIXTURE {tag}: {cycles} cycles, {perms} perms");
+        assert_eq!(Tier::for_workload(cycles, perms), Some(MSAUTH_TIER));
+        check_pinned_shape_with(&p, &input, &binding, pinned_options()).unwrap();
+        // natural heights equal the pinned ones at M_MAX
+        let t = rand_zkvm::machine::build_traces_salted_with(&p, &input, &binding, [0; 4], &e, MSAUTH_TIER, Default::default()).unwrap();
+        assert_eq!((t.keccak_log_height, t.modq_log_height, t.mem_log_height), (PINNED_KECCAK_LOG_HEIGHT, PINNED_MODQ_LOG_HEIGHT, PINNED_MEM_LOG_HEIGHT), "fixture {tag}");
+        cmin = cmin.min(cycles); cmax = cmax.max(cycles); pmin = pmin.min(perms); pmax = pmax.max(perms);
+    }
+    eprintln!("FIXTURES: M = 3 cycles min {cmin} max {cmax}; perms min {pmin} max {pmax}");
+    assert!(cmax <= Tier(18).max_cycles());
 }
