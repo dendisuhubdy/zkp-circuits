@@ -74,6 +74,17 @@ fn the_witness_tape_layout_is_pinned() {
 }
 
 #[test]
+fn a_declared_modq_table_is_refused_by_name_in_shape_matches() {
+    let (mut p, shape, _key) = one_test_proof();
+    assert_eq!(p.proof.modq_log_height, 0, "the fixture is chip-free");
+    assert!(shape.matches(&p.proof), "an honest chip-free proof passes");
+    p.proof.modq_log_height = 10;
+    assert!(!shape.matches(&p.proof), "a proof declaring a modq table is refused by name");
+    p.proof.modq_log_height = 0;
+    assert!(shape.matches(&p.proof), "and it is that field alone that was refused");
+}
+
+#[test]
 fn the_host_transcript_replay_reproduces_machine_verifys_acceptance() {
     let (p, shape, key) = one_test_proof();
     let m = Machine::new(FriProfile::Test);
