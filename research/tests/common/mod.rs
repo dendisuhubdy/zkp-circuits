@@ -18,7 +18,11 @@ pub mod sbpf_elf_builder;
 /// library code; only `tests/sbpf_interp.rs` and `tests/sbpf_elf.rs` use it.
 pub mod sbpf_oracle;
 
-/// MODQ phase 3: the chip's standalone harness (`tests/modq.rs`, `tests/cheating.rs`).
+/// MODQ phase 3: the chip's standalone harness on the real `ModqAir` (`tests/modq.rs`); builds without `cheating`.
+pub mod modq_run;
+
+/// MODQ phase 3: the same harness with one `Defence` switchable off (`tests/cheating.rs`).
+#[cfg(feature = "cheating")]
 pub mod modq_harness;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};

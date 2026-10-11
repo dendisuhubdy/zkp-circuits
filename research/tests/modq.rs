@@ -225,7 +225,7 @@ mod emulator {
 mod harness {
     use super::common::rejects;
     use super::emulator::{DOT_8_0_4, INTT1, MSUB_0_8_4, NTT0};
-    use super::common::modq_harness::run_raw;
+    use super::common::modq_run::run_raw;
     use p3_field::PrimeCharacteristicRing;
     use p3_matrix::dense::RowMajorMatrix;
     use rand_zkvm::emulator::SPACE_RAM;
@@ -258,7 +258,7 @@ mod harness {
 
     pub fn run(trace: &RowMajorMatrix<F>, range: &RangeCounts, calls: &[(ModqEvent, CallIo)], twin: &RowMajorMatrix<F>) -> Result<(), VerifyError> {
         let asks: Vec<(u32, u32, u32)> = calls.iter().map(|(ev, _)| (ev.clk, ev.base, ev.a1)).collect();
-        run_raw(trace, range, &asks, twin, None)
+        run_raw(trace, range, &asks, twin)
     }
 
     fn built() -> (Vec<(ModqEvent, CallIo)>, RowMajorMatrix<F>, RangeCounts) {

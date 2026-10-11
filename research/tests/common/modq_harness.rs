@@ -2,43 +2,19 @@
 //! of the cpu, a permissive `MEMORY` twin in place of the memory table (it receives whatever it is
 //! given, with no order or read-after-write rule) and the range table. Task 3's harness, moved
 //! here and generalised so `tests/cheating.rs` can switch one `Defence` off
-//! (`ModqAirWithout(off)`); `tests/modq.rs` uses `run_raw` with `off = None`.
-use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder, WindowAccess};
+//! (`ModqAirWithout(off)`); `tests/modq.rs` uses `modq_run::run_raw` (real `ModqAir`). Compiled only with `cheating`.
+use p3_air::{Air, AirBuilder, BaseAir, PermutationAirBuilder};
 use p3_batch_stark::{prove_batch, verify_batch, ProverData, StarkInstance};
 use p3_field::{Field, PrimeCharacteristicRing};
-use p3_lookup::{Count, InteractionBuilder};
+use p3_lookup::InteractionBuilder;
 use p3_matrix::dense::RowMajorMatrix;
-use rand_zkvm::emulator::{Execution, MemAccess};
 use rand_zkvm::machine::{make_config, FriProfile, VerifyError};
 use rand_zkvm::tables::modq::{col, range_counts_without, Defence, Forged, ModqAir, ModqAirWithout, ModqEvent};
 use rand_zkvm::tables::range::{range_trace, RangeAir, RangeCounts};
-use rand_zkvm::tables::{bus, F};
+use rand_zkvm::tables::F;
 
-/// The cpu's side of `MODQ`: one `(CLK, BASE, A1)` lookup per real row.
-#[derive(Clone)]
-pub struct Asker;
-impl<Fld> BaseAir<Fld> for Asker { fn width(&self) -> usize { 4 } }
-impl<AB: AirBuilder + InteractionBuilder> Air<AB> for Asker where AB::F: Field {
-    fn eval(&self, b: &mut AB) {
-        let m = b.main();
-        let v = |i: usize| -> AB::Expr { m.current(i).unwrap().into() };
-        b.assert_bool(v(0));
-        bus::MODQ.lookup_key(b, [v(1), v(2), v(3)], Count::bounded(v(0), 1));
-    }
-}
-
-/// A permissive memory table: receives each `(space, addr, ts, value, is_write)` row given.
-#[derive(Clone)]
-pub struct MemoryTwin;
-impl<Fld> BaseAir<Fld> for MemoryTwin { fn width(&self) -> usize { 6 } }
-impl<AB: AirBuilder + InteractionBuilder> Air<AB> for MemoryTwin where AB::F: Field {
-    fn eval(&self, b: &mut AB) {
-        let m = b.main();
-        let v = |i: usize| -> AB::Expr { m.current(i).unwrap().into() };
-        b.assert_bool(v(0));
-        bus::MEMORY.receive(b, [v(1), v(2), v(3), v(4), v(5)], Count::bounded(v(0), 1));
-    }
-}
+#[allow(unused_imports)]
+pub use super::modq_run::{events, twin_of, Asker, MemoryTwin};
 
 #[derive(Clone)]
 pub enum T { S(ModqAirWithout, usize), A(Asker), M(MemoryTwin), R(RangeAir) }
@@ -70,24 +46,6 @@ impl<AB: AirBuilder + PermutationAirBuilder + InteractionBuilder> Air<AB> for T 
     fn eval(&self, b: &mut AB) {
         match self { T::S(a, _) => a.eval(b), T::A(a) => a.eval(b), T::M(a) => a.eval(b), T::R(a) => a.eval(b) }
     }
-}
-
-/// The run's `MODQ` calls as chip events, at the emulator's own clock (the standalone harness has
-/// no digest prefix).
-pub fn events(exec: &Execution) -> Vec<ModqEvent> {
-    exec.events.iter()
-        .filter_map(|e| e.modq.as_ref().map(|m| ModqEvent { clk: m.clk, base: m.base, a1: m.a1, inputs: m.inputs.clone() }))
-        .collect()
-}
-
-/// The memory twin's trace: one row per `(clk, access)`.
-pub fn twin_of(accesses: &[(u32, Vec<MemAccess>)]) -> RowMajorMatrix<F> {
-    let rows: Vec<(u32, MemAccess)> = accesses.iter().flat_map(|(clk, a)| a.iter().map(move |x| (*clk, *x))).collect();
-    let mut v = F::zero_vec(rows.len().next_power_of_two().max(4) * 6);
-    for (i, (clk, a)) in rows.iter().enumerate() {
-        v[i * 6..(i + 1) * 6].copy_from_slice(&[F::ONE, F::from_u32(a.space), F::from_u32(a.addr), F::from_u32(a.ts(*clk)), F::from_u32(a.value), F::from_bool(a.is_write)]);
-    }
-    RowMajorMatrix::new(v, 6)
 }
 
 /// Prove and verify the four-table batch: the modq `trace` under `ModqAirWithout(off)`, an asker
