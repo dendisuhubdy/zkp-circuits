@@ -319,6 +319,19 @@ it cannot be admitted under it.
 permutations a proof); `NUM_REGS`, `ALLOCATABLE` (`r1..r25`) and `SCRATCH` (`r26..r31`);
 `Op::COUNT` 30; `tests/security.rs`, `tests/quotient_layout.rs`, `tests/machine.rs`.
 
+**Re-pinned once more on the private-multisig branch (2026-10-11, the MODQ chip).** The inner cpu
+gained `SYS_MODQ` (283 columns) and was merged with this phase. That moved every inner-shape pin
+above again, and the re-pin was done once, after both merges. `verify_rv32.digest`
+`6a70c377…` → `79ebe02b…`; the production `aggregate_program_digest` `e0eede8b…` → `8bc2cecb…`; the
+test-shape aggregate digest `1bcbcec9…` → `e26f37e3…`; the Off replay `759b015d…` → `ac1f08cf…`; and
+`inner_vk_digest` `346ee184…` → `1b0c4b00…`. That last one is the first move of the "asserted
+unchanged" value above since constraint set 8. One production verification goes from 315 952 to
+315 391 rows, still tier 19, and no tier moved. The full list is in
+`research/docs/05-roadmap.md`, "Constraint set: the MODQ chip". For the re-vendor this means the
+phase-4 values in the §6 table are stale as well as the pre-phase-4 ones: drop both. The §7 test
+tree pins (`pins.json` `tree_test`) were **not** re-recorded there, because the fixtures need a
+RAM window.
+
 ## 7. The test tree's fixed point moved from level 3 to level 2
 
 `docs/08` §5 found the test-profile tree's fixed point at level 3: `rv32t_leaf` ran

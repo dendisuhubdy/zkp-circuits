@@ -395,7 +395,8 @@ a tier a prover pool can prove.
   calls). The `msauth` guest at `M_MAX = 3` is 251 946 cycles at tier 18 (`docs/04-guests.md`).
 - **Tests.** 22 `modq_*` cheating tests, each AIR-level forgery accepted with only its defence off and
   rejected with it on; the hooks sit behind the `cheating` cargo feature, `tests/common/modq_run.rs`
-  is always compiled and `tests/modq_harness.rs` is gated.
+  is always compiled and `tests/common/modq_harness.rs` is gated; the two share one `run_raw_on`,
+  generic over the modq AIR.
 
 **Proof-size deltas (measured, tier 10).** Means of four runs each, bytes, `postcard` proof size.
 Per-run sizes vary by about ±1% (the four Test "before" runs span 312 329 to 317 289 bytes; the
@@ -441,10 +442,43 @@ extra header byte). It is a hard fork, and the fullnode re-vendor is pending.
 **Production prove at `M = 3`: pending.** The cause of the roughly 1300 s kill of three attempts on a
 48 GB laptop is under investigation; see `docs/04-guests.md`.
 
-**Recursion.** Not re-pinned by this note. The inner cpu width moved, so `verify_rv32.digest`,
-`tests/pins.json`, `inner_vk_digest` and the row and tier literals re-pin after rVM phase 4 is merged
-into this branch (a merge, never a rebase). `tree_measure.rs`'s `production_leaf_l2` and
-`production_rv32r_over_the_leaf_proves` stay stale until a 256 GB machine exists.
+**Recursion: re-pinned once, after rVM phase 4 (2026-10-11).** rVM phase 4 (`bba7875`, the Merkle
+spans) and `origin/main` (`9a1cba6`) were merged into this branch (merges, never a rebase; `26f547e`,
+the scan-compact merge, survives), and the recursion pins were re-recorded once, after both, from
+measured runs. Phase 4's rule carries over: opcodes 25 (`SPONGE`) and 27 (`COMPRESS`) read their
+fourth word as an absolute address under an unchanged rVM verifier key, so every pre-phase-4 program
+digest, aggregate or tree digest and key must be dropped at the cut, with none surviving in its old
+meaning (`recursion/docs/09-phase4-spans.md` §5–6). The MODQ cpu column then moved every inner pin
+again, so the phase-4 values below are stale too: the fullnode re-vendor greps for both columns.
+
+| pin | before MODQ (phase 4) | after | where |
+|---|---|---|---|
+| `verify_rv32.digest` (production) | `6a70c377…d344` (`cf5a350a…1788` before phase 4) | `79ebe02b…283b` | `recursion/src/programs/verify_rv32.digest` |
+| production `aggregate_program_digest` | `e0eede8b…b6c3` (`dc350ecf…8ba0` before phase 4) | `8bc2cecb…d8c7` | `tests/aggregate.rs` |
+| test-shape aggregate digest | `1bcbcec9…1fba` | `e26f37e3…41a0` | `tests/verifier.rs` |
+| Off-replay digest | `759b015d…9b4e` | `ac1f08cf…d406` | `tests/verifier.rs` |
+| `inner_vk_digest` (test fixture shape) | `346ee184…5fb9` | `1b0c4b00…ddc7` | `tests/aggregate.rs`, `recursion/docs/02-aggregate.md` |
+| one production inner verification | 315 952 rows, tier 19 | 315 391, tier 19 | `pins.json`, `tests/exit.rs` |
+| test-profile single verification | 104 150 rows, 11 875 permutations | 104 229, 11 894 | `tests/verifier.rs`, `tests/exit.rs` |
+| test aggregates N=1/2/3 | 104 477 / 208 571 / 312 665 | 104 556 / 208 729 / 312 902 (tiers 18/18/19) | `pins.json`, `N3_ROWS` |
+| production aggregates N=1/2/3 (emulated) | 316 279 / 632 175 / 948 071 | 315 718 / 631 053 / 946 388 (tiers 19/20/20) | `tests/aggregate.rs` |
+| reduce rows a proof, test / production | 39 296 / 196 480 | 39 392 / 196 960 (heights and N ceilings unchanged) | `tests/aggregate.rs` |
+
+No recursion tier moved. `LOOP_OVERHEAD` stays 327, and the rVM verifier keys
+(`tests/verifier_key.rs`) are unchanged. Production rows fell by 561 even though the opened row is one
+column wider. The drop is measured, not attributed: in `tests/profile.rs` it falls in the `(none)`
+call site (98 609 → 98 127) and in `input_root` (90 329 → 90 250).
+
+**Stale until a RAM window or a 256 GB machine.**
+
+- `tests/tree.rs`: twelve tests need `generate_test_tree_fixtures`. That run proves the test tree
+  at about 34 GB, which is over this session's memory budget, so `pins.json` `tree_test`
+  (`vk_leaf_*`, `vk_t_leaf_*`, `vk_int_*`, the step rows) and `tests/tree-test-genesis.json` still
+  hold phase 4's values.
+- `pins.json` `tree_measure` (the production leaf, at 632 175 rows, is now 631 053 by the N=2
+  emulation).
+- `tree_measure.rs`'s `production_leaf_l2` and `production_rv32r_over_the_leaf_proves`, which need
+  the 256 GB droplet.
 
 ## Relationship to `../../fullnode`
 
