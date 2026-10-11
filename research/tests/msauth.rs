@@ -258,7 +258,19 @@ fn cycles_at_one_two_and_three_signers() {
 
 const REFUSED: u32 = 0xdead_beef;
 /// Witness word of slot `s`'s path, sibling `lvl`, word `w`.
-fn path_word(s: usize, lvl: usize, w: usize) -> usize { 17 + 967 * s + 935 + 8 * lvl + w }
+fn path_word(s: usize, lvl: usize, w: usize) -> usize { 17 + SLOT_WORDS * s + (SLOT_WORDS - 8 * DEPTH) + 8 * lvl + w }
+/// The commit the host model gives a lone slot at threshold 1, from the root its own pk, index
+/// and path imply.
+fn implied_commit(s: &Slot) -> Word8 {
+    let mut cur = leaf(&s.pk);
+    for (lvl, sib) in s.path.iter().enumerate() {
+        let mut m = [0u32; 16];
+        if (s.index >> lvl) & 1 == 0 { m[..8].copy_from_slice(&cur); m[8..].copy_from_slice(sib); }
+        else { m[..8].copy_from_slice(sib); m[8..].copy_from_slice(&cur); }
+        cur = hash(MS_NODE, &m);
+    }
+    auth_commit(&nk(&MSK, &policy(1, &cur)), &SALT)
+}
 
 #[test]
 fn descending_indices_are_refused() {
@@ -271,7 +283,10 @@ fn descending_indices_are_refused() {
 fn corrupted_sibling_within_one_policy_is_refused() {
     let f = fixture(3);
     let mut input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 0, &BINDING), slot(&f, 1, &BINDING)]);
-    input[path_word(1, 2, 3)] ^= 1;
+    let at = path_word(1, 2, 3);
+    let honest = input[at];
+    input[at] ^= 1;
+    assert_ne!(input[at], honest);
     assert_eq!(run(&input, &BINDING)[7], REFUSED);
 }
 
@@ -279,7 +294,10 @@ fn corrupted_sibling_within_one_policy_is_refused() {
 fn a_single_signer_with_a_corrupted_path_changes_the_commit() {
     let f = fixture(3);
     let mut input = msauth_inputs(&MSK, &SALT, 1, &[slot(&f, 1, &BINDING)]);
-    input[path_word(0, 1, 0)] ^= 0x8000_0000;
+    let at = path_word(0, 1, 0);
+    let honest = input[at];
+    input[at] ^= 0x8000_0000;
+    assert_ne!(input[at], honest);
     assert_ne!(run(&input, &BINDING), expected(&f, 1));
 }
 
@@ -293,8 +311,12 @@ fn pk_from_one_index_with_the_path_of_another_is_refused() {
     s.index = 1;
     s.path = f.paths[1];
     let input = msauth_inputs(&MSK, &SALT, 1, &[s.clone()]);
-    assert_ne!(run(&input, &BINDING), expected(&f, 1));
-    let input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 2, &BINDING), s]);
+    let out = run(&input, &BINDING);
+    assert_ne!(out[7], REFUSED);
+    assert_ne!(out, expected(&f, 1));
+    assert_eq!(out, implied_commit(&s));
+    // ascending (1 then 2), so the root mismatch is what refuses, not the ordering
+    let input = msauth_inputs(&MSK, &SALT, 2, &[s, slot(&f, 2, &BINDING)]);
     assert_eq!(run(&input, &BINDING)[7], REFUSED);
 }
 
@@ -379,7 +401,23 @@ fn a_signature_by_a_non_member_with_a_member_path_is_refused() {
     s.pk = outsider.public.to_bytes().try_into().unwrap();
     s.sig = outsider.sign(&signing_message(&BINDING));
     let input = msauth_inputs(&MSK, &SALT, 1, &[s.clone()]);
-    assert_ne!(run(&input, &BINDING), expected(&f, 1));
+    let out = run(&input, &BINDING);
+    assert_ne!(out[7], REFUSED);
+    assert_ne!(out, expected(&f, 1));
+    assert_eq!(out, implied_commit(&s));
     let input = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 0, &BINDING), s]);
     assert_eq!(run(&input, &BINDING)[7], REFUSED);
+}
+
+#[test]
+fn public_multisig_message_format_is_not_accepted() {
+    let f = fixture(3);
+    let raw: Vec<u8> = BINDING.iter().flat_map(|w| w.to_le_bytes()).collect();
+    assert_eq!(raw.len(), 32);
+    let mk = |i: usize| Slot { index: i as u32, pk: f.pks[i], sig: f.kps[i].sign(&raw), path: f.paths[i] };
+    let input = msauth_inputs(&MSK, &SALT, 2, &[mk(0), mk(1)]);
+    assert_eq!(run(&input, &BINDING)[7], REFUSED);
+    // control: the same signers over the prefixed message are accepted
+    let ok = msauth_inputs(&MSK, &SALT, 2, &[slot(&f, 0, &BINDING), slot(&f, 1, &BINDING)]);
+    assert_eq!(run(&ok, &BINDING), expected(&f, 2));
 }
