@@ -224,8 +224,10 @@ fn malformed_signatures_agree_with_the_crate() {
     }
     let st = found.expect("a polynomial with >= 2 hints");
     let mut s = sig.to_vec(); s[HINT + st + 1] = s[HINT + st]; cases.push(("repeated index", s));
-    let mut s = sig.to_vec(); s[HINT + st + 1] = s[HINT + st].wrapping_sub(1);
-    if s[HINT + st] > 0 { cases.push(("decreasing index", s)); }
+    // swapping two strictly increasing indices always yields a decreasing pair, for every seed
+    let mut s = sig.to_vec(); s.swap(HINT + st, HINT + st + 1);
+    assert!(s[HINT + st] > s[HINT + st + 1], "the decreasing-index case must be generated");
+    cases.push(("decreasing index", s));
 
     // ‖z‖∞ too big
     let mut s = sig.to_vec(); for b in &mut s[32..32 + 18] { *b = 0xff; } cases.push(("‖z‖∞", s));
@@ -607,7 +609,7 @@ fn use_hint_pack_w1_is_exhaustive_over_every_canonical_residue() {
         }
     }
     named.extend([("87g2+1".into(), 87 * g2 + 1), ("q-2".into(), q - 2), ("q-1".into(), q - 1)]);
-    let mut check = |a0: u32, label: &str| {
+    let check = |a0: u32, label: &str| {
         let w: [u32; 256] = core::array::from_fn(|i| (a0 + i as u32).min(q - 1));
         let mut p = [0u32; 48];
         rounding::w1_pack_words(&mut p, &w);

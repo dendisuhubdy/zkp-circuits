@@ -127,13 +127,13 @@ fn call_reads_each_input_once_and_refuses_what_the_air_cannot_prove() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "poly index past 5 bits")]
 fn encode_refuses_a_field_that_would_spill_into_another() {
     let _ = Args { op: Op::Ntt, out: 32, a: 0, b: 0 }.encode();
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "zeta index 256 out of range")]
 fn zeta_refuses_an_index_past_255() {
     let _ = modq::zeta(256);
 }
