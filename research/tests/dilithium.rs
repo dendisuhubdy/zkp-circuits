@@ -114,6 +114,9 @@ fn ours(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     let chip = dilithium_core::verify_with(&mut HostKeccak, &mut HostModq, &mut Box::new(Arena::new()), pk, msg, sig);
     assert_eq!((soft, chip), (reference, reference), "three backends disagree");
     assert_eq!(dilithium_core::verify(&mut HostKeccak, pk, msg, sig), reference);
+    let wpk: [u32; 328] = core::array::from_fn(|i| u32::from_le_bytes(pk[4 * i..4 * i + 4].try_into().unwrap()));
+    let wsig: [u32; 605] = core::array::from_fn(|i| u32::from_le_bytes(sig[4 * i..4 * i + 4].try_into().unwrap()));
+    assert_eq!(dilithium_core::verify_words_with(&mut HostKeccak, &mut HostModq, &mut Box::new(Arena::new()), &wpk, msg, &wsig), reference, "word path");
     reference
 }
 
@@ -451,5 +454,86 @@ fn guest_and_host_agree_over_seeds() {
             assert_eq!(guest_valid(&p, &pk, &sig, &msg), want, "seed {seed} {name}");
             assert_eq!(want, (name == "valid") as u32, "seed {seed} {name} host");
         }
+    }
+}
+
+// ---- Task 7: software trims ---------------------------------------------------------------------
+
+#[test]
+fn uniform_words_matches_the_reference_uniform() {
+    use dilithium_core::poly::{uniform, uniform_words, Poly};
+    for s in 0..200u16 {
+        let rho: [u8; 32] = core::array::from_fn(|i| (i as u16 * 37 + s * 11) as u8);
+        let mut want = Poly::default();
+        uniform(&mut HostKeccak, &mut want, &rho, s);
+        let mut got = [0u32; 256];
+        uniform_words(&mut HostKeccak, &mut got, &rho, s);
+        assert_eq!(got, core::array::from_fn(|i| want.coeffs[i] as u32), "nonce {s}");
+    }
+}
+
+#[test]
+fn permute_words_is_permute_in_the_syscall_layout() {
+    use dilithium_core::Keccak;
+    let mut s: [u64; 25] = core::array::from_fn(|i| 0x0123_4567_89ab_cdefu64.rotate_left(i as u32 * 7));
+    let mut w = rand_zkvm::keccak::state_to_words(&s);
+    HostKeccak.permute(&mut s);
+    HostKeccak.permute_words(&mut w);
+    assert_eq!(w, rand_zkvm::keccak::state_to_words(&s));
+}
+
+#[test]
+fn fused_unpack_matches_the_reference_unpack_and_chknorm() {
+    use dilithium_core::{packing, params, poly};
+    for seed in 0..60u64 {
+        let (kp, msg) = case(400 + seed, 33);
+        let mut sig = kp.sign(&msg).to_vec();
+        if seed % 3 == 0 { sig[32 + (seed as usize * 13) % 2304] ^= 0x40; }
+        let pk: [u8; 1312] = kp.public.to_bytes().try_into().unwrap();
+        let sig: [u8; 2420] = sig.try_into().unwrap();
+        let (mut rho, mut t1) = ([0u8; 32], poly::Polyveck::default());
+        packing::unpack_pk(&mut rho, &mut t1, &pk);
+        let mut t1s = [[0u32; 256]; 4];
+        packing::unpack_t1_shifted(&mut t1s, &pk);
+        for k in 0..4 { for i in 0..256 { assert_eq!(t1s[k][i], (t1.vec[k].coeffs[i] << 13) as u32); } }
+        let (mut c, mut z, mut h) = ([0u8; 32], poly::Polyvecl::default(), poly::Polyveck::default());
+        let ok = packing::unpack_sig(&mut c, &mut z, &mut h, &sig);
+        let mut zc = [[0u32; 256]; 4];
+        let fused = packing::unpack_z_checked(&mut zc, &sig);
+        assert_eq!(fused, poly::l_chknorm(&z, (params::GAMMA1 - params::BETA) as i32) == 0, "seed {seed}");
+        if ok { for k in 0..4 { for i in 0..256 { assert_eq!(zc[k][i] as i64, (z.vec[k].coeffs[i] as i64).rem_euclid(rand_zkvm::modq::Q as i64)); } } }
+    }
+}
+
+fn reference_w1(w: &[[u32; 256]; 4], h: &[[u32; 256]; 4]) -> [u8; 768] {
+    use dilithium_core::poly;
+    let (mut rw, mut rh) = (poly::Polyveck::default(), poly::Polyveck::default());
+    for k in 0..4 { for i in 0..256 { rw.vec[k].coeffs[i] = w[k][i] as i32; rh.vec[k].coeffs[i] = h[k][i] as i32; } }
+    poly::k_use_hint(&mut rw, &rh);
+    let mut out = [0u8; 768];
+    poly::k_pack_w1(&mut out, &rw);
+    out
+}
+
+#[test]
+fn use_hint_pack_w1_matches_the_reference_on_random_values_and_every_decompose_edge() {
+    use dilithium_core::rounding::use_hint_pack_w1;
+    let q = rand_zkvm::modq::Q;
+    let mut s = 3u64;
+    let mut next = move || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; s };
+    for round in 0..40 {
+        let w: [[u32; 256]; 4] = core::array::from_fn(|_| core::array::from_fn(|_| (next() % q as u64) as u32));
+        let h: [[u32; 256]; 4] = core::array::from_fn(|_| core::array::from_fn(|_| (next() % 7 == 0) as u32));
+        let mut got = [0u8; 768];
+        use_hint_pack_w1(&mut got, &w, &h);
+        assert_eq!(got, reference_w1(&w, &h), "round {round}");
+    }
+    let g2 = 2 * dilithium_core::params::GAMMA2 as u32;
+    let edges: Vec<u32> = (0..=44u32).flat_map(|m| [m * g2, (m * g2).saturating_sub(1), m * g2 + 1]).filter(|&x| x < q).chain([0, q - 1]).collect();
+    for hint in [0u32, 1] {
+        let w: [[u32; 256]; 4] = core::array::from_fn(|k| core::array::from_fn(|i| edges[(k * 256 + i) % edges.len()]));
+        let mut got = [0u8; 768];
+        use_hint_pack_w1(&mut got, &w, &[[hint; 256]; 4]);
+        assert_eq!(got, reference_w1(&w, &[[hint; 256]; 4]), "decompose edges, hint {hint}");
     }
 }

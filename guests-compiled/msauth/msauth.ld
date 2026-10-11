@@ -1,10 +1,11 @@
-/* guest-sdk/guest.ld with ORIGIN raised to 0x10000, as dilithium-verify.ld does: the guest links
-   dilithium-core's .rodata (the NTT ZETAS table), which the loader writes with a prologue
+/* guest-sdk/guest.ld with ORIGIN raised to 0x10000, as dilithium-verify.ld does: the guest
+   links dilithium-core's .rodata (the NTT ZETAS table), which the loader writes with a prologue
    synthesised below the text (`Program::from_flat_image`).
 
-   Stack: 64 KiB. dilithium_core::verify's frame is about 24 KB on RV32; `main` adds the pk/sig
-   byte arrays (3.7 KB), the 328-word pk buffer, the 330-word hash buffer and the message, so
-   the measured peak (task-5 report) stays well under half the reserve. The 21 KiB ring Arena is the one .bss static (before the stack, inside the 1 MiB RAM). */
+   Stack: 64 KiB. The measured peak is about 2.7 KB (the 330-word hash buffer, the message and
+   the verifier's frame; `cycles_at_one_two_and_three_signers` prints it), so the reserve has a
+   wide margin. The 21 KiB ring Arena and the pk / sig words are .bss statics, before the stack,
+   inside the 1 MiB RAM. */
 
 ENTRY(_start)
 

@@ -87,6 +87,10 @@ pub fn verify_reference<K: Keccak>(
     true
 }
 
+// The z loops below index the K-long `z` rows by `p::K`; that is `p::L` only because they are
+// equal.
+const _: () = assert!(p::K == p::L && p::L == 4);
+
 use crate::ring::{slot, Arena, Ring, SoftRing};
 use crate::{poly::Poly as P, rounding};
 
@@ -187,4 +191,91 @@ pub fn verify<K: Keccak>(
     sig: &[u8; p::SIGNBYTES],
 ) -> bool {
     verify_with(k, &mut SoftRing, &mut Arena::new(), pk, m, sig)
+}
+
+/// [`verify_with`] on the wire format as little-endian words (`pk` 328, `sig` 605): the guest's
+/// verifier, with no byte buffers on the hot path. Same accept/reject as [`verify_reference`] on
+/// every input (spec §3.6), by construction of each step:
+///
+/// - `t1 << 13` and `z` (as `gamma1 - t`, then canonical) are unpacked straight into the arena;
+///   the `chknorm` test is made on the centred `z` in the same pass, before canonicalisation
+///   matters, and a failure returns before anything else runs;
+/// - ExpandA samples straight from the SHAKE128 state words into the arena's A row;
+/// - `use_hint` and `w1_pack` are one pass over the canonical `w` (the `caddq(w1)` of the
+///   reference), the hints applied as patches while the hint section is walked with
+///   `unpack_sig`'s own checks (a malformed section returns `false`, whenever it is reached).
+pub fn verify_words_with<K: Keccak, R: Ring>(
+    k: &mut K,
+    r: &mut R,
+    ar: &mut Arena,
+    pk: &[u32; packing::PK_WORDS],
+    m: &[u8],
+    sig: &[u32; packing::SIG_WORDS],
+) -> bool {
+    let (Some(rho), Some(c)) = (pk.first_chunk::<8>(), sig.first_chunk::<8>()) else {
+        return false;
+    };
+    {
+        let Some(zs) = ar.p[slot::Z..].first_chunk_mut::<4>() else { return false };
+        if !packing::unpack_z_checked_words(zs, sig) {
+            return false;
+        }
+        let Some(ts) = ar.p[slot::T1..].first_chunk_mut::<4>() else { return false };
+        packing::unpack_t1_shifted_words(ts, pk);
+    }
+
+    // mu = CRH(CRH(pk), m)
+    let mut mu = [0u32; 16];
+    {
+        let mut state = Shake::new256(&mut *k);
+        state.absorb_words(pk);
+        state.finalize();
+        state.squeeze_words(&mut mu[..8]);
+        let mut state = Shake::new256(&mut *k);
+        state.absorb_words(&mu[..8]);
+        state.absorb(m);
+        state.finalize();
+        state.squeeze_words(&mut mu);
+    }
+
+    poly::challenge_words(k, &mut ar.p[slot::C], c);
+
+    for i in 0..p::K {
+        r.ntt(ar, slot::Z + i);
+    }
+    for i in 0..p::K {
+        for j in 0..p::L {
+            poly::uniform_words_w(k, &mut ar.p[slot::ROW + j], rho, ((i << 8) + j) as u16);
+        }
+        r.dot4(ar, slot::W + i, slot::ROW, slot::Z);
+    }
+    r.ntt(ar, slot::C);
+    for i in 0..p::K {
+        r.ntt(ar, slot::T1 + i);
+    }
+    r.msub4(ar, slot::W, slot::C, slot::T1);
+    for i in 0..p::K {
+        r.intt(ar, slot::W + i);
+    }
+
+    // use_hint + w1_pack: the hint = 0 packing, then the hints as patches.
+    let mut buf = [0u32; p::K * p::POLYW1_PACKEDBYTES / 4];
+    let (polys, _) = buf.as_chunks_mut::<48>();
+    for (i, o) in polys.iter_mut().enumerate() {
+        rounding::w1_pack_words(o, &ar.p[slot::W + i]);
+    }
+    let ok = packing::for_each_hint(sig, |i, j| {
+        rounding::w1_apply_hint(&mut polys[i], &ar.p[slot::W + i], j)
+    });
+    if !ok {
+        return false;
+    }
+
+    let mut state = Shake::new256(&mut *k);
+    state.absorb_words(&mu);
+    state.absorb_words(&buf);
+    state.finalize();
+    let mut c2 = [0u32; 8];
+    state.squeeze_words(&mut c2);
+    c2 == *c
 }

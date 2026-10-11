@@ -17,11 +17,15 @@
 //! slot 7 and halts (no output slot is written before the last check).
 
 use dilithium_core::ring::Arena;
-use dilithium_core::verify_with;
-use guest_sdk::{halt, poseidon2, read_input, read_public, write_output, SyscallKeccak, SyscallRing};
+use dilithium_core::verify_words_with;
+use guest_sdk::{halt, poseidon2, read_input, read_input_words, read_public, write_output, SyscallKeccak, SyscallRing};
 
 /// The ring arena (21 KiB), in `.bss`, shared by the (sequential) signature checks.
 static mut ARENA: Arena = Arena::new();
+/// The slot's public key and signature, as the words they arrive in (also `.bss`): read once,
+/// hashed for `MS_LEAF` and verified from the same words.
+static mut PKW: [u32; 328] = [0; 328];
+static mut SIGW: [u32; 605] = [0; 605];
 
 const M_MAX: usize = 3;
 const SLOT: usize = 967;
@@ -44,14 +48,6 @@ fn h(domain: u32, msg: &[u32], buf: &mut [u32; 330]) -> [u32; 8] {
     let mut o = [0u32; 8];
     o.copy_from_slice(&buf[..8]);
     o
-}
-
-fn words_to_bytes<const B: usize>(base: u32) -> [u8; B] {
-    let mut out = [0u8; B];
-    for i in 0..B {
-        out[i] = (read_input(base + (i / 4) as u32) >> (8 * (i % 4))) as u8;
-    }
-    out
 }
 
 #[no_mangle]
@@ -90,11 +86,17 @@ pub extern "C" fn main() -> ! {
             panic!()
         }
         last_index = index as i32;
-        let mut pkw = [0u32; 328];
-        for i in 0..328 {
-            pkw[i] = read_input(base + 2 + i as u32);
-        }
-        let mut cur = h(MS_LEAF, &pkw, &mut buf);
+        // SAFETY: single-threaded; these are the only references to PKW / SIGW / ARENA, and they
+        // end with this slot's iteration.
+        let (pkw, sigw, ar) = unsafe {
+            (
+                &mut *core::ptr::addr_of_mut!(PKW),
+                &mut *core::ptr::addr_of_mut!(SIGW),
+                &mut *core::ptr::addr_of_mut!(ARENA),
+            )
+        };
+        read_input_words(base + 2, pkw);
+        let mut cur = h(MS_LEAF, pkw, &mut buf);
         for lvl in 0..DEPTH {
             let mut sib = [0u32; 8];
             for i in 0..8 {
@@ -115,11 +117,8 @@ pub extern "C" fn main() -> ! {
             Some(r) if r != cur => panic!(),
             _ => {}
         }
-        let pk: [u8; 1312] = words_to_bytes(base + 2);
-        let sig: [u8; 2420] = words_to_bytes(base + 330);
-        // SAFETY: single-threaded; this is the only reference to ARENA and it ends with the call.
-        let ar = unsafe { &mut *core::ptr::addr_of_mut!(ARENA) };
-        if !verify_with(&mut SyscallKeccak, &mut SyscallRing, ar, &pk, &msg, &sig) {
+        read_input_words(base + 330, sigw);
+        if !verify_words_with(&mut SyscallKeccak, &mut SyscallRing, ar, pkw, &msg, sigw) {
             panic!()
         }
         count += 1;

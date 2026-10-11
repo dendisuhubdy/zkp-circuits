@@ -1,11 +1,11 @@
-/* guest-sdk/guest.ld with ORIGIN raised to 0x10000, as evm.ld does: this guest has a .rodata (the
-   NTT ZETAS table, 256 words), which the loader writes with a prologue synthesised below the text
-   (`Program::from_flat_image`).
+/* guest-sdk/guest.ld with ORIGIN raised to 0x10000, as evm.ld does: this guest has a .rodata
+   (the NTT ZETAS table, 256 words), which the loader writes with a prologue synthesised below
+   the text (`Program::from_flat_image`).
 
-   Stack: 64 KiB, unchanged. dilithium_core::verify's measured frame is about 24 KB on RV32 and
-   `main` adds the pk/sig/msg buffers (about 4 KB), so the stack peaks near 28 KB (less now: the ring arrays live in the arena); the 64 KiB
-   the SDK script reserves has more than 2x headroom. The 21 KiB ring Arena is a .bss static
-   (before the stack, inside the 1 MiB RAM), so the stack was not raised. */
+   Stack: 64 KiB, unchanged. The measured peak is about 1.3 KB (task 7: the ring arrays live in
+   the arena, the pk / sig words in .bss), so the reserve has a wide margin. The 21 KiB ring
+   Arena and the 4 KiB of pk / sig words are .bss statics, before the stack, inside the 1 MiB
+   RAM. */
 
 ENTRY(_start)
 

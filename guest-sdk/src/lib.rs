@@ -46,6 +46,30 @@ pub fn read_input(idx: u32) -> u32 {
     out
 }
 
+/// Reads private input words `base..base + dst.len()` into `dst`, eight to a loop pass (one
+/// `READ_INPUT` each, so the same words bound to `H_IN` as `read_input` would read). The unrolling
+/// takes the per-word cost from about five instructions to about three.
+#[inline(always)]
+pub fn read_input_words(base: u32, dst: &mut [u32]) {
+    let (chunks, rest) = dst.as_chunks_mut::<8>();
+    let mut idx = base;
+    for c in chunks {
+        c[0] = read_input(idx);
+        c[1] = read_input(idx + 1);
+        c[2] = read_input(idx + 2);
+        c[3] = read_input(idx + 3);
+        c[4] = read_input(idx + 4);
+        c[5] = read_input(idx + 5);
+        c[6] = read_input(idx + 6);
+        c[7] = read_input(idx + 7);
+        idx += 8;
+    }
+    for w in rest {
+        *w = read_input(idx);
+        idx += 1;
+    }
+}
+
 /// Returns **public** input word `idx` — committed to the proof's unsalted `H_PUB`
 /// (`pv::PUB0..7`), which anyone holding the words recomputes and checks
 /// (`Machine::verify_public`). Use this for data the chain sees anyway (a program image, a
@@ -334,6 +358,12 @@ impl dilithium_core::Keccak for SyscallKeccak {
             i += 1;
         }
     }
+
+    /// The state already is the syscall's layout: one `ecall`, no join or split.
+    #[inline(always)]
+    fn permute_words(&mut self, w: &mut [u32; 50]) {
+        keccak(w);
+    }
 }
 
 /// `dilithium_core::ring::Ring` over the `MODQ` syscall: one `ecall` per operation, `a0` the
@@ -344,9 +374,12 @@ pub struct SyscallRing;
 #[cfg(feature = "dilithium")]
 #[inline(always)]
 fn modq_call(ar: &mut dilithium_core::ring::Arena, a1: u32) {
-    // SAFETY: the syscall reads and writes only polys inside the arena's `ARENA_POLYS * 256`
-    // words (every caller's index span is asserted `< ARENA_POLYS` below); `&mut Arena` is
-    // 4-aligned, exclusively borrowed and live for the whole call; no register is written.
+    // SAFETY: `&mut Arena` is 4-aligned, exclusively borrowed and live for the whole call, and no
+    // register is written. The syscall touches only polys inside the arena's `ARENA_POLYS * 256`
+    // words *provided the poly indices packed into `a1` are in range*: the callers below only
+    // `debug_assert!` that (the checks are compiled out of the shipped guests), and the chip's own
+    // aliasing rules (`dilithium_core::ring::Ring`) are not checked here at all. The two guests
+    // pass constant, in-range, non-aliasing indices (`dilithium_core::ring::slot`).
     unsafe {
         core::arch::asm!(
             "ecall",

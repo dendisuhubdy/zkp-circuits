@@ -399,3 +399,113 @@ pub fn k_pack_w1(r: &mut [u8; K * params::POLYW1_PACKEDBYTES], a: &Polyveck) {
         w1_pack(chunk, p);
     }
 }
+
+// ---------------------------------------------------------------------------------- word paths
+
+/// [`uniform`] from the `rho` words, straight into `out` (no `Poly`, no byte buffer): the
+/// SHAKE128(rho ‖ nonce) rate is read as 42 words per block, four 23-bit candidates per three
+/// words, accepted in stream order while `< q` until 256 are in. `rho` is the LE view of the
+/// reference's 32 seed bytes.
+///
+/// The reference squeezes five blocks and then one at a time; the candidates are one stream, and
+/// 256 candidates never fit four blocks (224), so the permutation count is the reference's too.
+pub fn uniform_words_w<H: Keccak>(k: &mut H, out: &mut [u32; N], rho: &[u32; 8], nonce: u16) {
+    const M: u32 = 0x7f_ffff;
+    const Q: u32 = params::Q as u32;
+    // SHAKE128 absorb + finalize, in place: rho, the two nonce bytes, the 0x1f pad byte (byte 34)
+    // and the final bit of the 168-byte rate (byte 167).
+    // (Written out as a literal: `[0; 50]` plus stores is a `memset` call, about twice the cost.)
+    let mut st: [u32; 50] = [
+        rho[0], rho[1], rho[2], rho[3], rho[4], rho[5], rho[6], rho[7], nonce as u32 | 0x1f << 16,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // words 9..41
+        1 << 31, // word 41, the last rate word
+        0, 0, 0, 0, 0, 0, 0, 0, // the capacity
+    ];
+    // Store through a running pointer. The common group (all four candidates accepted, four slots
+    // left) is four `sw` and one `addi`; anything else takes the checked per-candidate path.
+    let base = out.as_mut_ptr();
+    let end = base.wrapping_add(N);
+    let limit = end.addr() - 4 * 4;
+    let mut p = base;
+    loop {
+        k.permute_words(&mut st);
+        let mut i = 0;
+        while i < 42 {
+            let (w0, w1, w2) = (st[i], st[i + 1], st[i + 2]);
+            i += 3;
+            let c0 = w0 & M;
+            let c1 = (w0 >> 24 | w1 << 8) & M;
+            let c2 = (w1 >> 16 | w2 << 16) & M;
+            let c3 = (w2 >> 8) & M;
+            if p.addr() <= limit && ((c0 < Q) as u32 & (c1 < Q) as u32 & (c2 < Q) as u32 & (c3 < Q) as u32) != 0 {
+                // SAFETY: `p.addr() <= end.addr() - 16` leaves four u32 slots before `end`, which
+                // is one past the end of `out`; `p` only ever advances from `base` by stores.
+                unsafe {
+                    *p = c0;
+                    *p.add(1) = c1;
+                    *p.add(2) = c2;
+                    *p.add(3) = c3;
+                    p = p.add(4);
+                }
+            } else {
+                for c in [c0, c1, c2, c3] {
+                    if p != end && c < Q {
+                        // SAFETY: `p != end` and `p` only advances by one past each store, so
+                        // `p` is in `out`.
+                        unsafe {
+                            *p = c;
+                            p = p.add(1);
+                        }
+                    }
+                }
+                if p == end {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// [`uniform_words_w`] over seed bytes: equals [`uniform`] coefficient for coefficient.
+pub fn uniform_words<H: Keccak>(k: &mut H, out: &mut [u32; N], seed: &[u8; SEEDBYTES], nonce: u16) {
+    let rho: [u32; 8] = core::array::from_fn(|i| {
+        u32::from_le_bytes([seed[4 * i], seed[4 * i + 1], seed[4 * i + 2], seed[4 * i + 3]])
+    });
+    uniform_words_w(k, out, &rho, nonce)
+}
+
+/// [`challenge`] from the seed words, into `out` as canonical residues (`-1` as `q - 1`).
+pub fn challenge_words<H: Keccak>(k: &mut H, out: &mut [u32; N], seed: &[u32; 8]) {
+    let mut state = Shake::new256(&mut *k);
+    state.absorb_words(seed);
+    state.finalize();
+
+    let mut buf = [0u32; SHAKE256_RATE / 4];
+    state.squeeze_words(&mut buf);
+
+    let mut signs: u64 = buf[0] as u64 | (buf[1] as u64) << 32;
+    let mut pos: usize = 8;
+    // `out.fill(0)` is a `memset` call here (about 3 cycles a word); stores with a barrier
+    // between passes stay stores (about 1.3).
+    for ch in out.as_chunks_mut::<8>().0 {
+        *ch = [0; 8];
+        crate::packing::barrier();
+    }
+    for i in (N - params::TAU)..N {
+        let mut b: usize;
+        loop {
+            if pos >= SHAKE256_RATE {
+                state.squeeze_words(&mut buf);
+                pos = 0;
+            }
+            b = (buf[pos >> 2] >> (8 * (pos & 3))) as u8 as usize;
+            pos += 1;
+            if b <= i {
+                break;
+            }
+        }
+        out[i] = out[b];
+        out[b] = if signs & 1 == 0 { 1 } else { params::Q as u32 - 1 };
+        signs >>= 1;
+    }
+}
