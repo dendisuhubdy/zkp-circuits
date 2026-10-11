@@ -65,6 +65,8 @@ evm-core = { path = "../guests-compiled/evm-core", features = ["ffi"] }
 hex = "0.4"
 # The oracle for `dilithium-core` (keygen, signing, reference verify) — host tests only.
 crystals-dilithium = "=2.0.0"
+# Independent SHAKE oracle for `dilithium-core`'s sponge — host tests only.
+sha3 = "=0.10.9"
 # The oracle for `evm-core`'s 256-bit arithmetic — host tests only, never in a guest.
 num-bigint = "0.4"
 # The oracle for `evm-core`'s opcode semantics and gas (`tests/evm_interp.rs`) — host tests only,
