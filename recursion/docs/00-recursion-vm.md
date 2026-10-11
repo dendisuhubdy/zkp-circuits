@@ -43,6 +43,13 @@ operand: the pair `(r, r+1)`, value `c0 + c1·X`.
 | `PUBLIC` | `ra` | append `ra` to the public values |
 | `POSEIDON2` | `ra` | permute the eight cells at `ra..ra+8` in place |
 | `HALT` | — | end |
+| `SPONGE` (25) | `ra, imm` | absorb the four cells at `imm..imm+4` into rate lanes 0–3 of the state at `ra`, permute in place |
+| `COMPRESS` (27) | `rd, ra, imm` | Merkle level: the digest at `ra`, the sibling at `imm..imm+4`, ordered by the bit in `rd`; lanes 0–3 written back over `ra` |
+
+(2026-10-09, phase 4 B/B′: `SPONGE`'s and `COMPRESS`'s fourth word is the **absolute address** of
+the source block / the sibling digest — an immediate, no longer a register. The cpu AIR's immediate
+form binds `B0 = B`, `B1 = 0`; group 2's limbs range-check `B0 + 3 < 2^24`, and the emulator
+refuses an out-of-range immediate with `AddressOutOfRange`. `docs/superpowers/specs/2026-10-09-rvm-phase4-spans-design.md` §1.4.)
 
 **Precompiles are added when the measurement asks** — see the decision below. M5.1 declined a
 fold and an exponentiation precompile at 5.68 M rows; phase 3 took both at 893 606 as `FOLD` (28)

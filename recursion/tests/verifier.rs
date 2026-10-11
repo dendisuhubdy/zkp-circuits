@@ -342,8 +342,7 @@ fn a_commit_phase_leaf_and_its_restored_path_recompute_the_rounds_commitment() {
         let bits: Vec<Felt> = (0..levels)
             .map(|k| b.constant(F::from_u64(((index >> k) & 1) as u64)))
             .collect();
-        let root = Digest(b.alloc(4));
-        hash::merkle_walk(&mut b, leaf, &bits, sibs, levels, root);
+        let root = hash::merkle_walk(&mut b, leaf, &bits, sibs, levels);
         for i in 0..4 {
             let v = b.load(root.0, i);
             b.public(v);
@@ -451,15 +450,13 @@ fn an_input_rounds_leaf_group_and_restored_path_recompute_the_preprocessed_cap()
         let bits: Vec<Felt> = (0..levels)
             .map(|k| b.constant(F::from_u64(((index >> k) & 1) as u64)))
             .collect();
-        let root = Digest(b.alloc(4));
-        hash::merkle_walk_with_injections(
+        let root = hash::merkle_walk_with_injections(
             &mut b,
             leaf,
             &bits,
             sibs,
             levels,
             &[hash::Injection { after_level, rows, n_cells: short_cells }],
-            root,
         );
         for i in 0..4 {
             let v = b.load(root.0, i);
@@ -772,7 +769,7 @@ fn phase_5s_assertions_are_all_named() {
 /// checks the own slot by the indicator dot product — a change of the shared pipeline):
 /// `39bb6b8d…3352` → `af0c16e8…6c7b`. Phase 3's Cut E2 re-recorded it (2026-10-06: each committed row's
 /// buffer gains the two fold-result cells after its salts, `hint_array_padded`, in both builds, so
-/// every later cell address moves): `af0c16e8…6c7b` → `c580415b…5e6c`.
+/// every later cell address moves): `af0c16e8…6c7b` → `c580415b…5e6c`. Phase 4's D2 re-recorded it (2026-10-09: the walk returns its leaf, no out cell, in both builds): `c580415b…5e6c` → `759b015d…9b4e`.
 #[test]
 fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     use recursion::dsl::Liveness;
@@ -788,7 +785,7 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
-        "c580415bdaccf7888e7602e793198874e39e0bda8951d11ef6e47ed029455e6c",
+        "759b015d89ac22193904761c8eb0f68f3c2f9973d38247f4c169fbc0e3c39b4e",
         "the Off replay must reproduce the pre-Task-7 stream byte for byte (plus VERIFIER-1's \
          per-round assertions, and constraint set 7's and 8's inner changes)"
     );
@@ -833,15 +830,17 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// whole, its own slot checked by one register-addressed `LOADE`): `8a2d166f…8509` → `9a43596f…4aa9`.
 /// Re-registered for phase 3's Cut E2 (`FOLD`, the fold in the reduce chip): `9a43596f…4aa9` →
 /// `f66aa580…6f63`. Re-registered for phase 3's Cut F (`POW`, the index powers in the reduce chip):
-/// `f66aa580…6f63` → `df3a18b8…1073`.
+/// `f66aa580…6f63` → `df3a18b8…1073`. Phase 4 (2026-10-09, the Merkle spans) re-recorded it:
+/// `df3a18b8…1073` → `1bcbcec9…1fba` (program changes all four: the cap select by register-offset
+/// `LOAD`, the re-homing reloads, the in-place Merkle walk, `SPONGE`/`COMPRESS` immediates).
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "df3a18b8d3294a591a2e8fd79f5430550cd9f09afcff6fc8aea89cc1bfaf1073",
-        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 3's Cut F"
+        "1bcbcec900154ec2cb6084fca1a08e534bfb2f0d67e74a8e8deff1a15da81fba",
+        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 4's Merkle spans"
     );
 }
 

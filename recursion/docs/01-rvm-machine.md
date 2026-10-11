@@ -173,7 +173,9 @@ tier 20, with both memory tables at `2^21`; the same cell-weighted model project
 docs/05's projection) — a ≥ 160 GB host, until it is proved. Since `docs/07` the rVM proves at
 rate ¼ (`machine::RvmFri`: 92 queries, 24 grinding bits, 86.38 proven bits against 86.41): every
 LDE term in that list halves; the measured twin is 15.64 GB live (×0.58), and the exit is
-projected at ≈ 64–75 GB — a ≥ 96 GB host, until it is proved.
+projected at ≈ 64–75 GB — a ≥ 96 GB host, until it is proved. Since `docs/09` (phase 4, the
+Merkle spans) one inner verification is 315 952 rows, **tier 19**, and every production aggregate one tier
+lower (N=1 19, N=2–3 20).
 
 **Measured 2026-09-30 (constraint set 8, a 503 GB box, fullnode #45): the exit proves in
 8 164.8 s, verifies in 99.3 s, is 1 566 619 bytes, and peaks at 376.9 GB resident** — 7.8× the

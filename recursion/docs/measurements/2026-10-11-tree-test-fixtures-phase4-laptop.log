@@ -1,0 +1,35 @@
+# tree Task 1b generator, re-run for rVM phase 4 (Task 5 re-pin), 2026-10-11T02:49:20Z, HEAD d95aa5e+wip, 48 GiB, 16 cpus; leaves cached from the suite run
+   Compiling recursion v0.1.0 (/Users/dendisuhubdy/rand-worktrees/circuits-phase4/recursion)
+    Finished `release` profile [optimized] target(s) in 2.34s
+     Running tests/tree.rs (target/release/deps/tree-6b21a1eeff82cc2d)
+
+running 1 test
+test generate_test_tree_fixtures has been running for over 60 seconds
+TREE_TEST_FIXTURE leaf-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 269096
+TREE_TEST_FIXTURE step-0: tier 18 reg 19 ram 20 poseidon2 15 reduce 17 bytes 280325
+TREE_TEST_FIXTURE step-1: tier 18 reg 19 ram 20 poseidon2 15 reduce 17 bytes 283303
+TREE_TEST_FIXTURE root: tier 18 reg 19 ram 20 poseidon2 15 reduce 17 bytes 280069
+TREE_TEST_FIXTURE foreign-0: tier 18 reg 19 ram 19 poseidon2 14 reduce 16 bytes 271912
+test generate_test_tree_fixtures ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 1818.49s
+
+     1821.38 real      1769.11 user        19.59 sys
+         25283166208  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+            11795075  page reclaims
+               11567  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   3  signals received
+              114502  voluntary context switches
+              179073  involuntary context switches
+           715780774  instructions retired
+           235459505  cycles elapsed
+            32490072  peak memory footprint
+exit 0

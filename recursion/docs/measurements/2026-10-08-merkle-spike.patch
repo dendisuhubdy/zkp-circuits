@@ -1,0 +1,561 @@
+diff --git a/recursion/src/dsl/builder.rs b/recursion/src/dsl/builder.rs
+index 62417db..69c97f4 100644
+--- a/recursion/src/dsl/builder.rs
++++ b/recursion/src/dsl/builder.rs
+@@ -103,6 +103,11 @@ pub struct Stats {
+     pub span_names: Vec<&'static str>,
+     pub pc_span: Vec<u16>,
+     pub pc_kind: Vec<u8>,
++    /// SPIKE: per emitted pc, the handle a reload row reloads (u32::MAX otherwise).
++    pub pc_handle: Vec<u32>,
++    /// SPIKE: per handle, (defining op, span at def, alloc cells if a ptr holder else 0, def pc).
++    pub handle_def: Vec<(u8, u16, u64, u32)>,
++    pub holder_cells: Vec<u64>,
+ }
+ 
+ // ------------------------------------------------------------------ the buffered operations
+@@ -174,6 +179,7 @@ enum Op2 {
+ }
+ 
+ struct Slot {
++    pin: bool,
+     width: u8,
+     /// The value, when it is a compile-time constant ([`Builder::constant`], [`Builder::zero`]).
+     /// Only [`Builder::counted_loop`] reads it; it is deliberately *not* propagated through
+@@ -324,7 +330,7 @@ impl Builder {
+             return z;
+         }
+         let id = self.slots.len() as u32;
+-        self.slots.push(Slot { width: 1, konst: Some(F::ZERO), zero: true });
++        self.slots.push(Slot { pin: false, width: 1, konst: Some(F::ZERO), zero: true });
+         let z = Felt(id);
+         self.zero = Some(z);
+         z
+@@ -501,6 +507,8 @@ impl Builder {
+         self.stats.cells += cells;
+         self.begin();
+         let (id, rd) = self.new_handle(1);
++        if self.stats.holder_cells.len() <= id as usize { self.stats.holder_cells.resize(id as usize + 1, 0); }
++        self.stats.holder_cells[id as usize] = cells.max(1);
+         self.emit(Op::Faddi, rd, RRef::Raw(0), BRef::Imm(F::from_u64(base)));
+         self.ptrs.push(PtrSlot { holder: id, delta: 0, base_value: base });
+         Ptr(self.ptrs.len() as u32 - 1)
+@@ -575,6 +583,16 @@ impl Builder {
+         Ext(id)
+     }
+ 
++    /// SPIKE: `mem[addr_of(base) + k + off]` with `off` a runtime register.
++    pub fn load_offset(&mut self, base: Ptr, k: i64, off: Felt) -> Felt {
++        self.begin();
++        let ro = self.materialise(off.0);
++        let at = F::from_u64((self.addr_of(base) as i64 + k) as u64);
++        let (id, rd) = self.new_handle(1);
++        self.emit(Op::Load, rd, ro, BRef::Imm(at));
++        Felt(id)
++    }
++
+     pub fn store_ext(&mut self, p: Ptr, off: i64, v: Ext) {
+         self.begin();
+         let rv = self.materialise(v.0);
+@@ -649,6 +667,19 @@ impl Builder {
+         if let Some(p) = self.hash {
+             return p;
+         }
++        if crate::isa::spike("SPIKE_PIN_HASH") {
++            let base = self.next_cell;
++            self.next_cell += 16;
++            self.stats.cells += 16;
++            let id = self.slots.len() as u32;
++            self.slots.push(Slot { pin: true, width: 1, konst: None, zero: false });
++            self.begin();
++            self.emit(Op::Faddi, RRef::Raw(25), RRef::Raw(0), BRef::Imm(F::from_u64(base)));
++            self.ptrs.push(PtrSlot { holder: id, delta: 0, base_value: base });
++            let p = Ptr(self.ptrs.len() as u32 - 1);
++            self.hash = Some(p);
++            return p;
++        }
+         let p = self.alloc(16);
+         self.hash = Some(p);
+         p
+@@ -704,6 +735,12 @@ impl Builder {
+     pub fn sponge_absorb(&mut self, state: Ptr, src: Ptr) {
+         self.begin();
+         let ra = self.ptr_reg(state);
++        if crate::isa::spike_imm_s() {
++            let at = F::from_u64(self.addr_of(src));
++            self.emit(Op::Sponge, RRef::Raw(0), ra, BRef::Imm(at));
++            self.stats.perms += 1;
++            return;
++        }
+         let rb = self.ptr_reg(src);
+         self.emit(Op::Sponge, RRef::Raw(0), ra, bref_of(rb));
+         self.stats.perms += 1;
+@@ -717,6 +754,13 @@ impl Builder {
+     pub fn compress_step(&mut self, state: Ptr, sib: Ptr, bit: Felt) {
+         self.begin();
+         let ra = self.ptr_reg(state);
++        if crate::isa::spike_imm_c() {
++            let at = F::from_u64(self.addr_of(sib));
++            let rd = self.materialise(bit.0);
++            self.emit(Op::Compress, rd, ra, BRef::Imm(at));
++            self.stats.perms += 1;
++            return;
++        }
+         let rb = self.ptr_reg(sib);
+         let rd = self.materialise(bit.0);
+         self.emit(Op::Compress, rd, ra, bref_of(rb));
+@@ -1112,6 +1156,9 @@ impl Builder {
+         if self.slots[id as usize].zero {
+             return RRef::Raw(0);
+         }
++        if self.slots[id as usize].pin {
++            return RRef::Raw(25);
++        }
+         let entry = self.ops.len() as u32;
+         self.ops.push(Op2::Mat { id });
+         RRef::Mat(entry, 0)
+@@ -1133,7 +1180,7 @@ impl Builder {
+     /// A fresh handle: the slot, then the `Def` entry the replay allocates a home for.
+     fn new_handle(&mut self, width: u8) -> (u32, RRef) {
+         let id = self.slots.len() as u32;
+-        self.slots.push(Slot { width, konst: None, zero: false });
++        self.slots.push(Slot { pin: false, width, konst: None, zero: false });
+         self.ops.push(Op2::Def { id, width });
+         (id, RRef::Home(id, 0))
+     }
+@@ -1275,6 +1322,13 @@ impl Builder {
+         let mut pc_span: Vec<u16> = Vec::new();
+         let mut pc_kind: Vec<u8> = Vec::new();
+         let mut stats = self.stats;
++        let mut pc_handle: Vec<u32> = Vec::new();
++        let rehome = crate::isa::spike("SPIKE_REHOME");
++        let pin25 = crate::isa::spike("SPIKE_PIN_HASH");
++        let mut depth = 0i32; // open if_eq bodies
++        let mut loop_tops: Vec<u32> = Vec::new();
++        let mut clean: Vec<bool> = vec![false; self.slots.len()];
++        let mut handle_def: Vec<(u8, u16, u64, u32)> = vec![(255, 0, 0, 0); self.slots.len()];
+         let mut loop_snap: Vec<(u32, Vec<Option<u8>>, Vec<Option<u64>>)> = Vec::new();
+         let mut branch_snap: Vec<(Vec<Option<u8>>, Vec<Option<u64>>)> = Vec::new();
+ 
+@@ -1289,7 +1343,53 @@ impl Builder {
+                     mat_out.clear();
+                 }
+                 Op2::Mat { id } => {
+-                    let r = match home[*id as usize] {
++                    // SPIKE_REHOME: reload a spilled handle into a home register (Belady) when its
++                    // next materialise is nearer than the farthest resident's next use.
++                    let mut rehomed_reg: Option<u8> = None;
++                    if rehome && live && depth == 0 && loop_tops.last().is_none_or(|&t| def_idx[*id as usize] != u32::MAX && def_idx[*id as usize] > t) && home[*id as usize].is_none() && self.slots[*id as usize].width == 1 {
++                        let us = &uses[*id as usize];
++                        let nu = us[us.partition_point(|&u| u <= i as u32)..].iter().copied().find(|&u| matches!(ops[u as usize], Op2::Mat { .. }));
++                        if let Some(nu) = nu {
++                            let mut pinned: Vec<u8> = mat_out.values().copied().filter(|r| *r < SCRATCH[0]).collect();
++                            for o in ops[i + 1..].iter().take_while(|o| !matches!(o, Op2::Group)) {
++                                if let Op2::Instr { rd, ra, b, .. } = o {
++                                    for r in [*rd, *ra, b_rd_as_rref(b)] {
++                                        if let RRef::Home(h, lane) = r { if let Some(reg) = home[h as usize] { pinned.push(reg + lane); } }
++                                    }
++                                }
++                                if let Op2::Mat { id: h } = o { if let Some(reg) = home[*h as usize] { pinned.push(reg); } }
++                            }
++                            let vacant = ALLOCATABLE.iter().any(|&r| regs[r as usize].is_none() && !(pin25 && r == 25));
++                            let worth = vacant || {
++                                let mut far = 0u32;
++                                for &rid in residents.iter() {
++                                    let r = home[rid as usize].unwrap();
++                                    if (0..self.slots[rid as usize].width).any(|k| pinned.contains(&(r + k))) { continue; }
++                                    let u = &uses[rid as usize];
++                                    let nx = u.get(u.partition_point(|&x| x <= i as u32)).copied().unwrap_or(u32::MAX);
++                                    far = far.max(nx);
++                                }
++                                far > nu
++                            };
++                            if worth {
++                                let addr = cells[*id as usize].expect("a spilled handle has a cell");
++                                let reg = claim(1, &pinned, &mut home, &mut cells, &mut regs, &mut residents, &mut free_cells_1,
++                                    &mut free_cells_2, &mut arena, &mut arena_peak, &mut out, &mut stats, live, &uses, i as u32,
++                                    &self.slots, &mut live_count, &clean);
++                                out.push(Instr { op: Op::Load, rd: reg, ra: 0, b: F::from_u64(addr) });
++                                pc_handle.resize(out.len() - 1, u32::MAX);
++                                pc_handle.push(*id);
++                                stats.reloads += 1;
++                                home[*id as usize] = Some(reg);
++                                regs[reg as usize] = Some(*id);
++                                residents.push_back(*id);
++                                live_count += 1;
++                                clean[*id as usize] = true;
++                                rehomed_reg = Some(reg);
++                            }
++                        }
++                    }
++                    let r = match rehomed_reg.or(home[*id as usize]) {
+                         Some(r) => r,
+                         None => {
+                             let width = self.slots[*id as usize].width;
+@@ -1297,6 +1397,8 @@ impl Builder {
+                             let addr = cells[*id as usize].expect("a spilled handle has a cell");
+                             let op = if width == 1 { Op::Load } else { Op::Loade };
+                             out.push(Instr { op, rd: slot, ra: 0, b: F::from_u64(addr) });
++                            pc_handle.resize(out.len() - 1, u32::MAX);
++                            pc_handle.push(*id);
+                             stats.reloads += 1;
+                             slot
+                         }
+@@ -1304,6 +1406,12 @@ impl Builder {
+                     mat_out.insert(i as u32, r);
+                 }
+                 Op2::Def { id, width } => {
++                    {
++                        let dop = ops[i + 1..].iter().find_map(|o| if let Op2::Instr { op, .. } = o { Some(*op as u8) } else { None }).unwrap_or(254);
++                        let sp = span_stack.last().copied().unwrap_or(0);
++                        let hc = stats.holder_cells.get(*id as usize).copied().unwrap_or(0);
++                        handle_def[*id as usize] = (dop, sp, hc, out.len() as u32);
++                    }
+                     // The registers the defining instruction(s) read must survive the claim —
+                     // the pre-liveness `pinned` list: the next instructions' operand registers.
+                     let mut pinned: Vec<u8> = Vec::new();
+@@ -1350,6 +1458,7 @@ impl Builder {
+                         i as u32,
+                         &self.slots,
+                         &mut live_count,
++                        &clean,
+                     );
+                     home[*id as usize] = Some(reg);
+                     regs[reg as usize] = Some(*id);
+@@ -1381,12 +1490,15 @@ impl Builder {
+                     let _ = target;
+                 }
+                 Op2::LoopTop { id } => {
++                    loop_tops.push(i as u32);
+                     loop_snap.push((*id, home.clone(), cells.clone()));
+                 }
+                 Op2::BranchTop => {
++                    depth += 1;
+                     branch_snap.push((home.clone(), cells.clone()));
+                 }
+                 Op2::BranchEnd => {
++                    depth -= 1;
+                     let (was_home, was_cells) = branch_snap.pop().expect("unbalanced if_eq markers");
+                     for h in 0..was_home.len() {
+                         // Freed in the body (its last use was there): dead on both paths.
+@@ -1418,6 +1530,7 @@ impl Builder {
+                     span_stack.pop().expect("unbalanced span markers");
+                 }
+                 Op2::LoopEnd { id } => {
++                    loop_tops.pop();
+                     let (want_id, was_home, was_cells) = loop_snap.pop().expect("unbalanced LoopEnd");
+                     assert_eq!(*id, want_id, "unbalanced loop markers");
+                     for h in 0..was_home.len() {
+@@ -1489,6 +1602,9 @@ impl Builder {
+         stats.span_names = span_names;
+         stats.pc_span = pc_span;
+         stats.pc_kind = pc_kind;
++        pc_handle.resize(out.len(), u32::MAX);
++        stats.pc_handle = pc_handle;
++        stats.handle_def = handle_def;
+         // Cut D: a carrying entry's REDUCE is followed by its continuation's on the next pc. Only
+         // `Builder::reduce` emits `REDUCE`, with ids it registered, so the two asserts below name
+         // a builder bug, not a program's (Task 5 sweep: they were opaque index panics).
+@@ -1600,11 +1716,13 @@ fn claim(
+     at: u32,
+     slots: &[Slot],
+     live_count: &mut usize,
++    clean: &[bool],
+ ) -> u8 {
+     loop {
+         let vacant = |r: u8| regs[r as usize].is_none();
++        let pin25 = crate::isa::spike("SPIKE_PIN_HASH");
+         let found = if width == 1 {
+-            ALLOCATABLE.iter().copied().find(|&r| vacant(r))
++            ALLOCATABLE.iter().copied().find(|&r| vacant(r) && !(pin25 && r == 25))
+         } else {
+             ALLOCATABLE
+                 .iter()
+@@ -1650,6 +1768,9 @@ fn claim(
+             regs[r as usize + 1] = None;
+         }
+         let w = slots[id as usize].width as u64;
++        if clean[id as usize] && cells[id as usize].is_some() {
++            continue; // SPIKE: a re-homed SSA value still has its cell: evicting it is free
++        }
+         let addr = if live {
+             match w {
+                 1 => free_cells_1.pop().unwrap_or(*arena),
+diff --git a/recursion/src/dsl/hash.rs b/recursion/src/dsl/hash.rs
+index 024bd6e..e38fbf3 100644
+--- a/recursion/src/dsl/hash.rs
++++ b/recursion/src/dsl/hash.rs
+@@ -229,8 +229,8 @@ pub fn absorb_staged(b: &mut Builder, st: Ptr, cursor: Ptr, v: Felt) {
+ /// a register (level 0's offset is zero, so it has none), and the same sixteen copy rows; the
+ /// running digest lives in four dedicated cells instead of the hash scratch.
+ pub fn merkle_walk(b: &mut Builder, leaf: Digest, index_bits: &[Felt], siblings: Ptr, levels: usize,
+-                   out: Digest) {
+-    merkle_walk_with_injections(b, leaf, index_bits, siblings, levels, &[], out);
++                   out: Digest) -> Digest {
++    merkle_walk_with_injections(b, leaf, index_bits, siblings, levels, &[], out)
+ }
+ 
+ /// A shorter-height matrix group injected into the walk after `after_level`: the `n_cells` at `rows`
+@@ -268,7 +268,7 @@ pub struct Injection {
+ /// differential reference (`tests/precompiles.rs`).
+ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[Felt],
+                                    siblings: Ptr, levels: usize, injections: &[Injection],
+-                                   out: Digest) {
++                                   out: Digest) -> Digest {
+     assert!(index_bits.len() >= levels,
+             "a {levels}-level walk needs {levels} index bits, got {}", index_bits.len());
+     assert!(injections.iter().all(|i| i.after_level < levels),
+@@ -290,8 +290,8 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
+         // sponge]`, the reference's fixed order (`mmcs/batch.rs:245-262`). `sponge` works in the
+         // hash scratch, and `cur` and `tmp` are separate allocations, so the module's aliasing
+         // rule holds.
+-        let cur = b.alloc(DIGEST_ELEMS as u64);
+-        b.copy_cells(cur, 0, leaf.0, 0, DIGEST_ELEMS);
++        let nocopy = crate::isa::spike("SPIKE_NOCOPY");
++        let cur = if nocopy { leaf.0 } else { let c = b.alloc(DIGEST_ELEMS as u64); b.copy_cells(c, 0, leaf.0, 0, DIGEST_ELEMS); c };
+         let zero = b.zero();
+         for (l, &bit) in index_bits.iter().enumerate().take(levels) {
+             let sib = b.offset(siblings, (l * DIGEST_ELEMS) as i64);
+@@ -302,8 +302,9 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
+                 b.compress_step(cur, tmp.0, zero);
+             }
+         }
++        if nocopy { return Digest(cur); }
+         b.copy_cells(out.0, 0, cur, 0, DIGEST_ELEMS);
+-        return;
++        return out;
+     }
+     let st = b.hash_scratch();
+     // The running digest lives in the permutation's own first four lanes for the whole walk: every
+@@ -323,6 +324,7 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
+         }
+     }
+     b.copy_cells(out.0, 0, st, 0, DIGEST_ELEMS);
++    out
+ }
+ 
+ /// `[left ‖ right]` into the eight lanes, permuted; the result is lanes `0..4`.
+diff --git a/recursion/src/emulator.rs b/recursion/src/emulator.rs
+index 28f74a8..766ae3a 100644
+--- a/recursion/src/emulator.rs
++++ b/recursion/src/emulator.rs
+@@ -450,8 +450,7 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
+             }
+             Op::Sponge => {
+                 a[0] = regs[ra];
+-                let rb = reg_b(&instr, pc)? as usize;
+-                b_val[0] = regs[rb];
++                b_val[0] = if crate::isa::spike_imm_s() { instr.b } else { regs[reg_b(&instr, pc)? as usize] };
+                 let ptr = a[0].as_canonical_u64();
+                 let src = b_val[0].as_canonical_u64();
+                 bounded(pc, ptr + 7)?;
+@@ -487,9 +486,8 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
+                 run.hints_read += 8;
+             }
+             Op::Compress => {
+-                let rb = reg_b(&instr, pc)? as usize;
+                 a[0] = regs[ra];
+-                b_val[0] = regs[rb];
++                b_val[0] = if crate::isa::spike_imm_c() { instr.b } else { regs[reg_b(&instr, pc)? as usize] };
+                 d[0] = regs[rd];
+                 let bit = if d[0] == F::ZERO {
+                     false
+diff --git a/recursion/src/isa.rs b/recursion/src/isa.rs
+index b81f3d1..9b1835c 100644
+--- a/recursion/src/isa.rs
++++ b/recursion/src/isa.rs
+@@ -124,6 +124,9 @@ pub enum Op {
+     Pow,
+ }
+ 
++pub fn spike(name: &str) -> bool { std::env::var(name).is_ok() }
++pub fn spike_imm_s() -> bool { static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *F.get_or_init(|| spike("SPIKE_IMM_S")) }
++pub fn spike_imm_c() -> bool { static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *F.get_or_init(|| spike("SPIKE_IMM_C")) }
+ impl Op {
+     pub const COUNT: usize = 30;
+ 
+@@ -208,8 +211,8 @@ impl Op {
+     pub fn b_is_register(self) -> bool {
+         matches!(
+             self,
+-            Op::Fadd | Op::Fsub | Op::Fmul | Op::Eadd | Op::Esub | Op::Emul | Op::Emulf | Op::Sponge | Op::Compress
+-        )
++            Op::Fadd | Op::Fsub | Op::Fmul | Op::Eadd | Op::Esub | Op::Emul | Op::Emulf
++        ) || (self == Op::Sponge && !spike_imm_s()) || (self == Op::Compress && !spike_imm_c())
+     }
+ }
+ 
+diff --git a/recursion/src/programs/rv32.rs b/recursion/src/programs/rv32.rs
+index c90b9f7..e18fd5d 100644
+--- a/recursion/src/programs/rv32.rs
++++ b/recursion/src/programs/rv32.rs
+@@ -781,7 +781,7 @@ fn emit_input_round_root(
+         .map(|(&h, &(buf, n))| hash::Injection { after_level: max_h - h - 1, rows: buf, n_cells: n })
+         .collect();
+     let out = Digest(b.alloc(DIGEST_ELEMS as u64));
+-    hash::merkle_walk_with_injections(
++    let out = hash::merkle_walk_with_injections(
+         b,
+         leaf,
+         &index_bits[bits_reduced..bits_reduced + levels],
+@@ -807,7 +807,7 @@ fn emit_commit_root(b: &mut Builder, log_arity: usize, msg: Ptr, path: Array<Fel
+     hash::sponge(b, msg, 2 * (1usize << log_arity) + SALT_ELEMS, leaf);
+     let levels = path.len / DIGEST_ELEMS;
+     let out = Digest(b.alloc(DIGEST_ELEMS as u64));
+-    hash::merkle_walk(b, leaf, &index_bits[..levels], path.base, levels, out);
++    let out = hash::merkle_walk(b, leaf, &index_bits[..levels], path.base, levels, out);
+     assert_cap_eq(b, out, &cap, &index_bits[levels..levels + CAP_HEIGHT], name);
+ }
+ 
+@@ -817,6 +817,18 @@ fn emit_commit_root(b: &mut Builder, log_arity: usize, msg: Ptr, path: Array<Fel
+ /// either failing means the same thing: this opening is not in the committed tree.
+ fn assert_cap_eq(b: &mut Builder, got: Digest, cap: &[Digest; 4], bits: &[Felt], name: &str) {
+     debug_assert_eq!(bits.len(), CAP_HEIGHT);
++    if crate::isa::spike("SPIKE_CAP") {
++        for j in 1..4 { assert_eq!(b.addr_of(cap[j].0), b.addr_of(cap[0].0) + 4 * j as u64, "caps contiguous"); }
++        let o0 = b.mul_const(bits[0], F::from_u64(4));
++        let o1 = b.mul_const(bits[1], F::from_u64(8));
++        let off = b.add(o0, o1);
++        for lane in 0..DIGEST_ELEMS as i64 {
++            let c = b.load_offset(cap[0].0, lane, off);
++            let g = b.load(got.0, lane);
++            b.assert_eq(g, c, name);
++        }
++        return;
++    }
+     let one = b.constant(F::ONE);
+     let nb0 = b.sub(one, bits[0]);
+     let nb1 = b.sub(one, bits[1]);
+diff --git a/recursion/tests/spike.rs b/recursion/tests/spike.rs
+new file mode 100644
+index 0000000..9e6330b
+--- /dev/null
++++ b/recursion/tests/spike.rs
+@@ -0,0 +1,127 @@
++mod common;
++
++use std::collections::BTreeMap;
++use rand_zkvm::machine::FriProfile;
++use recursion::dsl::{Checkpoints, PC_RELOAD, PC_SPILL};
++use recursion::emulator::execute;
++use recursion::isa::Op;
++use recursion::programs::verify_rv32;
++use recursion::shape::{InnerKey, InnerShape};
++use recursion::witness::WitnessTape;
++
++#[test]
++#[ignore]
++fn spike() {
++    let profile = FriProfile::Production;
++    let p = common::bundle_proofs(profile, 1).pop().unwrap();
++    let shape = InnerShape::of(profile, p.proof.tier, p.proof.program_log_height, p.proof.input_log_height,
++        p.proof.keccak_log_height, p.proof.sha256_log_height, p.proof.public_log_height, p.proof.mem_log_height);
++    let key = InnerKey::of(profile, &shape);
++    let vp = verify_rv32(&shape, &key, Checkpoints::Off);
++    let tape = WitnessTape::build(profile, &shape, &key, &p.proof).unwrap();
++    let exec = execute(&vp.program, &tape.words, 1 << 24).unwrap();
++    let st = &vp.stats;
++    let names = &st.span_names;
++    let instrs = &vp.program.instrs;
++    let q = shape.num_queries as f64;
++    println!("SUMMARY rows {} q {} instrs {} reloads {} spills {} perms {} regacc {} mem {}", exec.cpu_rows(), shape.num_queries, vp.program.instrs.len(), st.reloads, st.spills, exec.permutations(), recursion::tables::cpu::register_accesses(&exec.events).len(), exec.mem_accesses());
++    {
++        let mut by: Vec<[usize; 2]> = vec![[0; 2]; names.len()];
++        let mut ops: Vec<[usize; Op::COUNT]> = vec![[0; Op::COUNT]; names.len()];
++        for e in &exec.events { let s = st.pc_span[e.pc as usize] as usize; by[s][0] += 1; if st.pc_kind[e.pc as usize] == PC_RELOAD { by[s][1] += 1; } ops[s][e.instr.op as usize] += 1; }
++        for (s, n) in names.iter().enumerate() {
++            let mut top: Vec<(usize, usize)> = ops[s].iter().copied().enumerate().filter(|(_, n)| *n > 0).collect();
++            top.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
++            let top: Vec<String> = top.iter().map(|&(o, n)| format!("{} {n}", Op::ALL[o].mnemonic())).collect();
++            println!("SPAN {:>9} reload {:>7} /q {:>8.1} {:<20} [{}]", by[s][0], by[s][1], by[s][0] as f64 / shape.num_queries as f64, n, top.join(", "));
++        }
++    }
++    {
++        // COMPRESS anatomy: per COMPRESS, the reload rows and scratch FADDIs that feed it.
++        for span in ["input_root", "commit_root"] {
++            let sid = names.iter().position(|n| *n == span).unwrap() as u16;
++            let (mut c, mut c0, mut feed, mut feed0, mut sp, mut spf) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
++            for e in &exec.events {
++                let pc = e.pc as usize;
++                if st.pc_span[pc] != sid { continue; }
++                let op = instrs[pc].op;
++                if op != Op::Compress && op != Op::Sponge { continue; }
++                let mut k = pc; let mut f = 0;
++                while k > 0 { k -= 1; let i = instrs[k]; if st.pc_kind[k] == PC_RELOAD || (i.op == Op::Faddi && i.rd >= 26) { f += 1; } else { break; } }
++                if op == Op::Sponge { sp += 1; spf += f; continue; }
++                if instrs[pc].rd == 0 { c0 += 1; feed0 += f; } else { c += 1; feed += f; }
++            }
++            println!("ANAT {span}: COMPRESS bit-driven {c} (feed rows {feed}), injection (rd=r0) {c0} (feed rows {feed0}); SPONGE {sp} (feed rows {spf})");
++        }
++    }
++    if std::env::var("SPIKE_VERBOSE").is_err() { return; }
++    // next non-reload/non-spill pc
++    let next_instr = |pc: usize| -> usize { let mut k = pc; while k < instrs.len() && st.pc_kind[k] != recursion::dsl::PC_INSTR { k += 1; } k };
++    let hname = |h: u32| -> String {
++        let (op, sp, cells, _) = st.handle_def[h as usize];
++        let opn = Op::from_u8(op).map(|o| o.mnemonic()).unwrap_or("?");
++        if cells > 0 { format!("PTR[{} cells] def@{}", cells, names[sp as usize]) } else { format!("VAL {} def@{}", opn, names[sp as usize]) }
++    };
++    for span in ["input_root", "commit_root"] {
++        let sid = names.iter().position(|n| *n == span).unwrap() as u16;
++        let mut by_class: BTreeMap<String, usize> = BTreeMap::new();
++        let mut by_class_cons: BTreeMap<(String, String), usize> = BTreeMap::new();
++        let mut per_handle: BTreeMap<u32, usize> = BTreeMap::new();
++        let mut faddi: BTreeMap<String, usize> = BTreeMap::new();
++        let mut loads: BTreeMap<String, usize> = BTreeMap::new();
++        let mut stores: BTreeMap<String, usize> = BTreeMap::new();
++        let mut fieldops: BTreeMap<String, usize> = BTreeMap::new();
++        let mut total = 0usize;
++        for e in &exec.events {
++            let pc = e.pc as usize;
++            if st.pc_span[pc] != sid { continue; }
++            total += 1;
++            let kind = st.pc_kind[pc];
++            if kind == PC_RELOAD {
++                let h = st.pc_handle[pc];
++                let c = hname(h);
++                let n = next_instr(pc);
++                let cons = instrs[n].op.mnemonic().to_string();
++                // which operand slot: compare reload rd with consumer's rd/ra/rb
++                let r = instrs[pc].rd; let ci = instrs[n];
++                let slot = if ci.ra == r { "ra" } else if ci.op.b_is_register() && ci.rb() == r { "rb" } else if ci.rd == r { "rd" } else { "?" };
++                *by_class.entry(c.clone()).or_default() += 1;
++                *by_class_cons.entry((c, format!("{cons}.{slot}"))).or_default() += 1;
++                *per_handle.entry(h).or_default() += 1;
++            } else if kind == PC_SPILL {
++            } else {
++                let ins = instrs[pc];
++                let n = next_instr(pc + 1);
++                let cons = instrs.get(n).map(|i| i.op.mnemonic()).unwrap_or("-");
++                match ins.op {
++                    Op::Faddi => { *faddi.entry(format!("ra={} -> {}", if ins.ra == 0 {"r0(alloc/abs)"} else if ins.ra >= 26 {"scratch"} else {"home"}, cons)).or_default() += 1; }
++                    Op::Load => { *loads.entry(format!("ra={} -> {}", if ins.ra == 0 {"r0"} else if ins.ra>=26 {"scratch"} else {"home"}, cons)).or_default() += 1; }
++                    Op::Store => { *stores.entry(format!("rd={} ra={}", if ins.rd==0 {"r0"} else if ins.rd>=26 {"scratch"} else {"home"}, if ins.ra == 0 {"r0"} else if ins.ra>=26 {"scratch"} else {"home"})).or_default() += 1; }
++                    Op::Fmul | Op::Fadd | Op::Fsub | Op::Jeq => { *fieldops.entry(ins.op.mnemonic().to_string()).or_default() += 1; }
++                    _ => {}
++                }
++            }
++        }
++        let rl: usize = by_class.values().sum();
++        println!("\n=== {span}: {total} rows, {rl} reloads ({:.1}/query), {} distinct handles reloaded", rl as f64 / q, per_handle.len());
++        let mut v: Vec<_> = by_class.into_iter().collect(); v.sort_by_key(|x| std::cmp::Reverse(x.1));
++        for (c, n) in v { println!("  reload class {n:>7} ({:>7.1}/q)  {c}", n as f64 / q); }
++        let mut v: Vec<_> = by_class_cons.into_iter().collect(); v.sort_by_key(|x| std::cmp::Reverse(x.1));
++        for ((c, k), n) in v { println!("  reload class×consumer {n:>7} ({:>7.1}/q)  {c}  -> {k}", n as f64 / q); }
++        // reloads-per-handle histogram
++        let mut hist: BTreeMap<usize, usize> = BTreeMap::new();
++        for (_, n) in &per_handle { *hist.entry(*n).or_default() += 1; }
++        println!("  reloads-per-handle histogram (reloads: handles): {:?}", hist);
++        for (m, t) in [("FADDI", &faddi), ("LOAD(non-reload)", &loads), ("STORE", &stores), ("field/jeq", &fieldops)] {
++            let mut v: Vec<_> = t.iter().collect(); v.sort_by_key(|x| std::cmp::Reverse(*x.1));
++            for (k, n) in v { println!("  {m:<16} {n:>7} ({:>7.1}/q)  {k}", *n as f64 / q); }
++        }
++    }
++    // Total program: where are all ptr-holder reloads, and do the bit handles get reloaded per use?
++    let mut cls: BTreeMap<String, usize> = BTreeMap::new();
++    for e in &exec.events { let pc = e.pc as usize; if st.pc_kind[pc] == PC_RELOAD { *cls.entry(format!("{} in {}", hname(st.pc_handle[pc]), names[st.pc_span[pc] as usize])).or_default() += 1; } }
++    let mut v: Vec<_> = cls.into_iter().collect(); v.sort_by_key(|x| std::cmp::Reverse(x.1));
++    println!("\n=== whole program reload classes (top 40)");
++    for (c, n) in v.iter().take(40) { println!("  {n:>7}  {c}"); }
++    // live registers: how many handles resident at the start of the first input_root span
++}
