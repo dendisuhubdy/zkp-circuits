@@ -398,10 +398,10 @@ a tier a prover pool can prove.
   is always compiled and `tests/modq_harness.rs` is gated.
 
 **Proof-size deltas (measured, tier 10).** Means of four runs each, bytes, `postcard` proof size.
-Per-run sizes vary by about ±0.5% (salted commitments, random-length openings), so a chip-free
-delta below roughly 5 KB is within noise. Before = merge-base `c83b1c7` (no chip); after = this
-branch with `modq_log_height = 0`; one block = a guest making one `NTT0` call (one 1 024-row
-block), measured by `tests/modq.rs::measure_modq_proof_sizes_at_tier_10` (`--ignored`).
+Per-run sizes vary by about ±1% (the four Test "before" runs span 312 329 to 317 289 bytes; the
+random H_IN salt and commitment randomness change the opened paths). Before = merge-base `c83b1c7` (no chip); after = this
+branch with `modq_log_height = 0`; one block = a guest making one `NTT0` call (three `li`, the
+ecall, halt; one 1 024-row block, memory table at its tier-10 floor 2^12, asserted), measured by `tests/modq.rs::measure_modq_proof_sizes_at_tier_10` (`--ignored`).
 
 | Profile | Chip-free before | Chip-free after | one modq block, after | Chip-free delta | One block vs. before |
 |---|---|---|---|---|---|
@@ -411,8 +411,8 @@ block), measured by `tests/modq.rs::measure_modq_proof_sizes_at_tier_10` (`--ign
 Runs (before Test / before Production / after Test / after Production chip-free / one block Test / one block Production):
 312 329, 317 289, 316 361, 315 081 / 1 367 466, 1 362 603, 1 374 731, 1 369 898 / 316 810, 318 153, 316 617, 317 738 /
 1 371 947, 1 374 636, 1 368 588, 1 375 148 / 351 017, 350 986, 349 864, 349 450 / 1 518 795, 1 519 884, 1 526 700, 1 519 564.
-The chip-free cost is consistent with the estimate (about +1 KB: one header byte, one cpu column,
-at most one LogUp group) and is indistinguishable from run-to-run noise. A chip-bearing proof costs
+The chip-free deltas (+0.7% and +0.3%) are indistinguishable from run-to-run noise; they do not
+confirm or refute the estimated +1 KB. A chip-bearing proof costs
 about twice the estimated +75 KB at Production FRI (+153 KB measured, +35 KB at the Test profile).
 
 **Every verifier key changed; ships only with a chain cut.** The cpu's extra column and lookup move

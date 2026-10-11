@@ -517,6 +517,7 @@ fn measure_modq_proof_sizes_at_tier_10() {
         let p = a.assemble();
         let (proof, _) = m.prove(&p, &[], &[], Some(Tier(10))).unwrap();
         assert_eq!(proof.modq_log_height, 10, "one block");
+        assert_eq!(proof.mem_log_height, 12, "tier 10 memory floor t + 2: the one call does not raise it");
         m.verify(&p.digest(), &proof).unwrap();
         println!("MODQ-SIZE profile={name} kind=one-block bytes={}", proof.size());
     }
