@@ -235,17 +235,56 @@ fn a_loop_body_rehomes_only_its_own_values_and_never_moves_a_pre_loop_handle() {
     });
     let out = b.load(acc_cell, 0);
     b.public(out);
-    let p = b.finish();
+    let (p, stats) = b.finish_stats();
+    assert!(stats.rehomes > 0, "the loop body must re-home its own values (rule 4(c) exercised): {stats:?}");
     assert_eq!(execute(&p, &[], 1_000_000).unwrap().public, vec![F::from_u64(3 * (2 * 465 + 55))]);
 }
 
-/// Rule 1: `counted_loop`'s counter is decremented in place (`FADDI ctr, ctr, −1`), so its spill
-/// cell goes stale after the first iteration; it must never be re-homed (a free eviction would
-/// then resurrect the stale count). Today rule 3 and the loop invariant already keep it from
-/// being re-homed: it is defined just before its own `LoopTop` (rule 3 refuses it in the body),
-/// it is never spilled outside the loop, and evicting it in the body is the `LoopEnd` refusal.
-/// The `mutable` guard is defence in depth, and this test guards against a future relaxation of
-/// rule 3.
+/// Rule 3, the main case: pre-loop handles spilled before `LoopTop` and read in the body reload
+/// into scratch (r26..r31) on every read — never re-homed into an allocatable register, even with
+/// vacant registers at the top (the ten temporaries die just before it). A re-home there would
+/// move a pre-loop handle inside the body, which the loop invariant refuses. The body defines
+/// nothing, so every `LOAD r, r0, addr` in it is a pre-loop handle's reload.
+#[test]
+fn a_pre_loop_handle_spilled_at_loop_top_reloads_in_the_body_without_rehoming() {
+    let mut b = Builder::new(Checkpoints::Off);
+    let vals: Vec<_> = (1..=30u64).map(|k| b.constant(F::from_u64(100 + k))).collect();
+    for k in 1..=10u64 {
+        let t = b.constant(F::from_u64(900 + k));
+        b.public(t);
+    }
+    let n = b.constant(F::from_u64(2));
+    b.counted_loop(n, |b, _| {
+        for v in &vals {
+            b.public(*v);
+        }
+    });
+    for v in &vals {
+        b.public(*v);
+    }
+    let p = b.finish();
+    let jne = p.instrs.iter().rposition(|i| i.op == Op::Jne).unwrap();
+    let top = p.instrs[jne].b.as_canonical_u64() as usize;
+    assert!(top < jne, "the loop's back edge jumps backward");
+    let body_reloads: Vec<_> = (top..jne).filter(|&pc| p.instrs[pc].op == Op::Load && p.instrs[pc].ra == 0).collect();
+    assert!(!body_reloads.is_empty(), "the body must reload a spilled pre-loop handle, or this test exercises nothing");
+    for pc in body_reloads {
+        assert!(p.instrs[pc].rd >= 26, "pc {pc}: a pre-loop handle was re-homed into r{} inside the loop", p.instrs[pc].rd);
+    }
+    let mut want: Vec<F> = (1..=10u64).map(|k| F::from_u64(900 + k)).collect();
+    for _ in 0..3 {
+        want.extend((1..=30u64).map(|k| F::from_u64(100 + k)));
+    }
+    assert_eq!(publics(&p), want);
+}
+
+/// A functional smoke test for rule 1's subject: a `counted_loop` whose counter is decremented
+/// in place (`FADDI ctr, ctr, −1`) computes the right sum. The counter never spills here, so this
+/// test does NOT guard rule 3 or the `mutable` guard (rule 1: a handle written in place is never
+/// re-homed, since its cell would go stale) — removing either leaves it green. Today rule 3 and
+/// the loop invariant already keep the counter from being re-homed: it is defined just before its
+/// own `LoopTop`, it is never spilled outside the loop, and evicting it in the body is the
+/// `LoopEnd` refusal; the `mutable` guard is defence in depth with no failing-first test.
 #[test]
 fn the_counted_loop_counter_is_never_rehomed() {
     let mut b = Builder::new(Checkpoints::Off);

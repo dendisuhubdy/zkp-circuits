@@ -26,9 +26,10 @@ around the hashes, never a hash. Every production aggregate moves down one tier 
 and N=3 20 (emulated) — and the production REG table from `2^21` to `2^20` (662 492 accesses).
 On this box the test-profile proofs did not get lighter where their tier did not move: the exit
 twin (169 366 → 104 150 rows) is tier 18 on both sides, and its peak live heap read **16.75 GB
-before and 17.19 GB after** — the peak is a transient inside `compute quotient`, within the
-spread seen between two runs of the same twin program on two bases (15.64 GB on `2fbd45b`,
-16.75 GB on `c83b1c7`), while the committed terms fell (§4). The test N=2 aggregate dropped to
+before and 17.19 GB after** — the peak is a transient inside `compute quotient`, and its
++0.44 GB is **not traced** (one run a side; the same twin program read 15.64 GB on `2fbd45b` and
+16.75 GB on `c83b1c7`, so the transient varies, but no same-base repeat spread was measured),
+while the committed terms fell (§4). The test N=2 aggregate dropped to
 tier 18 and **proved and verified here**. The memory win is the tier: one rung down for every
 production aggregate, projected in §5, measured nowhere yet.
 
@@ -97,14 +98,17 @@ differential reference.
 scratch one, when the handle's next use is nearer than the farthest-next-use resident's; the
 evicted resident is spilled as before, and the re-homed handle keeps its spill cell, so evicting
 it again costs no `STORE` (it is evicted clean). The rules, each with a test in
-`tests/allocator.rs`: (1) never evict a register the instruction being fed already reads — the
+`tests/allocator.rs` (§8 names them; the mutable guard below has none that fails without it):
+(1) never evict a register the instruction being fed already reads — the
 `Mat` outputs and the operand homes up to the next group are pinned; (2) never re-home inside an
 `if_eq` body, so both arms leave the register file in the same state; (3) inside a loop, re-home
 only values defined in the innermost body, never one from before the loop. Two guards complete
 it. The **mutable guard**: a handle written in place after its definition (`counted_loop`'s
 counter) is never re-homed — today rule 3 and the loop invariant already exclude it (the counter
 is defined just before its own `LoopTop` and never spilled outside its loop), so the guard is
-defence in depth and its test a regression guard against a relaxed rule 3. The **pre-loop
+defence in depth with no failing-first test: `the_counted_loop_counter_is_never_rehomed` never
+spills the counter, so it is a functional smoke test and stays green with the guard or rule 3
+removed. The **pre-loop
 guard**: inside a loop, a re-home claim pins the residents defined before the innermost loop,
 and a fresh handle's `Def` claim prefers any other victim over them, falling back to the old
 choice only when none exists. The `Def` preference is output-neutral for every build that
@@ -170,9 +174,10 @@ instructions, `2^18` → `2^17`). The committed terms show that: live heap after
 peak is set later, by a transient in the parallel `compute quotient` spans: the span that
 reaches it rose from Δlive +5.78 GB before to +8.61 GB after. Why is **not traced**; the likely
 cause is how the nested parallel work is scheduled, since the same program read 15.64 GB on
-2026-10-08 (`docs/07` §3, on `2fbd45b`) and 16.75 GB here on `c83b1c7`, so a 0.44 GB difference
-between two single runs is inside the spread; the tree-aggregation merge between those two
-bases is not traced as a cause either way. The verify drop (×0.63) follows the smaller program
+2026-10-08 (`docs/07` §3, on `2fbd45b`) and 16.75 GB here on `c83b1c7`. That 1.11 GB is a
+cross-base difference, not a same-base repeat spread, so it does not bound run-to-run noise: the
+twin's +0.44 GB is **not traced** (one run a side), not "within the spread". The
+tree-aggregation merge between those two bases is not traced as a cause either way. The verify drop (×0.63) follows the smaller program
 table, whose LDE and tree the verifier builds; the proof's +8.8 kB is **not traced** (one run a
 side).
 The tier-16 synthetic is a DSL program too, so B′'s immediates and re-homing cut it 63 762 →
@@ -224,7 +229,19 @@ the reduce rows are a compile-time function of the program and phase 4 changed n
 **The recommendation the fullnode follow-through applies:** the production flat path's
 `admitted_tiers` move from **{20, 21, 22}** to **{19, 20, 21}** — tier 19 for N=1, 20 for N=2–3,
 21 for N=4–5 — with the N ≤ 5 ceiling unchanged; tier 22 admits nothing a valid production
-aggregate can be. The test profile: N=1 104 477 (tier 18), N=2 208 571 (tier 18, was 19), N=3
+aggregate can be.
+
+**Re-vendor checklist (the same fullnode change as the phase-4 AIR):**
+- Drop every pre-phase-4 aggregate and tree program digest and every pre-phase-4 step key
+  (`aggregate_program_digest` `dc350ecf…`, the old tree step programs and keys) in the **same
+  change** that vendors the phase-4 AIR. The keys are preprocessed commitments, which phase 4
+  did not change for an unchanged program, while opcodes 25/27 changed meaning (§6, "an old key,
+  a new meaning"); an old digest left admitted next to the new AIR is an old program verified
+  under the new semantics.
+- Make fullnode **assert** at startup (or in its pin test) that its admitted
+  `aggregate_program_digest` and its step keys equal the phase-4 pins (`e0eede8b…`; the tree
+  keys from `pins.json`), so a stale admission list fails loudly instead of verifying.
+- `admitted_tiers` {19, 20, 21} as above; the test-tree section per §7. The test profile: N=1 104 477 (tier 18), N=2 208 571 (tier 18, was 19), N=3
 312 665 (tier 19).
 
 **Memory (projection).** Nothing at production has been measured. `docs/07` §4 projected the
@@ -278,6 +295,22 @@ commitment** — the program table and the range tables — and `B_REG` is an in
 over the opcode columns, so it reaches the verifier through the chips' constraint code, not
 through any committed matrix. The caps passed unchanged through B/B′ and the re-pin. That the
 changed constraint bites is shown by the cheating suite (§8), not by a key move.
+
+**An old key, a new meaning.** Ruling 9 is right about the caps, and that is exactly the hazard:
+opcodes 25 (`SPONGE`) and 27 (`COMPRESS`) now read their fourth word as an **absolute address**
+where before phase 4 it was a **register index**, and nothing a verifier holds says which reading
+applies. A pre-phase-4 program — a pre-phase-4 aggregate or tree step program — keeps its exact
+preprocessed commitment and so its exact verifier key under the phase-4 AIR, while its meaning
+changes: a `SPONGE` or `COMPRESS` whose fourth word is 7 meant "the block at the address r7
+holds" and now means "cells 7..10". A phase-4 node that still admits such a program's digest or
+key verifies its proofs under the new reading — proofs of a computation the program never
+described, whose soundness nobody has argued. The program digest pins (§6 table) did move, because every program the
+DSL builds now emits different words; what did not move is the key of any program built
+before. Hence the re-vendor checklist item in §5: drop every pre-phase-4 digest and key in the
+same change as the AIR. Longer term (a recommendation, no code here): bind a constraint-set
+version into the verifier key — e.g. a version word in the preprocessed commitment or in the
+key digest — so an AIR change that reinterprets a word moves every key, and a key from before
+it cannot be admitted under it.
 
 **Asserted unchanged** (the global constraints): the inner RV32 machine and every wallet proof;
 `inner_vk_digest` and the admission-stub vectors (`346ee184…`); the interface
@@ -339,19 +372,34 @@ emulation over a proved production depth-2 tree, which needs the 256 GB droplet 
 - **A** (`tests/allocator.rs`): `a_reload_rehomes_into_a_real_register_and_the_result_is_unchanged`,
   `a_rehome_never_evicts_an_operand_of_the_instruction_it_feeds` (rule 1),
   `no_reload_inside_an_if_eq_body_lands_in_an_allocatable_register` (rule 2),
-  `a_loop_body_rehomes_only_its_own_values_and_never_moves_a_pre_loop_handle` (rule 3 and the
-  pre-loop guard), `the_counted_loop_counter_is_never_rehomed` (the mutable guard's regression
-  test), `rehomed_values_return_their_cells_when_they_die` (cells bounded by the non-re-homing
+  `a_loop_body_rehomes_only_its_own_values_and_never_moves_a_pre_loop_handle` (the pre-loop
+  guard and rule 4(c); asserts the body does re-home),
+  `a_pre_loop_handle_spilled_at_loop_top_reloads_in_the_body_without_rehoming` (rule 3's main
+  case: with vacant registers at the top, every body reload of a pre-loop handle lands in
+  scratch; with rule 3 disabled the build trips the `LoopEnd` invariant),
+  `the_counted_loop_counter_is_never_rehomed` (a functional smoke test only — the counter never
+  spills, so it guards neither rule 3 nor the mutable guard),
+  `rehomed_values_return_their_cells_when_they_die` (cells bounded by the non-re-homing
   arena). `tests/dsl.rs::a_loop_body_that_evicts_a_pre_existing_handle_is_refused` was reshaped
   (24 pre-loop constants read after the loop) so only pre-loop victims exist and the `LoopEnd`
   refusal still fires.
+- **D1 build-time precondition:** `assert_cap_entry` refuses a `got` digest overlapping the
+  sixteen cap cells (no instruction emitted; the digest pins are unchanged).
 - **D2** (`tests/precompiles.rs`): `a_walk_whose_leaf_aliases_its_siblings_is_refused_at_build`,
   `a_walk_whose_leaf_aliases_an_injection_is_refused_at_build`; the walk tests read the returned
   digest. The hash-scratch clause of the aliasing assertion is untested (`hash_scratch` is
   `pub(super)`).
-- **B/B′:** `tests/cheating.rs` — `honest_immediate_address_hash_traces_pass`,
-  `a_sponge_source_moved_off_its_immediate_is_rejected`,
-  `a_compress_sibling_moved_off_its_immediate_is_rejected`,
+- **B/B′:** `tests/cheating.rs` — the binding tests are
+  `the_immediate_form_alone_binds_the_sponge_source` and
+  `the_immediate_form_alone_binds_the_compress_sibling`: a fully consistent forgery (the run
+  traced at word 4 = `A`, the row's fetched `B` set to `A − 4`, proved and verified against the
+  program variant whose word 4 is `A − 4`), so the PROGRAM fetch, the SPONGE/COMPRESS bus, RAM
+  and the limbs all balance and only `(1 − is_b_reg)(B0 − B)` can refuse it. With that line
+  commented out of `cpu.rs` both forgeries **verified** (checked by hand in the final-review fix
+  wave, then reverted). Also `honest_immediate_address_hash_traces_pass`,
+  `a_sponge_source_moved_off_its_immediate_is_rejected` and
+  `a_compress_sibling_moved_off_its_immediate_is_rejected` (these move `B0` alone, so the bus
+  mismatch refuses them too — they do not isolate the binding),
   `a_forged_second_pointer_limb_on_an_immediate_row_is_rejected`; `tests/cpu.rs` —
   `sponge_and_compress_rows_send_no_rb_register_read`, the extended binding test
   `every_operand_a_dispatch_carries_is_read_from_a_register` (a carried `B0` on a non-register
@@ -383,7 +431,9 @@ emulation over a proved production depth-2 tree, which needs the 256 GB droplet 
 - **The production proofs:** the production N=1 aggregate at tier 19, the production tree and its
   fixed-point level — on a larger host.
 - **The fullnode re-vendor** (`deploy/sync-zkvm.sh`, `CIRCUITS_PIN`, the `aggregate_program_digest`
-  re-pin, `admitted_tiers` from §5, the test-tree section of §7) — its own task after merge.
+  re-pin, `admitted_tiers` and the re-vendor checklist from §5, the test-tree section of §7) — its
+  own task after merge.
+- **A constraint-set version in the verifier key** (§6) — recommended, not built.
 
 ## Conclusion
 
@@ -394,7 +444,7 @@ The two Merkle spans fell from 368 791 rows to 125 289 and the reloads from 176 
 with not one hash added or removed. The inner machine, the interface, the FRI profiles, the
 reduce chip and the rVM verifier keys did not move. Every production aggregate is one tier
 lower — N=1 19, N=2 and N=3 20 — so the node's admitted tiers become {19, 20, 21} under the
-unchanged N ≤ 5 ceiling. On this box the exit twin, still tier 18, keeps its peak (16.75 →
-17.19 GB, within the spread) and verifies ×0.63 faster, and the test N=2 aggregate, now tier
+unchanged N ≤ 5 ceiling. On this box the exit twin, still tier 18, did not get lighter (16.75 →
+17.19 GB peak live, the +0.44 GB not traced) and verifies ×0.63 faster, and the test N=2 aggregate, now tier
 18, proves and verifies. What the tier is worth in memory at production is projected, between
 ≈ 32 and 75 GB, until a production proof runs on a larger host.

@@ -226,21 +226,22 @@ pub fn absorb_staged(b: &mut Builder, st: Ptr, cursor: Ptr, v: Felt) {
 /// permutation) and sixteen for copying the leaf digest in and the result out; the running digest
 /// lives in the permutation's own lanes for the whole walk, so a level costs no copy of its own.
 ///
-/// Measured under `Precompiles::On` (Cut C, the shipped setting): `2·levels + 15` rows and `levels`
-/// permutations — per level one `COMPRESS` plus one `FADDI` folding the sibling `Ptr`'s offset into
-/// a register (level 0's offset is zero, so it has none), and the same sixteen copy rows; the
-/// running digest lives in four dedicated cells instead of the hash scratch.
-///
-/// D2 (phase 4), `Precompiles::On`: the walk compresses over `leaf` and returns it, so the copy in
-/// and the copy out are gone — `2·levels − 1` rows when level 0 has no `FADDI`, sixteen fewer
-/// than before. Measured at the production profile: 386 698 → 366 219 cpu rows over 1 120 walks
-/// (`input_root` 137 201 → 129 762, `commit_root` 56 560 → 43 520), about 18 per walk — the
-/// sixteen copy rows plus the stores and loads their cells no longer cost. `Off` keeps the copy
-/// out (into `leaf`) as the differential reference.
-///
-/// B (phase 4): the sibling is `COMPRESS`'s absolute immediate, so the per-level `FADDI` that
-/// folded the sibling `Ptr`'s offset into a register is gone too (`commit_root`'s FADDI rows at
-/// the production profile: 8 560 → 720).
+/// `Precompiles::On` (the shipped setting), today: `levels` rows and `levels` permutations — one
+/// `COMPRESS` a level, over `leaf` in place, its sibling an absolute immediate (plus, for
+/// [`merkle_walk_with_injections`], each injection's sponge and one more `COMPRESS`). How it got
+/// there:
+/// - Cut C (before phase 4): `2·levels + 15` rows — per level one `COMPRESS` plus one `FADDI`
+///   folding the sibling `Ptr`'s offset into a register (none at level 0), and sixteen rows
+///   copying the leaf digest into four dedicated cells and the result back out.
+/// - D2 (phase 4): the walk compresses over `leaf` and returns it, so the copy in and the copy out
+///   are gone (`2·levels − 1` rows at that point). Measured at the production profile:
+///   386 698 → 366 219 cpu rows over 1 120 walks (`input_root` 137 201 → 129 762, `commit_root`
+///   56 560 → 43 520), about 18 per walk — the sixteen copy rows plus the stores and loads their
+///   cells no longer cost. `Off` keeps the copy out (into `leaf`) as the differential reference.
+/// - B (phase 4): the sibling is `COMPRESS`'s absolute immediate, so the per-level `FADDI` is gone
+///   too (`commit_root`'s FADDI rows at the production profile: 8 560 → 720), leaving `levels`.
+///   Any register traffic left around a walk (a spilled bit's reload, the leaf `Ptr` taken into a register) belongs to the operands,
+///   not to the walk's own row count.
 pub fn merkle_walk(b: &mut Builder, leaf: Digest, index_bits: &[Felt], siblings: Ptr, levels: usize)
                    -> Digest {
     merkle_walk_with_injections(b, leaf, index_bits, siblings, levels, &[])
@@ -275,10 +276,10 @@ pub struct Injection {
 /// Measured: an injection of `m` cells adds `sponge(m) + 25` rows and `ceil(m/4) + 1` permutations —
 /// 58 rows and four permutations for the nine-cell group a five-column salted matrix comes to.
 ///
-/// Under `Precompiles::On` (Cut C) a level is two rows instead of 33 — the `COMPRESS` and the
-/// `FADDI` that folds the sibling's offset into a register (none at level 0) — and an injection is
-/// its sponge plus one `COMPRESS`; the compiled body below stays the `Off` path, the
-/// differential reference (`tests/precompiles.rs`).
+/// Under `Precompiles::On` a level is one row instead of 33 — the `COMPRESS`, its sibling an
+/// absolute immediate (phase 4 B; Cut C also had a `FADDI` folding the sibling's offset into a
+/// register) — and an injection is its sponge plus one `COMPRESS`; the compiled body below stays
+/// the `Off` path, the differential reference (`tests/precompiles.rs`).
 pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[Felt],
                                    siblings: Ptr, levels: usize, injections: &[Injection])
                                    -> Digest {
@@ -357,7 +358,20 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
 /// `DslChallenger::sample_bits` constrains every bit where it is born — so `off ∈ {0, 4, 8, 12}`
 /// and the load stays inside the sixteen cells; the cpu AIR range-checks the address regardless.
 /// The pattern is the one `docs/06` Cut E1 ruled sound for the own-slot check.
+///
+/// Build-time preconditions (no instructions emitted): `got` must not overlap the sixteen cap
+/// cells — a digest compared against a window it sits inside proves nothing about the commitment.
+/// The contiguity of the four caps is the caller's (`rv32.rs`'s `assert_cap_eq` asserts it from
+/// the four `Digest`s); here `caps` is already one `Ptr`, and a `Ptr` carries no length to check.
 pub fn assert_cap_entry(b: &mut Builder, got: Digest, caps: Ptr, bits: [Felt; 2], name: &str) {
+    let (g, c) = (b.addr_of(got.0), b.addr_of(caps));
+    let span = 4 * DIGEST_ELEMS as u64;
+    assert!(
+        g + DIGEST_ELEMS as u64 <= c || c + span <= g,
+        "assert_cap_entry: the digest at {g}..{} overlaps the cap cells {c}..{}",
+        g + DIGEST_ELEMS as u64,
+        c + span
+    );
     let o0 = b.mul_const(bits[0], F::from_u64(DIGEST_ELEMS as u64));
     let o1 = b.mul_const(bits[1], F::from_u64(2 * DIGEST_ELEMS as u64));
     let off = b.add(o0, o1);

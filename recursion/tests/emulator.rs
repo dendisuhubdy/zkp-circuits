@@ -435,30 +435,34 @@ fn pow_refuses_a_non_boolean_bit_and_a_bad_shape() {
     assert!(matches!(execute(&pow_prog(&bits, 60, 8, F::TWO, F::ONE), &[], 10_000), Err(ExecError::PowShape { .. })));
 }
 
-/// Phase 4 B/B′: `SPONGE`'s source and `COMPRESS`'s sibling are absolute immediates.
+/// Phase 4 B/B′: `SPONGE`'s source and `COMPRESS`'s sibling are absolute immediates. The words
+/// are 8 and 9 while r8 and r9 hold 80 and 96: the pre-phase-4 register reading would have used
+/// cells 80 and 96, the immediate reading uses cells 8 and 9 — so the test tells the two apart.
 #[test]
 fn sponge_and_compress_read_their_second_address_from_the_immediate() {
-    // r8 holds an unrelated value: under the immediate form the address is the word, not a register.
     let p = Program { instrs: vec![
-        i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 8, 0, 5000), i(Op::Faddi, 3, 0, 1),
-        i(Op::Sponge, 0, 1, 80),
-        i(Op::Compress, 3, 1, 96),
+        i(Op::Faddi, 1, 0, 64), i(Op::Faddi, 8, 0, 80), i(Op::Faddi, 9, 0, 96), i(Op::Faddi, 3, 0, 1),
+        i(Op::Sponge, 0, 1, 8),
+        i(Op::Compress, 3, 1, 9),
         i(Op::Halt, 0, 0, 0),
     ], checkpoints: vec![], reduce_layout: vec![] };
     let ex = execute(&p, &[], 100).unwrap();
     let sp = ex.events.iter().find(|e| e.instr.op == Op::Sponge).unwrap();
-    assert!(matches!(sp.perm.as_ref().unwrap().kind, PermKind::Sponge { src: 80 }));
+    assert!(matches!(sp.perm.as_ref().unwrap().kind, PermKind::Sponge { src: 8 }), "{:?}", sp.perm.as_ref().unwrap().kind);
     let cp = ex.events.iter().find(|e| e.instr.op == Op::Compress).unwrap();
-    assert!(matches!(cp.perm.as_ref().unwrap().kind, PermKind::Compress { sib: 96, bit: true }));
+    assert!(matches!(cp.perm.as_ref().unwrap().kind, PermKind::Compress { sib: 9, bit: true }), "{:?}", cp.perm.as_ref().unwrap().kind);
 }
 
-/// Phase 4 B/B′ (Review Focus 5): an immediate whose top cell `b + 3` reaches `2^24` is refused.
+/// Phase 4 B/B′ (Review Focus 5): the emulator bounds the immediate's top cell, `b + 3 < 2^24`
+/// (`bounded(pc, src + 3)` / `bounded(pc, sib + 3)`), so the exact boundary is `2^24 − 4`
+/// accepted and `2^24 − 3` refused, by name, at the top cell `2^24`.
 #[test]
 fn a_sponge_or_compress_immediate_past_the_address_space_is_refused_by_name() {
-    let top = (1u64 << 24) - 2; // top cell = top + 3 >= 2^24
+    let limit = 1u64 << 24;
     for op in [Op::Sponge, Op::Compress] {
-        let p = Program { instrs: vec![i(Op::Faddi, 1, 0, 64), i(op, 0, 1, top), i(Op::Halt, 0, 0, 0)],
-                          checkpoints: vec![], reduce_layout: vec![] };
-        assert!(matches!(execute(&p, &[], 100), Err(ExecError::AddressOutOfRange { pc: 1, .. })), "{op:?}");
+        let prog = |b: u64| Program { instrs: vec![i(Op::Faddi, 1, 0, 64), i(op, 0, 1, b), i(Op::Halt, 0, 0, 0)],
+                                      checkpoints: vec![], reduce_layout: vec![] };
+        assert!(execute(&prog(limit - 4), &[], 100).is_ok(), "{op:?}: top cell 2^24 − 1 is in range");
+        assert_eq!(execute(&prog(limit - 3), &[], 100).unwrap_err(), ExecError::AddressOutOfRange { pc: 1, addr: limit }, "{op:?}");
     }
 }
