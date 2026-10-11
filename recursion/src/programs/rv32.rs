@@ -817,19 +817,17 @@ fn emit_input_round_root(
         .zip(&groups[1..])
         .map(|(&h, &(buf, n))| hash::Injection { after_level: max_h - h - 1, rows: buf, n_cells: n })
         .collect();
-    let out = Digest(b.alloc(DIGEST_ELEMS as u64));
-    hash::merkle_walk_with_injections(
+    let reached = hash::merkle_walk_with_injections(
         b,
         leaf,
         &index_bits[bits_reduced..bits_reduced + levels],
         path.base,
         levels,
         &injections,
-        out,
     );
     assert_cap_eq(
         b,
-        out,
+        reached,
         &meta.cap,
         &index_bits[bits_reduced + levels..bits_reduced + levels + CAP_HEIGHT],
         &format!("input opening root[{}]", meta.name),
@@ -843,9 +841,8 @@ fn emit_commit_root(b: &mut Builder, log_arity: usize, msg: Ptr, path: Array<Fel
     let leaf = Digest(b.alloc(DIGEST_ELEMS as u64));
     hash::sponge(b, msg, 2 * (1usize << log_arity) + SALT_ELEMS, leaf);
     let levels = path.len / DIGEST_ELEMS;
-    let out = Digest(b.alloc(DIGEST_ELEMS as u64));
-    hash::merkle_walk(b, leaf, &index_bits[..levels], path.base, levels, out);
-    assert_cap_eq(b, out, &cap, &index_bits[levels..levels + CAP_HEIGHT], name);
+    let reached = hash::merkle_walk(b, leaf, &index_bits[..levels], path.base, levels);
+    assert_cap_eq(b, reached, &cap, &index_bits[levels..levels + CAP_HEIGHT], name);
 }
 
 /// The digest a Merkle walk reached, compared against the commitment's entry at the remaining

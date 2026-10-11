@@ -320,8 +320,7 @@ fn merkle_walk_via_compress_matches_the_compiled_walk() {
                 let injections = if with_injection && levels >= 2 {
                     vec![hash::Injection { after_level: levels / 2, rows: inj_p, n_cells: 9 }]
                 } else { vec![] };
-                let out = Digest(b.alloc(4));
-                hash::merkle_walk_with_injections(&mut b, Digest(leaf_p), &bit_f, sib_p, levels, &injections, out);
+                let out = hash::merkle_walk_with_injections(&mut b, Digest(leaf_p), &bit_f, sib_p, levels, &injections);
                 for k in 0..4 { let v = b.load(out.0, k); b.public(v); }
                 let exec = execute(&b.finish(), &[], 1_000_000).unwrap();
                 let compress_rows = exec.histogram()[Op::Compress as usize];
@@ -505,4 +504,34 @@ fn a_pow_immediate_leaving_the_buffer_is_refused_at_registration() {
     }
     let p = common::pow_program(&[0; 64], 44, 20, F::TWO, F::ONE);
     assert_eq!(Machine::check_program(&p), Ok(()));
+}
+
+/// D2: the walk overwrites the leaf with the digest it reaches, so a leaf that aliases the siblings
+/// would be read back corrupted — refused at build time.
+#[test]
+#[should_panic(expected = "the walk consumes its leaf")]
+fn a_walk_whose_leaf_aliases_its_siblings_is_refused_at_build() {
+    use recursion::dsl::{hash, Builder, Checkpoints, Digest, Liveness};
+    use recursion::programs::Precompiles;
+    let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, Precompiles::On);
+    let sibs = b.alloc(16);
+    let bits: Vec<_> = (0..4).map(|_| b.zero()).collect();
+    let leaf = Digest(b.offset(sibs, 4));
+    let _ = hash::merkle_walk(&mut b, leaf, &bits, sibs, 4);
+}
+
+/// D2: the same refusal for an injection's rows. (The hash scratch is `pub(super)`, so a test cannot
+/// name its address; that third clause of the assertion is covered by review only.)
+#[test]
+#[should_panic(expected = "the walk consumes its leaf")]
+fn a_walk_whose_leaf_aliases_an_injection_is_refused_at_build() {
+    use recursion::dsl::{hash, Builder, Checkpoints, Digest, Liveness};
+    use recursion::programs::Precompiles;
+    let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, Precompiles::On);
+    let sibs = b.alloc(16);
+    let rows = b.alloc(9);
+    let bits: Vec<_> = (0..4).map(|_| b.zero()).collect();
+    let inj = [hash::Injection { after_level: 1, rows, n_cells: 9 }];
+    let leaf = Digest(b.offset(rows, 3));
+    let _ = hash::merkle_walk_with_injections(&mut b, leaf, &bits, sibs, 4, &inj);
 }

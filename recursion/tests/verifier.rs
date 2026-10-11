@@ -342,8 +342,7 @@ fn a_commit_phase_leaf_and_its_restored_path_recompute_the_rounds_commitment() {
         let bits: Vec<Felt> = (0..levels)
             .map(|k| b.constant(F::from_u64(((index >> k) & 1) as u64)))
             .collect();
-        let root = Digest(b.alloc(4));
-        hash::merkle_walk(&mut b, leaf, &bits, sibs, levels, root);
+        let root = hash::merkle_walk(&mut b, leaf, &bits, sibs, levels);
         for i in 0..4 {
             let v = b.load(root.0, i);
             b.public(v);
@@ -451,15 +450,13 @@ fn an_input_rounds_leaf_group_and_restored_path_recompute_the_preprocessed_cap()
         let bits: Vec<Felt> = (0..levels)
             .map(|k| b.constant(F::from_u64(((index >> k) & 1) as u64)))
             .collect();
-        let root = Digest(b.alloc(4));
-        hash::merkle_walk_with_injections(
+        let root = hash::merkle_walk_with_injections(
             &mut b,
             leaf,
             &bits,
             sibs,
             levels,
             &[hash::Injection { after_level, rows, n_cells: short_cells }],
-            root,
         );
         for i in 0..4 {
             let v = b.load(root.0, i);
@@ -772,7 +769,7 @@ fn phase_5s_assertions_are_all_named() {
 /// checks the own slot by the indicator dot product — a change of the shared pipeline):
 /// `39bb6b8d…3352` → `af0c16e8…6c7b`. Phase 3's Cut E2 re-recorded it (2026-10-06: each committed row's
 /// buffer gains the two fold-result cells after its salts, `hint_array_padded`, in both builds, so
-/// every later cell address moves): `af0c16e8…6c7b` → `c580415b…5e6c`.
+/// every later cell address moves): `af0c16e8…6c7b` → `c580415b…5e6c`. Phase 4's D2 re-recorded it (2026-10-09: the walk returns its leaf, no out cell, in both builds): `c580415b…5e6c` → `759b015d…9b4e`.
 #[test]
 fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     use recursion::dsl::Liveness;
@@ -788,7 +785,7 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
-        "c580415bdaccf7888e7602e793198874e39e0bda8951d11ef6e47ed029455e6c",
+        "759b015d89ac22193904761c8eb0f68f3c2f9973d38247f4c169fbc0e3c39b4e",
         "the Off replay must reproduce the pre-Task-7 stream byte for byte (plus VERIFIER-1's \
          per-round assertions, and constraint set 7's and 8's inner changes)"
     );
