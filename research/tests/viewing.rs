@@ -540,3 +540,67 @@ fn a_memo_envelope_is_1860_bytes_and_opens_for_the_same_keys() {
     assert_eq!(old.open_with_tx_key(cm, &key), Some(note));
     assert_eq!(old.memo(cm, &key), None);
 }
+
+use rand_zkvm::viewing::{EnvelopeHead, ENVELOPE_HEAD_BYTES};
+
+/// A scan's keys derived once (`ScanKey`) open exactly what the per-call openers open — as the
+/// receiver, as the sender, under a KEM version, for both body layouts — and nothing else.
+#[test]
+fn a_scan_key_opens_exactly_what_the_per_call_openers_open() {
+    let (alice, bob, carol) = (SpendKey::random().viewing_key(), SpendKey::random().viewing_key(), SpendKey::random().viewing_key());
+    let note = Note::new(bob.pk(), alice.pk(), 5, 0, 7);
+    let cm = note.commitment();
+    let key = TxKey::random();
+    for env in [
+        Envelope::seal(&alice, &bob.address(), &note, &key),
+        Envelope::seal_with_memo(&alice, &bob.address(), &note, &key, &memo_field("rent").unwrap()),
+    ] {
+        let (a, b, c) = (alice.scan_key(), bob.scan_key(), carol.scan_key());
+        assert_eq!(env.open_as_receiver_with(cm, &b), env.open_as_receiver(cm, &bob));
+        assert_eq!(env.open_as_receiver_with(cm, &b), Some((key, note)));
+        assert_eq!(env.open_as_sender_with(cm, &a), env.open_as_sender(cm, &alice));
+        assert_eq!(env.open_as_sender_with(cm, &a), Some((key, note)));
+        assert_eq!(env.open_as_receiver_with(cm, &a), None, "the sender is not the receiver");
+        assert_eq!(env.open_as_sender_with(cm, &b), None);
+        assert_eq!(env.open_as_receiver_with(cm, &c), None);
+        assert_eq!(env.open_as_sender_with(cm, &c), None);
+        let other = Note::new(bob.pk(), alice.pk(), 5, 0, 8).commitment();
+        assert_eq!(env.open_as_receiver_with(other, &b), None, "bound to its own commitment");
+    }
+    let v1 = Envelope::seal(&alice, &bob.address_at(1), &note, &key);
+    assert_eq!(v1.open_as_receiver_with(cm, &bob.scan_key()), None, "the version-0 scan key cannot open a version-1 envelope");
+    assert_eq!(v1.open_as_receiver_with(cm, &bob.scan_key_at(1)), Some((key, note)));
+}
+
+/// The head — an envelope less its body — is what a scan pages: a fixed 1 208 bytes for both
+/// body layouts, round-tripping through its wire form, and deciding the same ownership the full
+/// envelope does, with the same transaction key.
+#[test]
+fn an_envelope_head_decides_ownership_without_the_body() {
+    let (alice, bob, carol) = (SpendKey::random().viewing_key(), SpendKey::random().viewing_key(), SpendKey::random().viewing_key());
+    let note = Note::new(bob.pk(), alice.pk(), 5, 0, 7);
+    let cm = note.commitment();
+    let key = TxKey::random();
+    assert_eq!(ENVELOPE_HEAD_BYTES, 1088 + 60 + 60);
+    for env in [
+        Envelope::seal(&alice, &bob.address(), &note, &key),
+        Envelope::seal_with_memo(&alice, &bob.address(), &note, &key, &memo_field("rent").unwrap()),
+    ] {
+        let head = env.head();
+        let bytes = head.to_bytes();
+        assert_eq!(bytes.len(), ENVELOPE_HEAD_BYTES);
+        assert_eq!(EnvelopeHead::from_bytes(&bytes), Some(head.clone()));
+        assert_eq!(head.receiver_key(cm, &bob.scan_key()), Some(key));
+        assert_eq!(head.sender_key(cm, &alice.scan_key()), Some(key));
+        assert_eq!(head.receiver_key(cm, &carol.scan_key()), None);
+        assert_eq!(head.sender_key(cm, &carol.scan_key()), None);
+        assert_eq!(head.receiver_key(cm, &alice.scan_key()), None);
+        assert_eq!(env.open_with_tx_key(cm, &head.receiver_key(cm, &bob.scan_key()).unwrap()), Some(note));
+    }
+    assert_eq!(EnvelopeHead::from_bytes(&[0u8; ENVELOPE_HEAD_BYTES - 1]), None, "wrong length");
+    assert_eq!(EnvelopeHead::from_bytes(&[0u8; ENVELOPE_HEAD_BYTES + 1]), None, "wrong length");
+    // Garbage of the right length is a head that opens for nobody, never a panic.
+    let junk = EnvelopeHead::from_bytes(&[7u8; ENVELOPE_HEAD_BYTES]).unwrap();
+    assert_eq!(junk.receiver_key(cm, &bob.scan_key()), None);
+    assert_eq!(junk.sender_key(cm, &alice.scan_key()), None);
+}
