@@ -830,15 +830,17 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// whole, its own slot checked by one register-addressed `LOADE`): `8a2d166f…8509` → `9a43596f…4aa9`.
 /// Re-registered for phase 3's Cut E2 (`FOLD`, the fold in the reduce chip): `9a43596f…4aa9` →
 /// `f66aa580…6f63`. Re-registered for phase 3's Cut F (`POW`, the index powers in the reduce chip):
-/// `f66aa580…6f63` → `df3a18b8…1073`.
+/// `f66aa580…6f63` → `df3a18b8…1073`. Phase 4 (2026-10-09, the Merkle spans) re-recorded it:
+/// `df3a18b8…1073` → `1bcbcec9…1fba` (program changes all four: the cap select by register-offset
+/// `LOAD`, the re-homing reloads, the in-place Merkle walk, `SPONGE`/`COMPRESS` immediates).
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "df3a18b8d3294a591a2e8fd79f5430550cd9f09afcff6fc8aea89cc1bfaf1073",
-        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 3's Cut F"
+        "1bcbcec900154ec2cb6084fca1a08e534bfb2f0d67e74a8e8deff1a15da81fba",
+        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 4's Merkle spans"
     );
 }
 

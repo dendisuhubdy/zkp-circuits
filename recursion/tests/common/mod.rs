@@ -883,7 +883,7 @@ pub fn pin_i64(block: &str, key: &str) -> i64 {
 }
 
 /// One unsigned 64-bit value of a nested pin block: a field limb such as a key digest's
-/// (`tree_test.vk_fix_0..3`), which may exceed `i64::MAX`.
+/// (`tree_test.vk_int_0..3`), which may exceed `i64::MAX`.
 #[allow(dead_code)]
 pub fn pin_u64(block: &str, key: &str) -> u64 {
     u64::try_from(pin_raw(block, key)).unwrap_or_else(|_| panic!("tests/pins.json's `{block}.{key}` is not a u64"))

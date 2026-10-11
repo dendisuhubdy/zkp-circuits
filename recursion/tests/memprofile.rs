@@ -127,9 +127,10 @@ fn tier16_synthetic_threads() {
 /// table 2^20 → 2^19), and **26.88 GB at the phase's end** (169 366 rows, prove 141.3 s, verify
 /// 6.67 s, 268 168 B; 2026-10-06, `docs/measurements/2026-10-06-tier18-twin-memprofile-phase3.log`)
 /// — fewer cpu rows, but the reduce chip is 81 columns wide (was 30) and carries the fold and pow
-/// runs. The name is kept for the record it produced.
+/// runs. The name is kept for the record it produced. Phase 4 (2026-10-09, the Merkle spans)
+/// re-recorded it: 169 366 → 104 150 rows, still tier 18 (`TIERS` has no 17 rung; not re-profiled).
 #[test]
-#[ignore = "one exit-twin rVM proof under the heap profiler (tier 18 since phase 2): proved on this 48 GB box at 26.88 GB live, 2026-10-06, at phase 3's end (33.27 GB at the quotient-layout fork, 2026-10-05; 78.7 GB live when killed at tier 19 before it); ~2.5 min on 16 threads with --features parallel"]
+#[ignore = "one exit-twin rVM proof under the heap profiler (tier 18 since phase 2; 104 150 rows since phase 4): proved on this 48 GB box at 26.88 GB live, 2026-10-06, at phase 3's end (33.27 GB at the quotient-layout fork, 2026-10-05; 78.7 GB live when killed at tier 19 before it); ~2.5 min on 16 threads with --features parallel"]
 fn tier19_exit_twin() {
     use rand_zkvm::machine::FriProfile;
     use recursion::dsl::Checkpoints;
