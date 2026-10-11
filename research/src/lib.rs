@@ -12,6 +12,7 @@ pub mod keccak;
 pub mod sha256;
 pub mod sbpf;
 pub mod notes;
+pub mod dilithium_host;
 pub mod evm;
 pub mod viewing;
 pub mod ledger;

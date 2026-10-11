@@ -49,6 +49,8 @@ rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
 # `tests/evm_*.rs` link `rand_zkvm` as an external crate, so a dev-dependency could not appear in its
 # public API.
 evm-core = { path = "../guests-compiled/evm-core" }
+# The no_std Dilithium2 verifier core (private multisig): host-side Keccak lives in `src/dilithium_host.rs`.
+dilithium-core = { path = "../guests-compiled/dilithium-core" }
 # The sBPF interpreter core (M4.4): a no_std library with its own workspace root, compiled into the
 # `sbpf` guest on riscv32im and run natively here. A normal dependency, not a dev-dependency,
 # because `src/sbpf.rs` (the host side: `HostRef`, the aligned serializer, `SbpfCall`) is part of
@@ -61,6 +63,8 @@ sbpf-core = { path = "../guests-compiled/sbpf-core" }
 # (`evm_sload`/`evm_sstore`/`evm_keccak256`) `evm2rv`'s translated contracts call.
 evm-core = { path = "../guests-compiled/evm-core", features = ["ffi"] }
 hex = "0.4"
+# The oracle for `dilithium-core` (keygen, signing, reference verify) — host tests only.
+crystals-dilithium = "=2.0.0"
 # The oracle for `evm-core`'s 256-bit arithmetic — host tests only, never in a guest.
 num-bigint = "0.4"
 # The oracle for `evm-core`'s opcode semantics and gas (`tests/evm_interp.rs`) — host tests only,
