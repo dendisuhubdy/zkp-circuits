@@ -224,6 +224,49 @@ guest's byte-at-a-time input unpacking (one `READ_INPUT` per four bytes plus
 a per-byte shift/store loop), not by the hash: the permutation itself is a
 single cpu row.
 
+### `dilithium-verify` — phase 1 of private multisig
+
+`guests-compiled/dilithium-verify` runs `dilithium-core::verify` (a `no_std`, non-allocating
+Dilithium2 verifier, tested against `crystals-dilithium`) as a compiled guest, with every
+Keccak-f[1600] permutation on the `KECCAK` syscall (`guest_sdk::SyscallKeccak`, behind the
+`dilithium` feature so no other guest's pinned image moves). Input: words `0..328` the 1 312-byte
+public key, `328..933` the 2 420-byte signature, `933` the message byte length (`<= 64`), `934..`
+the message; output slot 0 is 1 on a valid signature, else 0. It is an image container
+(`bin/dilithium-verify.bin`, the NTT `ZETAS` table is `.rodata`), linked with its own
+`dilithium-verify.ld` (`guest.ld` with `ORIGIN` at `0x10000`, as `evm.ld`). The stack stays
+64 KiB: `verify`'s frame is about 24 KB and `main`'s buffers about 4 KB, so no static is needed.
+
+Measured by `research/tests/dilithium.rs`'s
+`the_guest_verifies_like_the_host_and_reports_its_cycles` (`cargo +1.98.1 test --release --test
+dilithium the_guest -- --nocapture`), a 45-byte message, host `execute` with the tier-22 cap:
+
+| quantity | value |
+|---|---|
+| program words | 4 943 (`hc b651b1bc…4b5`) |
+| cycles, valid signature | 880 102 |
+| cycles, invalid signature (one flipped byte) | 879 970 |
+| `KECCAK` permutations (syscall rows) | 99 per verification, both cases |
+
+Implied tier for M signatures in one proof (cycles = M x 880 102; tier `t` holds `2^t - 1`;
+`TIERS` stop at 20 = 1 048 575):
+
+| M | cycles | tier |
+|---|---|---|
+| 1 | 880 102 | 20 |
+| 2 | 1 760 204 | over tier 20 |
+| 3 | 2 640 306 | over tier 20 |
+| 5 | 4 400 510 | over tier 20 |
+
+The Poseidon2 budget (ZH1, `Tier::for_workload`) is not the binding one: the guest makes no
+`POSEIDON2` calls, and the program digest costs about 1 236 permutations (4 943 words / 4)
+against 2^17 = 131 072 slots at tier 20. The Keccak table needs 99 of its permutations, one cycle
+each, so the cycle budget already bounds it. The cost is the ring arithmetic in plain RV32IM
+(NTTs, 32-bit modular multiplies), not hashing: Keccak is about 0.01% of the rows.
+
+**Verdict:** one verification is over the 600 k-cycle line the plan set (880 k, 84% of tier 20),
+and any M >= 2 is out of the tier ladder. A coprocessor chip (NTT / modular multiply) must be
+raised in phase 3, before phase 2.
+
 ### The `evm` guest — M4.3's exit test
 
 `guests-compiled/evm` is the Solidity path made executable: **an ERC-20

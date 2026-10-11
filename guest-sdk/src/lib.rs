@@ -308,3 +308,28 @@ core::arch::global_asm!(
     "    li a7, 0",
     "    ecall",
 );
+
+/// `dilithium_core::Keccak` over the `KECCAK` syscall: the 25 lanes are split into the syscall's
+/// 50-word layout (lane `i`'s low word at `2i`, high at `2i+1`), permuted in place by one
+/// `ecall`, and joined back.
+#[cfg(feature = "dilithium")]
+pub struct SyscallKeccak;
+
+#[cfg(feature = "dilithium")]
+impl dilithium_core::Keccak for SyscallKeccak {
+    fn permute(&mut self, s: &mut [u64; 25]) {
+        let mut w = [0u32; 50];
+        let mut i = 0;
+        while i < 25 {
+            w[2 * i] = s[i] as u32;
+            w[2 * i + 1] = (s[i] >> 32) as u32;
+            i += 1;
+        }
+        keccak(&mut w);
+        i = 0;
+        while i < 25 {
+            s[i] = (w[2 * i] as u64) | ((w[2 * i + 1] as u64) << 32);
+            i += 1;
+        }
+    }
+}

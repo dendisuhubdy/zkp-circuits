@@ -309,3 +309,32 @@ fn unpack_sig_encoding_checks_are_pinned() {
     assert!(run(&idx, [80, 80, 80, 80]).0, "a full hint section at exactly OMEGA");
     assert!(run(&[], [0, 0, 0, 0]).0);
 }
+
+fn words(b: &[u8]) -> Vec<u32> {
+    b.chunks(4).map(|c| { let mut w = [0u8; 4]; w[..c.len()].copy_from_slice(c); u32::from_le_bytes(w) }).collect()
+}
+
+#[test]
+fn the_guest_verifies_like_the_host_and_reports_its_cycles() {
+    use rand_zkvm::emulator::Syscall;
+    use rand_zkvm::machine::Tier;
+    let p = rand_zkvm::guests::compiled::dilithium_verify();
+    eprintln!("dilithium-verify: {} program words", p.words.len());
+    for (seed, flip) in [(3u64, false), (4, true)] {
+        let (kp, msg) = case(seed, 45);
+        let mut sig = kp.sign(&msg).to_vec();
+        if flip { sig[100] ^= 1; }
+        let mut input = words(&kp.public.to_bytes());
+        input.extend(words(&sig));
+        input.push(msg.len() as u32);
+        input.extend(words(&msg));
+        let exec = rand_zkvm::emulator::execute(&p, &input, &[], Tier(22).max_cycles()).unwrap();
+        assert!(exec.halted);
+        assert_eq!(exec.outputs[0], (!flip) as u32);
+        let perms = exec.events.iter().filter(|e| matches!(e.sys, Some(Syscall::Keccak { .. }))).count();
+        eprintln!("dilithium2 verify in the rVM: {} cycles, {} keccak permutations (valid = {})", exec.cycles(), perms, !flip);
+        for m in [1usize, 2, 3, 5] {
+            eprintln!("  M = {m}: {} cycles -> {:?}", m * exec.cycles(), Tier::for_workload(m * exec.cycles(), 0));
+        }
+    }
+}

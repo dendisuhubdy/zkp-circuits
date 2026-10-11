@@ -54,6 +54,15 @@ pub mod compiled {
         Program::from_flat_image(BIN).expect("evm.bin is a committed, known-good build")
     }
 
+    /// `guests-compiled/dilithium-verify`: Dilithium2 verification (`dilithium-core::verify`) with
+    /// every Keccak-f permutation on the `KECCAK` syscall. Input words `0..328` pk, `328..933` sig,
+    /// `933` message byte length (`<= 64`), `934..` message; output slot 0 is 1 iff valid. An image
+    /// container (the NTT table is `.rodata`). The phase-1 measurement of the private multisig.
+    pub fn dilithium_verify() -> Program {
+        const BIN: &[u8] = include_bytes!("../../guests-compiled/bin/dilithium-verify.bin");
+        Program::from_flat_image(BIN).expect("dilithium-verify.bin is a committed, known-good build")
+    }
+
     /// M4.4's exit guest: an **sBPF interpreter**, compiled from `guests-compiled/sbpf` (see that
     /// Makefile's header for the exact `rustc +1.98.1` build) and committed as
     /// `guests-compiled/bin/sbpf.bin`. It reads **two** vectors: the public one is
