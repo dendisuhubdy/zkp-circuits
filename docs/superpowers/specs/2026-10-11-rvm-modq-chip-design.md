@@ -267,7 +267,11 @@ values, and the accept/reject result is provably unchanged.** Write `[x]` for `x
    `chknorm`, `mu`, the challenge. After the chip: `use_hint` (which "assumes a standard
    representative", i.e. canonical), `w1_pack`, SHAKE256 and the `c̃` compare. **The boolean is the
    reference's on every input**, malformed ones included, because the early rejections never reach
-   the chip.
+   the chip. (Task 7 amendment: the
+   `chknorm` rejection still returns before the chip; malformed *hint sections* are now detected
+   after the ring arithmetic, so they do reach the chip and are rejected unconditionally before
+   the c̃ compare. Hint bytes never feed chip inputs, so this is no soundness question; such a
+   rejection costs a full verification, about 80 k cycles, prover-side only.)
 
 The guest drops `reduce32`, `caddq` and the separate `shiftl` (`t1·2^{13} ≤ q − 1` is folded into
 unpacking). It keeps `chknorm` on the centred `z` and must **not** canonicalise first. That ordering

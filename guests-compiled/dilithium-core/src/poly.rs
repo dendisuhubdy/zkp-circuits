@@ -409,6 +409,10 @@ pub fn k_pack_w1(r: &mut [u8; K * params::POLYW1_PACKEDBYTES], a: &Polyveck) {
 ///
 /// The reference squeezes five blocks and then one at a time; the candidates are one stream, and
 /// 256 candidates never fit four blocks (224), so the permutation count is the reference's too.
+/// (Corner, harmless: the reference squeezes its first five blocks eagerly, this permutes a block
+/// only when it needs it. They coincide because 224 < 256, but were that ever to change, or on a
+/// stream that rejects so often that a sixth block is needed, only the permutation / cycle count
+/// could differ from the reference, never a sample.)
 pub fn uniform_words_w<H: Keccak>(k: &mut H, out: &mut [u32; N], rho: &[u32; 8], nonce: u16) {
     const M: u32 = 0x7f_ffff;
     const Q: u32 = params::Q as u32;

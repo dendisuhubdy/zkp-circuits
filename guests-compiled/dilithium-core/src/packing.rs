@@ -189,8 +189,10 @@ pub fn unpack_z_checked(out: &mut [[u32; 256]; L], sig: &[u8; params::SIGNBYTES]
 }
 
 /// Walk the hint section of `sig` exactly as `unpack_sig` does, calling `f(poly, index)` for each
-/// set hint, and return `false` on a malformed section, at the same checks in the same order.
-/// (`f` may have run for earlier hints when the answer is `false`.)
+/// set hint, and return `false` on a malformed section: the same checks, in the same order among
+/// themselves, as `unpack_sig`'s hint half. The caller runs it after the ring arithmetic (the
+/// reference runs it before), which cannot change the answer. (`f` may have run for earlier hints
+/// when the answer is `false`.)
 pub fn for_each_hint(sig: &[u32; SIG_WORDS], mut f: impl FnMut(usize, usize)) -> bool {
     let hb = |j: usize| (sig[HINT_WORD + (j >> 2)] >> (8 * (j & 3))) as u8;
     let mut k: usize = 0;

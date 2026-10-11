@@ -537,3 +537,88 @@ fn use_hint_pack_w1_matches_the_reference_on_random_values_and_every_decompose_e
         assert_eq!(got, reference_w1(&w, &[[hint; 256]; 4]), "decompose edges, hint {hint}");
     }
 }
+
+// ---- Task 7 fix round 1: the bounds, hit on purpose ------------------------------------------------
+
+/// A signature whose `z` fields are all `t = gamma1` (z = 0) except the given `(poly, coeff, t)`.
+fn sig_with_z_fields(fields: &[(usize, usize, u32)]) -> [u8; 2420] {
+    let mut sig = [0u8; 2420];
+    let mut set = |p: usize, i: usize, t: u32| {
+        let bit0 = 8 * (32 + 576 * p) + 18 * i;
+        for b in 0..18 {
+            let (byte, off) = ((bit0 + b) / 8, (bit0 + b) % 8);
+            sig[byte] = (sig[byte] & !(1 << off)) | ((((t >> b) & 1) as u8) << off);
+        }
+    };
+    for p in 0..4 { for i in 0..256 { set(p, i, 1 << 17); } }
+    for &(p, i, t) in fields { set(p, i, t); }
+    sig
+}
+
+#[test]
+fn z_bound_is_hit_on_purpose_at_straddling_and_plain_positions() {
+    use dilithium_core::{packing, params, poly};
+    let b = (params::GAMMA1 - params::BETA) as i64; // 130 994
+    let g1 = params::GAMMA1 as i64;
+    // (t, z = gamma1 - t, accepted)
+    let cases: [(u32, i64, bool); 6] = [
+        (78, b, false), (79, b - 1, true), (262_065, -(b - 1), true), (262_066, -b, false),
+        (0, g1, false), ((1 << 18) - 1, -g1 + 1, false),
+    ];
+    for &(t, z, _) in &cases { assert_eq!(g1 - t as i64, z); }
+    // 0 and 2^18-1 are the extremes of the field: outside the bound (|z| >= B), so rejected.
+    for n in [1usize, 3, 5, 7, 8, 10, 12, 14, 0, 2] {
+        for p in [0usize, 3] {
+            for &(t, z, accepted) in &cases {
+                let sig = sig_with_z_fields(&[(p, 16 * 5 + n, t)]);
+                let (mut c, mut zz, mut h) = ([0u8; 32], poly::Polyvecl::default(), poly::Polyveck::default());
+                assert!(packing::unpack_sig(&mut c, &mut zz, &mut h, &sig));
+                assert_eq!(zz.vec[p].coeffs[16 * 5 + n] as i64, z, "reference z, t={t} n={n}");
+                let ref_ok = poly::l_chknorm(&zz, b as i32) == 0;
+                let mut zc = [[0u32; 256]; 4];
+                let got = packing::unpack_z_checked(&mut zc, &sig);
+                assert_eq!(got, accepted, "accept/reject t={t} n={n} p={p}");
+                assert_eq!(got, ref_ok, "against the reference chknorm t={t} n={n} p={p}");
+                if accepted {
+                    assert_eq!(zc[p][16 * 5 + n] as i64, z.rem_euclid(params::Q as i64), "centred value t={t} n={n}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn use_hint_pack_w1_is_exhaustive_over_every_canonical_residue() {
+    use dilithium_core::{params, rounding};
+    let q = params::Q as u32;
+    let g2 = params::GAMMA2 as u32;
+    let field = |p: &[u32; 48], j: usize| -> i32 {
+        let b = 6 * j;
+        let lo = p[b >> 5] >> (b & 31);
+        let v = if (b & 31) > 26 { lo | p[(b >> 5) + 1] << (32 - (b & 31)) } else { lo };
+        (v & 63) as i32
+    };
+    // Named boundaries first, so a failure says which.
+    let mut named: Vec<(String, u32)> = vec![];
+    for m in 0..44u32 {
+        for (d, name) in [(0u32, "(2m+1)g2"), (1, "(2m+1)g2+1")] {
+            let a = (2 * m + 1) * g2 + d;
+            if a < q { named.push((format!("{name} m={m}"), a)); }
+        }
+    }
+    named.extend([("87g2+1".into(), 87 * g2 + 1), ("q-2".into(), q - 2), ("q-1".into(), q - 1)]);
+    let mut check = |a0: u32, label: &str| {
+        let w: [u32; 256] = core::array::from_fn(|i| (a0 + i as u32).min(q - 1));
+        let mut p = [0u32; 48];
+        rounding::w1_pack_words(&mut p, &w);
+        for j in 0..256 {
+            assert_eq!(field(&p, j), rounding::decompose(w[j] as i32).1, "high bits, {label}, a={}", w[j]);
+            let mut ph = p;
+            rounding::w1_apply_hint(&mut ph, &w, j);
+            assert_eq!(field(&ph, j), rounding::use_hint(w[j] as i32, 1), "hint patch, {label}, a={}", w[j]);
+        }
+    };
+    for (name, a) in &named { check(a.saturating_sub(128), name); check(*a, name); }
+    let mut a0 = 0u32;
+    while a0 < q { check(a0, "sweep"); a0 += 256; }
+}
