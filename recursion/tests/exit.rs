@@ -225,9 +225,14 @@ fn the_cycle_budget_per_inner_proof_is_pinned() {
     // (D1 the cap select by register-offset `LOAD`, A the re-homing reloads, D2 the in-place walk,
     // B/B′ `SPONGE`/`COMPRESS` immediates; docs/09): one production inner verification is now in
     // tier 19, 208 335 rows under the 2^19 − 1 gate. MODQ chip (2026-10-11, private multisig
-    // phase 3): the inner cpu gained SYS_MODQ (283 columns): 315 952 → 315 391 (measured; the
-    // wider opened row moves `(none)` 98 609 → 98 127 and `input_root` 90 329 → 90 250 in
-    // `tests/profile.rs`, every other call site unchanged), still tier 19, 208 896 under the gate.
+    // phase 3): the inner cpu gained SYS_MODQ (283 columns): 315 952 → 315 391 = −561, accounted
+    // for exactly: +178 (phase 5, new cpu constraints) +60 (phase 6 preamble: one more main and one
+    // more permutation column opened at ζ, ζg) −720 (tape reads: `Builder::hint_array` is one HINTN per
+    // full 8-word block but HINT+STORE per tail word; measured per query, the height-18 main group
+    // 295 → 296 words (tail 7 → 0: −13 rows) and permutation group 80 → 82 (tail 0 → 2: +4), net −9 × 80)
+    // −79 (`input_root`'s sponge, rate 4: one more full SPONGE replaces tail copies, −1 a query). In
+    // `tests/profile.rs`: `(none)` 98 609 → 98 127, `input_root` 90 329 → 90 250, every other call site
+    // unchanged. Still tier 19, 208 896 under the gate.
     assert_eq!(r.cpu_rows, 315_391, "the MODQ chip's re-pin: one production inner verification, 208 896 rows under the 2^19 − 1 gate (315 952 after phase 4; 585 686 after phase 3, 61 399 above it)");
     assert_eq!(recursion::machine::Tier::for_cycles(r.cpu_rows), Some(recursion::machine::Tier(19)),
                "tier 19: under the 2^19 − 1 gate since phase 4 (tier 20 after phase 3) — docs/09 and docs/00 must move with it");

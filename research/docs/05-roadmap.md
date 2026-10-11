@@ -465,9 +465,8 @@ again, so the phase-4 values below are stale too: the fullnode re-vendor greps f
 | reduce rows a proof, test / production | 39 296 / 196 480 | 39 392 / 196 960 (heights and N ceilings unchanged) | `tests/aggregate.rs` |
 
 No recursion tier moved. `LOOP_OVERHEAD` stays 327, and the rVM verifier keys
-(`tests/verifier_key.rs`) are unchanged. Production rows fell by 561 even though the opened row is one
-column wider. The drop is measured, not attributed: in `tests/profile.rs` it falls in the `(none)`
-call site (98 609 → 98 127) and in `input_root` (90 329 → 90 250).
+(`tests/verifier_key.rs`) are unchanged. Production rows fell by 561 even though the opened row is one column wider, and the fall is
+accounted for exactly: +178 (phase 5, the new cpu constraints), +60 (phase 6 preamble: one more main and one more permutation column opened at ζ, ζg), −720 (tape reads), −79 (`input_root`'s sponge tail). The −720 is `Builder::hint_array` (`recursion/src/dsl/builder.rs`): one HINTN per full 8-word block but a HINT+STORE pair per tail word. The cpu's extra main and LogUp aux column move two height-18 `row ‖ salt` buffers (words incl. 4 salt): the main group 295 → 296 (tail 7 → 0: HINT −7, STORE −7, HINTN +1 = −13 rows a query) and the permutation group 80 → 82 (tail 0 → 2: +4), net −9 rows × 80 queries (measured with a temporary `eprintln!` in `read_input_openings`, `tests/profile.rs` `where_the_rows_go`, at `bba7875` and at HEAD; every other group is unchanged). The −79 is `input_root`'s padding-free sponge (`dsl/hash.rs`, rate 4): the wider row adds one full SPONGE that replaces LOAD/STORE tail copies, −1 a query. In `tests/profile.rs` it falls in the `(none)` call site (98 609 → 98 127) and in `input_root` (90 329 → 90 250).
 
 **Stale until a RAM window or a 256 GB machine.**
 

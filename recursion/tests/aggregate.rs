@@ -455,7 +455,7 @@ fn run_reduce_rows(exec: &recursion::emulator::Execution) -> u64 {
 /// 2, emulated at the test profile — `N × program_rows`. So the canonical height is the height
 /// `build_traces` declares. Pinned: 39 392 rows a proof (`2^16` at N=1, docs/06 §3), and the
 /// ceiling at the current `REDUCE_MAX_LOG_HEIGHT = 20`: test N ≤ 26 (26 × 39 392 + 1 ≤ 2^20).
-/// MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ: the wider opened main-trace row moves the reduce rows 39 296 → 39 392; the
+/// MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ: the wider opened row (one more main column and one more permutation column, both opened at ζ and ζg) moves the reduce rows 39 296 → 39 392; the
 /// heights and the ceiling do not move.
 #[test]
 fn the_reduce_height_is_canonical_in_the_program_and_n_at_the_test_profile() {
