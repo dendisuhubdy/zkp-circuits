@@ -775,7 +775,7 @@ impl Builder {
     }
 
     /// One `POW` (Cut F): `base·g^{rev(bits, L)}` from the `len` bits at cells `off..off+len` of
-    /// the 65-cell bits buffer `bits` (`DslChallenger::sample_bits_mem`), by the reduce chip's
+    /// the 65-cell bits buffer `bits` (`DslChallenger::sample_index_bits`), by the reduce chip's
     /// pow run; the result is loaded from cell 64. `(g, base)` ride as one extension pair in `rd`.
     /// `len` is at least 1: a run has one chip row per bit and its first row is the one that
     /// receives the dispatch, so an empty run has nothing to receive it — the same shape
@@ -789,6 +789,18 @@ impl Builder {
         let rp = self.ptr_reg(bits);
         self.emit(Op::Pow, rgb, rp, BRef::Imm(F::from_u64((off + 256 * len) as u64)));
         self.load(bits, 64)
+    }
+
+    /// `LOAD r0, [v + offset]`, value discarded: a **range check** on `v` (phase 5 S1b). The cpu
+    /// AIR proves every LOAD/STORE address `< 2^24` with its three RANGE8 limbs, so this row proves
+    /// `v + offset < 2^24` as integers. Paired calls bound `v` from both sides: `v + 0 < 2^24` and
+    /// `v + (2^24 − 2^w) < 2^24` give `v < 2^w` (`v + c < 2^24` alone would admit `v ∈ [p − c, p)`).
+    /// The read reaches at most cell `2^24 − 1`, inside the address space; `r0` drops it.
+    pub fn range_load(&mut self, v: Felt, offset: u64) {
+        assert!(offset < 1 << 24, "range_load: offset {offset} is outside the 2^24 address space");
+        self.begin();
+        let rv = self.materialise(v.0);
+        self.emit(Op::Load, RRef::Raw(0), rv, BRef::Imm(F::from_u64(offset)));
     }
 
     /// The register a `Ptr`'s address lives in, folding any compile-time delta in first. An

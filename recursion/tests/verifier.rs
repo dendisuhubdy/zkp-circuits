@@ -198,14 +198,17 @@ fn the_opened_value_segments_are_sized_by_the_shape_alone() {
     assert_eq!(seg(recursion::witness::Segment::RandomOpenings), 2 * 4 * random);
 }
 
-/// `QueryBits` is 65 words per sampled element and nothing in phases 0–4 reads it, so without this
-/// its bit order, its group order and its canonicality hint would go unchecked until Task 6 — and a
-/// mistake in any of them is a tape the finished program cannot consume.
+/// `QueryBits` is 65 words for the PoW sample and `bits + 4` per query index (phase 5 S1b, `bits =
+/// log_global_max_height`), and nothing in phases 0–4 reads it, so without this its bit order, its
+/// group order and its hints would go unchecked until Task 6 — and a mistake in any of them is a
+/// tape the finished program cannot consume.
 ///
-/// The claims are the ones the program's `sample_bits` makes: each group's sixty-four little-endian
-/// bits are a decomposition of a canonical Goldilocks element, the hint is that element's low half
-/// inverted, the low `log_global_max_height` bits are the query index the Merkle proofs were checked
-/// against, and the PoW group comes first and grinds.
+/// The claims are the ones the program's samplers make. The PoW group (first, 65 words): sixty-four
+/// little-endian bits of a canonical Goldilocks element, the hint that element's low half inverted,
+/// and it grinds (`sample_bits`). Each index group (`bits + 4` words, `sample_index_bits`): `bits`
+/// booleans whose little-endian value is the query index the Merkle proofs were checked against
+/// (`index_samples[q] mod 2^bits`), then `a, h0, h1` the canonical limbs of the sampled element and
+/// `u` with `u·(H − (2^32 − 1)) = L`.
 #[test]
 fn the_query_bit_segment_decodes_to_the_sampled_query_indices() {
     let (p, shape, key) = one_test_proof();
@@ -216,40 +219,47 @@ fn the_query_bit_segment_decodes_to_the_sampled_query_indices() {
         .iter()
         .find(|(s, _, _)| *s == recursion::witness::Segment::QueryBits)
         .unwrap();
-    // One group per query, plus one for the query proof-of-work check (4 bits at this profile).
+    // The query proof-of-work check's group (4 bits at this profile), then one group per query.
     assert_eq!(shape.query_pow_bits, 4);
-    assert_eq!(len, 65 * (shape.num_queries + 1));
+    let bits = r.log_global_max_height;
+    assert_eq!(len, 65 + shape.num_queries * (bits + 4));
+    assert_eq!(r.index_samples.len(), shape.num_queries);
 
-    let group = |g: usize| -> (u64, F) {
-        let at = start + 65 * g;
-        let mut v = 0u64;
-        for k in (0..64).rev() {
-            let bit = tape.words[at + k];
-            assert!(bit == F::ZERO || bit == F::ONE, "group {g} bit {k} is not boolean");
-            v = (v << 1) | (bit == F::ONE) as u64;
-        }
-        (v, tape.words[at + 64])
-    };
     let canonical = |v: u64| {
         // `p = 2^64 - 2^32 + 1`: the elements with a second 64-bit decomposition are exactly those
         // with the high half all ones and a non-zero low half.
         !(v >> 32 == 0xFFFF_FFFF && v & 0xFFFF_FFFF != 0)
     };
 
-    let (pow, hint) = group(0);
+    let mut pow = 0u64;
+    for k in (0..64).rev() {
+        let bit = tape.words[start + k];
+        assert!(bit == F::ZERO || bit == F::ONE, "PoW bit {k} is not boolean");
+        pow = (pow << 1) | (bit == F::ONE) as u64;
+    }
     assert!(canonical(pow));
-    assert_eq!(hint, recursion::dsl::transcript::canonicality_hint(pow));
+    assert_eq!(tape.words[start + 64], recursion::dsl::transcript::canonicality_hint(pow));
     assert_eq!(pow & ((1 << shape.query_pow_bits) - 1), 0, "the query PoW witness must grind");
 
     for q in 0..shape.num_queries {
-        let (v, hint) = group(q + 1);
+        let at = start + 65 + q * (bits + 4);
+        let mut idx = 0u64;
+        for k in (0..bits).rev() {
+            let bit = tape.words[at + k];
+            assert!(bit == F::ZERO || bit == F::ONE, "query {q} bit {k} is not boolean");
+            idx = (idx << 1) | (bit == F::ONE) as u64;
+        }
+        let v = r.index_samples[q];
         assert!(canonical(v), "query {q}");
-        assert_eq!(hint, recursion::dsl::transcript::canonicality_hint(v), "query {q}");
-        let mask = (1u64 << r.log_global_max_height) - 1;
-        assert_eq!(
-            (v & mask) as usize, r.indices[q],
-            "query {q}'s low bits are the index its Merkle proof was checked against"
-        );
+        assert_eq!(idx, v & ((1u64 << bits) - 1), "query {q}'s bits are its sampled element's low bits");
+        assert_eq!(idx as usize, r.indices[q], "query {q}'s bits are the index its Merkle proof was checked against");
+        let (lo, hi) = (v & 0xFFFF_FFFF, v >> 32);
+        let [a, h0, h1, u] = [0, 1, 2, 3].map(|j| tape.words[at + bits + j]);
+        assert_eq!(a, F::from_u64(lo >> bits), "query {q}'s a");
+        assert_eq!(h0, F::from_u64(hi & 0xFF_FFFF), "query {q}'s h0");
+        assert_eq!(h1, F::from_u64(hi >> 24), "query {q}'s h1");
+        let (l, h) = (F::from_u64(lo), F::from_u64(hi));
+        assert_eq!(u * (h - F::from_u64(0xFFFF_FFFF)), l, "query {q}'s u·(H − (2^32 − 1)) = L");
     }
 }
 

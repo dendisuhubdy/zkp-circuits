@@ -62,8 +62,9 @@ fn fifty_production_profile_bundle_proofs_are_accepted() {
 /// **Deviation from the plan's table, measured against the built program (and forced by it):**
 /// the plan's static per-segment names assumed a tamper is caught at the check that *semantically*
 /// owns the tampered value. But seven of the thirteen segments are observed into the Fiat-Shamir
-/// transcript (or move it), and the plan's own tape design — precomputed bit decompositions in
-/// `Segment::QueryBits`, tied to the sampled elements by `sample_bits`'s decomposition assertion —
+/// transcript (or move it), and the plan's own tape design — precomputed decompositions in
+/// `Segment::QueryBits` (65 words for the PoW sample, `bits + 4` per query index since phase 5
+/// S1b), tied to the sampled elements by the samplers' `"sample_bits decomposition"` assertion —
 /// makes the *first* failing check the one that binds the tape to the moved transcript:
 ///
 /// - `PublicValues`/`Commitments`: zeta moves, so every instance's quotient identity fails, and

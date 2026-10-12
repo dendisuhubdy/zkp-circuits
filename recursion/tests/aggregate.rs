@@ -962,11 +962,12 @@ fn emulate_production_aggregate(n: usize, expected_tier: RvmTier) {
 /// B3: production N=2 aggregate emulation (tier 20: 631 053 rows since the MODQ chip, 632 175 after phase 4; tier 21: 1 171 511
 /// rows after phase 3, 1 787 351 after phase 2's row cuts; tier 22, ~3.94M rows before). Phase 4
 /// (2026-10-09, the Merkle spans) re-recorded it: tier 21 → 20.
+/// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: tier 20 → 19.
 #[test]
 #[ignore = "issue45 B3: production N=2 aggregate emulator run (631 053 rows since the MODQ chip, tier 20, no proving). Run: \
             cargo test --release -p recursion --test aggregate production_n2_aggregate_emulates_within_bounds -- --ignored --nocapture"]
 fn production_n2_aggregate_emulates_within_bounds() {
-    emulate_production_aggregate(2, RvmTier(20));
+    emulate_production_aggregate(2, RvmTier(19));
 }
 
 /// B3: production N=3 aggregate emulation (tier 20: 946 388 rows since the MODQ chip, 948 071 after phase 4; tier 21: 1 757 062

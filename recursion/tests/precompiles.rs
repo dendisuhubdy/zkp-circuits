@@ -509,7 +509,7 @@ fn fold_via_the_chip_matches_the_compiled_fold() {
                 })
                 .collect();
             let be = b.ext_constant(beta);
-            let out = fold_eval(&mut b, log_folded, la, &bits, be, msg, Some((buf, 3)));
+            let out = fold_eval(&mut b, log_folded, la, &bits, be, msg, Some((buf, 3, 3 + log_folded)));
             b.public_ext(out);
             b.public_ext(out);
             let p = b.finish();
@@ -518,6 +518,23 @@ fn fold_via_the_chip_matches_the_compiled_fold() {
             assert_eq!(ef([got[0], got[1]]), want, "the chip with POW, la {la}");
         }
     }
+}
+
+/// Review Focus 1 (phase 5 S1b): a query's 65-cell bits buffer holds only the `log_global` cells
+/// `sample_index_bits` wrote; a `POW` run reaching past them is refused when the program is built.
+#[test]
+#[should_panic(expected = "past the 5 bits sample_index_bits wrote")]
+fn a_pow_run_past_the_written_index_bits_is_refused_at_build() {
+    use recursion::dsl::Liveness;
+    use recursion::programs::{fold_eval, Precompiles};
+    let (log_folded, la) = (3usize, 1usize);
+    let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, Precompiles::On);
+    let msg = b.alloc(2 * (1 << la) + 6);
+    let buf = b.alloc(65);
+    let bits: Vec<recursion::dsl::Felt> = (0..log_folded).map(|_| b.constant(F::ZERO)).collect();
+    let be = b.ext_constant(EF::ONE);
+    // Cells 3..6 of a buffer whose first five cells are the index bits: one cell too far.
+    fold_eval(&mut b, log_folded, la, &bits, be, msg, Some((buf, 3, 5)));
 }
 
 /// Cut F: POW equals the closed form `base·Π_k g^{2^{L−1−k}·bit_{off+k}}` for random bits,
