@@ -245,7 +245,9 @@ Projected from the spike (production, labelled; rows ≈ N × 237 k + 300):
 
 - Program and tape cuts only: no ISA word, no AIR column, and no change to the inner machine.
 - S1b applies to query-index samples only; the PoW sample keeps the 64-bit path.
-- `Precompiles::Off` builds take S6a, S2b and S4a (their digests move). They keep the 64-bit `sample_bits` as the
-  differential reference, so the Off tape keeps the 65-word `QueryBits` layout. The writer takes the layout from the
-  program it targets.
+- `Precompiles::Off` builds take S6a, S2b (through the compiled sponge) and S1b; S4a stays On-only, as Cut B's HINTN does.
+  Their digests move. Ruling (2026-10-12, plan review): the Off and On builds read **one tape**
+  (`tests/verifier.rs`'s acceptance differential runs both on it), so the query-index `QueryBits` layout is the
+  same in both. The 64-bit `sample_bits` stays in the tree for the PoW sample, and the S1b gadget's reference is
+  p3's `DuplexChallenger::sample_bits` itself (§5), not the Off build.
 - The tier gate decides; the spike's numbers are the plan's projection.
