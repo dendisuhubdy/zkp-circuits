@@ -795,6 +795,8 @@ fn phase_5s_assertions_are_all_named() {
 /// every later cell address moves): `af0c16e8…6c7b` → `c580415b…5e6c`. Phase 4's D2 re-recorded it (2026-10-09: the walk returns its leaf, no out cell, in both builds): `c580415b…5e6c` → `759b015d…9b4e`.
 /// MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ (283 columns; the
 /// Off replay compiles the inner AIR and embeds its key): `759b015d…9b4e` → `ac1f08cf…d406`.
+/// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b — program and tape changes of the shared pipeline) re-recorded it:
+/// `ac1f08cf…d406` → `40532641…d482`.
 #[test]
 fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     use recursion::dsl::Liveness;
@@ -810,7 +812,7 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
     let off = verify_rv32_with(&shape, &key, Checkpoints::Off, Liveness::Off, recursion::programs::Precompiles::Off);
     assert_eq!(
         recursion::programs::digest_hex(&off.program),
-        "ac1f08cfc4aa66420718102d8b2eef9e157fb0a3aa94568c762e1313364fd406",
+        "40532641a13595decf6f131cfa8d5eeb7a0930ef9713c42a80da11bca20cd482",
         "the Off replay must reproduce the pre-Task-7 stream byte for byte (plus VERIFIER-1's \
          per-round assertions, and constraint set 7's and 8's inner changes)"
     );
@@ -860,14 +862,15 @@ fn the_off_replay_reproduces_the_pre_liveness_program_byte_for_byte() {
 /// `LOAD`, the re-homing reloads, the in-place Merkle walk, `SPONGE`/`COMPRESS` immediates).
 /// MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ (283 columns; an
 /// inner shape and key change): `1bcbcec9…1fba` → `e26f37e3…41a0`.
+/// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: `e26f37e3…41a0` → `b4988faa…a69b`.
 #[test]
 fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     let (_p, shape, key) = one_test_proof();
     let vp = recursion::programs::verify_rv32n(&shape, &key, Checkpoints::Off);
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
-        "e26f37e3682a42d2f9835dca49ac0ad7408ca27f24bc34867d5f2efb28a241a0",
-        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 4's Merkle spans"
+        "b4988faa0476692a20e285d920685110111d4a648d6687c6230bfceb055ea69b",
+        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 5"
     );
 }
 
