@@ -251,3 +251,12 @@ Projected from the spike (production, labelled; rows ≈ N × 237 k + 300):
   same in both. The 64-bit `sample_bits` stays in the tree for the PoW sample, and the S1b gadget's reference is
   p3's `DuplexChallenger::sample_bits` itself (§5), not the Off build.
 - The tier gate decides; the spike's numbers are the plan's projection.
+
+## Errata (2026-10-12)
+
+Production `bits` is **20**, not 19: `log_global_max_height` is the largest degree_bits (17) plus
+`INNER_LOG_BLOWUP` (3). This matters in §1.4 ("Only `bits` = 19 of the 64 bits are ever used") and in
+the S1b statement (§3, "19 at production"): S1a′'s booleanity saving is 20 × 80 = 1 600 rows, which
+reconciles the measured 237 018 → 235 418 exactly, and the witness words fall by 80 × 41 (65 − (20 + 4)
+per query). The gadget's range argument is unchanged (it holds for 8 ≤ B ≤ 32). See
+`recursion/docs/10-phase5-n2-tier19.md` §2.

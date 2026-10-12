@@ -42,7 +42,7 @@ Production fixture, 80 queries, the `== profile Production` section of
 
 | span | cpu rows | /query | what the rows are |
 |---|---:|---:|---|
-| `sample_bits` | 53 013 | 662.7 | all 64 bits of each sampled element hinted and checked boolean; two 32-bit Horners; the all-ones product and the canonicality check. 7 553 reloads and 5 193 spills (≈ 159 rows a query) keep the 64 bit handles live into the query phase. Only `bits` = 19 of the 64 bits are used. |
+| `sample_bits` | 53 013 | 662.7 | all 64 bits of each sampled element hinted and checked boolean; two 32-bit Horners; the all-ones product and the canonicality check. 7 553 reloads and 5 193 spills (≈ 159 rows a query) keep the 64 bit handles live into the query phase. Only `bits` = 20 of the 64 bits are used (production: `log_global_max_height` 17 + `INNER_LOG_BLOWUP` 3). |
 | `input_root` | 90 250 | 1 128.1 | 30 sponges a query (5 leaves + 25 injections), each with 4 zeroing STOREs and a 4 LOAD + 4 STORE copy of its digest out of the shared hash scratch; one `alloc` (`FADDI`) per injection digest. `STORE` 21 454, `LOAD` 17 915, `FADDI` 2 401. |
 | `commit_root` | 34 960 | 437.0 | 9 rounds a query, each with 4 zeroing and 4 copy-out STOREs and their LOADs. `LOAD` 10 880, `STORE` 5 760. |
 | `(none)` (tape reads and the rest) | 98 127 | 1 226.6 | among them 2 321 hinted arrays ending in an `n mod 8` tail, read one word at a time: 8 003 tail words, 16 006 `HINT` + `STORE` rows (the spike's count). |
@@ -67,8 +67,10 @@ expected Δ.
 The final profile (`2026-10-12-phase5-profile-final.log`, re-run for this record on `f001206`)
 reads the same 235 418 rows, 54 598 permutations, 1 679 138 mem accesses, 493 813 REG accesses,
 209 175 witness words and 243 391 program instructions as the S1b log. The total is 1 600 rows
-under the spike's combined 237 018, which is S1a′'s `b·b = b` booleanity the plan subtracted
-(19 bits × 80 queries = 1 520) plus 80 rows. The test profile followed: 104 229 → **88 160** rows
+under the spike's combined 237 018. This is exact: S1a′'s `b·b = b` booleanity the plan subtracted
+is 20 bits × 80 queries = 1 600 rows (production `bits` is 20, not the 19 the plan assumed; the
+witness words fell by 80 × 41 = 3 280, 65 − (20 + 4) per query, 212 455 → 209 175, and the
+profile's `sample_bits` row shows HINTN 160 / HINTE 160). Nothing remains unexplained. The test profile followed: 104 229 → **88 160** rows
 (baseline and final logs, `== profile Test`).
 
 The production N=2 aggregate after each cut, emulated over two distinct fixtures:
@@ -119,7 +121,7 @@ inside each query, and some spill there. That is the allocator follow-up in §7.
 ## 3. S1b's argument in full (the code's "`docs/10` §S1b")
 
 Let `p = 2^64 − 2^32 + 1`, `x ∈ F_p` the sampled element, `x_c` its canonical representative, and
-`B = bits` with 8 ≤ B ≤ 32 (19 at production). The tape carries `b_0 … b_{B−1}` (written into the
+`B = bits` with 8 ≤ B ≤ 32 (20 at production). The tape carries `b_0 … b_{B−1}` (written into the
 existing 65-cell bits buffer), then `a, h0, h1, u`: `B + 4` words. The program constrains:
 
 1. **Booleanity:** `b_k · b_k = b_k` for each k (one `FMUL` and one `JEQ`).
@@ -165,7 +167,7 @@ changed. The argument covers 8 ≤ B ≤ 32 only (`a < 2^(32−B)` needs `32 −
 
 | step | test |
 |---|---|
-| completeness, edges included | `honest_random_and_edges`: B ∈ {8, 19, 20, 24, 27, 32} on random `x` and `0, 1, 2, 2^32−2, 2^32−1, 2^32, p−2, p−1` |
+| completeness, edges included | `honest_random_and_edges` (both `Precompiles` builds): B ∈ {8, 19, 20, 24, 27, 32} on random `x` and `0, 1, 2, 2^32−2, 2^32−1, 2^32, p−2, p−1` |
 | equal to p3 | `matches_native_challenger`: `sample_index_bits` against `DuplexChallenger::sample_bits` on random transcripts |
 | (4), the alias refusal | `refuses_the_non_canonical_alias`: `X = x + p` with `u ∈ {0, 1, L}` at B ∈ {8, 19, 32} |
 | (2) and (3), the ranges | `refuses_a_shifted_index_or_limb`: an index shifted into `a`; an index difference absorbed by `h0`; `h1` overflowing with `h0` compensating |
@@ -176,7 +178,7 @@ changed. The argument covers 8 ≤ B ≤ 32 only (`a < 2^(32−B)` needs `32 −
 | no read past the written bits | `tests/precompiles.rs::a_pow_run_past_the_written_index_bits_is_refused_at_build` |
 
 The `Precompiles::Off` replay reads the same tape (spec §9 ruling). Its acceptance half passed in
-the Task 5 suite (124.66 s): both builds accepted a real Production proof with equal public values.
+the Task 5 suite: both builds accepted a real Production proof with equal public values.
 
 ## 4. What moved
 
@@ -216,9 +218,9 @@ true. The digest pin refuses a mismatched pair, since the program digest moved w
 | — mem accesses / REG accesses / witness words / program instrs | 1 721 705 / 662 040 / 212 455 / 326 964 | 1 679 138 / 493 813 / 209 175 / 243 391 |
 | — permutations | 54 598 | 54 598 |
 | `phase3_attribution` | reg 662 040; reduce 20 001; bit_selected_power 5 280; commit_root 34 960; sample_bits 53 013; reloads 23 559; spills 9 114 | 493 813; 21 598; 5 281; 26 080; 10 675; 14 424; 5 682 (select, fold_round unchanged) |
-| production N=1 aggregate | 315 718, tier 19 | **235 744, tier 18** (measured; overhead 326) |
+| production N=1 aggregate | 315 718, tier 19 (315 391 + 327) | **235 744, tier 18** (emulated, `2026-10-12-phase5-prod-n1-emulate.log`; overhead 326) |
 | production N=2 aggregate (B3) | 631 053, tier 20 | **471 105, tier 19** |
-| production N=3 aggregate (B3) | ≈ 946 500 by arithmetic (3 × 315 391 + 327), tier 20 | 706 466, tier 20 |
+| production N=3 aggregate (B3) | 946 388 (emulated after the MODQ chip, `tests/aggregate.rs` history), tier 20 | 706 466, tier 20 |
 | test aggregates N=1/2/3 (rows) | 104 556 / 208 729 / 312 902 | 88 486 / 176 589 / 264 692 (tiers 18 / 18 / 19 unchanged: there is no tier-17 rung) |
 | `LOOP_OVERHEAD` | 327 | 326 |
 | `N3_ROWS` | 312 902 | 264 692 |
@@ -235,6 +237,9 @@ restores 327. The exact instruction, an interaction of the 8-cell allocation wit
 was not traced. The self-verifier's phase-5 instruction counts moved (7 929, 8 209) → (7 915,
 8 195), consistent with S6a but not attributed.
 
+**`max_addr` in the emulation reports** rose from ≈ 4.43 M to 16 777 214 because the range loads
+reach the top of the address space; it is diagnostic only, not the program's memory footprint.
+
 ## 5. Re-vendor checklist
 
 The fullnode follow-through (`deploy/sync-zkvm.sh`, `CIRCUITS_PIN`) applies these in one change:
@@ -247,7 +252,7 @@ The fullnode follow-through (`deploy/sync-zkvm.sh`, `CIRCUITS_PIN`) applies thes
 - **Re-pin `aggregate_program_digest`** to
   `792a66d4a995c7b3874d38ecb8c971d5494b57b4cce13db11e08a4f9b2f9a982`, and keep the startup (or
   pin-test) assertion that the admitted digest equals the circuits pin.
-- **Move `admitted_tiers` from {19, 20, 21} to {18, 19, 20, 21}.** From the measured rungs: N=1 is
+- **Move `admitted_tiers` from {19, 20, 21} to {18, 19, 20, 21}.** From the emulated rungs: N=1 is
   tier 18 (235 744), N=2 tier 19 (471 105), N=3 tier 20 (706 466). From the projections in §6: N=4
   tier 20 and N=5 tier 21. The N ≤ 5 ceiling is unchanged (§6), so no valid production aggregate
   is tier 22, and tier 18 is now one.
@@ -265,15 +270,16 @@ The fullnode follow-through (`deploy/sync-zkvm.sh`, `CIRCUITS_PIN`) applies thes
 
 ## 6. N-economics
 
-Production cpu rows per aggregate. N=1 is the measured
-`the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead` run (Task 5), N=2 and N=3 are the
+Production cpu rows per aggregate. N=1 is the
+`the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead` emulation
+(`2026-10-12-phase5-prod-n1-emulate.log`), N=2 and N=3 are the
 B3 emulations (`2026-10-12-phase5-prod-n2-emulate.log`, `-prod-n3-emulate.log`):
 
 | N | cpu rows | tier | headroom under the tier | before phase 5 | source |
 |---:|---:|---:|---:|---|---|
-| 1 | 235 744 | **18** | 26 399 | 315 718, tier 19 (spike baseline) | measured |
+| 1 | 235 744 | **18** | 26 399 | 315 718, tier 19 (the pin's arithmetic: 315 391 + 327) | emulated (`2026-10-12-phase5-prod-n1-emulate.log`) |
 | 2 | 471 105 | **19** | 53 182 | 631 053, tier 20 | emulated |
-| 3 | 706 466 | 20 | 342 109 | tier 20 (948 071 at phase 4, `docs/09` §5) | emulated |
+| 3 | 706 466 | 20 | 342 109 | tier 20 (946 388 before phase 5) | emulated |
 | 4 | ≈ 941 827 | **20** | ≈ 106 748 | tier 21 | **projection** |
 | 5 | ≈ 1 177 188 | 21 | ≈ 919 963 | tier 21 | **projection** |
 
@@ -291,7 +297,8 @@ allocator traffic around the dispatches, not reduce-chip rows.)
 
 **Table heights (projection).** At N=2 the REG accesses are ≈ 2 × 493 813 ≈ 988 k, under `2^20`,
 so the N=2 REG table is projected to halve with the cpu table. This is arithmetic on the
-single-proof count; the N=2 emulation does not print REG accesses. The N=2 RAM table (3 357 986
+single-proof count. The spec asked for a traced REG height in the N=2 emulation; the emulation
+test does not print REG accesses, so this record labels it a projection and adds no code for it. The N=2 RAM table (3 357 986
 accesses) stays `2^22`.
 
 **Memory (projection).** No production proof was run. `docs/09` §5 projected the production N=1
