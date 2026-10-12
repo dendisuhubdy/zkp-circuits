@@ -4,15 +4,27 @@
 use p3_challenger::{CanObserve, CanSample, CanSampleBits};
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 use rand::{RngExt, SeedableRng};
-use recursion::dsl::{transcript::{low_bits_gadget, low_bits_tape, DslChallenger}, Builder, Checkpoints};
+use recursion::dsl::{transcript::{low_bits_gadget, low_bits_tape, DslChallenger}, Builder, Checkpoints, Liveness, Precompiles};
 use recursion::emulator::{execute, ExecError};
 use recursion::isa::F;
 
 type Chal = rand_zkvm::machine::Challenger;
 const P: u64 = 0xFFFF_FFFF_0000_0001;
+const BUILDS: [Precompiles; 2] = [Precompiles::On, Precompiles::Off];
 
-fn gadget_prog(x: u64, bits: usize) -> recursion::isa::Program {
-    let mut b = Builder::new(Checkpoints::Off);
+fn builder(pc: Precompiles) -> Builder {
+    Builder::with_opts(Checkpoints::Off, Liveness::On, pc)
+}
+
+/// The trap a refusal must raise: the gadget's own assertion (`INV` of zero) or a range `LOAD`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Trap {
+    InverseOfZero,
+    AddressOutOfRange,
+}
+
+fn gadget_prog(x: u64, bits: usize, pc: Precompiles) -> recursion::isa::Program {
+    let mut b = builder(pc);
     let xh = b.constant(F::from_u64(x));
     let buf = low_bits_gadget(&mut b, xh, bits);
     for k in 0..bits {
@@ -23,18 +35,24 @@ fn gadget_prog(x: u64, bits: usize) -> recursion::isa::Program {
 }
 
 fn honest(x: u64, bits: usize) {
-    let p = gadget_prog(x, bits);
+  for pc in BUILDS {
+    let p = gadget_prog(x, bits, pc);
     let got = execute(&p, &low_bits_tape(x, bits), 1_000_000).expect("honest accepted").public;
     let want: Vec<F> = (0..bits).map(|k| F::from_u64((x >> k) & 1)).collect();
-    assert_eq!(got, want, "x {x:#x} bits {bits}");
+    assert_eq!(got, want, "x {x:#x} bits {bits} {pc:?}");
+  }
 }
 
-fn refuse(x: u64, bits: usize, tape: Vec<F>, what: &str) {
-    let p = gadget_prog(x, bits);
-    match execute(&p, &tape, 1_000_000) {
-        Err(ExecError::InverseOfZero { .. }) | Err(ExecError::AddressOutOfRange { .. }) => {}
-        other => panic!("{what}: must trap, got {other:?}"),
-    }
+fn refuse(x: u64, bits: usize, tape: Vec<F>, want: Trap, what: &str) {
+  for pc in BUILDS {
+    let p = gadget_prog(x, bits, pc);
+    let got = match execute(&p, &tape, 1_000_000) {
+        Err(ExecError::InverseOfZero { .. }) => Trap::InverseOfZero,
+        Err(ExecError::AddressOutOfRange { .. }) => Trap::AddressOutOfRange,
+        other => panic!("{what} ({pc:?}): must trap, got {other:?}"),
+    };
+    assert_eq!(got, want, "{what} ({pc:?}): trapped for the wrong reason");
+  }
 }
 
 #[test]
@@ -61,7 +79,8 @@ fn matches_native_challenger() {
         let mut nat2 = Chal::new(rand_zkvm::machine::permutation());
         nat2.observe(seed);
         let x: F = nat2.sample();
-        let mut b = Builder::new(Checkpoints::Off);
+      for pc in BUILDS {
+        let mut b = builder(pc);
         let mut ch = DslChallenger::new(&mut b);
         let s = b.constant(seed);
         ch.observe(&mut b, s);
@@ -72,7 +91,8 @@ fn matches_native_challenger() {
         }
         let got = execute(&b.finish(), &low_bits_tape(x.as_canonical_u64(), bits), 1_000_000).unwrap().public;
         let want_bits: Vec<F> = (0..bits).map(|k| F::from_u64(((want as u64) >> k) & 1)).collect();
-        assert_eq!(got, want_bits);
+        assert_eq!(got, want_bits, "{pc:?}");
+      }
     }
 }
 
@@ -95,7 +115,7 @@ fn refuses_the_non_canonical_alias() {
             assert_eq!(h, 0xFFFF_FFFF);
             for u in [F::ZERO, F::ONE, F::from_u64(l)] {
                 let t = tape(l, bits, F::from_u64(l >> bits), F::from_u64(h & 0xFF_FFFF), F::from_u64(h >> 24), u);
-                refuse(x, bits, t, &format!("alias x={x} bits={bits}"));
+                refuse(x, bits, t, Trap::InverseOfZero, &format!("alias x={x} bits={bits}"));
             }
         }
     }
@@ -118,7 +138,7 @@ fn refuses_a_shifted_index_or_limb() {
             let d = F::from_u64(hi) - F::from_u64(0xFFFF_FFFF);
             let u = if d == F::ZERO { F::ZERO } else { F::from_u64(lo) * d.inverse() };
             let t = tape(idx2, bits, a2, F::from_u64(hi & 0xFF_FFFF), F::from_u64(hi >> 24), u);
-            refuse(x, bits, t, "shifted index");
+            refuse(x, bits, t, Trap::AddressOutOfRange, "shifted index");
             // 2. A different index with `h0` absorbing the difference: h0' = h0 + (idx − idx2)/2^32.
             let h0b = F::from_u64(hi & 0xFF_FFFF) + (F::from_u64(idx) - F::from_u64(idx2)) * F::from_u64(1 << 32).inverse();
             let lo2 = F::from_u64(idx2 + ((lo >> bits) << bits));
@@ -126,26 +146,35 @@ fn refuses_a_shifted_index_or_limb() {
             let d2 = hi2 - F::from_u64(0xFFFF_FFFF);
             let u2 = if d2 == F::ZERO { F::ZERO } else { lo2 * d2.inverse() };
             let t = tape(idx2, bits, F::from_u64(lo >> bits), h0b, F::from_u64(hi >> 24), u2);
-            refuse(x, bits, t, "index difference in h0");
+            refuse(x, bits, t, Trap::AddressOutOfRange, "index difference in h0");
             // 3. h1 out of range, h0 compensating (h1 + 1, h0 − 2^24).
             let h0c = F::from_u64(hi & 0xFF_FFFF) - F::from_u64(1 << 24);
             let t = tape(lo, bits, F::from_u64(lo >> bits), h0c, F::from_u64((hi >> 24) + 1), u);
-            refuse(x, bits, t, "h0 negative");
+            refuse(x, bits, t, Trap::AddressOutOfRange, "h0 negative");
             // 4. a non-boolean bit 0 carrying the whole low half.
             let mut t = tape(0, bits, F::ZERO, F::from_u64(hi & 0xFF_FFFF), F::from_u64(hi >> 24), u);
             t[0] = F::from_u64(lo);
             if lo > 1 {
-                refuse(x, bits, t, "non-boolean bit");
+                refuse(x, bits, t, Trap::InverseOfZero, "non-boolean bit");
             }
         }
     }
 }
 
+/// The honest gadget proves and verifies at the widths in use (19, the old claim, and 20, the
+/// production width: `log_global_max_height` 17 + `INNER_LOG_BLOWUP` 3); a forged range-LOAD limb
+/// is refused by the machine (a prover constraint panic or a verify error both count, as in
+/// `cheating.rs`'s `rejects()`), not by `Machine::verify` alone.
 #[test]
 fn the_gadget_proves_and_verifies_on_the_machine() {
+    for bits in [19usize, 20] {
+        proves_and_refuses_a_forged_limb(bits);
+    }
+}
+
+fn proves_and_refuses_a_forged_limb(bits: usize) {
     use recursion::machine::{build_traces, FriProfile, Machine, Tier};
     let x = 0x1234_5678_9abc_def0u64 % P;
-    let bits = 19;
     let mut b = Builder::new(Checkpoints::Off);
     let xh = b.constant(F::from_u64(x));
     let buf = low_bits_gadget(&mut b, xh, bits);
