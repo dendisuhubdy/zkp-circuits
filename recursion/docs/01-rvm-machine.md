@@ -175,7 +175,8 @@ rate ¼ (`machine::RvmFri`: 92 queries, 24 grinding bits, 86.38 proven bits agai
 LDE term in that list halves; the measured twin is 15.64 GB live (×0.58), and the exit is
 projected at ≈ 64–75 GB — a ≥ 96 GB host, until it is proved. Since `docs/09` (phase 4, the
 Merkle spans) one inner verification is 315 952 rows, **tier 19**, and every production aggregate one tier
-lower (N=1 19, N=2–3 20).
+lower (N=1 19, N=2–3 20). Since `docs/10` (phase 5, program and tape cuts) one inner verification is
+235 418 rows, **tier 18**, and the production aggregates are N=1 18, N=2 19, N=3 20 (emulated).
 
 **Measured 2026-09-30 (constraint set 8, a 503 GB box, fullnode #45): the exit proves in
 8 164.8 s, verifies in 99.3 s, is 1 566 619 bytes, and peaks at 376.9 GB resident** — 7.8× the
