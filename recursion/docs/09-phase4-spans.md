@@ -438,17 +438,20 @@ emulation over a proved production depth-2 tree, which needs the 256 GB droplet 
 - **The path-level precompile** (`docs/06` §7 item 1's third candidate): ≈ −50 to −56 k alone,
   less behind A and B, and the largest AIR surface.
 - **Compressing injections straight from the hash scratch** (≈ −16 k, not built in the spike) — a
-  follow-up if headroom is wanted.
+  follow-up if headroom is wanted. *Delivered by phase 5 as part of S2b (`docs/10` §2).*
 - **`POSEIDON2` immediate addresses** (B's pattern; a small count in these spans).
 - **The inner FRI profile; the reduce chip's N ceiling; device-resident LDEs.**
 - **The production proofs:** the production N=1 aggregate at tier 19, the production tree and its
-  fixed-point level — on a larger host.
+  fixed-point level — on a larger host. *Phase 5 moved these targets: production N=1 is now tier 18
+  and N=2 tier 19 (`docs/10` §6); still unproved.*
 - **The fullnode re-vendor** (`deploy/sync-zkvm.sh`, `CIRCUITS_PIN`, the `aggregate_program_digest`
   re-pin, `admitted_tiers` and the re-vendor checklist from §5, the test-tree section of §7) — its
   own task after merge.
 - **A constraint-set version in the verifier key** (§6) — recommended, not built.
 
 ## Conclusion
+
+> Superseded by phase 5: one inner verification 235 418 rows (tier 18), production N=2 tier 19, admitted tiers {18, 19, 20, 21}, see docs/10. The figures below are the historical record.
 
 Phase 4 put one production inner verification in **tier 19: 315 952 rows**, 208 335 under the
 gate phase 3 missed, by four program and ISA cuts that each landed in their band — the cap select

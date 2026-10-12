@@ -1,0 +1,73 @@
+diff --git a/recursion/src/dsl/hash.rs b/recursion/src/dsl/hash.rs
+index f90183e..e2254c8 100644
+--- a/recursion/src/dsl/hash.rs
++++ b/recursion/src/dsl/hash.rs
+@@ -85,6 +85,27 @@ pub fn sponge(b: &mut Builder, src: Ptr, n: usize, out: Digest) {
+     }
+ }
+ 
++/// SPIKE S2: the `On` sponge into the eight cells at `st`, digest left in lanes 0..4 (no copy
++/// out). `zero` false skips zeroing the unreached lanes — only for a fresh, never-written `st`,
++/// whose cells read zero by the memory table's first-read rule.
++pub fn sponge_state(b: &mut Builder, st: Ptr, src: Ptr, n: usize, zero: bool) {
++    assert!(n >= 1);
++    let first = n.min(RATE);
++    if zero {
++        b.zero_cells(st, first as i64, WIDTH - first);
++    }
++    let mut done = 0;
++    while done + RATE <= n {
++        let block = b.offset(src, done as i64);
++        b.sponge_absorb(st, block);
++        done += RATE;
++    }
++    if done < n {
++        b.copy_cells(st, 0, src, done as i64, n - done);
++        b.poseidon2(st);
++    }
++}
++
+ /// [`sponge`] with the absorb loop compiled as plain instructions (`copy_cells` + `POSEIDON2`
+ /// per block) — the precompile's differential reference, kept in the tree
+ /// (`tests/transcript.rs` and `tests/precompiles.rs` pin the two to each other).
+@@ -325,9 +346,9 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
+             let sib = b.offset(siblings, (l * DIGEST_ELEMS) as i64);
+             b.compress_step(cur, sib, bit);
+             for inj in injections.iter().filter(|i| i.after_level == l) {
+-                let tmp = Digest(b.alloc(DIGEST_ELEMS as u64));
+-                sponge(b, inj.rows, inj.n_cells, tmp);
+-                b.compress_step(cur, tmp.0, zero);
++                // SPIKE S2: compress straight from the hash scratch's lanes 0..4.
++                sponge_state(b, st, inj.rows, inj.n_cells, true);
++                b.compress_step(cur, st, zero);
+             }
+         }
+         return leaf;
+diff --git a/recursion/src/programs/rv32.rs b/recursion/src/programs/rv32.rs
+index 81e6311..66d7ff2 100644
+--- a/recursion/src/programs/rv32.rs
++++ b/recursion/src/programs/rv32.rs
+@@ -810,8 +810,10 @@ fn emit_input_round_root(
+     // Cut A: the tallest group's rows were hinted straight into `groups[0]`; the leaf sponge
+     // runs over that buffer in place. No copy.
+     let (leaf_msg, n) = groups[0];
+-    let leaf = Digest(b.alloc(DIGEST_ELEMS as u64));
+-    hash::sponge(b, leaf_msg, n, leaf);
++    // SPIKE S2b: the leaf sponge runs in its own 8-cell state (zeroed: the aggregate loops this
++    // body, so the cells are not fresh on the second proof); the walk consumes lanes 0..4.
++    let leaf = Digest(b.alloc(8));
++    hash::sponge_state(b, leaf.0, leaf_msg, n, true);
+     let injections: Vec<hash::Injection> = distinct[1..]
+         .iter()
+         .zip(&groups[1..])
+@@ -838,8 +840,8 @@ fn emit_input_round_root(
+ /// message `flatten_to_base(row) ‖ salt(4)` of the round's hiding MMCS — sponged in place, walked,
+ /// and compared against the round's cap.
+ fn emit_commit_root(b: &mut Builder, log_arity: usize, msg: Ptr, path: Array<Felt>, index_bits: &[Felt], cap: [Digest; 4], name: &str) {
+-    let leaf = Digest(b.alloc(DIGEST_ELEMS as u64));
+-    hash::sponge(b, msg, 2 * (1usize << log_arity) + SALT_ELEMS, leaf);
++    let leaf = Digest(b.alloc(8));
++    hash::sponge_state(b, leaf.0, msg, 2 * (1usize << log_arity) + SALT_ELEMS, true);
+     let levels = path.len / DIGEST_ELEMS;
+     let reached = hash::merkle_walk(b, leaf, &index_bits[..levels], path.base, levels);
+     assert_cap_eq(b, reached, &cap, &index_bits[levels..levels + CAP_HEIGHT], name);

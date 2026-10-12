@@ -1,0 +1,45 @@
+diff --git a/recursion/src/dsl/hash.rs b/recursion/src/dsl/hash.rs
+index f90183e..e2254c8 100644
+--- a/recursion/src/dsl/hash.rs
++++ b/recursion/src/dsl/hash.rs
+@@ -85,6 +85,27 @@ pub fn sponge(b: &mut Builder, src: Ptr, n: usize, out: Digest) {
+     }
+ }
+ 
++/// SPIKE S2: the `On` sponge into the eight cells at `st`, digest left in lanes 0..4 (no copy
++/// out). `zero` false skips zeroing the unreached lanes — only for a fresh, never-written `st`,
++/// whose cells read zero by the memory table's first-read rule.
++pub fn sponge_state(b: &mut Builder, st: Ptr, src: Ptr, n: usize, zero: bool) {
++    assert!(n >= 1);
++    let first = n.min(RATE);
++    if zero {
++        b.zero_cells(st, first as i64, WIDTH - first);
++    }
++    let mut done = 0;
++    while done + RATE <= n {
++        let block = b.offset(src, done as i64);
++        b.sponge_absorb(st, block);
++        done += RATE;
++    }
++    if done < n {
++        b.copy_cells(st, 0, src, done as i64, n - done);
++        b.poseidon2(st);
++    }
++}
++
+ /// [`sponge`] with the absorb loop compiled as plain instructions (`copy_cells` + `POSEIDON2`
+ /// per block) — the precompile's differential reference, kept in the tree
+ /// (`tests/transcript.rs` and `tests/precompiles.rs` pin the two to each other).
+@@ -325,9 +346,9 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
+             let sib = b.offset(siblings, (l * DIGEST_ELEMS) as i64);
+             b.compress_step(cur, sib, bit);
+             for inj in injections.iter().filter(|i| i.after_level == l) {
+-                let tmp = Digest(b.alloc(DIGEST_ELEMS as u64));
+-                sponge(b, inj.rows, inj.n_cells, tmp);
+-                b.compress_step(cur, tmp.0, zero);
++                // SPIKE S2: compress straight from the hash scratch's lanes 0..4.
++                sponge_state(b, st, inj.rows, inj.n_cells, true);
++                b.compress_step(cur, st, zero);
+             }
+         }
+         return leaf;

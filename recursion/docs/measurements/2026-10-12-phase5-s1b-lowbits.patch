@@ -1,0 +1,317 @@
+diff --git a/recursion/src/dsl/builder.rs b/recursion/src/dsl/builder.rs
+index 30928b5..00f9763 100644
+--- a/recursion/src/dsl/builder.rs
++++ b/recursion/src/dsl/builder.rs
+@@ -779,6 +779,14 @@ impl Builder {
+         self.load(bits, 64)
+     }
+ 
++    /// SPIKE S1b: `LOAD r0, [a + imm]` — the cpu's address limbs prove `a + imm < 2^24`; the
++    /// value read is dropped (r0).
++    pub fn range_load(&mut self, a: Felt, imm_v: u64) {
++        self.begin();
++        let ra = self.materialise(a.0);
++        self.emit(Op::Load, RRef::Raw(0), ra, BRef::Imm(F::from_u64(imm_v)));
++    }
++
+     /// The register a `Ptr`'s address lives in, folding any compile-time delta in first. An
+     /// absolute pointer has no holder: the address is a constant, materialised into scratch.
+     fn ptr_reg(&mut self, p: Ptr) -> RRef {
+diff --git a/recursion/src/dsl/transcript.rs b/recursion/src/dsl/transcript.rs
+index 2b55b36..32e902e 100644
+--- a/recursion/src/dsl/transcript.rs
++++ b/recursion/src/dsl/transcript.rs
+@@ -167,11 +167,17 @@ impl DslChallenger {
+     /// from those very cells, which nothing writes again (the buffer is fresh; `POW` writes only
+     /// cell 64).
+     pub fn sample_bits_mem(&mut self, b: &mut Builder, bits: usize) -> (Vec<Felt>, Ptr) {
+-        let (v, buf) = self.sample_bits_with(b, bits, |b| {
+-            let buf = b.hint_array_padded(64, 1);
+-            ((0..64).map(|k| b.get(buf, k)).collect(), Some(buf.base))
++        // SPIKE S1b: decompose only the `bits` low bits. x = L + 2^32·H with
++        //   L = idx + 2^bits·a,  idx = Σ b_k 2^k (b_k boolean), a < 2^(32−bits)  (so L < 2^32),
++        //   H = h0 + 2^24·h1,    h0 < 2^24, h1 < 2^8                          (so H < 2^32),
++        // the ranges by `LOAD r0, [v + imm]` rows (the cpu's 3-byte address check proves
++        // v + imm < 2^24), and canonicality by L = (H − (2^32 − 1))·u: H all ones forces L = 0.
++        // Tape: the `bits` bits, then a, h0, h1, u (`low_bits_tape`).
++        let buf = b.span("sample_bits", |b| {
++            let x = self.sample(b);
++            low_bits_gadget(b, x, bits)
+         });
+-        (v, buf.expect("the bits buffer"))
++        (Vec::new(), buf)
+     }
+ 
+     /// The body both forms share: `read` produces the sixty-four bit handles (and, for the
+@@ -282,3 +288,59 @@ pub fn canonicality_hint(v: u64) -> F {
+         F::from_u64(lo).inverse()
+     }
+ }
++
++/// SPIKE S1b: the tape `sample_bits_mem` reads for one sampled element `v` (canonical u64).
++pub fn low_bits_tape(v: u64, bits: usize) -> Vec<F> {
++    let mut out: Vec<F> = (0..bits).map(|k| F::from_u64((v >> k) & 1)).collect();
++    let lo = v & 0xFFFF_FFFF;
++    let hi = v >> 32;
++    out.push(F::from_u64(lo >> bits));
++    out.push(F::from_u64(hi & 0xFF_FFFF));
++    out.push(F::from_u64(hi >> 24));
++    let d = F::from_u64(hi) - F::from_u64(0xFFFF_FFFF);
++    out.push(if d == F::ZERO { F::ZERO } else { F::from_u64(lo) * d.inverse() });
++    out
++}
++
++/// SPIKE S1b: the low-bits decomposition gadget on an already-sampled `x`; returns the 65-cell
++/// buffer whose cells `0..bits` hold the index bits.
++pub fn low_bits_gadget(b: &mut Builder, x: Felt, bits: usize) -> Ptr {
++        assert!((8..=32).contains(&bits));
++        let arr = b.hint_array_padded(bits, 65 - bits);
++        let top = bits - 1;
++        let mut idx = b.get(arr, top);
++        let l = b.add_const(idx, F::NEG_ONE);
++        let p = b.mul(idx, l);
++        b.assert_zero(p, &format!("sample_bits bit {top}"));
++        for k in (0..top).rev() {
++            let bk = b.get(arr, k);
++            let l = b.add_const(bk, F::NEG_ONE);
++            let p = b.mul(bk, l);
++            b.assert_zero(p, &format!("sample_bits bit {k}"));
++            let d = b.mul_const(idx, F::TWO);
++            idx = b.add(d, bk);
++        }
++        let a = b.hint();
++        let h0 = b.hint();
++        let h1 = b.hint();
++        let u = b.hint();
++        let wa = 32 - bits;
++        b.range_load(a, 0);
++        if wa < 24 {
++            b.range_load(a, (1u64 << 24) - (1u64 << wa));
++        }
++        b.range_load(h0, 0);
++        b.range_load(h1, 0);
++        b.range_load(h1, (1u64 << 24) - (1u64 << 8));
++        let a_sh = b.mul_const(a, F::from_u64(1u64 << bits));
++        let lo = b.add(idx, a_sh);
++        let h1_sh = b.mul_const(h1, F::from_u64(1u64 << 24));
++        let hi = b.add(h0, h1_sh);
++        let d = b.add_const(hi, -F::from_u64(0xFFFF_FFFF));
++        let du = b.mul(d, u);
++        b.assert_eq(du, lo, "sample_bits canonicality");
++        let shifted = b.mul_const(hi, F::from_u64(1 << 32));
++        let sum = b.add(lo, shifted);
++        b.assert_eq(sum, x, "sample_bits decomposition");
++        arr.base
++}
+diff --git a/recursion/src/programs/rv32.rs b/recursion/src/programs/rv32.rs
+index 81e6311..8fd4776 100644
+--- a/recursion/src/programs/rv32.rs
++++ b/recursion/src/programs/rv32.rs
+@@ -311,8 +311,13 @@ where
+     }
+     mark(b, "query segments: tape reads");
+     b.unrolled(shape.num_queries(), |b, q| {
++        // SPIKE S1a/S1b: the index bits are re-loaded from their buffer at the query's start.
++        let lazy: Vec<Felt> = match index_cells[q] {
++            Some(buf) => (0..log_global).map(|k| b.load(buf, k as i64)).collect(),
++            None => index_bits[q].clone(),
++        };
+         emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
+-                   &index_bits[q], index_cells[q], &all_rows[q], &all_groups[q], &all_paths[q], &all_commit_openings[q],
++                   &lazy, index_cells[q], &all_rows[q], &all_groups[q], &all_paths[q], &all_commit_openings[q],
+                    &all_commit_paths[q]);
+     });
+     mark(b, "queries: merkle walks, reduction, folds");
+diff --git a/recursion/src/witness.rs b/recursion/src/witness.rs
+index 660399a..9eb6a78 100644
+--- a/recursion/src/witness.rs
++++ b/recursion/src/witness.rs
+@@ -441,7 +441,10 @@ where
+             w.sampled_bits(v);
+         }
+         for &v in &r.index_samples {
+-            w.sampled_bits(v);
++            // SPIKE S1b: only the low bits, then the range-checked limbs and the canonicality hint.
++            for x in crate::dsl::transcript::low_bits_tape(v, r.log_global_max_height) {
++                w.f(x);
++            }
+         }
+         w.end();
+ 
+diff --git a/recursion/tests/spike_s1b.rs b/recursion/tests/spike_s1b.rs
+new file mode 100644
+index 0000000..3bb66ab
+--- /dev/null
++++ b/recursion/tests/spike_s1b.rs
+@@ -0,0 +1,171 @@
++//! SPIKE S1b (throwaway): the low-bits sample_bits gadget — honest acceptance against the native
++//! challenger's `sample_bits`, edge values, and the forgeries it must refuse.
++use p3_challenger::{CanObserve, CanSample, CanSampleBits};
++use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
++use rand::{RngExt, SeedableRng};
++use recursion::dsl::{transcript::{low_bits_gadget, low_bits_tape, DslChallenger}, Builder, Checkpoints};
++use recursion::emulator::{execute, ExecError};
++use recursion::isa::F;
++
++type Chal = rand_zkvm::machine::Challenger;
++const P: u64 = 0xFFFF_FFFF_0000_0001;
++
++fn gadget_prog(x: u64, bits: usize) -> recursion::isa::Program {
++    let mut b = Builder::new(Checkpoints::Off);
++    let xh = b.constant(F::from_u64(x));
++    let buf = low_bits_gadget(&mut b, xh, bits);
++    for k in 0..bits {
++        let v = b.load(buf, k as i64);
++        b.public(v);
++    }
++    b.finish()
++}
++
++fn honest(x: u64, bits: usize) {
++    let p = gadget_prog(x, bits);
++    let got = execute(&p, &low_bits_tape(x, bits), 1_000_000).expect("honest accepted").public;
++    let want: Vec<F> = (0..bits).map(|k| F::from_u64((x >> k) & 1)).collect();
++    assert_eq!(got, want, "x {x:#x} bits {bits}");
++}
++
++fn refuse(x: u64, bits: usize, tape: Vec<F>, what: &str) {
++    let p = gadget_prog(x, bits);
++    match execute(&p, &tape, 1_000_000) {
++        Err(ExecError::InverseOfZero { .. }) | Err(ExecError::AddressOutOfRange { .. }) => {}
++        other => panic!("{what}: must trap, got {other:?}"),
++    }
++}
++
++#[test]
++fn honest_random_and_edges() {
++    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
++    for bits in [8usize, 19, 20, 24, 27, 32] {
++        for x in [0, 1, 2, (1u64 << 32) - 2, (1u64 << 32) - 1, 1u64 << 32, P - 2, P - 1] {
++            honest(x, bits);
++        }
++        for _ in 0..200 {
++            honest(rng.random::<u64>() % P, bits);
++        }
++    }
++}
++
++#[test]
++fn matches_native_challenger() {
++    let mut rng = rand::rngs::StdRng::seed_from_u64(9);
++    for bits in [8usize, 19, 20, 27] {
++        let seed = F::from_u64(rng.random::<u64>() % P);
++        let mut nat = Chal::new(rand_zkvm::machine::permutation());
++        nat.observe(seed);
++        let want = nat.sample_bits(bits);
++        let mut nat2 = Chal::new(rand_zkvm::machine::permutation());
++        nat2.observe(seed);
++        let x: F = nat2.sample();
++        let mut b = Builder::new(Checkpoints::Off);
++        let mut ch = DslChallenger::new(&mut b);
++        let s = b.constant(seed);
++        ch.observe(&mut b, s);
++        let (_, buf) = ch.sample_bits_mem(&mut b, bits);
++        for k in 0..bits {
++            let v = b.load(buf, k as i64);
++            b.public(v);
++        }
++        let got = execute(&b.finish(), &low_bits_tape(x.as_canonical_u64(), bits), 1_000_000).unwrap().public;
++        let want_bits: Vec<F> = (0..bits).map(|k| F::from_u64(((want as u64) >> k) & 1)).collect();
++        assert_eq!(got, want_bits);
++    }
++}
++
++/// Tape from explicit integer limbs (field-encoded), `u` chosen as the best a cheater can do.
++fn tape(bitsv: u64, bits: usize, a: F, h0: F, h1: F, u: F) -> Vec<F> {
++    let mut t: Vec<F> = (0..bits).map(|k| F::from_u64((bitsv >> k) & 1)).collect();
++    t.extend([a, h0, h1, u]);
++    t
++}
++
++#[test]
++fn refuses_the_non_canonical_alias() {
++    // X = x + p for small x: H = 2^32 − 1, L = x + 1. d = 0, so d·u = 0 ≠ L for every u.
++    for bits in [8usize, 19, 32] {
++        for x in [0u64, 1, 5, 12345, (1 << 32) - 2] {
++            let xx = x as u128 + P as u128;
++            assert!(xx < 1u128 << 64);
++            let l = (xx & 0xFFFF_FFFF) as u64;
++            let h = (xx >> 32) as u64;
++            assert_eq!(h, 0xFFFF_FFFF);
++            for u in [F::ZERO, F::ONE, F::from_u64(l)] {
++                let t = tape(l, bits, F::from_u64(l >> bits), F::from_u64(h & 0xFF_FFFF), F::from_u64(h >> 24), u);
++                refuse(x, bits, t, &format!("alias x={x} bits={bits}"));
++            }
++        }
++    }
++}
++
++#[test]
++fn refuses_a_shifted_index_or_limb() {
++    let mut rng = rand::rngs::StdRng::seed_from_u64(11);
++    for bits in [8usize, 19, 27] {
++        for _ in 0..50 {
++            let x = rng.random::<u64>() % P;
++            let lo = x & 0xFFFF_FFFF;
++            let hi = x >> 32;
++            let two_b_inv = F::from_u64(1u64 << bits).inverse();
++            // 1. A different index, `a` solved for in the field: `a'` is out of range.
++            let idx = lo & ((1 << bits) - 1);
++            let idx2 = (idx + 1 + rng.random::<u64>() % ((1 << bits) - 1)) & ((1 << bits) - 1);
++            assert_ne!(idx, idx2);
++            let a2 = (F::from_u64(lo) - F::from_u64(idx2)) * two_b_inv;
++            let d = F::from_u64(hi) - F::from_u64(0xFFFF_FFFF);
++            let u = if d == F::ZERO { F::ZERO } else { F::from_u64(lo) * d.inverse() };
++            let t = tape(idx2, bits, a2, F::from_u64(hi & 0xFF_FFFF), F::from_u64(hi >> 24), u);
++            refuse(x, bits, t, "shifted index");
++            // 2. A different index with `h0` absorbing the difference: h0' = h0 + (idx − idx2)/2^32.
++            let h0b = F::from_u64(hi & 0xFF_FFFF) + (F::from_u64(idx) - F::from_u64(idx2)) * F::from_u64(1 << 32).inverse();
++            let lo2 = F::from_u64(idx2 + ((lo >> bits) << bits));
++            let hi2 = h0b + F::from_u64((hi >> 24) << 24);
++            let d2 = hi2 - F::from_u64(0xFFFF_FFFF);
++            let u2 = if d2 == F::ZERO { F::ZERO } else { lo2 * d2.inverse() };
++            let t = tape(idx2, bits, F::from_u64(lo >> bits), h0b, F::from_u64(hi >> 24), u2);
++            refuse(x, bits, t, "index difference in h0");
++            // 3. h1 out of range, h0 compensating (h1 + 1, h0 − 2^24).
++            let h0c = F::from_u64(hi & 0xFF_FFFF) - F::from_u64(1 << 24);
++            let t = tape(lo, bits, F::from_u64(lo >> bits), h0c, F::from_u64((hi >> 24) + 1), u);
++            refuse(x, bits, t, "h0 negative");
++            // 4. a non-boolean bit 0 carrying the whole low half.
++            let mut t = tape(0, bits, F::ZERO, F::from_u64(hi & 0xFF_FFFF), F::from_u64(hi >> 24), u);
++            t[0] = F::from_u64(lo);
++            if lo > 1 {
++                refuse(x, bits, t, "non-boolean bit");
++            }
++        }
++    }
++}
++
++#[test]
++fn the_gadget_proves_and_verifies_on_the_machine() {
++    use recursion::machine::{build_traces, FriProfile, Machine, Tier};
++    let x = 0x1234_5678_9abc_def0u64 % P;
++    let bits = 19;
++    let mut b = Builder::new(Checkpoints::Off);
++    let xh = b.constant(F::from_u64(x));
++    let buf = low_bits_gadget(&mut b, xh, bits);
++    for k in 0..4 {
++        let v = b.load(buf, k as i64);
++        b.public(v);
++    }
++    let p = b.finish();
++    let exec = execute(&p, &low_bits_tape(x, bits), 1_000_000).unwrap();
++    let m = Machine::new(FriProfile::Test);
++    let t = build_traces(&p, &exec, Tier(10)).unwrap();
++    let proof = m.prove_traces(&p, &t, Tier(10));
++    m.verify(&p, &proof).unwrap();
++    // A range LOAD row's limb forged: rejected (the mechanism the range checks rely on).
++    let w = recursion::tables::cpu::col::WIDTH;
++    let row = exec.events.iter().position(|e| e.instr.op == recursion::isa::Op::Load && e.instr.rd == 0).unwrap();
++    let mut t2 = t;
++    t2.cpu.values[row * w + recursion::tables::cpu::col::LIMB2] += F::ONE;
++    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        let proof = m.prove_traces(&p, &t2, Tier(10));
++        m.verify(&p, &proof)
++    }));
++    assert!(matches!(r, Err(_) | Ok(Err(_))), "a forged range limb must be refused");
++}

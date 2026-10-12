@@ -1,0 +1,30 @@
+diff --git a/recursion/src/dsl/builder.rs b/recursion/src/dsl/builder.rs
+index 30928b5..c2f83e2 100644
+--- a/recursion/src/dsl/builder.rs
++++ b/recursion/src/dsl/builder.rs
+@@ -805,8 +805,9 @@ impl Builder {
+     /// address — costs one `FADDI` into scratch to fold it in first.
+     pub fn poseidon2(&mut self, p: Ptr) {
+         self.begin();
+-        let ra = self.ptr_reg(p);
+-        self.emit(Op::Poseidon2, RRef::Raw(0), ra, BRef::Imm(F::ZERO));
++        // SPIKE S3: an absolute immediate state address — no holder, no FADDI.
++        let at = F::from_u64(self.addr_of(p));
++        self.emit(Op::Poseidon2, RRef::Raw(0), RRef::Raw(0), BRef::Imm(at));
+         self.stats.perms += 1;
+     }
+ 
+diff --git a/recursion/src/emulator.rs b/recursion/src/emulator.rs
+index 432d14f..285f935 100644
+--- a/recursion/src/emulator.rs
++++ b/recursion/src/emulator.rs
+@@ -389,7 +389,8 @@ pub fn execute(p: &Program, witness: &[F], max_cycles: usize) -> Result<Executio
+             }
+             Op::Poseidon2 => {
+                 a[0] = regs[ra];
+-                let ptr = a[0].as_canonical_u64();
++                // SPIKE S3: the state address is ra + imm (B/B′'s immediate pattern).
++                let ptr = (a[0] + instr.b).as_canonical_u64();
+                 for k in 0..8 {
+                     bounded(pc, ptr + k)?;
+                 }

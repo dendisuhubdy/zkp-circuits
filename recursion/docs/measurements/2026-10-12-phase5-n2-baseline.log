@@ -1,0 +1,11 @@
+   Compiling recursion v0.1.0 (/Users/dendisuhubdy/rand-worktrees/circuits-phase5/recursion)
+    Finished `release` profile [optimized] target(s) in 4.25s
+     Running tests/aggregate.rs (target/release/deps/aggregate-1f0a738aac1e1e8f)
+
+running 1 test
+test production_n2_aggregate_emulates_within_bounds has been running for over 60 seconds
+issue45 B3: production N=2 aggregate emulation — 631053 cpu rows (tier 20), 109170 permutations, 3443122 mem accesses, 424919 witness words, max addr 4429352, max ts 10096863 (< 2^27)
+test production_n2_aggregate_emulates_within_bounds ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 122.78s
+

@@ -1,0 +1,77 @@
+diff --git a/recursion/src/dsl/transcript.rs b/recursion/src/dsl/transcript.rs
+index 2b55b36..8a811e4 100644
+--- a/recursion/src/dsl/transcript.rs
++++ b/recursion/src/dsl/transcript.rs
+@@ -167,11 +167,50 @@ impl DslChallenger {
+     /// from those very cells, which nothing writes again (the buffer is fresh; `POW` writes only
+     /// cell 64).
+     pub fn sample_bits_mem(&mut self, b: &mut Builder, bits: usize) -> (Vec<Felt>, Ptr) {
+-        let (v, buf) = self.sample_bits_with(b, bits, |b| {
++        // SPIKE S1a: the same checks, streamed — each bit is loaded, checked, and folded into
++        // its Horner accumulator (and, for the high half, the all-ones product) at once, so no
++        // bit handle outlives its row group. The caller re-loads the `bits` low bits from the
++        // buffer where it uses them (rv32.rs), so nothing is returned live.
++        let buf = b.span("sample_bits", |b| {
++            assert!(bits <= 32);
++            let x = self.sample(b);
++            let zero = b.zero();
+             let buf = b.hint_array_padded(64, 1);
+-            ((0..64).map(|k| b.get(buf, k)).collect(), Some(buf.base))
++            let mut stream = |b: &mut Builder, hi_half: bool| {
++                let top = if hi_half { 63 } else { 31 };
++                let mut acc = b.get(buf, top);
++                let l = b.add_const(acc, F::NEG_ONE);
++                let p = b.mul(acc, l);
++                b.assert_zero(p, &format!("sample_bits bit {top}"));
++                let mut all = if hi_half { Some(acc) } else { None };
++                for k in (top - 31..top).rev() {
++                    let bk = b.get(buf, k);
++                    let l = b.add_const(bk, F::NEG_ONE);
++                    let p = b.mul(bk, l);
++                    b.assert_zero(p, &format!("sample_bits bit {k}"));
++                    if let Some(a) = all {
++                        all = Some(b.mul(a, bk));
++                    }
++                    let d = b.mul_const(acc, F::TWO);
++                    acc = b.add(d, bk);
++                }
++                (acc, all)
++            };
++            let (hi, all_hi) = stream(b, true);
++            let all_hi = all_hi.unwrap();
++            let (lo, _) = stream(b, false);
++            let t = b.hint();
++            let lo_t = b.mul(lo, t);
++            let back = b.mul(lo, lo_t);
++            b.assert_eq(back, lo, "sample_bits canonicality");
++            let non_canonical = b.mul(all_hi, lo_t);
++            b.assert_zero(non_canonical, "sample_bits canonicality");
++            let shifted = b.mul_const(hi, F::from_u64(1 << 32));
++            let sum = b.add(lo, shifted);
++            b.assert_eq(sum, x, "sample_bits decomposition");
++            buf.base
+         });
+-        (v, buf.expect("the bits buffer"))
++        (Vec::new(), buf)
+     }
+ 
+     /// The body both forms share: `read` produces the sixty-four bit handles (and, for the
+diff --git a/recursion/src/programs/rv32.rs b/recursion/src/programs/rv32.rs
+index 81e6311..8fd4776 100644
+--- a/recursion/src/programs/rv32.rs
++++ b/recursion/src/programs/rv32.rs
+@@ -311,8 +311,13 @@ where
+     }
+     mark(b, "query segments: tape reads");
+     b.unrolled(shape.num_queries(), |b, q| {
++        // SPIKE S1a/S1b: the index bits are re-loaded from their buffer at the query's start.
++        let lazy: Vec<Felt> = match index_cells[q] {
++            Some(buf) => (0..log_global).map(|k| b.load(buf, k as i64)).collect(),
++            None => index_bits[q].clone(),
++        };
+         emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
+-                   &index_bits[q], index_cells[q], &all_rows[q], &all_groups[q], &all_paths[q], &all_commit_openings[q],
++                   &lazy, index_cells[q], &all_rows[q], &all_groups[q], &all_paths[q], &all_commit_openings[q],
+                    &all_commit_paths[q]);
+     });
+     mark(b, "queries: merkle walks, reduction, folds");
