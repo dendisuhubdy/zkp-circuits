@@ -458,9 +458,10 @@ impl Builder {
     }
 
     /// `n` witness words, read in order into `n` fresh cells. `Precompiles::On` (Cut B): one
-    /// `HINTN` per full block of eight at immediate offset `8·j`, then `HINT; STORE` pairs for the
-    /// `n mod 8` tail — the tail stays compiled because a block always consumes eight words, and
-    /// the tape has exactly `n`. `Precompiles::Off`: the pairs throughout (the reference).
+    /// `HINTN` per full block of eight at immediate offset `8·j`, then the `n mod 8` tail in
+    /// `HINTE; STOREE` pairs (S4a), plus one `HINT; STORE` for an odd last word — a block always
+    /// consumes eight words, and the tape has exactly `n`. `Precompiles::Off`: `HINT; STORE`
+    /// throughout (the reference).
     pub fn hint_array(&mut self, n: usize) -> Array<Felt> {
         self.hint_array_padded(n, 0)
     }
@@ -477,7 +478,18 @@ impl Builder {
         for j in 0..blocks {
             self.emit(Op::Hintn, RRef::Raw(0), rp, BRef::Imm(imm(8 * j as i64)));
         }
-        for k in 8 * blocks..n {
+        let mut k = 8 * blocks;
+        if self.precompiles() == Precompiles::On {
+            // S4a (phase 5): the tail two words at a time — `HINTE` reads two tape words into a
+            // register pair, `STOREE` writes the pair to two cells. Same words, same cells.
+            let pair = self.take_scratch(2);
+            while k + 2 <= n {
+                self.emit(Op::Hinte, RRef::scratch(pair), RRef::Raw(0), BRef::Imm(F::ZERO));
+                self.emit(Op::Storee, RRef::scratch(pair), rp, BRef::Imm(imm(k as i64)));
+                k += 2;
+            }
+        }
+        for k in k..n {
             self.emit(Op::Hint, RRef::scratch(s), RRef::Raw(0), BRef::Imm(F::ZERO));
             self.emit(Op::Store, RRef::scratch(s), rp, BRef::Imm(imm(k as i64)));
         }
