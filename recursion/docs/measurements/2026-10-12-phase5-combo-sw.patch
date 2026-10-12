@@ -1,0 +1,217 @@
+diff --git a/recursion/src/dsl/builder.rs b/recursion/src/dsl/builder.rs
+index 30928b5..c876444 100644
+--- a/recursion/src/dsl/builder.rs
++++ b/recursion/src/dsl/builder.rs
+@@ -477,7 +477,17 @@ impl Builder {
+         for j in 0..blocks {
+             self.emit(Op::Hintn, RRef::Raw(0), rp, BRef::Imm(imm(8 * j as i64)));
+         }
+-        for k in 8 * blocks..n {
++        let mut k = 8 * blocks;
++        if self.precompiles() == Precompiles::On {
++            // SPIKE S4a: the tail two words at a time, HINTE + STOREE (same tape, same cells).
++            let s2 = self.take_scratch(2);
++            while k + 2 <= n {
++                self.emit(Op::Hinte, RRef::scratch(s2), RRef::Raw(0), BRef::Imm(F::ZERO));
++                self.emit(Op::Storee, RRef::scratch(s2), rp, BRef::Imm(imm(k as i64)));
++                k += 2;
++            }
++        }
++        for k in k..n {
+             self.emit(Op::Hint, RRef::scratch(s), RRef::Raw(0), BRef::Imm(F::ZERO));
+             self.emit(Op::Store, RRef::scratch(s), rp, BRef::Imm(imm(k as i64)));
+         }
+@@ -817,10 +827,9 @@ impl Builder {
+         self.begin();
+         let ra = self.materialise(a.0);
+         let rb = self.materialise(b.0);
+-        let t = self.take_scratch(1);
+-        self.emit_r(Op::Fsub, RRef::scratch(t), ra, bref_of(rb));
++        // SPIKE S6a: one JEQ comparing the two registers (the cpu's equality gadget is D0 vs A0).
+         let over = self.ops.len() as u32 + 2;
+-        self.emit(Op::Jeq, RRef::scratch(t), RRef::Raw(0), BRef::Imm(F::ZERO));
++        self.emit(Op::Jeq, ra, rb, BRef::Imm(F::ZERO));
+         self.set_target(over);
+         self.trap(what);
+     }
+diff --git a/recursion/src/dsl/hash.rs b/recursion/src/dsl/hash.rs
+index f90183e..e2254c8 100644
+--- a/recursion/src/dsl/hash.rs
++++ b/recursion/src/dsl/hash.rs
+@@ -85,6 +85,27 @@ pub fn sponge(b: &mut Builder, src: Ptr, n: usize, out: Digest) {
+     }
+ }
+ 
++/// SPIKE S2: the `On` sponge into the eight cells at `st`, digest left in lanes 0..4 (no copy
++/// out). `zero` false skips zeroing the unreached lanes — only for a fresh, never-written `st`,
++/// whose cells read zero by the memory table's first-read rule.
++pub fn sponge_state(b: &mut Builder, st: Ptr, src: Ptr, n: usize, zero: bool) {
++    assert!(n >= 1);
++    let first = n.min(RATE);
++    if zero {
++        b.zero_cells(st, first as i64, WIDTH - first);
++    }
++    let mut done = 0;
++    while done + RATE <= n {
++        let block = b.offset(src, done as i64);
++        b.sponge_absorb(st, block);
++        done += RATE;
++    }
++    if done < n {
++        b.copy_cells(st, 0, src, done as i64, n - done);
++        b.poseidon2(st);
++    }
++}
++
+ /// [`sponge`] with the absorb loop compiled as plain instructions (`copy_cells` + `POSEIDON2`
+ /// per block) — the precompile's differential reference, kept in the tree
+ /// (`tests/transcript.rs` and `tests/precompiles.rs` pin the two to each other).
+@@ -325,9 +346,9 @@ pub fn merkle_walk_with_injections(b: &mut Builder, leaf: Digest, index_bits: &[
+             let sib = b.offset(siblings, (l * DIGEST_ELEMS) as i64);
+             b.compress_step(cur, sib, bit);
+             for inj in injections.iter().filter(|i| i.after_level == l) {
+-                let tmp = Digest(b.alloc(DIGEST_ELEMS as u64));
+-                sponge(b, inj.rows, inj.n_cells, tmp);
+-                b.compress_step(cur, tmp.0, zero);
++                // SPIKE S2: compress straight from the hash scratch's lanes 0..4.
++                sponge_state(b, st, inj.rows, inj.n_cells, true);
++                b.compress_step(cur, st, zero);
+             }
+         }
+         return leaf;
+diff --git a/recursion/src/dsl/transcript.rs b/recursion/src/dsl/transcript.rs
+index 2b55b36..f40e9f4 100644
+--- a/recursion/src/dsl/transcript.rs
++++ b/recursion/src/dsl/transcript.rs
+@@ -167,11 +167,49 @@ impl DslChallenger {
+     /// from those very cells, which nothing writes again (the buffer is fresh; `POW` writes only
+     /// cell 64).
+     pub fn sample_bits_mem(&mut self, b: &mut Builder, bits: usize) -> (Vec<Felt>, Ptr) {
+-        let (v, buf) = self.sample_bits_with(b, bits, |b| {
++        // SPIKE S1a: the same checks, streamed — each bit is loaded, checked, and folded into
++        // its Horner accumulator (and, for the high half, the all-ones product) at once, so no
++        // bit handle outlives its row group. The caller re-loads the `bits` low bits from the
++        // buffer where it uses them (rv32.rs), so nothing is returned live.
++        let buf = b.span("sample_bits", |b| {
++            assert!(bits <= 32);
++            let x = self.sample(b);
++            let zero = b.zero();
+             let buf = b.hint_array_padded(64, 1);
+-            ((0..64).map(|k| b.get(buf, k)).collect(), Some(buf.base))
++            let mut stream = |b: &mut Builder, hi_half: bool| {
++                let top = if hi_half { 63 } else { 31 };
++                let mut acc = b.get(buf, top);
++                // SPIKE S1a′: booleanity as b·b = b (one JEQ under S6a).
++                let sq = b.mul(acc, acc);
++                b.assert_eq(sq, acc, &format!("sample_bits bit {top}"));
++                let mut all = if hi_half { Some(acc) } else { None };
++                for k in (top - 31..top).rev() {
++                    let bk = b.get(buf, k);
++                    let sq = b.mul(bk, bk);
++                    b.assert_eq(sq, bk, &format!("sample_bits bit {k}"));
++                    if let Some(a) = all {
++                        all = Some(b.mul(a, bk));
++                    }
++                    let d = b.mul_const(acc, F::TWO);
++                    acc = b.add(d, bk);
++                }
++                (acc, all)
++            };
++            let (hi, all_hi) = stream(b, true);
++            let all_hi = all_hi.unwrap();
++            let (lo, _) = stream(b, false);
++            let t = b.hint();
++            let lo_t = b.mul(lo, t);
++            let back = b.mul(lo, lo_t);
++            b.assert_eq(back, lo, "sample_bits canonicality");
++            let non_canonical = b.mul(all_hi, lo_t);
++            b.assert_zero(non_canonical, "sample_bits canonicality");
++            let shifted = b.mul_const(hi, F::from_u64(1 << 32));
++            let sum = b.add(lo, shifted);
++            b.assert_eq(sum, x, "sample_bits decomposition");
++            buf.base
+         });
+-        (v, buf.expect("the bits buffer"))
++        (Vec::new(), buf)
+     }
+ 
+     /// The body both forms share: `read` produces the sixty-four bit handles (and, for the
+diff --git a/recursion/src/programs/rv32.rs b/recursion/src/programs/rv32.rs
+index 81e6311..7767ac2 100644
+--- a/recursion/src/programs/rv32.rs
++++ b/recursion/src/programs/rv32.rs
+@@ -311,8 +311,13 @@ where
+     }
+     mark(b, "query segments: tape reads");
+     b.unrolled(shape.num_queries(), |b, q| {
++        // SPIKE S1a/S1b: the index bits are re-loaded from their buffer at the query's start.
++        let lazy: Vec<Felt> = match index_cells[q] {
++            Some(buf) => (0..log_global).map(|k| b.load(buf, k as i64)).collect(),
++            None => index_bits[q].clone(),
++        };
+         emit_query(b, shape, &opened, &metas, &fri_caps, &betas, fri_alpha, final_poly,
+-                   &index_bits[q], index_cells[q], &all_rows[q], &all_groups[q], &all_paths[q], &all_commit_openings[q],
++                   &lazy, index_cells[q], &all_rows[q], &all_groups[q], &all_paths[q], &all_commit_openings[q],
+                    &all_commit_paths[q]);
+     });
+     mark(b, "queries: merkle walks, reduction, folds");
+@@ -810,8 +815,10 @@ fn emit_input_round_root(
+     // Cut A: the tallest group's rows were hinted straight into `groups[0]`; the leaf sponge
+     // runs over that buffer in place. No copy.
+     let (leaf_msg, n) = groups[0];
+-    let leaf = Digest(b.alloc(DIGEST_ELEMS as u64));
+-    hash::sponge(b, leaf_msg, n, leaf);
++    // SPIKE S2b: the leaf sponge runs in its own 8-cell state (zeroed: the aggregate loops this
++    // body, so the cells are not fresh on the second proof); the walk consumes lanes 0..4.
++    let leaf = Digest(b.alloc(8));
++    hash::sponge_state(b, leaf.0, leaf_msg, n, true);
+     let injections: Vec<hash::Injection> = distinct[1..]
+         .iter()
+         .zip(&groups[1..])
+@@ -838,8 +845,8 @@ fn emit_input_round_root(
+ /// message `flatten_to_base(row) ‖ salt(4)` of the round's hiding MMCS — sponged in place, walked,
+ /// and compared against the round's cap.
+ fn emit_commit_root(b: &mut Builder, log_arity: usize, msg: Ptr, path: Array<Felt>, index_bits: &[Felt], cap: [Digest; 4], name: &str) {
+-    let leaf = Digest(b.alloc(DIGEST_ELEMS as u64));
+-    hash::sponge(b, msg, 2 * (1usize << log_arity) + SALT_ELEMS, leaf);
++    let leaf = Digest(b.alloc(8));
++    hash::sponge_state(b, leaf.0, msg, 2 * (1usize << log_arity) + SALT_ELEMS, true);
+     let levels = path.len / DIGEST_ELEMS;
+     let reached = hash::merkle_walk(b, leaf, &index_bits[..levels], path.base, levels);
+     assert_cap_eq(b, reached, &cap, &index_bits[levels..levels + CAP_HEIGHT], name);
+diff --git a/recursion/tests/spike_n2.rs b/recursion/tests/spike_n2.rs
+new file mode 100644
+index 0000000..f4cdab1
+--- /dev/null
++++ b/recursion/tests/spike_n2.rs
+@@ -0,0 +1,30 @@
++//! SPIKE (throwaway): the production aggregate emulated at N = 1 and N = 2 over the one cached
++//! production fixture (fixture 0 twice for N = 2) — no proving, no new fixture. Checks the loop
++//! body (lazy bit reloads, per-leaf sponge states) is right on the second iteration too.
++mod common;
++use rand_zkvm::machine::{FriProfile, Proof};
++use recursion::dsl::Checkpoints;
++use recursion::emulator::execute;
++use recursion::programs::verify_rv32n;
++use recursion::shape::{InnerKey, InnerShape};
++use recursion::witness::WitnessTape;
++
++#[test]
++fn spike_production_aggregate_n1_n2_emulate() {
++    let p0: Proof = common::bundle_proofs(FriProfile::Production, 1).pop().unwrap().proof;
++    let shape = InnerShape::of(FriProfile::Production, p0.tier, p0.program_log_height, p0.input_log_height,
++        p0.keccak_log_height, p0.sha256_log_height, p0.public_log_height, p0.mem_log_height);
++    let key = InnerKey::of(FriProfile::Production, &shape);
++    let vp = verify_rv32n(&shape, &key, Checkpoints::Off);
++    for n in [1usize, 2] {
++        let proofs: Vec<Proof> = (0..n).map(|_| common::bundle_proofs(FriProfile::Production, 1).pop().unwrap().proof).collect();
++        let tape = WitnessTape::build_n(FriProfile::Production, &shape, &key, &proofs, &common::TEST_BINDING).unwrap();
++        let exec = execute(&vp.program, &tape.words, 1 << 24).expect("emulates");
++        let pvs: Vec<Vec<u64>> = proofs.iter().map(|p| p.public_values.clone()).collect();
++        let words = recursion::public_values::interface_words_bound(&shape, &key, &common::TEST_BINDING, &pvs);
++        assert_eq!(exec.public, recursion::public_values::public_digest(&words).to_vec());
++        let rows = exec.cpu_rows();
++        println!("SPIKE production N={n} aggregate: {rows} cpu rows (tier {:?}), {} perms, {} witness words, max addr {}",
++            recursion::machine::Tier::for_cycles(rows), exec.permutations(), tape.words.len(), exec.max_addr);
++    }
++}

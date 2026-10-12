@@ -1,0 +1,23 @@
+diff --git a/recursion/src/dsl/builder.rs b/recursion/src/dsl/builder.rs
+index 30928b5..b0393a1 100644
+--- a/recursion/src/dsl/builder.rs
++++ b/recursion/src/dsl/builder.rs
+@@ -477,7 +477,17 @@ impl Builder {
+         for j in 0..blocks {
+             self.emit(Op::Hintn, RRef::Raw(0), rp, BRef::Imm(imm(8 * j as i64)));
+         }
+-        for k in 8 * blocks..n {
++        let mut k = 8 * blocks;
++        if self.precompiles() == Precompiles::On {
++            // SPIKE S4a: the tail two words at a time, HINTE + STOREE (same tape, same cells).
++            let s2 = self.take_scratch(2);
++            while k + 2 <= n {
++                self.emit(Op::Hinte, RRef::scratch(s2), RRef::Raw(0), BRef::Imm(F::ZERO));
++                self.emit(Op::Storee, RRef::scratch(s2), rp, BRef::Imm(imm(k as i64)));
++                k += 2;
++            }
++        }
++        for k in k..n {
+             self.emit(Op::Hint, RRef::scratch(s), RRef::Raw(0), BRef::Imm(F::ZERO));
+             self.emit(Op::Store, RRef::scratch(s), rp, BRef::Imm(imm(k as i64)));
+         }
