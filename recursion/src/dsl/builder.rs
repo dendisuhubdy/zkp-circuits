@@ -812,15 +812,16 @@ impl Builder {
 
     // --------------------------------------------------------------- control
 
-    /// `a == b`, or the program traps at a `pc` that names `what`.
+    /// `a == b`, or the program traps at a `pc` that names `what`. One `JEQ a, b` over the trap:
+    /// the cpu's equality gadget constrains `D0 − A0` (zero or invertible) and selects the branch
+    /// on it, so the `FSUB` into scratch the pre-phase-5 form paid computed nothing the gadget does
+    /// not (phase 5 S6a: −10 124 rows a production inner verification).
     pub fn assert_eq(&mut self, a: Felt, b: Felt, what: &str) {
         self.begin();
         let ra = self.materialise(a.0);
         let rb = self.materialise(b.0);
-        let t = self.take_scratch(1);
-        self.emit_r(Op::Fsub, RRef::scratch(t), ra, bref_of(rb));
         let over = self.ops.len() as u32 + 2;
-        self.emit(Op::Jeq, RRef::scratch(t), RRef::Raw(0), BRef::Imm(F::ZERO));
+        self.emit(Op::Jeq, ra, rb, BRef::Imm(F::ZERO));
         self.set_target(over);
         self.trap(what);
     }
