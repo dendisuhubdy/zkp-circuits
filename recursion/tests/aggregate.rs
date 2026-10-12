@@ -732,7 +732,7 @@ fn the_per_n_cycle_budget_is_pinned() {
 /// (585 960 = 585 686 + 274, `docs/06-phase3-fold-reduce.md`), tier 19 since phase 4's Merkle spans
 /// (316 279 = 315 952 + 327, measured 2026-10-11), still tier 19 with the MODQ chip (315 718 =
 /// 315 391 + 327, measured 2026-10-11; MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ),
-/// tier 18 since phase 5 (2026-10-12, S6a/S2b/S4a/S1b: 235 744 = 235 418 + 326).
+/// tier 18 since phase 5 (2026-10-12, S6a/S2b/S4a/S1b: 235 744 = 235 418 + 326, measured by this test's `measure_aggregate`: production overhead 326, as at the Test shape).
 ///
 /// It also pins the N-generic program's digest at the production bundle shape — the number a
 /// chain's aggregation section registers and the fullnode re-pins at a chain cut (`docs/02`'s
@@ -888,7 +888,7 @@ fn prove_production_aggregate(n: usize, expected_tier: RvmTier) {
 /// of four terms and is withdrawn; ≈ 64–75 GB projected at rate ¼, docs/07 §4 — a ≥ 96 GB host).
 /// Phase 4 (2026-10-09, the Merkle spans) re-recorded it: tier 20 → tier 19 (316 279 rows, emulated; 315 718 since the MODQ chip);
 /// the GB projection above is the tier-20 one, not re-taken.
-/// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: tier 19 → tier 18 (235 744 rows = 235 418 + 326, emulated; the projection is not re-taken).
+/// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: tier 19 → tier 18 (235 744 rows = 235 418 + 326, emulated and measured by `the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead`; the projection is not re-taken).
 #[test]
 #[ignore = "issue45 A6: production N=1 aggregate proof, tier 18 since phase 5 (235 744 rows; 315 718 since the MODQ chip, tier 19 since phase 4, 316 279 after it; tier 20 before), ~64-75 GB projected at tier 20 at rate 1/4 (docs/07 §4), >=96 GB host. Run: \
             cargo test --release -p recursion --test aggregate production_n1_aggregate_proves_and_verifies -- --ignored --nocapture"]
