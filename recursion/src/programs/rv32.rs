@@ -810,8 +810,10 @@ fn emit_input_round_root(
     // Cut A: the tallest group's rows were hinted straight into `groups[0]`; the leaf sponge
     // runs over that buffer in place. No copy.
     let (leaf_msg, n) = groups[0];
-    let leaf = Digest(b.alloc(DIGEST_ELEMS as u64));
-    hash::sponge(b, leaf_msg, n, leaf);
+    // S2b (phase 5): the leaf is sponged in its own eight cells and the walk runs over their lanes
+    // 0..4 in place — no copy out of the hash scratch. Zeroed every time (`sponge_state`).
+    let leaf = Digest(b.alloc(hash::WIDTH as u64));
+    hash::sponge_state(b, leaf.0, leaf_msg, n);
     let injections: Vec<hash::Injection> = distinct[1..]
         .iter()
         .zip(&groups[1..])
@@ -838,8 +840,8 @@ fn emit_input_round_root(
 /// message `flatten_to_base(row) ‖ salt(4)` of the round's hiding MMCS — sponged in place, walked,
 /// and compared against the round's cap.
 fn emit_commit_root(b: &mut Builder, log_arity: usize, msg: Ptr, path: Array<Felt>, index_bits: &[Felt], cap: [Digest; 4], name: &str) {
-    let leaf = Digest(b.alloc(DIGEST_ELEMS as u64));
-    hash::sponge(b, msg, 2 * (1usize << log_arity) + SALT_ELEMS, leaf);
+    let leaf = Digest(b.alloc(hash::WIDTH as u64));
+    hash::sponge_state(b, leaf.0, msg, 2 * (1usize << log_arity) + SALT_ELEMS);
     let levels = path.len / DIGEST_ELEMS;
     let reached = hash::merkle_walk(b, leaf, &index_bits[..levels], path.base, levels);
     assert_cap_eq(b, reached, &cap, &index_bits[levels..levels + CAP_HEIGHT], name);

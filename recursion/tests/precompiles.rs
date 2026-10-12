@@ -220,6 +220,43 @@ fn sponge_via_the_precompile_matches_padding_free_sponge() {
     }
 }
 
+/// S2b (phase 5): `sponge_state` leaves the padding-free sponge's digest in lanes 0..4 of its own
+/// eight cells, in both builds — and stays right when the *same* state is used twice, the second
+/// time with a shorter message (the lanes the first block does not reach hold the first sponge's
+/// leftovers unless they are zeroed: the dirty-state case an aggregate's second proof meets).
+#[test]
+fn sponge_state_matches_padding_free_sponge_and_survives_reuse() {
+    use recursion::programs::Precompiles;
+    let perm = rand_zkvm::machine::permutation();
+    let sponge = p3_symmetric::PaddingFreeSponge::<rand_zkvm::machine::Perm, 8, 4, 4>::new(perm);
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(31);
+    for (n1, n2) in [(1usize, 1usize), (9, 1), (121, 3), (4, 5), (37, 2)] {
+        let m1: Vec<F> = (0..n1).map(|_| common::random_felt(&mut rng)).collect();
+        let m2: Vec<F> = (0..n2).map(|_| common::random_felt(&mut rng)).collect();
+        let w1: [F; 4] = sponge.hash_iter(m1.iter().copied());
+        let w2: [F; 4] = sponge.hash_iter(m2.iter().copied());
+        for pc in [Precompiles::On, Precompiles::Off] {
+            let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, pc);
+            let st = b.alloc(8);
+            for msg in [&m1, &m2] {
+                let src = b.alloc(msg.len() as u64);
+                for (k, v) in msg.iter().enumerate() {
+                    let hv = b.constant(*v);
+                    b.store(src, k as i64, hv);
+                }
+                recursion::dsl::hash::sponge_state(&mut b, st, src, msg.len());
+                for k in 0..4 {
+                    let v = b.load(st, k);
+                    b.public(v);
+                }
+            }
+            let got = execute(&b.finish(), &[], 1_000_000).unwrap().public;
+            let want: Vec<F> = w1.iter().chain(w2.iter()).copied().collect();
+            assert_eq!(got, want, "n1 {n1} n2 {n2} {pc:?}");
+        }
+    }
+}
+
 /// The sponge contract in a proof (joining Task 5's 1 000-state contract): a program absorbs
 /// 100 random buffers through the precompile and asserts each digest against the host's
 /// `PaddingFreeSponge`, proved and verified. (100, not 1 000, so the in-suite proof stays at
@@ -308,7 +345,7 @@ fn merkle_walk_via_compress_matches_the_compiled_walk() {
             let sibs: Vec<F> = (0..4 * levels).map(|_| common::random_felt(&mut rng)).collect();
             let bits: Vec<bool> = (0..levels).map(|_| rand::RngExt::random(&mut rng)).collect();
             let inj: Vec<F> = (0..9).map(|_| common::random_felt(&mut rng)).collect();
-            let run = |pc: Precompiles| {
+            let run = |pc: Precompiles, second_injection: bool| {
                 let mut b = Builder::with_opts(Checkpoints::Off, Liveness::On, pc);
                 let leaf_p = b.alloc(4);
                 for (k, v) in leaf.iter().enumerate() { let c = b.constant(*v); b.store(leaf_p, k as i64, c); }
@@ -317,20 +354,34 @@ fn merkle_walk_via_compress_matches_the_compiled_walk() {
                 let bit_f: Vec<_> = bits.iter().map(|&t| b.constant(F::from_bool(t))).collect();
                 let inj_p = b.alloc(9);
                 for (k, v) in inj.iter().enumerate() { let c = b.constant(*v); b.store(inj_p, k as i64, c); }
-                let injections = if with_injection && levels >= 2 {
+                let mut injections = if with_injection && levels >= 2 {
                     vec![hash::Injection { after_level: levels / 2, rows: inj_p, n_cells: 9 }]
                 } else { vec![] };
+                if second_injection && levels >= 4 {
+                    injections.push(hash::Injection { after_level: levels / 2 - 1, rows: inj_p, n_cells: 9 });
+                }
                 let out = hash::merkle_walk_with_injections(&mut b, Digest(leaf_p), &bit_f, sib_p, levels, &injections);
                 for k in 0..4 { let v = b.load(out.0, k); b.public(v); }
                 let exec = execute(&b.finish(), &[], 1_000_000).unwrap();
                 let compress_rows = exec.histogram()[Op::Compress as usize];
-                (exec.public, compress_rows)
+                (exec.public, compress_rows, exec.max_addr)
             };
-            let (off, _) = run(Precompiles::Off);
-            let (on, compress_rows) = run(Precompiles::On);
+            let (off, _, _) = run(Precompiles::Off, false);
+            let (on, compress_rows, max_addr) = run(Precompiles::On, false);
             assert_eq!(on, off, "levels {levels}, injection {with_injection}");
             let expected_compress = levels + usize::from(with_injection && levels >= 2);
             assert_eq!(compress_rows, expected_compress, "one COMPRESS per level and per injection");
+            // S2 (phase 5): an injection is compressed straight from the hash scratch — the On walk
+            // allocates no tmp digest, so the On program's top address does not grow per injection.
+            if with_injection && levels >= 4 {
+                // The second injection compresses from the same scratch: the top address is the
+                // one-injection program's, not four cells higher per injection.
+                let (off2, _, _) = run(Precompiles::Off, true);
+                let (on2, compress2, max_addr2) = run(Precompiles::On, true);
+                assert_eq!(on2, off2, "levels {levels}, two injections");
+                assert_eq!(compress2, levels + 2);
+                assert_eq!(max_addr2, max_addr, "levels {levels}: a second injection must add no allocation");
+            }
         }
     }
 }
