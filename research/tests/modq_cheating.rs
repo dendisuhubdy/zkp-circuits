@@ -14,6 +14,12 @@ use common::rejects;
 // accesses read back off the forged trace (`machine::build_traces_forged` rebuilds the machine's
 // range and memory tables from them). `ModqAirWithout(Some(d))` switches exactly one constraint
 // group off; it is a `#[doc(hidden)]` type `chips()` never builds.
+//
+// Forged traces are proved in the machine with `Machine::prove_traces_without_self_check` (audit
+// CS9-2): under plain `cargo test` the batch prover's `debug_assertions` self-check would otherwise
+// panic on the lie before any proof exists, and the tests that assert on the *verifier's* typed error
+// (`OodEvaluationMismatch`, `Lookup(TerminalSumNonZero)`) could only pass with `--release`. Honest
+// traces still go through `prove_traces`, self-check on.
 
 use rand_zkvm::modq::Op;
 use rand_zkvm::tables::modq::{forge_block, modq_log_height, Defence, Lie};
@@ -60,7 +66,7 @@ fn machine_outcome(p: &rand_zkvm::isa::Program, e: &rand_zkvm::emulator::Executi
     let m = Machine::new(FriProfile::Test);
     let limit = rand_zkvm::gas::gas_max_with_modq(Tier(14), 0, 0, modq_log_height(n_calls));
     let t = rand_zkvm::machine::build_traces_forged(p, &[], &[], [0u32; 4], e, Tier(14), limit, lie).unwrap();
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let pr = m.prove_traces(p, &t, Tier(14)); m.verify(&p.digest(), &pr) }));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let pr = m.prove_traces_without_self_check(p, &t, Tier(14)); m.verify(&p.digest(), &pr) }));
     let said = outcome(&r);
     eprintln!("{lie:?} in the machine: {said}");
     (rejects(|| r.unwrap_or_else(|e| std::panic::resume_unwind(e))), said)
@@ -165,7 +171,7 @@ fn modq_row_without_a_modq_table_is_rejected() {
     m.verify(&p.digest(), &m.prove_traces(&p, &honest, Tier(14))).expect("the honest traces verify");
     let t = rand_zkvm::machine::build_traces_forged(&p, &[], &[], [0u32; 4], &e, Tier(14), gas, Lie::NoModqTable).unwrap();
     assert!(t.modq.is_none() && t.modq_log_height == 0);
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let pr = m.prove_traces(&p, &t, Tier(14)); m.verify(&p.digest(), &pr) }));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let pr = m.prove_traces_without_self_check(&p, &t, Tier(14)); m.verify(&p.digest(), &pr) }));
     let said = outcome(&r);
     eprintln!("NoModqTable in the machine: {said}");
     assert!(said.contains("Lookup(TerminalSumNonZero)"), "the unanswered MODQ lookup rejects it: {said}");

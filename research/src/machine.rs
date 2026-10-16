@@ -2032,6 +2032,40 @@ impl Machine {
     /// blinds that do not balance (`tests/cheating.rs`) are refused like any other unbalanced bus.
     #[doc(hidden)]
     pub fn prove_traces_with_blinds(&self, _program: &Program, traces: &Traces, tier: Tier, blinds: &[crate::tables::blind::Blind]) -> Proof {
+        self.prove_traces_via(traces, tier, blinds, |cfg, instances, prover_data| prove_batch(cfg, instances, prover_data))
+    }
+
+    /// Cheating-suite hook (`cheating` feature only; audit CS9-2): [`Self::prove_traces`] with the
+    /// batch prover's debug-build self-checks off (`p3_batch_stark::SelfCheck::Skip`), so a *forged*
+    /// trace set is proved as given and [`Self::verify`] is what refuses it — with its typed error,
+    /// the thing a forgery test asserts on. Under plain `cargo test` (`debug_assertions` on) the
+    /// prover otherwise checks every instance's constraints and the global lookup balance before it
+    /// commits, and panics on the lie first; `--release` has no such check, which is why the three
+    /// tests this exists for (`tests/modq_cheating.rs`) used to pass there and fail in debug. Not a
+    /// soundness lever: a skipped self-check only lets a proof the verifier then rejects be built.
+    /// Fresh blinds, the same instances, the same key split as `prove_traces`; no prover path calls
+    /// this.
+    #[cfg(feature = "cheating")]
+    #[doc(hidden)]
+    pub fn prove_traces_without_self_check(&self, _program: &Program, traces: &Traces, tier: Tier) -> Proof {
+        use p3_batch_stark::{prove_batch_with_layout_and_self_check, QuotientLayout, SelfCheck};
+        let blinds = crate::tables::blind::fresh(traces.as_slice().len());
+        self.prove_traces_via(traces, tier, &blinds, |cfg, instances, prover_data| {
+            prove_batch_with_layout_and_self_check(cfg, instances, prover_data, QuotientLayout::PerChunk, SelfCheck::Skip)
+        })
+    }
+
+    /// The one body behind [`Self::prove_traces_with_blinds`] and
+    /// [`Self::prove_traces_without_self_check`]: the instances, the `i == 1` public-values slot and
+    /// the `key_config`/`self.config` split, with `prove` the batch prover call itself — `prove_batch`
+    /// on every honest path.
+    fn prove_traces_via(
+        &self,
+        traces: &Traces,
+        tier: Tier,
+        blinds: &[crate::tables::blind::Blind],
+        prove: impl for<'a> FnOnce(&'a Config, &'a [StarkInstance<'a, Config, Chip>], &'a ProverData<Config>) -> BatchProof<Config>,
+    ) -> Proof {
         let airs = chips_with_modq(tier, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height);
         // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
         // traces, so the two must agree — a mismatch would `zip` short and silently prove a
@@ -2062,7 +2096,7 @@ impl Machine {
         // RNG state can differ freely.
         let key_cfg = key_config(self.profile);
         let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees_with_modq(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height, traces.public_log_height, traces.mem_log_height));
-        let batch = prove_batch(&self.config, &instances, &prover_data);
+        let batch = prove(&self.config, &instances, &prover_data);
         Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, keccak_log_height: traces.keccak_log_height, sha256_log_height: traces.sha256_log_height, modq_log_height: traces.modq_log_height, public_log_height: traces.public_log_height, mem_log_height: traces.mem_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }
     }
 

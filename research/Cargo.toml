@@ -113,6 +113,17 @@ name = "modq_cheating"
 path = "tests/modq_cheating.rs"
 required-features = ["cheating"]
 
+# The quotient-layout fork of p3-batch-stark (`../vendor/PROVENANCE.md`), as `recursion/` and the
+# fullnode already take it — `QuotientLayout::PerChunk`, upstream byte for byte, is what every entry
+# point this crate calls gets, so no proof or key changes. Taken here since 2026-10-15 (audit CS9-2)
+# for its `SelfCheck` switch: the fork's `prove_batch_with_layout_and_self_check(.., SelfCheck::Skip)`
+# lets the cheating suite prove a forged trace in a debug build without the prover's own
+# `debug_assertions` self-check panicking first, so the *verifier's* typed error is what a forgery test
+# sees. Only `Machine::prove_traces_without_self_check` (`cheating` feature) calls it; every honest
+# path stays on `prove_batch`, which enforces the self-check exactly as crates.io's crate does.
+[patch.crates-io]
+p3-batch-stark = { path = "../vendor/p3-batch-stark" }
+
 [profile.release]
 opt-level = 3
 

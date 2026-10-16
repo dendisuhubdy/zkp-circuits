@@ -182,7 +182,12 @@ its only two patches (everything else rides along in the wholesale rsync —
   must be compared under: `--release` turns off `debug_assertions` and with it
   the per-instance constraint checker `tests/cheating.rs`'s `rejects()` helper
   depends on, so it is both much faster and a weaker run, and its timings are
-  not comparable with these. In this run `tests/e2e.rs` takes ~459 s — M4.3's tier-16 EVM-call
+  not comparable with these. (Since 2026-10-15 — audit CS9-2 — `research` builds
+  `p3-batch-stark` from `../vendor/p3-batch-stark`, the quotient-layout fork `recursion/` and the
+  fullnode already use, for its `SelfCheck` switch: `Machine::prove_traces_without_self_check`
+  (`cheating` feature) proves a *forged* trace set with that checker off, so the verifier's typed
+  error is what `tests/modq_cheating.rs` asserts on, in debug as in release. Every honest path
+  still enforces the checker; `PerChunk` is upstream byte for byte, so no proof or key moved.) In this run `tests/e2e.rs` takes ~459 s — M4.3's tier-16 EVM-call
   proof dominates it (~438 s to prove and ~14 s to verify when run alone,
   overlapped here with the file's other tests) — `tests/bundle.rs` ~244 s (six
   proofs: four guest-level, plus one shared by every ledger-level test and one
