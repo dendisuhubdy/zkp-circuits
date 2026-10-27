@@ -1081,6 +1081,11 @@ fn a_reduce_row_reading_at_a_stale_clock_is_rejected() {
         }
         // acc = (10 − 4)·1 + (7 − 7)·3 + (30 − 6)·9 = 222.
         e.mem[4 + 9].value = F::from_u64(222);
+        // The forged event's own chain end: the trace builder recomputes the chain from the logged
+        // reads and `debug_assert`s it against the event, so without this the builder (not the
+        // prover) refuses the forgery in a debug-assertions build, and only a `--release` run
+        // reaches the AIR. (222 is the FORGED sum; the honest program publishes 267.)
+        e.reduce.as_mut().unwrap().acc_out = [F::from_u64(222), F::ZERO];
     }
     forge_accumulator_readback(&mut exec, F::from_u64(222));
     let mut t = build_traces(&p, &exec, Tier(8)).unwrap();
