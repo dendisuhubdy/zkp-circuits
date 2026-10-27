@@ -1056,11 +1056,14 @@ pub fn build_traces_salted(program: &Program, inputs: &[u32], public: &[u32], sa
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_traces_forged(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 4], exec: &Execution, tier: Tier, gas_limit: u64, lie: crate::tables::modq::Lie) -> Result<Traces, ProveError> {
-    use crate::tables::modq::{forge_block, Lie};
+    use crate::tables::modq::{forge_block, Lie, MIN_LOG_HEIGHT};
     let forge = |events: &[crate::tables::modq::ModqEvent], log_height: u8| {
-        if lie == Lie::NoModqTable || log_height == 0 {
+        // A `RealPadding` block on a run with no call at all declares the one-block floor: the
+        // table nobody asked for is the lie (`Defence::Handshake`'s test).
+        if lie == Lie::NoModqTable || (log_height == 0 && !matches!(lie, Lie::RealPadding { .. })) {
             return ModqOverride { log_height: 0, trace: None, range: RangeCounts::default(), accesses: Vec::new() };
         }
+        let log_height = log_height.max(MIN_LOG_HEIGHT);
         let f = forge_block(events, log_height, lie);
         let accesses = f.accesses.iter().flat_map(|(clk, acc)| acc.iter().map(move |a| (*clk, *a))).collect();
         ModqOverride { log_height, trace: Some(f.trace), range: f.range, accesses }

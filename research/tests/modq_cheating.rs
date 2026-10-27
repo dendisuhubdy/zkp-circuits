@@ -22,12 +22,17 @@ use common::rejects;
 // traces still go through `prove_traces`, self-check on.
 
 use rand_zkvm::modq::Op;
-use rand_zkvm::tables::modq::{forge_block, modq_log_height, Defence, Lie};
+use rand_zkvm::tables::modq::{forge_block, modq_log_height, Defence, Lie, MIN_LOG_HEIGHT};
 
 const NTT0: u32 = 0;
 const INTT1: u32 = 1 | 1 << 8;
 const DOT_8_0_4: u32 = 2 | 8 << 8 | 4 << 24;
 const MSUB_0_8_4: u32 = 3 | 8 << 16 | 4 << 24;
+/// An `NTT` into poly 2: `out` has bits `(0, 1) = (0, 1)`, the shape `Lie::NonBooleanBit` carries.
+const NTT_OUT2: u32 = 2 << 8;
+/// Op byte `2 + 3 = 5`: the `a1` of a block that claims to be a `DOT4` and an `MSUB4` at once
+/// (`Lie::TwoOps`); bit 2 is reserved, so only `execute_unchecked_modq` runs it (as an `INTT`).
+const DOT_AND_MSUB: u32 = 5 | 8 << 8 | 4 << 24;
 
 /// Each MODQ cheating test peaks at ~5.4–5.9 GB RSS (tier-14 machine proof plus the standalone
 /// harness; `/usr/bin/time -l`, one thread). Under libtest's default parallelism (one thread per
@@ -76,13 +81,14 @@ fn machine_outcome(p: &rand_zkvm::isa::Program, e: &rand_zkvm::emulator::Executi
 fn off_accepts_on_rejects(calls: &[u32], unchecked: bool, lie: Lie, off: Defence) {
     let (p, e) = modq_run(calls, unchecked);
     let evs = common::modq_harness::events(&e);
-    let forged = forge_block(&evs, modq_log_height(evs.len()), lie);
-    let accepted = common::modq_harness::run(&forged, &evs, Some(off));
+    // A run with no call has no table; `Lie::RealPadding` on it needs the one-block floor.
+    let forged = forge_block(&evs, modq_log_height(evs.len()).max(MIN_LOG_HEIGHT), lie);
+    let accepted = common::modq_harness::run(&forged, Some(off));
     eprintln!("{lie:?} with {off:?} off: {accepted:?}");
     assert!(accepted.is_ok(), "{lie:?} must be accepted with only {off:?} off");
-    let on = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| common::modq_harness::run(&forged, &evs, None)));
+    let on = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| common::modq_harness::run(&forged, None)));
     eprintln!("{lie:?} with {off:?} on: {}", outcome(&on));
-    assert!(rejects(|| common::modq_harness::run(&forged, &evs, None)), "{lie:?} must be rejected with {off:?} on");
+    assert!(rejects(|| common::modq_harness::run(&forged, None)), "{lie:?} must be rejected with {off:?} on");
     assert!(machine_rejects(&p, &e, calls.len(), lie), "{lie:?} must be rejected by the machine");
 }
 
@@ -91,7 +97,7 @@ fn passes_the_chip_dies_in_the_machine(calls: &[u32], unchecked: bool, lie: Lie)
     let (p, e) = modq_run(calls, unchecked);
     let evs = common::modq_harness::events(&e);
     let forged = forge_block(&evs, modq_log_height(evs.len()), lie);
-    assert!(common::modq_harness::run(&forged, &evs, None).is_ok(), "{lie:?} passes the modq AIR alone");
+    assert!(common::modq_harness::run(&forged, None).is_ok(), "{lie:?} passes the modq AIR alone");
     assert!(machine_rejects(&p, &e, calls.len(), lie), "{lie:?} must be rejected by the machine");
 }
 
@@ -114,8 +120,18 @@ fn modq_honest_traces_pass_and_every_lie_changes_the_witness() {
     for lie in [Lie::NonCanonicalO0 { block: 0, stage: 7 }, Lie::SwapUV { block: 0, stage: 3 }, Lie::ButterflyOutput { block: 0, stage: 3, delta: 1 },
                 Lie::InputLimbCarry { block: 0 }, Lie::DotCarry { block: 2, coefficient: 17, k: 1, delta: 1 }, Lie::MsubBroadcast { block: 3, coefficient: 17, k: 2, delta: 1 },
                 Lie::OpAs { block: 1, op: Op::Ntt }, Lie::NonCanonicalO1 { block: 0, stage: 7 }, Lie::ButterflyOutputO1 { block: 0, stage: 3, delta: 1 },
-                Lie::InputLimbCarryV { block: 0 }, Lie::InputLimbCarryW { block: 2 }, Lie::DotStart { block: 2, coefficient: 17, delta: 1 }] {
+                Lie::InputLimbCarryV { block: 0 }, Lie::InputLimbCarryW { block: 2 }, Lie::DotStart { block: 2, coefficient: 17, delta: 1 },
+                // Audit CS9-1's lies (`TwoOps` needs its own `a1`; `UnwrittenO0`/`O1` lie in the story, not the witness).
+                Lie::NonBooleanBit { block: 2 }, Lie::OpLess { block: 0 }, Lie::HalfReal { block: 2 }, Lie::TransformW { block: 0 },
+                Lie::CrossedU { block: 0, stage: 3 }, Lie::CrossedV { block: 0, stage: 3 }, Lie::WrongAddress { block: 0, slot: 0, delta: 1 },
+                Lie::ReadValue { block: 0, delta: 1 }, Lie::ReadValueV { block: 0, delta: 1 }, Lie::ReadValueW { block: 2, delta: 1 },
+                Lie::LimbCarryO0 { block: 0 }, Lie::LimbCarryO1 { block: 0 }, Lie::LimbCarryK0 { block: 0 }, Lie::LimbCarryK1 { block: 0 }] {
         assert_ne!(forge_block(&evs, 12, lie).trace.values, honest.values, "{lie:?} must change the witness");
+    }
+    for lie in [Lie::UnwrittenO0 { block: 0 }, Lie::UnwrittenO1 { block: 0 }] {
+        let f = forge_block(&evs, 12, lie);
+        assert_eq!(f.trace.values, honest.values, "{lie:?} leaves the witness honest");
+        assert_ne!(f.accesses, forge_block(&evs, 12, Lie::None).accesses, "{lie:?} must change the memory story");
     }
 }
 
@@ -135,8 +151,55 @@ fn modq_honest_traces_pass_and_every_lie_changes_the_witness() {
 #[test] fn modq_ntt_with_nonzero_a_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0 | 1 << 16], true, Lie::None, Defence::CanonicalArgsA); }
 #[test] fn modq_ntt_with_nonzero_b_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0 | 1 << 24], true, Lie::None, Defence::CanonicalArgsB); }
 
+// ---- Audit CS9-1 (2026-10-15): the lines that had no switch, each with the one lie only it tells. ----
+// Rule 1. `TwoOps` is accepted with only `RealBoolean` off because every bound rules 5–8 declare
+// (`Count::bounded(.., 1)`) is the AIR's promise, not the lookup's check: the block claims itself twice
+// on `MODQ`, reads `V` twice, counts every limb twice, and the story (asks, twin, range) pays twice.
+#[test] fn modq_two_op_block_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[DOT_AND_MSUB], true, Lie::TwoOps { block: 0 }, Defence::RealBoolean); }
+#[test] fn modq_non_boolean_offset_bit_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT_OUT2], false, Lie::NonBooleanBit { block: 0 }, Defence::FlagsBoolean); }
+#[test] fn modq_op_less_real_block_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::OpLess { block: 0 }, Defence::OneHot); }
+#[test] fn modq_half_real_block_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[DOT_8_0_4], false, Lie::HalfReal { block: 0 }, Defence::BlockConstant); }
+// Rule 2.
+#[test] fn modq_transform_with_a_multiplier_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::TransformW { block: 0 }, Defence::TransformNoW); }
+// Rule 3.
+#[test] fn modq_crossed_u_wire_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::CrossedU { block: 0, stage: 3 }, Defence::IdxU); }
+#[test] fn modq_crossed_v_wire_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::CrossedV { block: 0, stage: 3 }, Defence::IdxV); }
+#[test] fn modq_wrong_u_address_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::WrongAddress { block: 0, slot: 0, delta: 1 }, Defence::AddrU); }
+#[test] fn modq_wrong_v_address_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::WrongAddress { block: 0, slot: 1, delta: 1 }, Defence::AddrV); }
+#[test] fn modq_wrong_w_address_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[DOT_8_0_4], false, Lie::WrongAddress { block: 0, slot: 2, delta: 1 }, Defence::AddrW); }
+#[test] fn modq_wrong_o0_address_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::WrongAddress { block: 0, slot: 3, delta: 1 }, Defence::AddrO0); }
+#[test] fn modq_wrong_o1_address_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::WrongAddress { block: 0, slot: 4, delta: 1 }, Defence::AddrO1); }
+// Rule 6: the memory story is memory's own (the read values the emulator saw; no writes for the
+// `Unwritten*` lies), so the chip's send is what disagrees with it — standalone now, not only in the
+// machine (the audit's "ReadValue only exercises at machine level"). A `ReadValue*` lie cannot use
+// `off_accepts_on_rejects`: with its `Memory*` defence off the chip sends no read at all, so the
+// twin's (honest) read is left unpaid and the batch is refused for that, not accepted. The
+// isolation is instead that the same call with `Lie::None` passes standalone, and the lied value
+// is the only difference.
+fn read_lie_rejected(calls: &[u32], lie: Lie) {
+    let (p, e) = modq_run(calls, false);
+    let evs = common::modq_harness::events(&e);
+    let honest = forge_block(&evs, modq_log_height(evs.len()), Lie::None);
+    assert!(common::modq_harness::run(&honest, None).is_ok(), "the honest block passes standalone");
+    let forged = forge_block(&evs, modq_log_height(evs.len()), lie);
+    assert!(rejects(|| common::modq_harness::run(&forged, None)), "{lie:?} must be rejected standalone (the MEMORY balance)");
+    assert!(machine_rejects(&p, &e, calls.len(), lie), "{lie:?} must be rejected by the machine");
+}
+#[test] fn modq_memory_read_mismatch_is_rejected() { let _permit = modq_permit(); read_lie_rejected(&[NTT0], Lie::ReadValue { block: 0, delta: 1 }); }
+#[test] fn modq_v_read_mismatch_is_rejected() { let _permit = modq_permit(); read_lie_rejected(&[NTT0], Lie::ReadValueV { block: 0, delta: 1 }); }
+#[test] fn modq_w_read_mismatch_is_rejected() { let _permit = modq_permit(); read_lie_rejected(&[DOT_8_0_4], Lie::ReadValueW { block: 0, delta: 1 }); }
+#[test] fn modq_unwritten_o0_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::UnwrittenO0 { block: 0 }, Defence::MemoryO0); }
+#[test] fn modq_unwritten_o1_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::UnwrittenO1 { block: 0 }, Defence::MemoryO1); }
+// Rule 7: a real block on a run with no `SYS_MODQ` row at all — the table claims an entry no cpu row
+// asks for; without the entry the chip can carry any block unseen.
+#[test] fn modq_unasked_block_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[], false, Lie::RealPadding { block: 0 }, Defence::Handshake); }
+// Rule 8: the output and quotient limb groups, as `InputLimbCarry` for the inputs.
+#[test] fn modq_output_limb_out_of_range_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::LimbCarryO0 { block: 0 }, Defence::OutputRangeO0); }
+#[test] fn modq_o1_limb_out_of_range_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::LimbCarryO1 { block: 0 }, Defence::OutputRangeO1); }
+#[test] fn modq_k0_limb_out_of_range_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::LimbCarryK0 { block: 0 }, Defence::QuotientRangeK0); }
+#[test] fn modq_k1_limb_out_of_range_is_rejected() { let _permit = modq_permit(); off_accepts_on_rejects(&[NTT0], false, Lie::LimbCarryK1 { block: 0 }, Defence::QuotientRangeK1); }
+
 #[test] fn modq_overlapping_dot_operands_die_on_strict_order() { let _permit = modq_permit(); passes_the_chip_dies_in_the_machine(&[2 | 8 << 8 | 2 << 24], true, Lie::None); }
-#[test] fn modq_memory_read_mismatch_is_rejected() { let _permit = modq_permit(); passes_the_chip_dies_in_the_machine(&[NTT0], false, Lie::ReadValue { block: 0, delta: 1 }); }
 /// The modq instance (index 8 in the batch) is the one whose constraints fail.
 #[test]
 fn modq_wrong_zeta_block_is_rejected() {

@@ -368,7 +368,10 @@ takes a block that is honest except for the targeted lie and makes it consistent
 `machine::build_traces_forged` then rebuilds the range and memory traces from that forged witness.
 Each test asserts both directions. **With only the targeted defence switched off**, through
 `#[doc(hidden)] ModqAirWithout(Some(Defence::X))` (never reachable from `chips()`), the forgery is
-accepted. **With it on**, the forgery is rejected. That pins each defence as necessary and as the
+accepted. **With it on**, the forgery is rejected. Since audit CS9-1 (2026-10-15) every
+soundness-bearing line of `eval_minus` is behind such a switch — `Defence::ALL`, 36 of them — and
+`ModqAir` is `eval_minus(None)` with every switch on, so the AIR's shape is pinned by a unit test
+(62 constraints of degree ≤ 3, 39 bus messages) and the verifier key does not move. That pins each defence as necessary and as the
 thing doing the work. The defences that live outside the modq AIR are the memory table's strict
 `(addr, ts)` order and the cpu's `MODQ` lookup. Their tests switch nothing off; instead they show the
 forgery passes the modq AIR (the standalone harness with a permissive memory twin) and dies in the
@@ -394,6 +397,16 @@ full machine.
 | **AIR-level:** an `a1` with a reserved bit set (bit 5), the cpu row and register carrying it | the `A1` decomposition (`Defence::A1Decomposition`) | `modq_reserved_a1_bit_is_rejected` |
 | **AIR-level:** an `NTT` with `A ≠ 0` | canonical args `T·A = 0` (`Defence::CanonicalArgs`) | `modq_ntt_with_nonzero_a_is_rejected` |
 | pointer near `2^30` | cpu cubic rule; `MODQ_PTR_LIMIT` | `modq_refuses_a_base_past_the_limit` (`tests/modq.rs`) |
+| **AIR-level (audit CS9-1, 2026-10-15; `tests/modq_cheating.rs`):** a block that is a `DOT4` and an `MSUB4` at once, `IS_REAL = 2`, every op-gated count 2 where both ops send and the story asking, reading and counting twice — every `Count::bounded(.., 1)` is the AIR's promise, not the lookup's check | `IS_REAL ∈ {0, 1}` (`Defence::RealBoolean`) | `modq_two_op_block_is_rejected` |
+| **AIR-level:** a poly-offset bit carried (`OUT_BITS[i], [i+1] = 2, 0`; `out`, `A1`, every address unchanged) | flag booleanity (`Defence::FlagsBoolean`) | `modq_non_boolean_offset_bit_is_rejected` |
+| **AIR-level:** a real `a1 = 0` block with no op: zero rows, no reads, writes or wires, the cpu's ask answered | one-hot sum (`Defence::OneHot`) | `modq_op_less_real_block_is_rejected` |
+| **AIR-level:** a `DOT4` that stops half-way (rows 512.. padding) | block constancy (`Defence::BlockConstant`) | `modq_half_real_block_is_rejected` |
+| **AIR-level:** a transform row with `W ≠ 0` | `T·W = 0` (`Defence::TransformNoW`) | `modq_transform_with_a_multiplier_is_rejected` |
+| **AIR-level:** two butterflies of one stage exchanging their `U` (`V`) wires — index, value, address, write-back, later stages recomputed; the stage's wire multiset honest | `IDX_U`/`IDX_V` (`Defence::IdxU`/`IdxV`) | `modq_crossed_u_wire_is_rejected`, `modq_crossed_v_wire_is_rejected` |
+| **AIR-level:** one address moved (`ADDR_* += 1` on the first row that sends it), the story following it | the five address identities (`Defence::AddrU`/`AddrV`/`AddrW`/`AddrO0`/`AddrO1`) | `modq_wrong_{u,v,w,o0,o1}_address_is_rejected` |
+| **AIR-level:** a read value memory never held (`U`, `V`, or a `DOT4`'s `W`), the story keeping memory's value; a block whose `O0` (`O1`) writes the story never records | the five `MEMORY` sends (`Defence::MemoryU`/`MemoryV`/`MemoryW`/`MemoryO0`/`MemoryO1`); the three `ReadValue*` tests assert rejection standalone and in the machine without an off-switch run (with the send off the twin's honest read is left unpaid, so the batch is refused for that reason) | `modq_memory_read_mismatch_is_rejected`, `modq_{v,w}_read_mismatch_is_rejected`, `modq_unwritten_{o0,o1}_is_rejected` |
+| **AIR-level:** a real block on a run with no `SYS_MODQ` row at all | the `MODQ` entry (`Defence::Handshake`) | `modq_unasked_block_is_rejected` |
+| **AIR-level:** an `O0`/`O1`/`K0`/`K1` limb carried past 255 (value kept) | rule 8's output and quotient groups (`Defence::OutputRangeO0`/`OutputRangeO1`/`QuotientRangeK0`/`QuotientRangeK1`) | `modq_output_limb_out_of_range_is_rejected`, `modq_{o1,k0,k1}_limb_out_of_range_is_rejected` |
 | centred `z` canonicalised before `chknorm` | review; the KAT suite's `‖z‖∞` cases through `HostModq` | `malformed_signatures_agree_with_the_crate` over three backends (`tests/dilithium.rs`) |
 
 **Height leaks `M` (pre-flight ruling 3).** A run with fewer active slots makes fewer calls: 18 / 36
