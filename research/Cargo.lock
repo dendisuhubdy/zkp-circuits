@@ -2333,8 +2333,6 @@ dependencies = [
 [[package]]
 name = "p3-fri"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52e1cb8b63f02a9e3e441b20c341856d9bce85ae3e3bee6d3ed0da9bea8779d1"
 dependencies = [
  "itertools 0.15.0",
  "p3-challenger",
@@ -2343,6 +2341,7 @@ dependencies = [
  "p3-field",
  "p3-matrix",
  "p3-maybe-rayon",
+ "p3-merkle-tree",
  "p3-security",
  "p3-util",
  "rand 0.10.2",
@@ -2439,8 +2438,6 @@ dependencies = [
 [[package]]
 name = "p3-merkle-tree"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1508ed6e0211a8375ffdcd08746d81841526fe36140d985acd81b4bfe4103649"
 dependencies = [
  "itertools 0.15.0",
  "p3-commit",

@@ -121,8 +121,14 @@ required-features = ["cheating"]
 # `debug_assertions` self-check panicking first, so the *verifier's* typed error is what a forgery test
 # sees. Only `Machine::prove_traces_without_self_check` (`cheating` feature) calls it; every honest
 # path stays on `prove_batch`, which enforces the self-check exactly as crates.io's crate does.
+#
+# The fullnode's two patched Plonky3 crates (`../vendor/PROVENANCE.md`), as `recursion/` takes them:
+# the hiding PCS/MMCS lock fix and, from fullnode v0.8.3 (#151), counter-mode ChaCha20 streams for
+# the random columns and Merkle salts, which `key_derivation_v2`'s `impl CounterModeRng` needs.
 [patch.crates-io]
 p3-batch-stark = { path = "../vendor/p3-batch-stark" }
+p3-fri = { path = "../vendor/p3-fri" }
+p3-merkle-tree = { path = "../vendor/p3-merkle-tree" }
 
 [profile.release]
 opt-level = 3
