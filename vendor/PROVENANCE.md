@@ -1,14 +1,23 @@
 # vendor/ — three patched Plonky3 crates
 
-- `p3-fri` 0.7.0 and `p3-merkle-tree` 0.7.0: the crates.io sources, each with exactly one file changed —
-  `p3-fri/src/hiding_pcs.rs` and `p3-merkle-tree/src/hiding_mmcs.rs` ("RandProtocol patch (2026-10-01)").
-- Why: the hiding PCS and hiding MMCS hold a spin lock on their RNG across rayon work; a worker waiting on a
-  stolen job can steal another `commit` and spin on its own lock for ever. The patch forks a child RNG under
-  the lock and never holds it across rayon work. Upstream: Plonky3 issue #2363, PR #2368.
-- Copied verbatim (`diff -r` clean) from `randprotocol/fullnode` `vendor/`: `p3-fri` at fullnode commit 4d5b0391,
-  `p3-merkle-tree` at 0e70ddc4 (fullnode HEAD c69a0b0f).
-- Used by `recursion/` (its `[patch.crates-io]`, every build; the `parallel` feature turns rayon on).
-  `research/` does not use them yet. Drop both once a Plonky3 release carries #2368.
+- `p3-fri` 0.7.0 and `p3-merkle-tree` 0.7.0: the crates.io sources with two RandProtocol patches. The first
+  (2026-10-01) changes one file each, `p3-fri/src/hiding_pcs.rs` and `p3-merkle-tree/src/hiding_mmcs.rs`.
+  The second (fullnode v0.8.3, issue #151) touches the same two files, adds
+  `p3-merkle-tree/src/counter_rng.rs` (exported from `src/lib.rs`), gives `p3-fri` a `p3-merkle-tree`
+  dependency and turns on `rand`'s `chacha` feature in both manifests.
+- Why (2026-10-01): the hiding PCS and hiding MMCS hold a spin lock on their RNG across rayon work; a worker
+  waiting on a stolen job can steal another `commit` and spin on its own lock for ever. The patch forks a child
+  RNG under the lock and never holds it across rayon work. Upstream: Plonky3 issue #2363, PR #2368.
+- Why (#151): the random columns and Merkle salts were drawn serially from that one generator (~7.5 s of an
+  18.2 s tier-14 bundle proof). They are now ChaCha20 counter-mode streams, one per (lane, 1024-row chunk),
+  keyed by one secret the generator hands out per call (`CounterModeRng`), and filled in parallel. Values
+  are sampled exactly as before; a generator that hands out no key (a verifier key's label stream) is
+  drawn from serially, bit for bit as before, so no verifier key moves. Proof format and verifier unchanged.
+- Copied verbatim (`diff -r` clean) from `randprotocol/fullnode` `vendor/` at fullnode cccf5cac
+  (main 641cae9e, the merge of PR #156); before that, `p3-fri` at 4d5b0391 and `p3-merkle-tree` at 0e70ddc4.
+- Used by `recursion/` (its `[patch.crates-io]`, every build; the `parallel` feature turns rayon on) and,
+  from #151, by `research/` (its `[patch.crates-io]`: `key_derivation_v2`'s `impl CounterModeRng` needs
+  them). Drop the 2026-10-01 patch once a Plonky3 release carries #2368.
 
 ## p3-batch-stark 0.7.0 — the quotient-layout fork (2026-10-04)
 
