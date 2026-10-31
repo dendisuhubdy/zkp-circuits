@@ -364,3 +364,24 @@ keys stayed put; every program digest and the `QueryBits` layout moved. The node
 become {18, 19, 20, 21} under the unchanged N ≤ 5 ceiling, once the re-vendor drops every
 pre-phase-5 digest and tape. The proved runs on this box, the test-tree fixtures and every
 production memory figure are pending.
+
+## Constraint set 10 (ZKV-5, 2026-10-31)
+
+The inner cpu's gas chain gained three selector terms and its first row a new constant
+(`research/docs/05-roadmap.md`, "Constraint set 10"). The programs that compile those constraints
+moved by +7 cpu rows per inner proof; no tier moved, and the RV32 verifier keys did not. `rv32t`,
+`rv32r` and the child rows (254 177) read no inner constraint and are unchanged.
+
+| | phase 5 | constraint set 10 |
+|---|---|---|
+| production single-proof rows | 235 418 | 235 425 |
+| production N=1 / N=2 / N=3 rows | 235 744 / 471 105 / 706 466 | 235 751 / 471 119 / 706 487 |
+| test N=1 / N=2 / N=3 rows | 88 486 / 176 589 / 264 692 | 88 493 / 176 603 / 264 713 |
+| production aggregate digest | `792a66d4…a982` | `a3d5c38b2481d59f91cb8f03ada990facdd7c152d07a7f5d25930fd7d1e883d3` |
+| test-shape aggregate digest | `b4988faa…a69b` | `560784df9f29f862cc3f7523b0fd99d13aa64f6698e4b60692a80a462906760c` |
+| Off replay | `40532641…d482` | `f351f639c3b7895f07e75def2b23f458cd9c897f261c64ea10a4fe1afbf12fd9` |
+| `verify_rv32.digest` | `c3065887…1b24` | `ef62f60c39ec5fff1047571462f44e2314e3541b8ba62e18af43ef81f5811792` |
+
+Row counts quoted in `#[ignore]` strings and doc comments as "since phase 5" are the left column.
+The tree test pins (`tests/pins.json` `tree_test`, `tests/tree-test-genesis.json`) still wait on the
+fixture regeneration.
