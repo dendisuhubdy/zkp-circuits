@@ -69,3 +69,12 @@ fn a_misaligned_base_is_a_layout_finding() {
     let r = check_text(0x1002, &ok_program(), 2, 4096);
     assert!(r.findings.iter().any(|f| f.rule == Rule::Layout), "{r}");
 }
+
+#[test]
+fn poseidon2_len_is_a_syscall_the_checker_accepts() {
+    // li a7, 7 ; ecall  (POSEIDON2_LEN, the length-bound sponge guest_sdk::poseidon2_len calls)
+    let p = vec![enc(Instr::AluImm { op: rand_zkvm::isa::AluOp::Add, rd: 17, rs1: 0, imm: 7 }), enc(Instr::Ecall)];
+    let r = check_text(0x1000, &p, p.len(), 4096);
+    assert!(r.is_ok(), "{r}");
+    assert_eq!(r.unresolved_ecalls, 0);
+}
