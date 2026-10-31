@@ -264,8 +264,9 @@ pub mod col {
     /// every row that is not a `JALR`. Appended at the end of the column list.
     pub const JALR_B0: usize = SYS_HASH_LEN + 1;
     /// Constraint set 8 (fullnode spec 2026-09-28 §4.2): the gas accumulated *through* this row —
-    /// `1` on row 0 (always a digest row, weight 1), then on every real row the previous row's
-    /// `GAS` plus this row's weight `1 + 2·IS_HASH + 191·SYS_KECCAK + 63·SYS_SHA256 + 167·SYS_MODQ`
+    /// `POSEIDON2_ABSORB_GAS` (3) on row 0 (always a digest row, one permutation; constraint set 10,
+    /// ZKV-5), then on every real row the previous row's
+    /// `GAS` plus this row's weight `1 + 2·(IS_HASH + IS_DIGEST + IS_INDIGEST + IS_PUBDIGEST) + 191·SYS_KECCAK + 63·SYS_SHA256 + 167·SYS_MODQ`
     /// (`gas::row_gas`'s constants). Read once, on the `HALT` row, against `pv::GAS`; unconstrained
     /// on padding rows (the fill copies the halt row's value forward). Appended at the end of the
     /// column list.
@@ -368,8 +369,9 @@ where
             // as it flowed directly before M3.4.
             f.assert_one(v(IS_DIGEST));
             f.assert_eq(v(PC), pvs[pv::PC_ENTRY].clone());
-            // Constraint set 8: row 0 is a digest row, and a digest row weighs 1 (`gas::gas_of`).
-            f.assert_one(v(GAS));
+            // Constraint set 10 (ZKV-5): row 0 is a digest row, and a digest row is one permutation,
+            // so it weighs an absorb row (`gas::gas_of`).
+            f.assert_eq(v(GAS), AB::Expr::from_u64(crate::gas::POSEIDON2_ABSORB_GAS));
         }
         b.when_last_row().assert_zero(v(IS_REAL));
         {
@@ -386,8 +388,10 @@ where
             // Constraint set 8: the gas chain. The next row's weight is a constant per row kind
             // (`gas::row_gas`'s, the same constants), so this is degree 2: `n(IS_REAL)` times a
             // form linear in next-row selectors. No transition into a padding row is charged.
+            // Constraint set 10 (ZKV-5): the three digest selectors take `IS_HASH`'s weight; the four
+            // are pairwise exclusive (below), so a row carries that term at most once.
             let w_next = one.clone()
-                + AB::Expr::from_u64(crate::gas::POSEIDON2_ABSORB_GAS - 1) * n(IS_HASH)
+                + AB::Expr::from_u64(crate::gas::POSEIDON2_ABSORB_GAS - 1) * (n(IS_HASH) + n(IS_DIGEST) + n(IS_INDIGEST) + n(IS_PUBDIGEST))
                 + AB::Expr::from_u64(crate::gas::KECCAK_GAS - 1) * n(SYS_KECCAK)
                 + AB::Expr::from_u64(crate::gas::SHA256_GAS - 1) * n(SYS_SHA256)
                 // Private multisig phase 3: `SYS_SHA256`'s twin, at `MODQ_GAS − 1`.
@@ -1779,7 +1783,7 @@ fn fill_public_digest_rows(v: &mut [F], offset: usize, base_pc: u32, public: &[u
 /// per-cycle rows, which now start `digest_rows` rows later (`CLK` shifted the same amount).
 ///
 /// Constraint set 8: `gas_limit` is the proof's declared `pv::GAS`. The fill keeps the running
-/// gas (`+1` per digest row, `gas::row_gas` per event row) in `GAS` on every real row, and on the
+/// gas (`gas::POSEIDON2_ABSORB_GAS` per digest-prefix row, `gas::row_gas` per event row) in `GAS` on every real row, and on the
 /// `HALT` row writes the byte limbs of `gas_limit − gas` into `GD0..3` (each `RANGE8`-counted).
 /// Padding rows carry the halt row's `GAS` forward (deterministic; the AIR leaves it free there)
 /// and zero limbs. Panics if `gas_limit` is below the run's gas or `2^32` or more above it —
@@ -1799,10 +1803,10 @@ pub fn cpu_trace(program: &Program, inputs: &[u32], public: &[u32], salt: [u32; 
     fill_digest_rows(&mut v, program, range);
     fill_input_digest_rows(&mut v, digest_rows, program.base_pc, salt, inputs, range);
     fill_public_digest_rows(&mut v, digest_rows + input_digest_rows, program.base_pc, public, range);
-    // Constraint set 8: the digest prefix rows weigh 1 each (`gas::gas_of`).
+    // Constraint set 10 (ZKV-5): the digest prefix rows weigh an absorb row each (`gas::gas_of`).
     let mut gas: u64 = 0;
     for i in 0..offset {
-        gas += 1;
+        gas += crate::gas::POSEIDON2_ABSORB_GAS;
         v[i * WIDTH + GAS] = F::from_u64(gas);
     }
     let mut written = [0u32; NUM_OUTPUTS];

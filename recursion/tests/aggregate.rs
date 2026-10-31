@@ -66,7 +66,8 @@ const LOOP_OVERHEAD: usize = 326;
 /// Phase 4 (2026-10-09, the Merkle spans) re-recorded it: 508 102 → 312 665. MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ
 /// (283 columns): 312 665 → 312 902.
 /// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: 312 902 → 264 692.
-const N3_ROWS: usize = 264_692;
+/// Constraint set 10 (ZKV-5): +7 rows per inner proof: 264 692 → 264 713.
+const N3_ROWS: usize = 264_713;
 
 fn shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
     let shape = InnerShape::of(
@@ -772,7 +773,7 @@ fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
     assert_eq!(single_rows, common::pins().cpu_rows, "the M5.2 pin still holds");
     assert_eq!(
         recursion::programs::digest_hex(&verify_rv32n(&shape, &key, Checkpoints::Off).program),
-        "792a66d4a995c7b3874d38ecb8c971d5494b57b4cce13db11e08a4f9b2f9a982",
+        "a3d5c38b2481d59f91cb8f03ada990facdd7c152d07a7f5d25930fd7d1e883d3",
         "the aggregate program's digest at the production bundle shape, as docs/02 and docs/04 state it"
     );
     let r = common::measure_aggregate(1, FriProfile::Production);

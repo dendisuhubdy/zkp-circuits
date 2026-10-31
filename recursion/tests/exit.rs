@@ -236,8 +236,9 @@ fn the_cycle_budget_per_inner_proof_is_pinned() {
     // unchanged. Still tier 19, 208 896 under the gate.
     // Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: 315 391 → 235 418 (profile: S6a −10 124,
     // S2b −27 120 on the profile's own measure, S4a −7 522, S1b −35 207; docs/measurements/2026-10-12-phase5-profile-*.log).
-    // Tier 18 now: 235 418 is under 2^18 − 1 = 262 143 by 26 725 rows.
-    assert_eq!(r.cpu_rows, 235_418, "phase 5's re-pin: one production inner verification, 26 725 rows under the 2^18 − 1 gate (315 391 after the MODQ chip, 315 952 after phase 4; 585 686 after phase 3, 61 399 above the 2^19 − 1 gate)");
+    // Constraint set 10 (ZKV-5): +7 rows, the three selectors the gas chain's absorb term gained: 235 418 → 235 425.
+    // Tier 18 now: 235 425 is under 2^18 − 1 = 262 143 by 26 718 rows.
+    assert_eq!(r.cpu_rows, 235_425, "constraint set 10's re-pin: one production inner verification, 26 718 rows under the 2^18 − 1 gate (315 391 after the MODQ chip, 315 952 after phase 4; 585 686 after phase 3, 61 399 above the 2^19 − 1 gate)");
     assert_eq!(recursion::machine::Tier::for_cycles(r.cpu_rows), Some(recursion::machine::Tier(18)),
                "tier 18: under the 2^18 − 1 gate since phase 5 (tier 19 since phase 4, tier 20 after phase 3) — docs/09 and docs/00 must move with it");
     assert!(r.cpu_rows <= (1 << 18) - 1, "above the 2^18 − 1 gate again: docs/09 and docs/00's decision paragraph must be updated");
@@ -398,7 +399,7 @@ fn exit_the_verifier_program_over_one_real_cs6_bundle_proof_proves_and_verifies_
     let t0 = std::time::Instant::now();
     let (rvm_proof, exec) = m.prove(&vp.program, &tape.words, None).unwrap();
     let prove_s = t0.elapsed().as_secs_f64();
-    assert_eq!(exec.cpu_rows(), 235_418, "the exit proves the post-cut program as measured (after phase 5 (235 418), `tests/pins.json`; 315 391 after the MODQ chip; 315 952 after phase 4; 585 686 after phase 3's Cut F; 664 886 after Cut E2; 703 766 after Cut E1; 749 846 after Cut D; 893 606 after phase 2's row cuts; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
+    assert_eq!(exec.cpu_rows(), 235_425, "the exit proves the post-cut program as measured (after constraint set 10 (235 425); after phase 5 (235 418), `tests/pins.json`; 315 391 after the MODQ chip; 315 952 after phase 4; 585 686 after phase 3's Cut F; 664 886 after Cut E2; 703 766 after Cut E1; 749 846 after Cut D; 893 606 after phase 2's row cuts; 2 047 268 at tier 21 in constraint set 8, 2 044 506 in constraint set 7 with VERIFIER-1, 1 968 619 in constraint set 6)");
     assert_eq!(rvm_proof.tier, recursion::machine::Tier(18), "tier 18 since phase 5 (tier 19 since phase 4, tier 20 after phase 3)");
     let t1 = std::time::Instant::now();
     m.verify(&vp.program, &rvm_proof).unwrap();

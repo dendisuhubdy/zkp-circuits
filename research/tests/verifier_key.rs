@@ -54,6 +54,10 @@
 //! block", pins the modq chip's 16 periodic columns. The key tuple is now 7 wide (`mlh`). The
 //! constraint-set-8 `common` pins this replaces were `fd2f4f49…`, `99eed72b…`, `8792f659…`,
 //! `9690b474…`.
+//!
+//! Constraint set 10 (ZKV-5) changed no digest here: it adds no column, lookup or preprocessed
+//! table, only the weight of a row in the gas chain, and neither half of `CommonData` carries
+//! ordinary constraints. A red-free run here is therefore not evidence that the AIR is unchanged.
 use p3_batch_stark::CommonData;
 use rand_zkvm::machine::{Config, FriProfile, Machine, Tier};
 use rand_zkvm::tables::{input, keccak, program, public, sha256};

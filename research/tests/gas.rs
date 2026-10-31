@@ -60,7 +60,7 @@ fn a_run_past_the_cycle_budget_in_gas_proves_at_its_tier() {
     assert!(proof.public_values[pv::GAS] >= gas);
     assert!(m.verify(&p.digest(), &proof).is_ok());
 }
-/// 998 cycles + 18 program-digest rows (≤ tier 10's 1 023), gas 1 078.
+/// 998 cycles + 18 digest-prefix rows (≤ tier 10's 1 023), gas 1 114 since ZKV-5 (1 078 before).
 const PROBE_LOOPS: i32 = 440;
 
 /// Final review, item 2: `gas_max` clamps the tier to `[10, 20]` before shifting, so an untrusted
@@ -118,7 +118,7 @@ mod gas_of_tests {
         p.digest_rows() + rand_zkvm::hash::input_digest_row_count(n_inputs) + rand_zkvm::hash::public_digest_row_count(n_public)
     }
 
-    /// A hash-free program: gas is exactly the digest rows plus one per cycle.
+    /// A hash-free program: gas is the digest rows at the absorb weight plus one per cycle.
     #[test]
     fn gas_of_counts_rows_with_no_hash_syscall() {
         let mut a = Assembler::new(0);
@@ -128,7 +128,7 @@ mod gas_of_tests {
         let p = a.assemble();
         let e = execute(&p, &[], &[], 1_000).unwrap();
         let rows = digest_rows(&p, 0, 0);
-        assert_eq!(gas_of(&p, &[], &[], &e.events), (rows + e.events.len()) as u64);
+        assert_eq!(gas_of(&p, &[], &[], &e.events), (3 * rows + e.events.len()) as u64);
     }
 
     /// `guests::keccak_demo(b"hi")` is one `SYS_KECCAK` row plus its permutation (see
@@ -141,7 +141,7 @@ mod gas_of_tests {
         let keccaks = e.events.iter().filter(|ev| matches!(ev.sys, Some(Syscall::Keccak { .. }))).count() as u64;
         assert_eq!(keccaks, 1, "keccak_demo hashes exactly one rate block");
         let rows = digest_rows(&p, 0, 0);
-        let expected = (rows + e.events.len()) as u64 + keccaks * 191;
+        let expected = (3 * rows + e.events.len()) as u64 + keccaks * 191;
         assert_eq!(gas_of(&p, &[], &[], &e.events), expected);
     }
 
@@ -156,7 +156,7 @@ mod gas_of_tests {
         let rows = digest_rows(&p, 0, 0);
         let expected_extra = absorbs * 2;
         assert_eq!(expected_extra, 4, "the brief's worked example: 2 absorb rows -> +4 gas");
-        let expected = (rows + e.events.len()) as u64 + expected_extra;
+        let expected = (3 * rows + e.events.len()) as u64 + expected_extra;
         assert_eq!(gas_of(&p, &[], &[], &e.events), expected);
     }
 
@@ -169,8 +169,145 @@ mod gas_of_tests {
         let absorbs = e.events.iter().filter(|ev| matches!(ev.hash_row, Some(HashRow::Absorb { .. }))).count() as u64;
         assert_eq!(absorbs, 2);
         let rows = digest_rows(&p, 0, 0);
-        let expected = (rows + e.events.len()) as u64 + absorbs * 2;
+        let expected = (3 * rows + e.events.len()) as u64 + absorbs * 2;
         assert_eq!(gas_of(&p, &[], &[], &e.events), expected);
+    }
+}
+
+/// ZKV-5 (constraint set 10): a digest-prefix row — `IS_DIGEST`, `IS_INDIGEST`, `IS_PUBDIGEST` — makes
+/// one `POSEIDON2` call and counts against the poseidon2 table exactly as an absorb row does, so it
+/// weighs what an absorb row weighs.
+mod digest_prefix {
+    use super::common;
+    use rand_zkvm::asm::{ops::*, Assembler};
+    use rand_zkvm::emulator::execute;
+    use rand_zkvm::gas::{gas_max, gas_of, POSEIDON2_ABSORB_GAS};
+    use rand_zkvm::isa::{BranchCond, Program};
+    use rand_zkvm::machine::{build_traces_salted, FriProfile, Machine, ProveError, Tier, CONSTRAINT_SET};
+    use rand_zkvm::tables::cpu::{col, pv};
+    use rand_zkvm::tables::F;
+    use p3_field::{PrimeCharacteristicRing, PrimeField64};
+
+    const INPUTS: [u32; 5] = [1, 2, 3, 4, 5];
+    const PUBLIC: [u32; 5] = [6, 7, 8, 9, 10];
+
+    /// `(program, input, public)` prefix row counts.
+    fn regions(p: &Program, n_in: usize, n_pub: usize) -> (usize, usize, usize) {
+        (p.digest_rows(), rand_zkvm::hash::input_digest_row_count(n_in), rand_zkvm::hash::public_digest_row_count(n_pub))
+    }
+
+    #[test]
+    fn the_gas_column_climbs_by_the_absorb_weight_across_all_three_regions() {
+        assert_eq!(CONSTRAINT_SET, 10);
+        let p = rand_zkvm::guests::fib(20);
+        let e = execute(&p, &INPUTS, &PUBLIC, 10_000).unwrap();
+        let gas = gas_of(&p, &INPUTS, &PUBLIC, &e.events);
+        let t = build_traces_salted(&p, &INPUTS, &PUBLIC, [0; 4], &e, Tier(10), gas).unwrap();
+        let (d, i, q) = regions(&p, INPUTS.len(), PUBLIC.len());
+        assert!(d >= 2 && i >= 2 && q >= 2, "every region needs an interior transition: {d} {i} {q}");
+        for r in 0..d + i + q {
+            assert_eq!(t.cpu.values[r * col::WIDTH + col::GAS], F::from_u64((r as u64 + 1) * POSEIDON2_ABSORB_GAS), "prefix row {r}");
+        }
+    }
+
+    /// `(rows of the cpu trace to charge 1 instead of the absorb weight)`, the claim a prover would
+    /// make to keep the cs8 price: the `GAS` chain rebuilt with those rows at weight 1, and `pv::GAS`
+    /// lowered by exactly what that saves, so the `HALT` row's limbs (and with them `RANGE8`) are
+    /// untouched and only the gas chain can object.
+    fn undercharge(t: &mut rand_zkvm::machine::Traces, rows: std::ops::Range<usize>) {
+        let w = col::WIDTH;
+        let cell = |t: &rand_zkvm::machine::Traces, r: usize, c: usize| t.cpu.values[r * w + c].as_canonical_u64();
+        let height = t.cpu.values.len() / w;
+        let mut prev_old = 0;
+        let mut new = 0;
+        let mut r = 0;
+        while r < height && cell(t, r, col::IS_REAL) == 1 {
+            let old = cell(t, r, col::GAS);
+            new += if rows.contains(&r) { 1 } else { old - prev_old };
+            prev_old = old;
+            t.cpu.values[r * w + col::GAS] = F::from_u64(new);
+            r += 1;
+        }
+        let saved = prev_old - new;
+        for p in r..height { t.cpu.values[p * w + col::GAS] = F::from_u64(new); }
+        let pv = t.public_values[pv::GAS].as_canonical_u64();
+        t.public_values[pv::GAS] = F::from_u64(pv - saved);
+    }
+
+    /// One forgery per weight the AIR now carries: the first row's constant, then the chain's three
+    /// selectors. Each forgery leaves the `HALT` limbs and `RANGE8` untouched, so the gas chain is
+    /// what refuses it; dropping any one term from the AIR fails this test at the honest proof.
+    #[test]
+    fn a_prefix_row_charged_one_is_refused() {
+        let m = Machine::new(FriProfile::Test);
+        let p = rand_zkvm::guests::fib(20);
+        let e = execute(&p, &INPUTS, &PUBLIC, 10_000).unwrap();
+        let gas = gas_of(&p, &INPUTS, &PUBLIC, &e.events);
+        let (d, i, q) = regions(&p, INPUTS.len(), PUBLIC.len());
+        let honest = build_traces_salted(&p, &INPUTS, &PUBLIC, [0; 4], &e, Tier(10), gas).unwrap();
+        assert!(m.verify(&p.digest(), &m.prove_traces(&p, &honest, Tier(10))).is_ok());
+        for (name, rows) in [("row 0", 0..1), ("IS_DIGEST", 1..d), ("IS_INDIGEST", d..d + i), ("IS_PUBDIGEST", d + i..d + i + q)] {
+            let mut forged = build_traces_salted(&p, &INPUTS, &PUBLIC, [0; 4], &e, Tier(10), gas).unwrap();
+            undercharge(&mut forged, rows);
+            assert!(common::rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &forged, Tier(10)))), "{name} charged 1 verified");
+        }
+    }
+
+    /// `n` program words whose run is `cycles` cycles: a counted loop, then dead words after `HALT`
+    /// that only the program-digest rows ever touch.
+    fn filler(words: usize, cycles: usize) -> Program {
+        const T2: u32 = 7;
+        let build = |loops: i32, nop: bool, dead: usize| {
+            let mut a = Assembler::new(0);
+            a.extend(li(T2, loops));
+            if nop { a.push(addi(0, 0, 0)); }
+            a.label("fill");
+            a.push(addi(T2, T2, -1));
+            a.branch(BranchCond::Ne, T2, 0, "fill");
+            a.extend(halt());
+            for _ in 0..dead { a.push(addi(0, 0, 0)); }
+            a.assemble()
+        };
+        for loops in 1..(cycles as i32) {
+            for nop in [false, true] {
+                let p = build(loops, nop, 0);
+                if execute(&p, &[], &[], 1 << 20).unwrap().events.len() == cycles { return build(loops, nop, words - p.words.len()); }
+            }
+        }
+        panic!("no loop count runs {cycles} cycles");
+    }
+
+    /// The ceiling (`gas_max`'s `2^(t−2)` term) holds with the prefix priced at 3, and tightly. The
+    /// run's gas is `(P + C) + 2·(P + A) + …` for `P` prefix rows, `C` cycles, `A` absorb rows: `P + C`
+    /// is bounded by the cpu height less a padding row, and `P + A` by the poseidon2 table's `2^(t−3)`
+    /// slots, because every prefix and absorb row is one permutation. So a run filling both budgets
+    /// with prefix rows alone spends exactly the hash-free ceiling; it proves with zero slack, and
+    /// neither budget has a row to spare.
+    #[test]
+    fn a_run_filling_both_budgets_with_prefix_rows_spends_exactly_the_ceiling() {
+        let slots = Tier(10).poseidon2_height() / rand_zkvm::tables::poseidon2::BLOCK;
+        assert_eq!(slots, 128);
+        let (i, q) = (rand_zkvm::hash::input_digest_row_count(0), rand_zkvm::hash::public_digest_row_count(0));
+        let digest_rows = slots - i - q;
+        let cycles = Tier(10).max_cycles() - slots;
+        let p = filler(4 * digest_rows, cycles);
+        assert_eq!(p.digest_rows(), digest_rows);
+        let e = execute(&p, &[], &[], 1 << 20).unwrap();
+        let gas = gas_of(&p, &[], &[], &e.events);
+        assert_eq!(gas, gas_max(Tier(10), 0, 0));
+
+        let m = Machine::new(FriProfile::Test);
+        let t = build_traces_salted(&p, &[], &[], [0; 4], &e, Tier(10), gas).unwrap();
+        assert!(m.verify(&p.digest(), &m.prove_traces(&p, &t, Tier(10))).is_ok());
+
+        // One more permutation (one word past the last digest row, one cycle fewer so the cycle
+        // budget is not what answers) has no slot.
+        let over = filler(4 * digest_rows + 1, cycles - 1);
+        let e = execute(&over, &[], &[], 1 << 20).unwrap();
+        assert!(matches!(
+            build_traces_salted(&over, &[], &[], [0; 4], &e, Tier(10), gas_max(Tier(10), 0, 0)),
+            Err(ProveError::TooManyPoseidon2Permutations { .. })
+        ));
     }
 }
 

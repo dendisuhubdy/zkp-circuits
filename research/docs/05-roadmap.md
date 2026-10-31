@@ -493,6 +493,53 @@ accounted for exactly: +178 (phase 5, the new cpu constraints), +60 (phase 6 pre
 - `tree_measure.rs`'s `production_leaf_l2` and `production_rv32r_over_the_leaf_proves`, which need
   the 256 GB droplet.
 
+## Constraint set 10: a digest-prefix row costs a permutation
+
+ZKV-5 (fullnode audit v6, `randprotocol/zkp-circuits#2`). The digest-prefix rows (`IS_DIGEST`
+`⌈words/4⌉`, `IS_INDIGEST` the salt row plus `⌈n_in/4⌉`, `IS_PUBDIGEST` `max(1, ⌈n_pub/4⌉)`) each make
+one `POSEIDON2` call and count against the poseidon2 table, but were charged 1 gas against an absorb
+row's 3. Pricing accuracy only: the under-count was once per proof, `2·P` gas for `P` prefix rows. A
+chain-side surcharge cannot replace this, because `n_in` is private (the COV-2/INT-6 floor).
+
+**What moved.**
+
+- `gas::gas_of` charges `POSEIDON2_ABSORB_GAS` per prefix row; the cpu AIR's first row asserts
+  `GAS = 3`, `w_next`'s absorb term reads `n(IS_HASH) + n(IS_DIGEST) + n(IS_INDIGEST) +
+  n(IS_PUBDIGEST)` (still degree 2, the four selectors are pairwise exclusive), and `cpu_trace`'s
+  prefix loop follows.
+- `gas_max` is unchanged. A run's gas is `(P + C) + 2·(P + A) + …` for `C` cycles and `A` absorb rows:
+  `P + C ≤ 2^t − 1` by the cpu height and `P + A ≤ 2^(t−3)` by the poseidon2 slots, so the terms
+  `2^t − 1` and `2^(t−2)` still cover it, and now exactly: `tests/gas.rs` proves a run at the ceiling
+  with zero slack.
+
+**What did not move: the RV32 verifier keys.** `CommonData` is the preprocessed commitment and the
+packed lookups, and this change adds no column, no lookup and no preprocessed table, so every
+`tests/verifier_key.rs` digest stands. What separates cs9 from cs10 is the constraint itself (a
+trace at the cs9 weights no longer verifies, `tests/gas.rs`) and the `constraint_set` stamp in a `VerifierKeyBlob`, so any pinned SHA-256 of a blob does move.
+
+**What did move, downstream.** The rVM programs compile the cpu AIR's constraints
+(`recursion/src/programs/constraints.rs`), so the `verify_rv32`/`rv32n` program digests and the rVM
+keys committing those programs move, by +7 cpu rows per inner proof and no tier; `rv32t` and `rv32r`
+read no inner constraint and do not. `recursion/docs/10-phase5-n2-tier19.md` has the table.
+
+**Re-vendor checklist: the node's constraint-set guard will not go red by itself.** The fullnode's
+`BUILD_CONSTRAINT_SET: u8 = 9` (`crates/randprotocol-node/src/node.rs`) is a separate constant, read
+only by a test's assert, so the re-vendor leaves it at 9 with every test green. `check_build_runs_genesis`
+keys on `hc_bundle` and `hc_auth`, and neither moves in constraint set 10: no guest changed. So a cs10
+binary installed on a chain-21 host passes that check, refuses the chain's own history at its startup
+replay, and a `verify --repair` truncates it. The cut that carries cs10 must, in the fullnode:
+
+1. bump `BUILD_CONSTRAINT_SET` to 10 and its assert in `this_build_refuses_chains_18_to_20`, and
+   preferably derive the constant from the vendored `randprotocol_zkvm::machine::CONSTRAINT_SET`
+   (`u32` there, `u8` here), so the next set cannot miss it;
+2. add chain 21 and any other chain that commits proofs under constraint set 9 to
+   `CHAINS_THIS_BUILD_CANNOT_RUN` by genesis hash (the array's length with it), with a new
+   `CONSTRAINT_SET_9_REASON` naming the release to run instead and a test pinning each row;
+3. update the `CONSTRAINT_SET_*_REASON` and `SPLIT_AUTH_REASON` strings, which all say "this build is
+   constraint set 9".
+
+A live cs9 chain moved to cs10 is a new genesis, as every set before it.
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency

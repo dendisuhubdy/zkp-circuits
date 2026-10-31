@@ -1153,9 +1153,12 @@ run that lands on an odd target.
 ### Constraint set 8: the gas meter (`GAS`, `GD0..3`)
 
 fullnode spec 2026-09-28 §4.2. `GAS` is the gas accumulated *through* each
-row, with exactly `gas::gas_of`'s weights: `GAS = 1` on row 0 (a digest row),
+row, with exactly `gas::gas_of`'s weights: `GAS = 1` on row 0 (a digest row;
+3 since constraint set 10),
 and on every transition into a real row
-`n(GAS) = GAS + 1 + 2·n(IS_HASH) + 191·n(SYS_KECCAK) + 63·n(SYS_SHA256)` —
+`n(GAS) = GAS + 1 + 2·n(IS_HASH) + 191·n(SYS_KECCAK) + 63·n(SYS_SHA256)`
+(constraint set 10's ZKV-5 widens the `2·` term to
+`2·(n(IS_HASH) + n(IS_DIGEST) + n(IS_INDIGEST) + n(IS_PUBDIGEST))`) —
 the constants are `gas.rs`'s (`POSEIDON2_ABSORB_GAS − 1`, `KECCAK_GAS − 1`,
 `SHA256_GAS − 1`), and the rule is degree 2 (`n(IS_REAL)` times a form linear
 in next-row selectors). On the one `HALT` row, `pv::GAS − GAS = Σ 2^(8k)·GD_k`
@@ -1165,7 +1168,8 @@ limit is at or above the run's gas without the run's gas being published;
 included. The slack fits four bytes because `check_public_values` refuses a
 `pv::GAS` above `gas::gas_max(header)` =
 `(2^t − 1) + 2^(t−2) + 191·(2^klh/32) + 63·(2^slh/64)` (the `2^(t−2)`: at most
-`2^(t−3)` absorb rows, one per poseidon2 permutation slot, `+2` each), and the
+`2^(t−3)` absorb and, since constraint set 10, digest-prefix rows together, one
+per poseidon2 permutation slot, `+2` each), and the
 largest admissible ceiling (tier 20, both hash tables at `2^20` rows,
 8 601 599) is under `2^32`. `GAS` is free on padding rows (the fill carries the
 halt row's value forward). The prover refuses a limit below the run

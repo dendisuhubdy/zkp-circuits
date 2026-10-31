@@ -1556,12 +1556,14 @@ impl KeyCache {
     fn built(&self) -> usize { self.map.values().filter(|(slot, _, _)| slot.get().is_some()).count() }
 }
 
-/// The constraint set this crate's AIRs implement: 9 is the MODQ chip (`docs/05-roadmap.md`,
-/// "Constraint set 9: the MODQ chip", after constraint set 8's gas meter). It is stamped into every
+/// The constraint set this crate's AIRs implement: 10 prices a digest-prefix row as a Poseidon2
+/// absorb (ZKV-5, `docs/05-roadmap.md`, "Constraint set 10"), after constraint set 9's MODQ chip and
+/// constraint set 8's gas meter. It is stamped into every
 /// [`VerifierKeyBlob`] and checked on install, so a key exported by one constraint set is never
-/// installed by a machine of another (whose `CommonData` for the same shape differs —
-/// `tests/verifier_key.rs` pins those digests). Bump it with every chain-cut re-pin there.
-pub const CONSTRAINT_SET: u32 = 9;
+/// installed by a machine of another (whose `CommonData` for the same shape usually differs —
+/// `tests/verifier_key.rs` pins those digests — and whose constraints differ even when it does not,
+/// as constraint set 10's did not). Bump it with every constraint change, re-pin or no re-pin.
+pub const CONSTRAINT_SET: u32 = 10;
 
 /// The [`VerifierKeyBlob`] wire format's version: the header layout and the `CommonData` mirror
 /// (`CommonDataWire`). Format 1 is the first.
