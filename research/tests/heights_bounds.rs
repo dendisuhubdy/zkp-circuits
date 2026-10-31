@@ -267,14 +267,14 @@ fn gas_of_is_the_prefix_rows_plus_the_row_weights_and_grows_with_the_inputs() {
     let e = execute(&p, &inputs, &[], 10_000).unwrap();
     let rows: u64 = e.events.iter().map(row_gas).sum();
     let prefix = |n_in: usize, n_pub: usize| (p.digest_rows() + rand_zkvm::hash::input_digest_row_count(n_in) + rand_zkvm::hash::public_digest_row_count(n_pub)) as u64;
-    assert_eq!(gas_of(&p, &inputs, &[], &e.events), prefix(4, 0) + rows);
+    assert_eq!(gas_of(&p, &inputs, &[], &e.events), 3 * prefix(4, 0) + rows);
     // The digest prefix is charged for what is *committed*, whether or not the guest reads it:
     // four more private words are one more indigest row, and four public words one pubdigest row
     // (the empty segment's header row is already paid).
     let more: Vec<u32> = inputs.iter().copied().chain([1, 2, 3, 4]).collect();
-    assert_eq!(gas_of(&p, &more, &[], &e.events), prefix(4, 0) + rows + 1);
-    assert_eq!(gas_of(&p, &inputs, &[1, 2, 3, 4], &e.events), prefix(4, 0) + rows);
-    assert_eq!(gas_of(&p, &inputs, &[1, 2, 3, 4, 5], &e.events), prefix(4, 0) + rows + 1);
+    assert_eq!(gas_of(&p, &more, &[], &e.events), 3 * prefix(4, 0) + rows + 3);
+    assert_eq!(gas_of(&p, &inputs, &[1, 2, 3, 4], &e.events), 3 * prefix(4, 0) + rows);
+    assert_eq!(gas_of(&p, &inputs, &[1, 2, 3, 4, 5], &e.events), 3 * prefix(4, 0) + rows + 3);
     // And every run under the header fits the ceiling.
     assert!(gas_of(&p, &inputs, &[], &e.events) <= gas_max(Tier::for_cycles(e.cycles() + prefix(4, 0) as usize).unwrap(), 0, 0));
 }

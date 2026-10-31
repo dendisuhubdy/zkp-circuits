@@ -1,5 +1,6 @@
 //! Constraint set 8: what a run costs in gas (fullnode spec 2026-09-28 §3.1). One cpu row is one
-//! gas; a `POSEIDON2` absorb row pulls one 32-row permutation into the poseidon2 table (+2); a
+//! gas; a `POSEIDON2` absorb row pulls one 32-row permutation into the poseidon2 table (+2), and so
+//! since constraint set 10 (ZKV-5) does a digest-prefix row, the same call at the same price; a
 //! `KECCAK` row pulls 32 rows of 2 612 columns and 100 memory rows (+191); a `SHA256` row 64 rows
 //! of 466 columns (+63); a `MODQ` row one 1 024-row block of 59 + 16 columns (+167, private multisig
 //! phase 3). The cpu AIR accumulates exactly these weights in its `GAS` column.
@@ -17,11 +18,12 @@ pub const POSEIDON2_ABSORB_GAS: u64 = 3;
 pub const MODQ_GAS: u64 = 168;
 
 /// The gas the cpu AIR's `GAS` column accumulates for this execution (spec §3.1): the digest
-/// prefix rows (program, input, public — real rows, one gas each, since they precede any cycle
-/// and are never charged twice), then every cycle at its row weight (`row_gas`).
+/// prefix rows (program, input, public — real rows that precede any cycle and are never charged
+/// twice, each one permutation and so `POSEIDON2_ABSORB_GAS`, ZKV-5), then every cycle at its row
+/// weight (`row_gas`).
 pub fn gas_of(program: &Program, inputs: &[u32], public: &[u32], events: &[CycleEvent]) -> u64 {
     let prefix = program.digest_rows() + crate::hash::input_digest_row_count(inputs.len()) + crate::hash::public_digest_row_count(public.len());
-    prefix as u64 + events.iter().map(row_gas).sum::<u64>()
+    prefix as u64 * POSEIDON2_ABSORB_GAS + events.iter().map(row_gas).sum::<u64>()
 }
 
 /// One cycle's weight (spec §3.1): a row is 1; a `POSEIDON2`/`POSEIDON2_LEN` absorb row adds
@@ -40,12 +42,12 @@ pub fn row_gas(ev: &CycleEvent) -> u64 {
 /// The gas no run under this header can exceed — the header's ceiling, and the verifier refuses
 /// a `GAS_LIMIT` above it. Four terms, each the most its row kind can contribute at this header:
 ///
-/// - `2^t − 1`: the tier's cycle budget, one gas per cpu row;
-/// - `2^(t−2)`: every `POSEIDON2`/`POSEIDON2_LEN` absorb row adds `POSEIDON2_ABSORB_GAS − 1 = 2`
-///   beyond its own cycle, and each absorb row pulls one permutation into the poseidon2 table,
-///   whose height `2^(t+2)` holds `2^(t+2) / 32 = 2^(t−3)` permutation slots — so at most
-///   `2^(t−3)` absorb rows, `2 · 2^(t−3) = 2^(t−2)` gas (the final review's probe, 30 absorbs in
-///   a 1 016-row tier-10 run, spent 1 078 against the old `2^t − 1` ceiling);
+/// - `2^t − 1`: the tier's cycle budget, one gas per cpu row, prefix rows included;
+/// - `2^(t−2)`: every `POSEIDON2`/`POSEIDON2_LEN` absorb row and every digest-prefix row adds
+///   `POSEIDON2_ABSORB_GAS − 1 = 2` beyond its own row, and each pulls one permutation into the
+///   poseidon2 table, whose height `2^(t+2)` holds `2^(t+2) / 32 = 2^(t−3)` permutation slots — so
+///   at most `2^(t−3)` such rows together, `2 · 2^(t−3) = 2^(t−2)` gas (the final review's probe,
+///   30 absorbs in a 1 016-row tier-10 run, spent 1 078 against the old `2^t − 1` ceiling);
 /// - `191 · 2^klh / 32`: every `KECCAK` row adds 191 and occupies one 32-row keccak block;
 /// - `63 · 2^slh / 64`: every `SHA256` row adds 63 and occupies one 64-row sha256 block.
 ///
