@@ -18,6 +18,7 @@
 #define RAND_SYS_KECCAK 4
 #define RAND_SYS_SHA256 5
 #define RAND_SYS_READ_PUBLIC 6
+#define RAND_SYS_POSEIDON2_LEN 7
 
 /* Private input word `idx`, bound to the proof's `H_IN` commitment. `idx >= n_in` can never be
  * satisfied. (`guest_sdk::read_input`.) */
