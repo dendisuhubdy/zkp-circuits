@@ -522,6 +522,24 @@ trace at the cs9 weights no longer verifies, `tests/gas.rs`) and the `constraint
 keys committing those programs move, by +7 cpu rows per inner proof and no tier; `rv32t` and `rv32r`
 read no inner constraint and do not. `recursion/docs/10-phase5-n2-tier19.md` has the table.
 
+**Re-vendor checklist: the node's constraint-set guard will not go red by itself.** The fullnode's
+`BUILD_CONSTRAINT_SET: u8 = 9` (`crates/randprotocol-node/src/node.rs`) is a separate constant, read
+only by a test's assert, so the re-vendor leaves it at 9 with every test green. `check_build_runs_genesis`
+keys on `hc_bundle` and `hc_auth`, and neither moves in constraint set 10: no guest changed. So a cs10
+binary installed on a chain-21 host passes that check, refuses the chain's own history at its startup
+replay, and a `verify --repair` truncates it. The cut that carries cs10 must, in the fullnode:
+
+1. bump `BUILD_CONSTRAINT_SET` to 10 and its assert in `this_build_refuses_chains_18_to_20`, and
+   preferably derive the constant from the vendored `randprotocol_zkvm::machine::CONSTRAINT_SET`
+   (`u32` there, `u8` here), so the next set cannot miss it;
+2. add chain 21 and any other chain that commits proofs under constraint set 9 to
+   `CHAINS_THIS_BUILD_CANNOT_RUN` by genesis hash (the array's length with it), with a new
+   `CONSTRAINT_SET_9_REASON` naming the release to run instead and a test pinning each row;
+3. update the `CONSTRAINT_SET_*_REASON` and `SPLIT_AUTH_REASON` strings, which all say "this build is
+   constraint set 9".
+
+A live cs9 chain moved to cs10 is a new genesis, as every set before it.
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency

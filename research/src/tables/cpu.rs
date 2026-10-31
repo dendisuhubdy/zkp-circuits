@@ -264,7 +264,8 @@ pub mod col {
     /// every row that is not a `JALR`. Appended at the end of the column list.
     pub const JALR_B0: usize = SYS_HASH_LEN + 1;
     /// Constraint set 8 (fullnode spec 2026-09-28 §4.2): the gas accumulated *through* this row —
-    /// `1` on row 0 (always a digest row, weight 1), then on every real row the previous row's
+    /// `POSEIDON2_ABSORB_GAS` (3) on row 0 (always a digest row, one permutation; constraint set 10,
+    /// ZKV-5), then on every real row the previous row's
     /// `GAS` plus this row's weight `1 + 2·(IS_HASH + IS_DIGEST + IS_INDIGEST + IS_PUBDIGEST) + 191·SYS_KECCAK + 63·SYS_SHA256 + 167·SYS_MODQ`
     /// (`gas::row_gas`'s constants). Read once, on the `HALT` row, against `pv::GAS`; unconstrained
     /// on padding rows (the fill copies the halt row's value forward). Appended at the end of the

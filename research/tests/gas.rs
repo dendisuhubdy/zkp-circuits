@@ -235,7 +235,8 @@ mod digest_prefix {
     }
 
     /// One forgery per weight the AIR now carries: the first row's constant, then the chain's three
-    /// selectors. Each is refused by that term alone.
+    /// selectors. Each forgery leaves the `HALT` limbs and `RANGE8` untouched, so the gas chain is
+    /// what refuses it; dropping any one term from the AIR fails this test at the honest proof.
     #[test]
     fn a_prefix_row_charged_one_is_refused() {
         let m = Machine::new(FriProfile::Test);

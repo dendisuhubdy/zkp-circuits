@@ -872,7 +872,7 @@ fn the_aggregate_program_digest_is_unchanged_by_rvm_constraint_fixes() {
     assert_eq!(
         recursion::programs::digest_hex(&vp.program),
         "560784df9f29f862cc3f7523b0fd99d13aa64f6698e4b60692a80a462906760c",
-        "the aggregate program's digest at the Test fixture shape, as re-registered for phase 5"
+        "the aggregate program's digest at the Test fixture shape, as re-registered for constraint set 10"
     );
 }
 
