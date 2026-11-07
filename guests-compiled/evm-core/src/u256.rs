@@ -473,3 +473,12 @@ fn significant_limbs(v: &[u32]) -> usize {
     }
     n
 }
+
+// The post-Shanghai additions, in an `impl` of their own at the end of the file so that no line
+// above moves (a guest image embeds the source line of each panic location it keeps).
+impl U256 {
+    /// `CLZ` (EIP-7939): the number of leading zero bits, 256 for zero.
+    pub fn clz(&self) -> U256 {
+        U256::from_u32(256 - self.bit_len())
+    }
+}

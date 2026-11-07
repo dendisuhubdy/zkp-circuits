@@ -309,7 +309,42 @@ const CASES: &[(&str, &str, &str, u32, u64, &str)] = &[
         2,
         100000,
         "",
+    ),    // CLZ (EIP-7939): 5 static, 256 for zero.
+    ("clz of 1", "60011e", "", 1, 21, "00000000000000000000000000000000000000000000000000000000000000ff"),
+    ("clz of 0", "5f1e", "", 1, 20, "0000000000000000000000000000000000000000000000000000000000000100"),
+    ("clz of 2^255", "600160ff1b1e", "", 1, 27, "0000000000000000000000000000000000000000000000000000000000000000"),
+    // MCOPY (EIP-5656): memmove on overlap, 3 + 3/word + the expansion over max(dst, src) + len.
+    (
+        "mcopy forward overlap",
+        "7f0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f205f5260085f60015e5f51",
+        "",
+        1,
+        40,
+        "0101020304050607080a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
     ),
+    (
+        "mcopy backward overlap",
+        "7f0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f205f52600860015f5e5f51",
+        "",
+        1,
+        40,
+        "0203040506070809090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    ),
+    ("mcopy expands over the source range", "600160405f5e59", "", 1, 35, "0000000000000000000000000000000000000000000000000000000000000060"),
+    (
+        "mcopy of zero bytes at huge offsets",
+        "5f7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5e59",
+        "",
+        1,
+        26,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ),
+    ("mcopy past the memory", "60015f620100005e00", "", 2, 100000, ""),
+    // TLOAD/TSTORE (EIP-1153): 100 each, a map of their own that every call starts empty. The
+    // "unset" case runs after the one that stored 42 under the same key, in the same runtime.
+    ("tstore then tload", "602a60015d60015c", "", 1, 222, "000000000000000000000000000000000000000000000000000000000000002a"),
+    ("tload unset", "60015c", "", 1, 116, "0000000000000000000000000000000000000000000000000000000000000000"),
+    ("tstore one key past the table", "60016100015d60016100025d60016100035d60016100045d60016100055d60016100065d60016100075d60016100085d60016100095d600161000a5d600161000b5d600161000c5d600161000d5d600161000e5d600161000f5d60016100105d60016100115d60016100125d60016100135d60016100145d60016100155d60016100165d60016100175d60016100185d60016100195d600161001a5d600161001b5d600161001c5d600161001d5d600161001e5d600161001f5d60016100205d60016100215d00", "", 2, 100000, ""),
 ];
 
 /// The runtime call a laundered case must reach under stage two, by its name's first word.
@@ -322,6 +357,10 @@ fn runtime_call(name: &str) -> Option<&'static str> {
         "smod" => "u256_smod(",
         "exp" => "evm_exp(",
         "dynamic" | "jumpi" => "goto dispatch;",
+        "clz" => "u256_clz(",
+        "mcopy" => "evm_mcopy(",
+        "tstore" => "evm_tstore(",
+        "tload" => "evm_tload(",
         _ => return None,
     })
 }

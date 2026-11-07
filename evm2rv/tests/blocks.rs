@@ -1,7 +1,7 @@
 //! Task 3's tests: `jumpdests` against the interpreter's own scan on the ERC-20 bytecode, block
 //! splitting at jumpdests and after terminators, the static-gas table against the interpreter's
 //! for every opcode byte, a hand-built static-gas sum, stack bounds on a hand-built sequence, and
-//! `warnings` over the cross-contract family (both the statically-trapping sixteen and the
+//! `warnings` over the cross-contract family (both the statically-trapping eighteen and the
 //! runtime-resolved call family).
 //!
 //! Fix 1's tests: `Op::gas_after`'s invariants against the interpreter's static-gas table, on the
@@ -11,7 +11,10 @@
 //! single `Term::OutOfBounds` block, and an empty jumpdest set; code exactly at the cap analyses
 //! normally.
 
-use evm2rv::blocks::{blocks, jumpdests, static_gas, warnings, Term, Warning};
+use evm2rv::blocks::{
+    blocks, jumpdests, stack_effect, static_gas, warnings, Term, Warning, BLOCK_CTX_TRAPS, TRAP_TERM,
+    WARN_SET,
+};
 use evm_core::interp::MAX_CODE_BYTES;
 
 /// The ERC-20 runtime bytecode the interpreter's own tests use (`evm-core`'s parity vector).
@@ -165,6 +168,45 @@ fn call_family_is_not_a_block_terminator() {
     assert_eq!(bs.len(), 1, "CALL must not end the block");
     assert_eq!(bs[0].term, Term::Stop);
     assert!(bs[0].ops.iter().any(|o| o.opcode == 0xf1));
+}
+
+/// `CLZ` (Osaka), `TLOAD`, `TSTORE` and `MCOPY` (Cancun) are ordinary ops: the block runs on past
+/// each, with the EIPs' stack effects and the interpreter's static gas (5, 100, 100, 3).
+#[test]
+fn the_cancun_and_osaka_opcodes_are_ordinary_ops() {
+    for (op, effect, gas) in [
+        (0x1e, (1, 0), 5),
+        (0x5c, (1, 0), 100),
+        (0x5d, (2, -2), 100),
+        (0x5e, (3, -3), 3),
+    ] {
+        let bs = blocks(&[op, 0x00]);
+        assert_eq!(bs.len(), 1, "{op:#04x} must not end the block");
+        assert_eq!(bs[0].term, Term::Stop, "{op:#04x}");
+        assert_eq!(bs[0].ops.len(), 2, "{op:#04x}");
+        assert_eq!(stack_effect(op), effect, "{op:#04x}");
+        assert_eq!(static_gas(op), gas, "{op:#04x}");
+        assert_eq!(bs[0].min_depth, effect.0, "{op:#04x}");
+        assert!(warnings(&[op]).is_empty(), "{op:#04x} is implemented, not warned");
+    }
+}
+
+/// `BLOBHASH` and `BLOBBASEFEE` stay block-context traps, and are warned like the others.
+#[test]
+fn the_blob_opcodes_trap_and_are_warned() {
+    for op in [0x49u8, 0x4a] {
+        assert!(BLOCK_CTX_TRAPS.contains(&op) && TRAP_TERM.contains(&op) && WARN_SET.contains(&op));
+        let bs = blocks(&[op, 0x00]);
+        assert_eq!(bs[0].term, Term::TrapOp(op), "{op:#04x}");
+        assert_eq!(static_gas(op), 0);
+    }
+    assert_eq!(
+        warnings(&[0x60, 0x00, 0x49, 0x4a]),
+        vec![
+            Warning::Trap { pc: 2, opcode: 0x49 },
+            Warning::Trap { pc: 3, opcode: 0x4a },
+        ]
+    );
 }
 
 #[test]

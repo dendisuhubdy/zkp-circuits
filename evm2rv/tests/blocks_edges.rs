@@ -144,10 +144,15 @@ fn every_terminator_kind_ends_its_block() {
     for op in TRAP_TERM {
         assert_eq!(one(&[op, 0x00]), (2, Term::TrapOp(op), 1), "{op:#04x}");
     }
-    // Undefined bytes and the Cancun opcodes trap the same way.
-    for op in [0x0c, 0x0e, 0x21, 0x2f, 0x49, 0x4f, 0x5c, 0x5d, 0x5e, 0xa5, 0xef, 0xfb, 0xfc] {
+    // Undefined bytes trap the same way (BLOBHASH is a block-context trap now, still unnamed).
+    for op in [0x0c, 0x0e, 0x21, 0x2f, 0x49, 0x4b, 0x4f, 0xa5, 0xef, 0xfb, 0xfc] {
         assert_eq!(one(&[op, 0x00]), (2, Term::TrapOp(op), 1), "{op:#04x}");
-        assert!(mnemonic(op).starts_with("UNDEFINED_") || matches!(op, 0x5c | 0x5d | 0x5e), "{op:#04x}");
+        assert!(mnemonic(op).starts_with("UNDEFINED_"), "{op:#04x}");
+    }
+    // CLZ, TLOAD, TSTORE and MCOPY do not end a block.
+    for op in [0x1e, 0x5c, 0x5d, 0x5e] {
+        assert_eq!(one(&[op, 0x00]), (1, Term::Stop, 2), "{op:#04x}");
+        assert!(!mnemonic(op).starts_with("UNDEFINED_"), "{op:#04x}");
     }
     // The call family does not end a block; JUMPDEST does not either.
     for op in CALL_FAMILY {

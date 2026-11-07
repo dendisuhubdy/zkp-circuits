@@ -55,7 +55,7 @@ use std::fmt::Write as _;
 
 use evm_core::u256::U256;
 
-use crate::blocks::{blocks, jumpdests, Op, Term, CALL_FAMILY};
+use crate::blocks::{blocks, jumpdests, Op, Term, CALL_FAMILY, TRANSIENT_OPS};
 use crate::emit::{comment, head_c, EmitError, Emitted, Options};
 
 /// The most `u256` locals any block holds at once: 96 × 32 bytes = 3 KiB of `evm_entry`'s frame,
@@ -180,6 +180,7 @@ fn fold(op: u8, v: &[[u32; 8]]) -> Option<[u32; 8]> {
             0x1b => u(1).shl(&u(0)),
             0x1c => u(1).shr(&u(0)),
             0x1d => u(1).sar(&u(0)),
+            0x1e => u(0).clz(),
             _ => return None,
         }
         .0,
@@ -523,6 +524,7 @@ impl<'f> Lift<'f> {
             0x1b => self.pure(o, 2, vfirst("u256_shl")),
             0x1c => self.pure(o, 2, vfirst("u256_shr")),
             0x1d => self.pure(o, 2, vfirst("u256_sar")),
+            0x1e => self.pure(o, 1, |a, d| format!("u256_clz(&{d}, {});", a[0])),
             // KECCAK256: offset on top, size second.
             0x20 => self.call(&[Use::Sat, Use::Sat], true, |a, d| {
                 format!("evm_keccak({}, {}, &{d});", a[0], a[1])
@@ -606,6 +608,17 @@ impl<'f> Lift<'f> {
                 self.fresh(|d| format!("u256_from_u64(&{d}, evm_gas + {g}ull);"))
             }
             0x5b => String::new(),
+            // TLOAD: the key, the value into a local; TSTORE: key on top, value second.
+            0x5c => self.call(&[Use::Ptr], true, |a, d| {
+                format!("evm_tload({}, &{d});", a[0])
+            }),
+            0x5d => self.call(&[Use::Ptr, Use::Ptr], false, |a, _| {
+                format!("evm_tstore({}, {});", a[0], a[1])
+            }),
+            // MCOPY: destination on top, then the source, then the length.
+            0x5e => self.call(&[Use::Sat, Use::Sat, Use::Sat], false, |a, _| {
+                format!("evm_mcopy({}, {}, {});", a[0], a[1], a[2])
+            }),
             0x5f => {
                 self.push(Val::Const([0; 8]));
                 String::new()
@@ -739,6 +752,9 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
     let calls = bs
         .iter()
         .any(|b| b.ops.iter().any(|o| CALL_FAMILY.contains(&o.opcode)));
+    let transient = bs
+        .iter()
+        .any(|b| b.ops.iter().any(|o| TRANSIENT_OPS.contains(&o.opcode)));
     let mut f = Func::default();
     let mut j = Jumps {
         targets: vec![bs[0].start],
@@ -805,6 +821,9 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
     out.push_str("#include <stdint.h>\n#include \"evm_rt.h\"\n\n");
     out.push_str("void evm_entry(void);\n\n");
     out.push_str("void evm_entry(void) {\n");
+    if transient {
+        out.push_str("    evm_transient_begin();\n");
+    }
     if calls {
         out.push_str("    evm_calls_begin();\n");
     }

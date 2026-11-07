@@ -51,6 +51,7 @@
 #define MAX_RETURN_BYTES 1024
 #define MAX_LOGS 8
 #define MAX_TOPICS 4
+#define MAX_TRANSIENT_SLOTS 16 /* TSTORE's table (EIP-1153): interp.rs's, and transient.rs's rules */
 
 /* ---- the Shanghai schedule, interp.rs's constants by name ---- */
 #define G_BASE 2
@@ -66,6 +67,7 @@
 #define G_SLOAD 2100
 #define G_SSTORE_SET 20000
 #define G_SSTORE_RESET 2900
+#define G_WARM_STORAGE_READ 100 /* TLOAD/TSTORE: static, the block head's */
 #define G_LOG 375
 #define G_LOG_TOPIC 375
 #define G_LOG_DATA 8
@@ -162,6 +164,26 @@ void evm_storage_store(const u256 *slot, const u256 *value);
 /* RETURN / REVERT: the data (bounds, MAX_RETURN_BYTES, expansion) into evm_ret, then the halt. */
 __attribute__((noreturn)) void evm_return(uint32_t off, uint32_t len);
 __attribute__((noreturn)) void evm_revert(uint32_t off, uint32_t len);
+
+/* ---- the post-Shanghai opcodes (evm_cancun.c) ----
+ *
+ * In a file of their own, so a contract that uses none of them links none of it: `evm_rt.c`'s
+ * object is unchanged, and the emitter emits a call to these only for the opcodes themselves.
+ *
+ * MCOPY (EIP-5656): `dst`, `src`, `len` saturated. len_arg, then G_COPY_WORD per word, then the
+ * expansion over max(dst, src) + len (a zero length touches nothing), then a memmove. Its 3 is
+ * static.
+ * TLOAD/TSTORE (EIP-1153): one call's transient storage, a table of MAX_TRANSIENT_SLOTS keys
+ * that `evm_transient_begin` empties (the emitter calls it at the top of `evm_entry` in a
+ * contract that has either opcode). TLOAD of a key never stored is 0; `r` may alias `key`.
+ * TSTORE of a held key overwrites it; of a new key with a zero value is a no-op; of a new key
+ * with a non-zero value takes the next entry, or halts OutOfBounds when the table is full —
+ * `transient.rs`'s rules exactly. Their 100 each is static. Nothing here reaches the storage
+ * tree. CLZ is `u256_clz` (u256.h). */
+void evm_mcopy(uint32_t dst, uint32_t src, uint32_t len);
+void evm_transient_begin(void);
+void evm_tload(const u256 *key, u256 *r);
+void evm_tstore(const u256 *key, const u256 *value);
 
 /* ---- calls: the precompiles (precompiles.h) and the return-data buffer (evm_call.c) ----
  *

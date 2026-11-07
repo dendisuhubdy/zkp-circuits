@@ -2,7 +2,7 @@
 //! jumps' shape, the call family's arity, the return-data buffer, `CHAINID`, compiling clean for
 //! rv32im — while the per-opcode strings are stage one's, `op_c`): each opcode's C against the spec's table (the operand order the
 //! interpreter pops in, offsets and lengths saturated, the runtime's names), the block head, the
-//! jump switch and the statically resolved jumps, `GAS`/`PC`, the traps (the sixteen and undefined
+//! jump switch and the statically resolved jumps, `GAS`/`PC`, the traps (the eighteen and undefined
 //! bytes), the call family (a runtime dispatch to the precompiles, Task 5) and the return-data
 //! buffer, the environment (`ORIGIN` = `CALLER`,
 //! `CHAINID` a required constant), code over the cap, and the generated shim crate. The emitted
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use evm2rv::blocks::{Op, TRAP_TERM};
-use evm2rv::emit::{op_c, translate, EmitError, Options, Stage};
+use evm2rv::emit::{mnemonic, op_c, translate, EmitError, Options, Stage};
 use evm2rv::shim::{crate_name, files, C_FLAGS};
 use evm_core::interp::MAX_CODE_BYTES;
 
@@ -191,6 +191,59 @@ fn memory_storage_logs_and_halts() {
     assert_eq!(c_of(0xfe), "evm_halt(EVM_HALT_INVALID, 0);");
 }
 
+/// The post-Shanghai opcodes: `MCOPY` takes dst (the top), src, len as offsets, like the other
+/// copies; `TLOAD` replaces its key as `SLOAD` does; `TSTORE` takes the key on top, the value
+/// second; `CLZ` is a unary `u256` op. Their names reach the op comments.
+#[test]
+fn mcopy_tload_tstore_and_clz() {
+    assert_eq!(
+        c_of(0x5e),
+        format!("evm_mcopy({}, {}, {}); evm_sp -= 3;", sat(S1), sat(S2), sat(S3))
+    );
+    assert_eq!(c_of(0x5c), format!("evm_tload({S1}, {S1});"));
+    assert_eq!(c_of(0x5d), format!("evm_tstore({S1}, {S2}); evm_sp -= 2;"));
+    assert_eq!(c_of(0x1e), format!("u256_clz({S1}, {S1});"));
+    for (op, name) in [(0x1e, "CLZ"), (0x5c, "TLOAD"), (0x5d, "TSTORE"), (0x5e, "MCOPY")] {
+        assert_eq!(mnemonic(op), name);
+    }
+    for stage in STAGES {
+        // Stage two: a runtime operand reaches the call; constant CLZ operands fold.
+        let c = translate(&[0x36, 0x1e, 0x50, 0x00], &at(stage)).unwrap().c;
+        assert!(c.contains("u256_clz("), "{stage:?}: {c}");
+        let c = translate(&[0x36, 0x36, 0x36, 0x5e, 0x00], &at(stage)).unwrap().c;
+        assert!(c.contains("evm_mcopy("), "{stage:?}: {c}");
+        let c = translate(&[0x36, 0x36, 0x5d, 0x36, 0x5c, 0x50, 0x00], &at(stage)).unwrap().c;
+        assert!(c.contains("evm_tstore(") && c.contains("evm_tload("), "{stage:?}: {c}");
+    }
+    let c = translate(&[0x60, 0x01, 0x1e, 0x50, 0x00], &at(Stage::Two)).unwrap().c;
+    assert!(!c.contains("u256_clz("), "a constant CLZ folds at stage two: {c}");
+}
+
+/// Transient storage starts empty at every call: a contract with `TLOAD` or `TSTORE` empties the
+/// table first thing in `evm_entry`; one without either has no such call (its C is as before).
+#[test]
+fn transient_storage_is_emptied_only_in_a_contract_that_uses_it() {
+    for stage in STAGES {
+        for code in [&[0x36, 0x5c, 0x50, 0x00][..], &[0x36, 0x36, 0x5d, 0x00][..]] {
+            let c = translate(code, &at(stage)).unwrap().c;
+            assert!(
+                c.contains("void evm_entry(void) {\n    evm_transient_begin();\n"),
+                "{stage:?}: {c}"
+            );
+        }
+        // A TLOAD byte inside push data is not an op.
+        for code in [&[0x61, 0x5c, 0x5d, 0x00][..], &[0x36, 0x36, 0x36, 0x5e, 0x1e, 0x00][..]] {
+            let c = translate(code, &at(stage)).unwrap().c;
+            assert!(!c.contains("evm_transient_begin"), "{stage:?}: {c}");
+        }
+        let c = translate(&erc20_code(), &at(stage)).unwrap().c;
+        assert!(
+            !c.contains("evm_transient_begin") && !c.contains("evm_tload") && !c.contains("evm_mcopy"),
+            "{c}"
+        );
+    }
+}
+
 #[test]
 fn stack_ops_pushes_and_constants() {
     assert_eq!(c_of(0x50), "evm_sp--;");
@@ -349,14 +402,14 @@ fn origin_and_chainid_are_charged_g_base() {
     assert_eq!(b.ops[0].gas_after, 2);
 }
 
-/// The sixteen `TRAP_TERM` opcodes (the nine block-context ones among them) and any byte the
+/// The eighteen `TRAP_TERM` opcodes (the eleven block-context ones among them) and any byte the
 /// interpreter does not implement halt `Trap(op)`.
 #[test]
 fn trapping_opcodes_halt_with_their_opcode() {
     for opcode in TRAP_TERM
         .iter()
         .copied()
-        .chain([0x0c, 0x21, 0x5c, 0x5e, 0xef])
+        .chain([0x0c, 0x21, 0x4b, 0x4f, 0xef])
     {
         assert_eq!(
             c_of(opcode),
@@ -828,6 +881,7 @@ fn the_shim_crate() {
         "\"evm_bn.c\"",
         "\"evm_secp256k1.c\"",
         "\"evm_bn254.c\"",
+        "\"evm_cancun.c\"",
     ] {
         assert!(f.build_rs.contains(src), "{src}: {}", f.build_rs);
     }

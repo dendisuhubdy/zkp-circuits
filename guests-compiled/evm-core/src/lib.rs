@@ -135,3 +135,8 @@ pub fn hash_pair<H: Host>(h: &mut H, domain: u32, a: &[u32; 8], b: &[u32; 8]) ->
 // of each bounds-check panic location.
 #[cfg(feature = "ffi")]
 pub mod ffi;
+
+// Transient storage (EIP-1153). Declared after everything else, `ffi` included, for the reason
+// `ffi`'s comment gives: no line above moves, so neither does any panic location the translated
+// contracts' shims embed from this file.
+pub mod transient;

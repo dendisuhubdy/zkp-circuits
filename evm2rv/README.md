@@ -52,8 +52,9 @@ To get runtime bytecode from Solidity:
 solc --optimize --optimize-runs 200 --evm-version shanghai --bin-runtime MyToken.sol
 ```
 
-The last line of output is the hex. Save it as `mytoken.hex`. Use `--evm-version shanghai`:
-newer targets emit `MCOPY` and other Cancun opcodes, which trap here.
+The last line of output is the hex. Save it as `mytoken.hex`. `--evm-version` may be `shanghai`,
+`cancun`, `prague` or `osaka`: `MCOPY`, `TLOAD`/`TSTORE` (transient storage, at most 32 non-zero
+slots per call) and `CLZ` translate. `BLOBHASH` and `BLOBBASEFEE` trap and are warned.
 
 `solc` is not installed on the machine these numbers come from. The committed ERC-20
 (`guests-compiled/evm/contracts/erc20.runtime.hex`, 1 296 bytes) was compiled once with solc
@@ -175,9 +176,9 @@ the eight words are identical
 | | translated (stage two) | interpreter (`evm.bin`) |
 |---|---:|---:|
 | eight output words | identical | identical |
-| cycles | 66 235 | 121 638 |
+| cycles | 66 235 | 124 606 |
 | tier | 18 | 18 |
-| program words | 11 686 | 18 009 |
+| program words | 11 686 | 19 637 |
 
 `tests/parity.rs` runs this and seven more vectors under both stages, and also checks `gas_used`
 and the halt through a second build that reports them.
@@ -269,9 +270,9 @@ kind is not public, and it may differ. Three divergences are accepted:
 | `ADDRESS`, `CALLER`, `CALLVALUE`, `CALLDATASIZE`, `CODESIZE` | from the input vector, as the interpreter reads them |
 | `CHAINID` | the `--chain-id` constant, baked in, so `hc` binds it; 2 gas |
 | `ORIGIN` | `CALLER` (one call, no relayer); 2 gas |
-| `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH` | trap (status 2), as in the interpreter |
+| `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH`, `BLOBHASH`, `BLOBBASEFEE` | trap (status 2), as in the interpreter |
 
-The nine block-context opcodes trap until there is a design for binding them. A private input
+The eleven block-context opcodes trap until there is a design for binding them. A private input
 word is bound only to the salted `H_IN`, which a verifier cannot open, so it could not carry a
 block fact a prover could not forge. Binding them needs a chain decision on which block a proof is
 checked against. Until then, contracts that read the time or the block number (a permit deadline,
@@ -309,7 +310,9 @@ backlog: ecrecover, bn256 mul, the pairing, modexp past small operands, and blak
 ## Cycles against the interpreter
 
 Measured with `rand-guest run` on the vectors `tests/parity.rs` and `tests/precompiles.rs` pin,
-with the code guard in. Tier in parentheses.
+with the code guard in. Tier in parentheses. The interpreter column predates `MCOPY`, `TLOAD`/
+`TSTORE` and `CLZ` in `evm-core`, which made `evm.bin` 19 637 words and its `transfer` 124 606
+cycles (from 18 009 and 121 638); the translations did not move.
 
 | vector | interpreter | stage one | stage two |
 |---|---:|---:|---:|
@@ -324,7 +327,7 @@ with the code guard in. Tier in parentheses.
 
 | program | words | hc |
 |---|---:|---|
-| interpreter (`evm.bin`) | 18 009 | `7e1aea2b…854c08` |
+| interpreter (`evm.bin`) | 19 637 | `31e682ec…6c289c3` |
 | ERC-20, stage one | 15 804 | `9cdb79e7f05d53f6503f0eb777bb0c2356d29cab516a0378864802e42fd048c8` |
 | ERC-20, stage two | 11 686 | `a0feae92a7311c9562495717100eb7aea71270a38ed435d06dc31387e0ea8ff6` |
 | sha256 + ecrecover contract, stage one | 15 858 | `c8f00a09…f946fd` |

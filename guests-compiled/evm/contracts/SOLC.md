@@ -1,4 +1,4 @@
-# How `erc20.runtime.hex` was produced
+# How the committed runtime bytecode was produced
 
 `solc` is on none of the build machines and no test needs it: `ERC20.sol` was compiled **once**,
 by hand, with the pinned static release binary below, and only the runtime bytecode is committed.
@@ -51,3 +51,25 @@ would have written (`_balances[ALICE]`, `_totalSupply`) is seeded as storage wit
 pre-state tree instead (`research/src/evm.rs::erc20_transfer`). Because all six functions are
 non-payable, `solc` hoists one `CALLVALUE`-is-zero check to the top of the dispatcher: a call with
 a non-zero `callvalue` reverts before dispatch, so the fixtures pass zero.
+
+## The Cancun and Osaka fixtures
+
+`cancun.runtime.hex` and `osaka.runtime.hex` are the same compiler and profile with a newer
+`--evm-version`, so the post-Shanghai opcodes are real solc output (`evm2rv/tests/parity_cancun.rs`
+runs them through both translation stages against the interpreter):
+
+```sh
+solc --optimize --optimize-runs 200 --evm-version cancun --bin-runtime contracts/Cancun.sol
+solc --optimize --optimize-runs 200 --evm-version osaka  --bin-runtime contracts/Osaka.sol
+```
+
+Run from `guests-compiled/evm` like the ERC-20: the source path is in the metadata, so compiling
+from elsewhere changes the CBOR trailer's hash (and nothing else).
+
+- `Cancun.sol` (657 bytes): a counter in storage slot 0 behind a reentrancy lock held in a
+  `transient` variable, plus `bytes.concat(m, m)`. The code uses `TLOAD` and `TSTORE` twice each
+  and `MCOPY` twice; nothing else outside the Shanghai subset.
+- `Osaka.sol` (151 bytes): `lz(x)`, one `CLZ` in inline assembly.
+
+Their CBOR trailers happen to contain bytes that decode as trapping opcodes (`warnings` lists
+them); the trailer is never executed.

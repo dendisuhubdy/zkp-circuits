@@ -172,7 +172,7 @@ says why); in practice the linker, the packer and the loader cover them:
 The default, `4096`, is the fullnode's deploy cap today. Both loaders (`Program::from_flat_image`,
 `Program::from_flat_binary`) refuse anything over **65 535** words outright (`LoadError::TooLong`)
 regardless of `--max-words` — the hard ceiling the v0.4 chain is expected to raise the deploy cap
-to. The two committed interpreters are already over the default: `evm.bin` is 18 009 words and
+to. The two committed interpreters are already over the default: `evm.bin` is 19 637 words and
 `sbpf.bin` 8 317, so building or checking either needs `--max-words 65535` — as
 `rand-guest/tests/build.rs` passes it, and as a developer building `evm` or `sbpf` by hand must
 pass it too, there being no build script that does it for them (`guests-compiled/README.md`'s

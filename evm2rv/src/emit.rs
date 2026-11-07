@@ -19,8 +19,15 @@
 //! block's static gas was taken at the head and has not been "spent" yet in the interpreter's
 //! per-opcode accounting.
 //!
-//! **Traps.** The sixteen [`crate::blocks::TRAP_TERM`] opcodes and every byte the interpreter does
+//! **Traps.** The eighteen [`crate::blocks::TRAP_TERM`] opcodes and every byte the interpreter does
 //! not implement are `evm_halt(EVM_HALT_TRAP, op)`.
+//!
+//! **The post-Shanghai opcodes** (`evm-rt/evm_cancun.c`): `MCOPY` is `evm_mcopy(dst, src, len)`,
+//! offsets saturated like the other copies; `TLOAD`/`TSTORE` are `evm_tload`/`evm_tstore` over the
+//! runtime's transient table, which a contract containing either empties first thing in
+//! `evm_entry` (`evm_transient_begin()`, as `evm_calls_begin()` for the call family): each call
+//! starts with no transient storage. `CLZ` is `u256_clz`. A contract with none of these opcodes is
+//! emitted exactly as before.
 //!
 //! **The call family** (Task 5): `CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL` are
 //! `evm_call(op, &evm_stack[evm_sp-n], gas_after)`, n = 7 or 6, then `evm_sp -= n - 1`: the
@@ -39,7 +46,7 @@
 //! `evm_callvalue`, which the shim fills from the decoded `Env`; `ORIGIN` reads `evm_caller`;
 //! `CHAINID` is the `--chain-id` constant, baked in here so the image hash binds it — and
 //! translating code that contains `CHAINID` without one is an error ([`EmitError`]), never a
-//! silent default. The nine block-context opcodes trap (they are in `TRAP_TERM`).
+//! silent default. The eleven block-context opcodes trap (they are in `TRAP_TERM`).
 //!
 //! **Code over `MAX_CODE_BYTES`** is one `Term::OutOfBounds` block, which halts `OutOfBounds`
 //! with `gas_used = 0` — the interpreter's `pre_halt` spends nothing (ruling 3) — so it sets the
@@ -47,7 +54,7 @@
 
 use std::fmt::Write as _;
 
-use crate::blocks::{blocks, jumpdests, Block, Op, Term, CALL_FAMILY};
+use crate::blocks::{blocks, jumpdests, Block, Op, Term, CALL_FAMILY, TRANSIENT_OPS};
 
 /// Which translation: stage one (this module, the memory stack) or stage two (register lifting,
 /// [`crate::lift`]). Both run the same runtime calls with the same gas and produce the same
@@ -138,7 +145,7 @@ fn push_c(v: &[u8; 32]) -> String {
 /// are the dynamic form (`goto dispatch`) — the emitter resolves a `PUSHn`-then-jump pair
 /// statically in [`translate`] instead.
 ///
-/// An opcode this crate traps on (the sixteen [`crate::blocks::TRAP_TERM`] opcodes and every byte
+/// An opcode this crate traps on (the eighteen [`crate::blocks::TRAP_TERM`] opcodes and every byte
 /// the interpreter does not implement) is `evm_halt(EVM_HALT_TRAP, op)`.
 pub fn op_c(op: &Op, gas_after: u64, opts: &Options, calls: bool) -> Result<String, EmitError> {
     let bin = |f: &str| format!("{f}({}, {}, {}); evm_sp--;", s(2), s(1), s(2));
@@ -181,6 +188,7 @@ pub fn op_c(op: &Op, gas_after: u64, opts: &Options, calls: bool) -> Result<Stri
         0x1b => format!("u256_shl({}, {}, {}); evm_sp--;", s(2), s(2), s(1)),
         0x1c => format!("u256_shr({}, {}, {}); evm_sp--;", s(2), s(2), s(1)),
         0x1d => format!("u256_sar({}, {}, {}); evm_sp--;", s(2), s(2), s(1)),
+        0x1e => format!("u256_clz({}, {});", s(1), s(1)),
         // KECCAK256: offset on top, size second.
         0x20 => format!("evm_keccak({}, {}, {}); evm_sp--;", sat(1), sat(2), s(2)),
         0x30 => "evm_stack[evm_sp++] = evm_address;".into(),
@@ -243,6 +251,16 @@ pub fn op_c(op: &Op, gas_after: u64, opts: &Options, calls: bool) -> Result<Stri
         0x59 => "u256_from_u32(&evm_stack[evm_sp++], evm_msize);".into(),
         0x5a => format!("u256_from_u64(&evm_stack[evm_sp++], evm_gas + {gas_after}ull);"),
         0x5b => String::new(),
+        // TLOAD replaces its key, as SLOAD does; TSTORE: key on top, value second.
+        0x5c => format!("evm_tload({}, {});", s(1), s(1)),
+        0x5d => format!("evm_tstore({}, {}); evm_sp -= 2;", s(1), s(2)),
+        // MCOPY: destination on top, then the source, then the length.
+        0x5e => format!(
+            "evm_mcopy({}, {}, {}); evm_sp -= 3;",
+            sat(1),
+            sat(2),
+            sat(3)
+        ),
         0x5f => "u256_from_u32(&evm_stack[evm_sp++], 0u);".into(),
         0x60..=0x7f => push_c(op.push.as_ref().expect("a PUSHn op carries its immediate")),
         0x80..=0x8f => {
@@ -311,6 +329,7 @@ pub fn mnemonic(op: u8) -> String {
         0x1b => "SHL",
         0x1c => "SHR",
         0x1d => "SAR",
+        0x1e => "CLZ",
         0x20 => "KECCAK256",
         0x30 => "ADDRESS",
         0x31 => "BALANCE",
@@ -349,6 +368,9 @@ pub fn mnemonic(op: u8) -> String {
         0x59 => "MSIZE",
         0x5a => "GAS",
         0x5b => "JUMPDEST",
+        0x5c => "TLOAD",
+        0x5d => "TSTORE",
+        0x5e => "MCOPY",
         0x5f => "PUSH0",
         0x60..=0x7f => return format!("PUSH{}", op - 0x5f),
         0x80..=0x8f => return format!("DUP{}", op - 0x7f),
@@ -455,6 +477,9 @@ fn translate_one(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
     let calls = bs
         .iter()
         .any(|b| b.ops.iter().any(|o| CALL_FAMILY.contains(&o.opcode)));
+    let transient = bs
+        .iter()
+        .any(|b| b.ops.iter().any(|o| TRANSIENT_OPS.contains(&o.opcode)));
     for b in &bs {
         let mut body = String::new();
         if b.term == Term::OutOfBounds {
@@ -542,6 +567,9 @@ fn translate_one(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
     out.push_str("#include <stdint.h>\n#include \"evm_rt.h\"\n\n");
     out.push_str("void evm_entry(void);\n\n");
     out.push_str("void evm_entry(void) {\n");
+    if transient {
+        out.push_str("    evm_transient_begin();\n");
+    }
     if calls {
         out.push_str("    evm_calls_begin();\n");
     }

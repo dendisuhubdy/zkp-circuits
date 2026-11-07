@@ -41,6 +41,7 @@ int main(void) {
     call_tests();
     call_fuzz_tests();
     precompile_fuzz_tests();
+    cancun_tests();
     printf("evm-rt: %d passed, %d failed\n", passed, failed);
     return failed != 0;
 }
