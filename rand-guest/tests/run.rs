@@ -110,7 +110,7 @@ fn keccak_inputs(msg: &[u8]) -> Vec<u32> {
 /// `research/tests/e2e.rs` runs each of them with: `fib(20)`
 /// (`compiled_fib_proves_and_verifies`), Keccak-256 of the 135-byte message
 /// (`compiled_keccak256_matches_the_host_in_one_permutation`), the ERC-20 `transfer` of 250 from a
-/// balance of 1 000 (`compiled_evm_erc20_transfer_binds_the_state_root_transition`; 125 439
+/// balance of 1 000 (`compiled_evm_erc20_transfer_binds_the_state_root_transition`; 124 606
 /// executed cycles, `research/docs/04-guests.md`), and the SPL Token `Transfer` of 250
 /// (`compiled_sbpf_spl_token_transfer_executes_and_publishes_the_bound_digest`). A different count
 /// means the image or the emulator changed.
@@ -136,7 +136,7 @@ fn run_reproduces_the_committed_guests_cycle_counts() {
     }
     let got = [cycles_of(&fib), cycles_of(&keccak), cycles_of(&evm), cycles_of(&sbpf)];
     eprintln!("cycles: fib {} keccak256 {} evm {} sbpf {}", got[0], got[1], got[2], got[3]);
-    assert_eq!(got, [PIN_FIB, PIN_KECCAK, 125_439, PIN_SBPF]);
+    assert_eq!(got, [PIN_FIB, PIN_KECCAK, 124_606, PIN_SBPF]);
 }
 
 /// `--tier t` states the same rule `Tier::for_workload` applies, for one tier, with both budgets:
@@ -145,8 +145,8 @@ fn run_reproduces_the_committed_guests_cycle_counts() {
 /// cycles plus the program-digest rows plus the one public-digest row an empty public segment
 /// still costs, and the permutations count the digest rows and the `Absorb` rows only, as the
 /// prover does. They were 126 374 and 5 407 (04-guests.md's 126 373 + 1, and its 5 805 less the
-/// ecall rows) before MCOPY/TLOAD/TSTORE/CLZ grew the interpreter to 19 257 program words and
-/// 125 439 executed cycles; they are now 130 487 and 5 719.
+/// ecall rows) before MCOPY/TLOAD/TSTORE/CLZ grew the interpreter to 19 637 program words and
+/// 124 606 executed cycles; they are now 129 749 and 5 814.
 #[test]
 fn run_says_whether_the_workload_fits_a_given_tier() {
     let s = run("fib.bin", &[20], &[], &["--tier", "10"]);
@@ -157,9 +157,9 @@ fn run_says_whether_the_workload_fits_a_given_tier() {
     let call = erc20_transfer(ALICE, BOB, U256::from_u32(250), &[(ALICE, U256::from_u32(1000))]);
     let s = run("evm.bin", &call.input_words(), &[], &["--tier", "16"]);
     assert!(s.contains("tier 18\n"), "{s}");
-    assert!(s.contains("tier 16: does not fit (cycles 130487 of 65535, Poseidon2 permutations 5719 of 8192)"), "{s}");
+    assert!(s.contains("tier 16: does not fit (cycles 129749 of 65535, Poseidon2 permutations 5814 of 8192)"), "{s}");
     let s = run("evm.bin", &call.input_words(), &[], &["--tier", "18"]);
-    assert!(s.contains("tier 18: fits (cycles 130487 of 262143, Poseidon2 permutations 5719 of 32768)"), "{s}");
+    assert!(s.contains("tier 18: fits (cycles 129749 of 262143, Poseidon2 permutations 5814 of 32768)"), "{s}");
     let o = Command::new(bin()).arg("run").arg(root().join("guests-compiled/bin/fib.bin")).args(["--input", "20", "--tier", "11"]).output().unwrap();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("not one of the machine's tiers"));

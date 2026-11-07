@@ -176,9 +176,9 @@ the eight words are identical
 | | translated (stage two) | interpreter (`evm.bin`) |
 |---|---:|---:|
 | eight output words | identical | identical |
-| cycles | 66 235 | 125 439 |
+| cycles | 66 235 | 124 606 |
 | tier | 18 | 18 |
-| program words | 11 686 | 19 257 |
+| program words | 11 686 | 19 637 |
 
 `tests/parity.rs` runs this and seven more vectors under both stages, and also checks `gas_used`
 and the halt through a second build that reports them.
@@ -311,7 +311,7 @@ backlog: ecrecover, bn256 mul, the pairing, modexp past small operands, and blak
 
 Measured with `rand-guest run` on the vectors `tests/parity.rs` and `tests/precompiles.rs` pin,
 with the code guard in. Tier in parentheses. The interpreter column predates `MCOPY`, `TLOAD`/
-`TSTORE` and `CLZ` in `evm-core`, which made `evm.bin` 19 257 words and its `transfer` 125 439
+`TSTORE` and `CLZ` in `evm-core`, which made `evm.bin` 19 637 words and its `transfer` 124 606
 cycles (from 18 009 and 121 638); the translations did not move.
 
 | vector | interpreter | stage one | stage two |
@@ -327,7 +327,7 @@ cycles (from 18 009 and 121 638); the translations did not move.
 
 | program | words | hc |
 |---|---:|---|
-| interpreter (`evm.bin`) | 19 257 | `c34d0fe1…3f4cc6` |
+| interpreter (`evm.bin`) | 19 637 | `31e682ec…6c289c3` |
 | ERC-20, stage one | 15 804 | `9cdb79e7f05d53f6503f0eb777bb0c2356d29cab516a0378864802e42fd048c8` |
 | ERC-20, stage two | 11 686 | `a0feae92a7311c9562495717100eb7aea71270a38ed435d06dc31387e0ea8ff6` |
 | sha256 + ecrecover contract, stage one | 15 858 | `c8f00a09…f946fd` |

@@ -51,7 +51,7 @@
 #define MAX_RETURN_BYTES 1024
 #define MAX_LOGS 8
 #define MAX_TOPICS 4
-#define MAX_TRANSIENT_SLOTS 32 /* TSTORE's table (EIP-1153): interp.rs's, and transient.rs's rules */
+#define MAX_TRANSIENT_SLOTS 16 /* TSTORE's table (EIP-1153): interp.rs's, and transient.rs's rules */
 
 /* ---- the Shanghai schedule, interp.rs's constants by name ---- */
 #define G_BASE 2

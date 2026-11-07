@@ -9,7 +9,7 @@
 //!   `=1.4.6`, and a generated `Cargo.lock` ([`cargo_lock`]) fixes it and its dependencies. One cargo feature,
 //!   `emit-outcome`, off by default, is for the parity test only (see `src/main.rs`).
 //! * `build.rs` — compiles `contract.c` and `evm-rt/`'s `evm_rt.c`, `u256.c`, the call family's
-//!   `evm_call.c`, the post-Shanghai opcodes' `evm_cancun.c` and the precompiles (`precompiles.c`, `evm_bn.c`, `evm_secp256k1.c`, `evm_bn254.c`; with `rand-guest/guest.h` on
+//!   `evm_call.c`, the post-Shanghai opcodes' `evm_cancun.c` (only for a contract that uses one) and the precompiles (`precompiles.c`, `evm_bn.c`, `evm_secp256k1.c`, `evm_bn254.c`; with `rand-guest/guest.h` on
 //!   the include path for the SHA-256 coprocessor) with the `cc` crate, driving the clang `rand-guest` would pick (`$CLANG`, else Homebrew's LLVM, else `clang`
 //!   on `PATH`, and only one with a `riscv32` target) with **exactly `rand-guest`'s C flags**
 //!   ([`C_FLAGS`], rv32im — never rv32imc — `-Os`, the path remap), inheriting no rustflags and
@@ -378,7 +378,7 @@ fn main() {
     // The whole runtime, the precompiles included: `cc` archives it, and the linker takes only the
     // objects (and, with -ffunction-sections, only the functions) the contract reaches, so a
     // contract that never calls has none of the precompile code in its image.
-    let sources = [
+    let mut sources = vec![
         dir.join("contract.c"),
         rt.join("evm_rt.c"),
         rt.join("u256.c"),
@@ -387,8 +387,16 @@ fn main() {
         rt.join("evm_bn.c"),
         rt.join("evm_secp256k1.c"),
         rt.join("evm_bn254.c"),
-        rt.join("evm_cancun.c"),
     ];
+    // The post-Shanghai opcodes' runtime only for a contract that calls into it: even unreferenced,
+    // its object in the archive moves the image, and a Shanghai contract's hc must not move.
+    let contract = std::fs::read_to_string(dir.join("contract.c")).expect("contract.c");
+    if ["evm_mcopy(", "evm_tload(", "evm_tstore(", "evm_transient_begin(", "u256_clz("]
+        .iter()
+        .any(|f| contract.contains(f))
+    {
+        sources.push(rt.join("evm_cancun.c"));
+    }
     let mut b = cc::Build::new();
     b.compiler(&clang)
         .archiver(llvm_tool(&clang, "llvm-ar"))

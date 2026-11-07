@@ -542,12 +542,12 @@ A live cs9 chain moved to cs10 is a new genesis, as every set before it.
 
 **Re-vendor note: `evm-core` gained `MCOPY`, `TLOAD`/`TSTORE` and `CLZ`** (branch
 `feat/evm-cancun-osaka`; no constraint-set change). The interpreter used to trap (`Halt::Trap`, status
-2) on `0x5e`, `0x5c`, `0x5d` and `0x1e`; it now executes them (EIP-5656, EIP-1153 over a 32-key
+2) on `0x5e`, `0x5c`, `0x5d` and `0x1e`; it now executes them (EIP-5656, EIP-1153 over a 16-key
 transient table, EIP-7939). That is a semantic change for any chain that runs `evm.bin`: a call whose
 bytecode reaches one of them proved status 2 before and proves its real outcome now. The committed
 interpreter image moved with it — `guests-compiled/bin/evm.bin` hc `7e1aea2b…2b854c08` →
-`c34d0fe1…6f3f4cc6`, program id `99694342…2c44762b` → `8d40d59e…f97c9507`, 18 009 → 19 257 program
-words, the ERC-20 `transfer` 121 638 → 125 439 executed cycles (still tier 18). The fullnode vendors
+`31e682ec…b6c289c3`, program id `99694342…2c44762b` → `47df46b2…d6c9f3978c`, 18 009 → 19 637 program
+words, the ERC-20 `transfer` 121 638 → 124 606 executed cycles (still tier 18). The fullnode vendors
 `evm-core` (`deploy/sync-zkvm.sh`'s `for CRATE in evm-core sbpf-core`), so its re-vendor must move
 every pin of the `evm` guest's hc or program id it holds, and a chain that admits `evm.bin` by hc
 admits the new one only at a cut. Translated contracts (`evm2rv`) are unaffected unless their

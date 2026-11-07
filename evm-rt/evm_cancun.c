@@ -59,3 +59,7 @@ void evm_tstore(const u256 *key, const u256 *value) {
     evm_tvals[evm_tn] = *value;
     evm_tn++;
 }
+
+/* CLZ (EIP-7939), `U256::clz`: 256 - bit_len. Here rather than in u256.c, so a contract without
+ * CLZ links none of it and its image (and hc) is what it was before the post-Shanghai opcodes. */
+void u256_clz(u256 *r, const u256 *a) { u256_from_u32(r, 256 - u256_bit_len(a)); }

@@ -54,7 +54,7 @@ pub const MAX_TOPICS: usize = 4;
 /// The most distinct keys one call's transient storage (`TSTORE`, EIP-1153) may hold — a fixed
 /// table, like every other working array here. One more key with a non-zero value is
 /// [`Halt::OutOfBounds`]; see [`crate::transient`].
-pub const MAX_TRANSIENT_SLOTS: usize = 32;
+pub const MAX_TRANSIENT_SLOTS: usize = 16;
 
 // The Shanghai schedule, named as the yellow paper's tiers.
 const G_BASE: u64 = 2;
@@ -216,8 +216,8 @@ pub struct Interpreter<'a, H: Host> {
     logs: [Log; MAX_LOGS],
     n_logs: usize,
     /// `TLOAD`/`TSTORE`'s map: empty at the start of every call (each call is a new
-    /// `Interpreter`), dropped at its end, never part of the storage tree. 2 KiB, so the
-    /// interpreter is now ~4 KiB, still nothing beside the 100 KiB `Buffers` it borrows.
+    /// `Interpreter`), dropped at its end, never part of the storage tree. 1 KiB, so the
+    /// interpreter stays under 4 KiB, still nothing beside the 100 KiB `Buffers` it borrows.
     transient: Transient,
     /// Set by `new` when the code or the calldata is above its limit, and returned by `run` before
     /// a single opcode executes. An over-long input is the prover's doing, so it has to be an
