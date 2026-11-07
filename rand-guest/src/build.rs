@@ -141,8 +141,8 @@ pub struct BuildOutput {
 /// 17 065 with the compare-and-branch chain (128 158 all in) — the tables cost ~900 more program
 /// words and save ~1 900 execution cycles. (Both figures are from the same build pair, which
 /// predates two later `storage.rs` changes — a tidy-up and the duplicate-leaf-index check; the
-/// committed image measures 121 638 executed cycles over 18 009 program words,
-/// `docs/04-guests.md`.)
+/// image measured 121 638 executed cycles over 18 009 program words, `docs/04-guests.md`, and
+/// with MCOPY/TLOAD/TSTORE/CLZ the committed one measures 125 439 over 19 257.)
 pub fn flags(root: &Path, ld: &Path) -> Vec<String> {
     vec![
         "-C".into(),
