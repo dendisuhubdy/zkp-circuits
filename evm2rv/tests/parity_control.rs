@@ -1,7 +1,7 @@
 //! Directed parity for control flow and the environment: static and dynamic `JUMP`/`JUMPI` to a
 //! `JUMPDEST`, to a non-`JUMPDEST`, into push data and past the code, `JUMPI` with a zero, a
 //! one and a high-limb condition, a counted loop, `PC` and `GAS` at several points, `STOP` and
-//! dead code, `INVALID`, every one of the sixteen trapping opcodes and an undefined byte, empty
+//! dead code, `INVALID`, every one of the eighteen trapping opcodes and an undefined byte, empty
 //! code, `ADDRESS`/`CALLER`/`CALLVALUE`, and a few gas-limit edges. Pins: `(status, gas_used,
 //! returned word)`; both stages must agree with the interpreter, and the laundered twin sends
 //! every jump through the dispatch (`common/directed.rs`).
@@ -155,17 +155,19 @@ fn pc_gas_stop_and_dead_code() {
         Directed::new("a single PUSH0", "5f", 1, 2),
         Directed::new("INVALID", "fe", 2, 100_000),
         Directed::new("INVALID after a push", "6001fe", 2, 100_000),
-        // Undefined bytes trap; so does a Cancun opcode (TLOAD) and MCOPY.
+        // Undefined bytes trap, and so do Cancun's BLOBHASH and BLOBBASEFEE; TLOAD and MCOPY run.
         Directed::new("undefined 0x0c traps", "0c", 2, 100_000),
         Directed::new("undefined 0x21 traps", "6001 21", 2, 100_000),
-        Directed::new("TLOAD traps", "5f5c", 2, 100_000),
-        Directed::new("MCOPY traps", "5f5f5f5e", 2, 100_000),
+        Directed::new("BLOBHASH traps", "5f49", 2, 100_000),
+        Directed::new("BLOBBASEFEE traps", "4a", 2, 100_000),
+        Directed::new("TLOAD runs", "5f5c", 1, 102),
+        Directed::new("MCOPY of nothing runs", "5f5f5f5e", 1, 9),
         Directed::new("PUSH0-then-0xef traps", "5fef", 2, 100_000),
     ];
     run_directed("control-pc-gas", &cases);
 }
 
-/// Every one of the sixteen `TRAP_TERM` opcodes halts the call (status 2, the limit spent), bare
+/// Every one of the eighteen `TRAP_TERM` opcodes halts the call (status 2, the limit spent), bare
 /// and after enough pushes for its operands, as the interpreter traps on it before touching the
 /// stack.
 #[test]

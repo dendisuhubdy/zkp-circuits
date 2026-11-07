@@ -139,7 +139,7 @@ uint32_t fuzz_run(uint32_t idx, const uint8_t *code, uint32_t code_len, const ui
 "#;
 
 /// The runtime's sources, as the shim's build.rs lists them, and the host's setjmp.
-const RT_SOURCES: [&str; 8] = [
+const RT_SOURCES: [&str; 9] = [
     "evm_rt.c",
     "u256.c",
     "evm_call.c",
@@ -147,6 +147,7 @@ const RT_SOURCES: [&str; 8] = [
     "evm_bn.c",
     "evm_secp256k1.c",
     "evm_bn254.c",
+    "evm_cancun.c",
     "test/host_jmp.c",
 ];
 

@@ -9,7 +9,7 @@
 //!   `=1.4.6`, and a generated `Cargo.lock` ([`cargo_lock`]) fixes it and its dependencies. One cargo feature,
 //!   `emit-outcome`, off by default, is for the parity test only (see `src/main.rs`).
 //! * `build.rs` — compiles `contract.c` and `evm-rt/`'s `evm_rt.c`, `u256.c`, the call family's
-//!   `evm_call.c` and the precompiles (`precompiles.c`, `evm_bn.c`, `evm_secp256k1.c`, `evm_bn254.c`; with `rand-guest/guest.h` on
+//!   `evm_call.c`, the post-Shanghai opcodes' `evm_cancun.c` and the precompiles (`precompiles.c`, `evm_bn.c`, `evm_secp256k1.c`, `evm_bn254.c`; with `rand-guest/guest.h` on
 //!   the include path for the SHA-256 coprocessor) with the `cc` crate, driving the clang `rand-guest` would pick (`$CLANG`, else Homebrew's LLVM, else `clang`
 //!   on `PATH`, and only one with a `riscv32` target) with **exactly `rand-guest`'s C flags**
 //!   ([`C_FLAGS`], rv32im — never rv32imc — `-Os`, the path remap), inheriting no rustflags and
@@ -387,6 +387,7 @@ fn main() {
         rt.join("evm_bn.c"),
         rt.join("evm_secp256k1.c"),
         rt.join("evm_bn254.c"),
+        rt.join("evm_cancun.c"),
     ];
     let mut b = cc::Build::new();
     b.compiler(&clang)

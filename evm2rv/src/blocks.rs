@@ -8,12 +8,16 @@
 //! touching the stack (`evm_core::interp::Interpreter::step`'s catch-all arm pops nothing before
 //! returning the halt). `evm2rv` deliberately keeps trapping on:
 //!
-//! - the nine block-context opcodes ([`BLOCK_CTX_TRAPS`]) the interpreter has no public-segment
-//!   binding for yet, and
+//! - the eleven block-context opcodes ([`BLOCK_CTX_TRAPS`]) the interpreter has no public-segment
+//!   binding for yet — Cancun's `BLOBHASH` and `BLOBBASEFEE` among them — and
 //! - seven more of the cross-contract family ([`STORAGE_CREATE_TRAPS`]): `BALANCE`,
 //!   `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, `CREATE`, `CREATE2`, `SELFDESTRUCT`.
 //!
-//! Together these sixteen ([`TRAP_TERM`]) become [`Term::TrapOp`] and end the block.
+//! Together these eighteen ([`TRAP_TERM`]) become [`Term::TrapOp`] and end the block.
+//!
+//! The other post-Shanghai opcodes are ordinary ops, as the interpreter implements them: `CLZ`
+//! (EIP-7939), `TLOAD`/`TSTORE` (EIP-1153) and `MCOPY` (EIP-5656). A Shanghai contract has none of
+//! them, so its blocks — and its translation — are what they were.
 //!
 //! `CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL` ([`CALL_FAMILY`]) are **not** block terminators
 //! here: a precompile target is resolved by address at runtime (the runtime traps only on a
@@ -25,7 +29,7 @@
 //! Each costs Shanghai's `G_BASE` = 2 in the translation ([`static_gas`]).
 //!
 //! [`warnings`] reports every occurrence (in code order, immediates correctly skipped) of any
-//! opcode in [`WARN_SET`]: [`TRAP_TERM`]'s sixteen as a [`Warning::Trap`] (they always trap), and
+//! opcode in [`WARN_SET`]: [`TRAP_TERM`]'s eighteen as a [`Warning::Trap`] (they always trap), and
 //! [`CALL_FAMILY`]'s four as a [`Warning::Call`] (they trap unless the target is a precompile).
 //!
 //! **Code longer than [`MAX_CODE_BYTES`]** (EIP-170's cap) is a separate case from every opcode
@@ -79,10 +83,10 @@ pub enum Term {
     Revert,
     /// The `0xfe` opcode — the interpreter's one distinguished halt outside `Trap`.
     Invalid,
-    /// One of [`TRAP_TERM`]'s sixteen opcodes: the interpreter halts on it unconditionally,
+    /// One of [`TRAP_TERM`]'s eighteen opcodes: the interpreter halts on it unconditionally,
     /// before touching the stack, and so does the translation (`evm_halt(HALT_TRAP, op)`, Task
     /// 4). Also covers any opcode byte the interpreter does not implement at all and this crate
-    /// has no other classification for (undefined bytes, the Cancun opcodes, …) — those trap
+    /// has no other classification for (undefined bytes, …) — those trap
     /// exactly the same way, just without a name in [`WARN_SET`].
     TrapOp(u8),
     /// `code` is longer than [`MAX_CODE_BYTES`] (EIP-170's cap). The interpreter's
@@ -115,7 +119,7 @@ pub struct Block {
 /// without refusing to translate the contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
-    /// One of [`TRAP_TERM`]'s sixteen opcodes, present at `pc`: it always traps.
+    /// One of [`TRAP_TERM`]'s eighteen opcodes, present at `pc`: it always traps.
     Trap { pc: usize, opcode: u8 },
     /// One of [`CALL_FAMILY`]'s four, present at `pc`: it traps unless its target is a
     /// precompile (addresses 1-9), which the runtime runs (Task 5).
@@ -127,9 +131,12 @@ pub enum Warning {
     CodeTooLarge { len: usize },
 }
 
-/// The nine block-context opcodes: no public-segment binding exists yet (plan's Global
-/// Constraints), so the translator traps on them exactly as the interpreter does.
-pub const BLOCK_CTX_TRAPS: [u8; 9] = [0x3a, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x47, 0x48];
+/// The eleven block-context opcodes: no public-segment binding exists yet (plan's Global
+/// Constraints), so the translator traps on them exactly as the interpreter does. `BLOBHASH`
+/// (0x49) and `BLOBBASEFEE` (0x4a), Cancun's, are the last two: they trapped before as undefined
+/// bytes, the same `Term::TrapOp` and the same C, and are listed so [`warnings`] names them.
+pub const BLOCK_CTX_TRAPS: [u8; 11] =
+    [0x3a, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x47, 0x48, 0x49, 0x4a];
 
 /// `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, `CREATE`, `CREATE2`, `SELFDESTRUCT` —
 /// the rest of the cross-contract family that traps unconditionally, unlike [`CALL_FAMILY`],
@@ -142,16 +149,20 @@ pub const STORAGE_CREATE_TRAPS: [u8; 7] = [0x31, 0x3b, 0x3c, 0x3f, 0xf0, 0xf5, 0
 /// static gas 0 — their gas is all dynamic, charged in the runtime (Task 5).
 pub const CALL_FAMILY: [u8; 4] = [0xf1, 0xf2, 0xf4, 0xfa];
 
-/// The sixteen opcodes [`blocks`] turns into a [`Term::TrapOp`] block terminator:
+/// `TLOAD`, `TSTORE` — a contract with either (as an op, not push data) empties the runtime's
+/// transient table at the top of `evm_entry`, so every call starts with none (EIP-1153).
+pub const TRANSIENT_OPS: [u8; 2] = [0x5c, 0x5d];
+
+/// The eighteen opcodes [`blocks`] turns into a [`Term::TrapOp`] block terminator:
 /// [`BLOCK_CTX_TRAPS`] followed by [`STORAGE_CREATE_TRAPS`].
-pub const TRAP_TERM: [u8; 16] = [
-    0x3a, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x47, 0x48, // BLOCK_CTX_TRAPS
+pub const TRAP_TERM: [u8; 18] = [
+    0x3a, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x47, 0x48, 0x49, 0x4a, // BLOCK_CTX_TRAPS
     0x31, 0x3b, 0x3c, 0x3f, 0xf0, 0xf5, 0xff, // STORAGE_CREATE_TRAPS
 ];
 
-/// The twenty opcodes [`warnings`] reports: [`TRAP_TERM`] plus [`CALL_FAMILY`].
-pub const WARN_SET: [u8; 20] = [
-    0x3a, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x47, 0x48, // BLOCK_CTX_TRAPS
+/// The twenty-two opcodes [`warnings`] reports: [`TRAP_TERM`] plus [`CALL_FAMILY`].
+pub const WARN_SET: [u8; 22] = [
+    0x3a, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x47, 0x48, 0x49, 0x4a, // BLOCK_CTX_TRAPS
     0x31, 0x3b, 0x3c, 0x3f, 0xf0, 0xf5, 0xff, // STORAGE_CREATE_TRAPS
     0xf1, 0xf2, 0xf4, 0xfa, // CALL_FAMILY
 ];
@@ -175,6 +186,7 @@ pub const fn static_gas(op: u8) -> u64 {
     const G_HIGH: u64 = 10;
     const G_JUMPDEST: u64 = 1;
     const G_SLOAD: u64 = 2_100;
+    const G_WARM_STORAGE_READ: u64 = 100;
     match op {
         0x5b => G_JUMPDEST,
         // ORIGIN and CHAINID: G_BASE in the translation only (the interpreter traps on both).
@@ -182,17 +194,18 @@ pub const fn static_gas(op: u8) -> u64 {
         // base
         0x30 | 0x33 | 0x34 | 0x36 | 0x38 | 0x3d | 0x50 | 0x58 | 0x59 | 0x5a | 0x5f => G_BASE,
         // verylow: ADD/SUB, every comparison and bitwise opcode, CALLDATALOAD, MLOAD/MSTORE/
-        // MSTORE8, the copies' base, PUSHn, DUPn, SWAPn
-        0x01 | 0x03 | 0x10..=0x1d | 0x35 | 0x37 | 0x39 | 0x3e | 0x51..=0x53 | 0x60..=0x9f => {
-            G_VERYLOW
-        }
-        // low
-        0x02 | 0x04..=0x07 | 0x0b => G_LOW,
+        // MSTORE8, the copies' base (MCOPY's too), PUSHn, DUPn, SWAPn
+        0x01 | 0x03 | 0x10..=0x1d | 0x35 | 0x37 | 0x39 | 0x3e | 0x51..=0x53 | 0x5e
+        | 0x60..=0x9f => G_VERYLOW,
+        // low; CLZ is EIP-7939's 5
+        0x02 | 0x04..=0x07 | 0x0b | 0x1e => G_LOW,
         // mid
         0x08 | 0x09 | 0x56 => G_MID,
         // high
         0x57 => G_HIGH,
         0x54 => G_SLOAD,
+        // TLOAD, TSTORE: EIP-1153's warm storage read
+        0x5c | 0x5d => G_WARM_STORAGE_READ,
         _ => 0,
     }
 }
@@ -259,7 +272,7 @@ enum Classify {
     Return,
     Revert,
     Invalid,
-    /// [`TRAP_TERM`]'s sixteen, or any opcode byte this crate does not otherwise classify — both
+    /// [`TRAP_TERM`]'s eighteen, or any opcode byte this crate does not otherwise classify — both
     /// become [`Term::TrapOp`], matching the interpreter's unconditional, stack-untouched halt.
     Trap,
 }
@@ -272,15 +285,16 @@ fn classify(opcode: u8) -> Classify {
         0xf3 => Classify::Return,
         0xfd => Classify::Revert,
         0xfe => Classify::Invalid,
-        // arithmetic, comparison, bitwise, KECCAK256
-        0x01..=0x0b | 0x10..=0x1d | 0x20 => Classify::Ordinary,
+        // arithmetic, comparison, bitwise (CLZ included), KECCAK256
+        0x01..=0x0b | 0x10..=0x1e | 0x20 => Classify::Ordinary,
         // environment, including ORIGIN (= CALLER) and CHAINID (a translation-time constant) —
         // both ordinary here though the interpreter itself does not implement either
         0x30 | 0x32 | 0x33 | 0x34 | 0x35 | 0x36 | 0x37 | 0x38 | 0x39 | 0x3d | 0x3e | 0x46 => {
             Classify::Ordinary
         }
-        // stack, memory, storage, PC/MSIZE/GAS/JUMPDEST (0x56/0x57 already matched above)
-        0x50..=0x55 | 0x58 | 0x59 | 0x5a | 0x5b | 0x5f => Classify::Ordinary,
+        // stack, memory, storage, PC/MSIZE/GAS/JUMPDEST (0x56/0x57 already matched above),
+        // TLOAD/TSTORE, MCOPY
+        0x50..=0x55 | 0x58..=0x5f => Classify::Ordinary,
         // PUSH0..32 (0x5f already matched above), DUPn, SWAPn
         0x60..=0x9f => Classify::Ordinary,
         // LOG0..4
@@ -306,6 +320,7 @@ pub fn stack_effect(op: u8) -> (usize, i32) {
         0x16..=0x18 => (2, -1),                       // AND, OR, XOR
         0x19 => (1, 0),                               // NOT
         0x1a..=0x1d => (2, -1),                       // BYTE, SHL, SHR, SAR
+        0x1e => (1, 0),                               // CLZ
         0x20 => (2, -1),                              // KECCAK256
         0x30 => (0, 1),                               // ADDRESS
         0x32 => (0, 1),                               // ORIGIN
@@ -331,6 +346,9 @@ pub fn stack_effect(op: u8) -> (usize, i32) {
         0x59 => (0, 1),                               // MSIZE
         0x5a => (0, 1),                               // GAS
         0x5b => (0, 0),                               // JUMPDEST
+        0x5c => (1, 0),                               // TLOAD
+        0x5d => (2, -2),                              // TSTORE: key, value
+        0x5e => (3, -3),                              // MCOPY: dst, src, len
         0x5f => (0, 1),                               // PUSH0
         0x60..=0x7f => (0, 1),                        // PUSH1..32
         0x80..=0x8f => ((op - 0x7f) as usize, 1),     // DUPn: needs n, pushes a copy
@@ -372,7 +390,7 @@ pub fn stack_bounds(ops: &[Op]) -> (usize, usize) {
 }
 
 /// Split `code` into basic blocks at every `JUMPDEST` and after every terminator (`JUMP`,
-/// `JUMPI`, `STOP`, `RETURN`, `REVERT`, `INVALID`, or one of [`TRAP_TERM`]'s sixteen opcodes, or
+/// `JUMPI`, `STOP`, `RETURN`, `REVERT`, `INVALID`, or one of [`TRAP_TERM`]'s eighteen opcodes, or
 /// any other opcode byte this crate does not implement). Falling off the end of the code is
 /// `STOP`, as in the interpreter.
 ///

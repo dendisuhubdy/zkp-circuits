@@ -52,8 +52,9 @@ To get runtime bytecode from Solidity:
 solc --optimize --optimize-runs 200 --evm-version shanghai --bin-runtime MyToken.sol
 ```
 
-The last line of output is the hex. Save it as `mytoken.hex`. Use `--evm-version shanghai`:
-newer targets emit `MCOPY` and other Cancun opcodes, which trap here.
+The last line of output is the hex. Save it as `mytoken.hex`. `--evm-version` may be `shanghai`,
+`cancun`, `prague` or `osaka`: `MCOPY`, `TLOAD`/`TSTORE` (transient storage, at most 32 non-zero
+slots per call) and `CLZ` translate. `BLOBHASH` and `BLOBBASEFEE` trap and are warned.
 
 `solc` is not installed on the machine these numbers come from. The committed ERC-20
 (`guests-compiled/evm/contracts/erc20.runtime.hex`, 1 296 bytes) was compiled once with solc
@@ -269,9 +270,9 @@ kind is not public, and it may differ. Three divergences are accepted:
 | `ADDRESS`, `CALLER`, `CALLVALUE`, `CALLDATASIZE`, `CODESIZE` | from the input vector, as the interpreter reads them |
 | `CHAINID` | the `--chain-id` constant, baked in, so `hc` binds it; 2 gas |
 | `ORIGIN` | `CALLER` (one call, no relayer); 2 gas |
-| `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH` | trap (status 2), as in the interpreter |
+| `GASPRICE`, `COINBASE`, `TIMESTAMP`, `NUMBER`, `PREVRANDAO`, `GASLIMIT`, `SELFBALANCE`, `BASEFEE`, `BLOCKHASH`, `BLOBHASH`, `BLOBBASEFEE` | trap (status 2), as in the interpreter |
 
-The nine block-context opcodes trap until there is a design for binding them. A private input
+The eleven block-context opcodes trap until there is a design for binding them. A private input
 word is bound only to the salted `H_IN`, which a verifier cannot open, so it could not carry a
 block fact a prover could not forge. Binding them needs a chain decision on which block a proof is
 checked against. Until then, contracts that read the time or the block number (a permit deadline,
