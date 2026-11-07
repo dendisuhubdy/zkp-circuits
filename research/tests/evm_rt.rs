@@ -30,7 +30,7 @@ fn rt_dir() -> PathBuf {
 const OPS: &[&str] = &[
     "ADD", "SUB", "MUL", "DIV", "MOD", "SDIV", "SMOD", "ADDMOD", "MULMOD", "EXP", "SIGNEXTEND",
     "LT", "GT", "SLT", "SGT", "EQ", "ISZERO", "AND", "OR", "XOR", "NOT", "BYTE", "SHL", "SHR",
-    "SAR", "BIT_LEN", "BYTE_LEN",
+    "SAR", "BIT_LEN", "BYTE_LEN", "CLZ",
 ];
 
 fn op_code(name: &str) -> u8 {
@@ -75,6 +75,7 @@ fn apply(op: &str, a: &U256, b: &U256, c: &U256) -> U256 {
         "SAR" => a.sar(b),
         "BIT_LEN" => U256::from_u32(a.bit_len()),
         "BYTE_LEN" => U256::from_u32(a.byte_len()),
+        "CLZ" => a.clz(),
         _ => unreachable!("{op}"),
     }
 }
@@ -271,6 +272,18 @@ fn vectors_header() -> String {
             add(op, a, &z, &z, &mut table);
         }
     }
+    // CLZ (EIP-7939), after everything else so no earlier vector or operand index moves: every
+    // operand, and 2^k for every k with its neighbours, so each limb boundary is crossed.
+    for a in &all {
+        add("CLZ", a, &z, &z, &mut table);
+    }
+    for k in 0..256 {
+        add("CLZ", &pow2(k), &z, &z, &mut table);
+    }
+    for k in [31u32, 32, 33, 63, 64, 224, 255] {
+        add("CLZ", &pow2(k).sub(&U256::ONE), &z, &z, &mut table);
+        add("CLZ", &pow2(k).add(&U256::ONE), &z, &z, &mut table);
+    }
 
     let mut s = String::new();
     s.push_str(
@@ -397,10 +410,10 @@ fn the_c_gas_constants_and_limits_are_interp_rs() {
         c_defines(&h, "G_").into_iter().map(|(k, v)| (format!("G_{k}"), v)).collect();
     let g_c: BTreeMap<_, _> = g_c.iter().collect();
     assert_eq!(g_c, g_rust, "evm_rt.h's G_* against interp.rs's");
-    assert_eq!(g_rust.len(), 18);
+    assert_eq!(g_rust.len(), 19);
     for name in [
         "STACK_LIMIT", "MAX_MEMORY_BYTES", "MAX_CODE_BYTES", "MAX_CALLDATA_BYTES",
-        "MAX_RETURN_BYTES", "MAX_LOGS", "MAX_TOPICS",
+        "MAX_RETURN_BYTES", "MAX_LOGS", "MAX_TOPICS", "MAX_TRANSIENT_SLOTS",
     ] {
         let c = c_defines(&h, name).remove("").unwrap_or_else(|| panic!("{name} not in evm_rt.h"));
         assert_eq!(Some(&c), rust.get(name), "{name}");

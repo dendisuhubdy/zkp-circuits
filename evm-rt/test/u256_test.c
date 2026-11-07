@@ -39,7 +39,7 @@ static const char *op_name(unsigned op) {
     static const char *names[] = {"?", "ADD", "SUB", "MUL", "DIV", "MOD", "SDIV", "SMOD", "ADDMOD",
                                   "MULMOD", "EXP", "SIGNEXTEND", "LT", "GT", "SLT", "SGT", "EQ",
                                   "ISZERO", "AND", "OR", "XOR", "NOT", "BYTE", "SHL", "SHR",
-                                  "SAR", "BIT_LEN", "BYTE_LEN"};
+                                  "SAR", "BIT_LEN", "BYTE_LEN", "CLZ"};
     return op < sizeof names / sizeof *names ? names[op] : "?";
 }
 
@@ -59,8 +59,9 @@ static void run_vector(size_t k) {
         got[n] = a; f(&got[n], &got[n], &b, &c); n++;
         got[n] = b; f(&got[n], &a, &got[n], &c); n++;
         got[n] = c; f(&got[n], &a, &b, &got[n]); n++;
-    } else if (op == V_ISZERO || op == V_NOT) {
-        void (*f)(u256 *, const u256 *) = op == V_ISZERO ? u256_iszero : u256_not;
+    } else if (op == V_ISZERO || op == V_NOT || op == V_CLZ) {
+        void (*f)(u256 *, const u256 *) =
+            op == V_ISZERO ? u256_iszero : op == V_NOT ? u256_not : u256_clz;
         f(&got[n++], &a);
         got[n] = a; f(&got[n], &got[n]); n++;
     } else if (op == V_BIT_LEN) {

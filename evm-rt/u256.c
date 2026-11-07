@@ -415,3 +415,6 @@ void u256_signextend(u256 *r, const u256 *x, const u256 *b) {
     }
     *r = t;
 }
+
+/* CLZ (EIP-7939), `U256::clz`: 256 - bit_len. Last in the file, so nothing above moves. */
+void u256_clz(u256 *r, const u256 *a) { u256_from_u32(r, 256 - u256_bit_len(a)); }

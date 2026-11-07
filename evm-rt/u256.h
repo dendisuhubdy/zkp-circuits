@@ -30,6 +30,7 @@
  *   AND OR XOR  a, b                      u256_and(r, a, b)
  *   BYTE        i, x                      u256_byte(r, x, i)         (note: x first)
  *   SHL SHR SAR n, x                      u256_shl(r, x, n)          (note: x first)
+ *   CLZ         a                         u256_clz(r, a)
  */
 #ifndef EVM_RT_U256_H
 #define EVM_RT_U256_H
@@ -88,6 +89,7 @@ void u256_byte(u256 *r, const u256 *x, const u256 *i);   /* byte i from the most
 void u256_shl(u256 *r, const u256 *x, const u256 *n);    /* n >= 256 -> 0 */
 void u256_shr(u256 *r, const u256 *x, const u256 *n);    /* n >= 256 -> 0 */
 void u256_sar(u256 *r, const u256 *x, const u256 *n);    /* n >= 256 -> the sign */
+void u256_clz(u256 *r, const u256 *a);                   /* CLZ: leading zero bits, 256 for 0 */
 
 /* The predicates behind LT/SLT, for the emitter's JUMPI-free comparisons (U256::lt, slt). */
 int u256_lt_p(const u256 *a, const u256 *b);
