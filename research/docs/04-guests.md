@@ -30,7 +30,8 @@ slower than the RISC-V native path:
 C over `evm-rt/` ahead of time, in a shim crate `rand-guest build` turns into an image. The shim
 reuses the interpreter's ABI harness, so the input vector and the eight public output words do not
 change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 66 235 cycles
-against the interpreter's 121 638, at 11 686 program words against 18 009. The harness it shares
+against the interpreter's 124 606, at 11 686 program words against 19 637 (the committed
+`evm.bin`, program id `47df46b2…`, hc `31e682ec…`; 121 638 and 18 009 before MCOPY/TLOAD/TSTORE/CLZ). The harness it shares
 with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 60%
 of those cycles, so further gains must come from the harness or the coprocessors above. One `hc`
 per contract: the image carries a digest of its source bytecode and refuses any other code
@@ -416,7 +417,7 @@ new digests. The `guests-compiled` provenance process has one pinned image per
 guest, rebuilt and compared, and no way to publish a second storage version
 beside the first, so a fix here would replace the pinned interpreter rather than
 add a version, and every contract deployed against it would move with it. It is
-also moot on chain 15 today: the EVM interpreter (18 009 words) cannot be called
+also moot on chain 15 today: the EVM interpreter (19 637 words) cannot be called
 at the node's tier-14 cap (the review's CPU-1). It belongs with the next
 interpreter version, alongside a deploy-time program version so existing
 contracts keep theirs.
@@ -476,9 +477,9 @@ slots touched, one `Transfer` log.
 | | |
 |---|---|
 | contract | `guests-compiled/evm/contracts/ERC20.sol`, `solc 0.8.37`, `--optimize --optimize-runs 200 --evm-version shanghai`, 1 296 bytes of runtime bytecode (committed as hex; `contracts/SOLC.md` records the binary's sha256 and the exact command) |
-| guest program | **18 009 words** — 16 370 of text plus a 1 639-instruction data prologue for 2 444 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations) — and 4 503 program-digest rows |
+| guest program | **19 637 words** (`evm.bin` program id `47df46b2…`, hc `31e682ec…`) — 17 598 of text plus a 2 039-instruction data prologue; the rows below this one, and the digest-row count, were measured on the pre-MCOPY/TLOAD/TSTORE/CLZ image of 18 009 words: 16 370 of text plus a 1 639-instruction data prologue for 2 444 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations), and 4 503 program-digest rows |
 | input vector | 921 words (the bytecode, 68 bytes of calldata, the env, two 272-word witnesses) → 232 input-digest rows |
-| cycles | **121 638 executed**, 126 373 total with both digest prefixes |
+| cycles | **124 606 executed** on the committed image (121 638 executed, 126 373 total with both digest prefixes, on the pre-MCOPY/TLOAD/TSTORE/CLZ image) |
 | Poseidon2 | 1 070 absorb rows (132 sponge calls: four 32-level Merkle walks, plus the leaves and the output digest), 5 805 permutations in all with the digest prefixes |
 | Keccak | 17 permutations (`codehash` over 1 296 bytes is ten of them; two mapping-slot hashes; the return-data and logs hashes) |
 | tier | **`Tier(18)`** — `keccak_log_height` would be 10 (17 permutations = 544 rows, padded to 1 024) |

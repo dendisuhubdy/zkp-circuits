@@ -53,8 +53,8 @@ solc --optimize --optimize-runs 200 --evm-version shanghai --bin-runtime MyToken
 ```
 
 The last line of output is the hex. Save it as `mytoken.hex`. `--evm-version` may be `shanghai`,
-`cancun`, `prague` or `osaka`: `MCOPY`, `TLOAD`/`TSTORE` (transient storage, at most 32 non-zero
-slots per call) and `CLZ` translate. `BLOBHASH` and `BLOBBASEFEE` trap and are warned.
+`cancun`, `prague` or `osaka`: `MCOPY`, `TLOAD`/`TSTORE` (transient storage, at most 16 non-zero
+slots per call, `MAX_TRANSIENT_SLOTS`; a 17th halts `OutOfBounds`) and `CLZ` translate. `BLOBHASH` and `BLOBBASEFEE` trap and are warned.
 
 `solc` is not installed on the machine these numbers come from. The committed ERC-20
 (`guests-compiled/evm/contracts/erc20.runtime.hex`, 1 296 bytes) was compiled once with solc
@@ -137,7 +137,7 @@ digest over the code hash, both state roots, the return data and the logs.
 
 ### 5. The same eight words as the interpreter
 
-The interpreter guest, on the same input:
+The interpreter guest (`evm.bin`, program id `47df46b2…`, hc `31e682ec…`), on the same input:
 
 ```
 $ rand-guest/target/release/rand-guest run guests-compiled/bin/evm.bin --input $(cat evm2rv/target/transfer.words)
@@ -149,7 +149,7 @@ out[4] = 4004100029
 out[5] = 234390638
 out[6] = 3262201797
 out[7] = 3842361427
-cycles 121638
+cycles 124606
 tier 18
 ```
 
