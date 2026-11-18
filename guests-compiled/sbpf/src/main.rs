@@ -3,13 +3,14 @@
 
 //! M4.4's exit guest: an sBPF interpreter. It reads a Solana program's ELF from the **public**
 //! input segment and one serialized instruction from the private one, runs the program over it,
-//! and publishes a status word plus a 224-bit digest binding the instruction and the accounts'
-//! post-state (`sbpf_core::abi`). The program itself is bound by `H_PUB`, which the chain checks
+//! and publishes a status word plus a 224-bit digest binding the instruction, the accounts'
+//! post-state and the program's return data (`sbpf_core::abi`). The public segment also carries the
+//! chain's Clock and Rent sysvars after the ELF, which is the only place a sysvar getter reads them. The program itself is bound by `H_PUB`, which the chain checks
 //! against the ELF it published, so the guest no longer hashes it. The whole interpreter — 91
-//! opcodes, the four memory regions, twelve syscalls, the ELF loader and its relocations — is
+//! opcodes, the four memory regions, eighteen syscalls, compute-unit metering, the ELF loader and its relocations — is
 //! `sbpf-core`, compiled to RV32IM and proved by the machine like any other guest; the only
-//! syscalls it takes are `SHA256` (the M4.4 chip, for the two digests and for the program's own
-//! `sol_sha256`) and `POSEIDON2` (the output digest).
+//! syscalls it takes are `SHA256` (the M4.4 chip, for the three digests and for the program's own
+//! `sol_sha256`), `KECCAK` (the program's `sol_keccak256`) and `POSEIDON2` (the output digest).
 //!
 //! This file is forty lines because that is the whole point: everything the milestone is about is
 //! library code that runs identically on the host, where it is unit-tested against `solana-sbpf`
@@ -32,6 +33,10 @@ impl sbpf_core::Host for Syscalls {
         // digest buffers are sized for the digest), and `words` is a live, exclusive `&mut` for the
         // call — `guest_sdk::poseidon2`'s `# Safety` contract.
         unsafe { guest_sdk::poseidon2(words.as_mut_ptr(), n) };
+    }
+
+    fn keccak_f(&mut self, state: &mut [u32; 50]) {
+        guest_sdk::keccak(state);
     }
 }
 

@@ -219,8 +219,9 @@ generating a bespoke circuit. Details, cycle-cost estimates, and what
 milestone 4 builds first: `docs/04-guests.md`.
 
 The Solana interpreter **runs** an SPL Token `Transfer` correctly in the machine's
-executor, and since constraint set 6 the run also *fits* a tier: **694 498 cycles
-against `Tier(20)`'s 1 048 575**, where M4.4 measured 1 753 945 and fitted nothing.
+executor, and since constraint set 6 the run also *fits* a tier: **685 749 cycles
+against `Tier(20)`'s 1 048 575** (694 498 when the public segment landed, before
+ZKVM-116's syscalls and compute-unit meter), where M4.4 measured 1 753 945 and fitted nothing.
 What bought it was the public input segment. The 108 600-byte ELF used to ride the
 private tape (27 151 of 37 609 words) and be hashed in-circuit as `program_hash` —
 1 698 of the run's 2 368 SHA-256 compressions, about 1.20 M of the 1.75 M cycles —

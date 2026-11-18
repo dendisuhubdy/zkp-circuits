@@ -99,11 +99,14 @@ translation — unknown syscalls, CPI, bad registers, bad opcodes and bad jumps 
 scanner warnings plus the interpreter's own runtime trap, matching `interp.rs`'s own
 raise-only-on-execution rule. Three accepted divergences, each erring on the safe side (the
 README lists them): any `callx` target outside the set the scanner found gives `BadJump` (where
-the interpreter might run real code; fuzzed 117-for-117 sound); a deferred budget check can change
-the halt kind inside the one limit-crossing block; and an image refuses (`BadElf`, status 2) any
-ELF that loads to a program other than the one it was translated from. The committed SPL Token `Transfer`, `MintTo` and `Burn` all
-match the interpreter word for word — the eight public output words and the halt — at **65 096**
-of the 65 535-word cap. Translated execution itself is about 2.4–2.5× cheaper per sBPF
+the interpreter might run real code; fuzzed 117-for-117 sound); a run that passes the compute budget
+halts at the next check (an entry, a loop head, an exit) rather than at the instruction, so its
+halt kind can differ, never its status or public words; and an image refuses (`BadElf`, status 2) any
+ELF that loads to a program other than the one it was translated from. The committed SPL Token `Transfer`, `MintTo`, `Burn`,
+`InitializeAccount`, `InitializeAccount3`, `GetAccountDataSize` and `AmountToUiAmount` all
+match the interpreter word for word — the eight public output words and the halt — at **64 465**
+of the 65 535-word cap (ZKVM-116, 2026-11-18: eighteen syscalls on both sides, Solana's
+compute-unit costs on the meter, sysvars on the public tape, return data in the output digest). Translated execution itself is about 2.4–2.5× cheaper per sBPF
 instruction, but the harness `sbpf-core::abi` shares with the interpreter is about 98% of every
 run's cycles, and the ELF guard adds 73 k (copying the loaded program into a buffer and hashing it
 with `POSEIDON2`), so the translated SPL Token transfer is 766 k cycles against the interpreter's 694 k;
@@ -232,7 +235,7 @@ its only two patches (everything else rides along in the wholesale rsync —
   `tests/e2e.rs::compiled_sbpf_spl_token_transfer_proves_and_verifies` is
   M4.4's, and since constraint set 6 it is `#[ignore]`d for **the same reason
   as the EVM one** rather than its own: the guest went from 1 753 945 cycles
-  (above every tier) to **694 498**, which fits `Tier(20)` — but a tier-20
+  (above every tier) to **694 498** (685 749 since ZKVM-116), which fits `Tier(20)` — but a tier-20
   batch is four times the cpu rows of that tier-18 EVM proof, so it needs more
   than the 48 GB here, not less. It was not attempted on this machine; run it
   on a **≥ 64 GB** one with `-- --ignored`.

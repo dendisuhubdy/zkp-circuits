@@ -94,7 +94,14 @@ pub const HALT_INSTRUCTION_LIMIT: u32 = 6;
 pub const HALT_BAD_JUMP: u32 = 8;
 pub const HALT_TRAP: u32 = 10;
 
-const TRAPS: [&str; 3] = ["abort", "sol_panic_", "sol_memcpy_ overlap"];
+const TRAPS: [&str; 6] = [
+    "abort",
+    "sol_panic_",
+    "sol_memcpy_ overlap",
+    "return data too large",
+    "return data overlap",
+    "sysvar unavailable",
+];
 
 /// `Result<u64, Halt>` as `sbpf-rt`'s `(code, payload)`: the `Halt` variant's declaration index.
 pub fn halt_code(r: &Result<u64, Halt>) -> (u32, u64) {

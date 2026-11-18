@@ -338,9 +338,17 @@ fn calls_exit_and_syscalls() {
         e(i(opc::CALL_IMM, 0, 1, 0, log)),
         "r0 = sbpf_sys_log(r1, r2, r3, r4, r5);"
     );
-    // An unimplemented syscall (here `sol_set_return_data`, which the SPL Token ELF names) is the
-    // interpreter's own `Halt::UnknownSyscall(hash)`.
-    let h = syscalls::murmur3_32(b"sol_set_return_data", 0);
+    // ZKVM-116's: return data and the sysvar getter the SPL Token ELF names.
+    let h = syscalls::murmur3_32(b"sol_set_return_data", 0) as i32;
+    assert_eq!(
+        e(i(opc::CALL_IMM, 0, 1, 0, h)),
+        "r0 = sbpf_sys_set_return_data(r1, r2, r3, r4, r5);"
+    );
+    let h = syscalls::murmur3_32(b"sol_get_sysvar", 0) as i32;
+    assert_eq!(e(i(opc::CALL_IMM, 0, 1, 0, h)), "r0 = sbpf_sys_get_sysvar(r1, r2, r3, r4, r5);");
+    // An unimplemented syscall (here `sol_secp256k1_recover`) is the interpreter's own
+    // `Halt::UnknownSyscall(hash)`.
+    let h = syscalls::murmur3_32(b"sol_secp256k1_recover", 0);
     assert_eq!(
         e(i(opc::CALL_IMM, 0, 1, 0, h as i32)),
         format!("sbpf_trap(SBPF_HALT_UNKNOWN_SYSCALL, {h:#010x}u);")
@@ -406,17 +414,19 @@ fn a_small_program_translates_to_the_expected_functions() {
     assert!(c.contains("#include \"sbpf_rt.h\""), "{c}");
     assert!(c.contains("SBPF_FN f_0(uint64_t r0, uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5, uint64_t r6, uint64_t r7, uint64_t r8, uint64_t r9, uint64_t r10)"), "{c}");
     assert!(c.contains("SBPF_FN f_5("), "{c}");
-    // Block 0 is one instruction and falls into the loop head; the loop is two. Block 0 only
-    // charges: its one successor checks (a deferred check). The loop head checks — it is its own
-    // successor — and so do the call and the exit.
+    // Block 0 is one instruction and falls into the loop head; the loop is two. Block 0 checks:
+    // it is the function's entry. The loop head checks — it closes a loop — and so does the exit;
+    // the call only charges (the callee's entry checks).
     assert!(
-        c.contains("L_0:\n    budget -= 1;\n    r6 = 3;\n    goto L_1;\n"),
+        c.contains("L_0:\n    if ((budget -= 1) < 0) goto L_limit;\n    r6 = 3;\n    goto L_1;\n"),
         "{c}"
     );
+    // Every function pushes its own frame first, and takes the budget over.
+    assert!(c.contains(") {\n    SBPF_ENTER();\n    int32_t budget = sbpf_budget;\n"), "{c}");
     assert!(c.contains("L_1:\n    if ((budget -= 2) < 0) goto L_limit;\n    r6 = r6 - 1;\n    if (r6 != 0) goto L_1;\n    goto L_3;\n"), "{c}");
     // Liveness: f_5 reads nothing before writing it and writes only r0, so nothing goes in (0 for
     // r0..r9) and only r0 comes back.
-    assert!(c.contains("L_3:\n    if ((budget -= 1) < 0) goto L_limit;\n    SBPF_CALL(f_5(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, r10 + SBPF_STACK_FRAME), r0 = x_.r0;);\n    goto L_4;\n"), "{c}");
+    assert!(c.contains("L_3:\n    budget -= 1;\n    SBPF_CALL(f_5(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, r10 + SBPF_STACK_FRAME), r0 = x_.r0;);\n    goto L_4;\n"), "{c}");
     assert!(c.contains("    SBPF_RETURN();\n"), "{c}");
     assert!(
         c.contains(
@@ -430,7 +440,7 @@ fn a_small_program_translates_to_the_expected_functions() {
         "{c}"
     );
     assert!(
-        c.contains("sbpf_rt_enter(sbpf_entry_fn, SBPF_REGION_INPUT, 0, 0, 0, 0, r0)"),
+        c.contains("sbpf_rt_settle(sbpf_rt_enter(sbpf_entry_fn, SBPF_REGION_INPUT, 0, 0, 0, 0, r0))"),
         "{c}"
     );
     // callx can land on either function.
@@ -449,7 +459,7 @@ fn trap_blocks_charge_what_the_interpreter_counts() {
     let p = Program::from_text(&t).unwrap();
     let c = emit_program(&p, &scan(&p)).c;
     assert!(
-        c.contains("L_0:\n    budget -= 1;\n    sbpf_trap(SBPF_HALT_BAD_INSN, 0xb7);\n"),
+        c.contains("L_0:\n    if ((budget -= 1) < 0) goto L_limit;\n    sbpf_trap(SBPF_HALT_BAD_INSN, 0xb7);\n"),
         "{c}"
     );
     assert!(!c.contains("r11"), "{c}");
@@ -459,7 +469,7 @@ fn trap_blocks_charge_what_the_interpreter_counts() {
     let p = Program::from_text(&t).unwrap();
     let c = emit_program(&p, &scan(&p)).c;
     assert!(
-        c.contains("L_0:\n    budget -= 2;\n    r0 = 1;\n    sbpf_trap(SBPF_HALT_BAD_JUMP, 0);\n"),
+        c.contains("L_0:\n    if ((budget -= 2) < 0) goto L_limit;\n    r0 = 1;\n    sbpf_trap(SBPF_HALT_BAD_JUMP, 0);\n"),
         "{c}"
     );
 
@@ -502,12 +512,19 @@ fn a_function_inside_another_is_merged_into_it() {
     );
 }
 
-/// Deferred checks: no two unchecked blocks are adjacent, and a block ending in `exit` or a call
-/// always checks. A chain of straight-line blocks split by jump targets alternates.
+/// Which blocks check the budget: a function's entry, a block that closes a loop, and a block
+/// ending in `exit`. Everything else only charges — straight-line chains, branches, calls and
+/// syscalls alike.
 #[test]
-fn a_deferred_check_is_never_next_to_another() {
+fn a_block_checks_only_at_an_entry_a_loop_head_or_an_exit() {
+    let head_of = |c: &str, pc: usize| {
+        let at = c
+            .find(&format!("L_{pc}:\n"))
+            .unwrap_or_else(|| panic!("no L_{pc}:\n{c}"));
+        c[at..].lines().nth(1).unwrap().trim().to_string()
+    };
     // 0: jeq r1, 0, +1 (-> 2 or 1); 1: mov r0, 1; 2: jeq r2, 0, +1 (-> 4 or 3); 3: mov r0, 2;
-    // 4: exit.
+    // 4: exit. No loop: the entry and the exit check, the three between only charge.
     let t = text(&[
         i(opc::JEQ_IMM, 1, 0, 1, 0),
         i(opc::MOV64_IMM, 0, 0, 0, 1),
@@ -517,19 +534,70 @@ fn a_deferred_check_is_never_next_to_another() {
     ]);
     let p = Program::from_text(&t).unwrap();
     let c = emit_program(&p, &scan(&p)).c;
-    let head = |pc: usize| {
-        let at = c
-            .find(&format!("L_{pc}:\n"))
-            .unwrap_or_else(|| panic!("no L_{pc}:\n{c}"));
-        c[at..].lines().nth(1).unwrap().trim().to_string()
+    assert_eq!(head_of(&c, 0), "if ((budget -= 1) < 0) goto L_limit;");
+    assert_eq!(head_of(&c, 1), "budget -= 1;");
+    assert_eq!(head_of(&c, 2), "budget -= 1;");
+    assert_eq!(head_of(&c, 3), "budget -= 1;");
+    assert_eq!(head_of(&c, 4), "if ((budget -= 1) < 0) goto L_limit;");
+
+    // A loop of three blocks with a syscall in it, and a nested one-block loop:
+    // 0: mov r6, 5                 entry
+    // 1: call sol_log_64_          <- the outer loop's head (the back edge from 6 lands here)
+    // 2: sub r7, 1 ; 3: jne r7, 0, -2   the inner loop: its own head
+    // 4: sub r6, 1 ; 5: jeq r6, 0, +1 (-> 7) ; 6: ja -6 (-> 1)
+    // 7: exit
+    let log64 = syscalls::SOL_LOG_64 as i32;
+    let t = text(&[
+        i(opc::MOV64_IMM, 6, 0, 0, 5),
+        i(opc::CALL_IMM, 0, 1, 0, log64),
+        i(opc::SUB64_IMM, 7, 0, 0, 1),
+        i(opc::JNE_IMM, 7, 0, -2, 0),
+        i(opc::SUB64_IMM, 6, 0, 0, 1),
+        i(opc::JEQ_IMM, 6, 0, 1, 0),
+        i(opc::JA, 0, 0, -6, 0),
+        i(opc::EXIT, 0, 0, 0, 0),
+    ]);
+    let p = Program::from_text(&t).unwrap();
+    let c = emit_program(&p, &scan(&p)).c;
+    assert_eq!(head_of(&c, 0), "if ((budget -= 1) < 0) goto L_limit;", "{c}");
+    // The syscall's block is the outer loop's head, and its charge is the `call` plus
+    // `sol_log_64_`'s 100 compute units.
+    assert_eq!(head_of(&c, 1), "if ((budget -= 101) < 0) goto L_limit;", "{c}");
+    assert_eq!(head_of(&c, 2), "if ((budget -= 2) < 0) goto L_limit;", "{c}");
+    assert_eq!(head_of(&c, 4), "budget -= 2;", "{c}");
+    assert_eq!(head_of(&c, 6), "budget -= 1;", "{c}");
+    assert_eq!(head_of(&c, 7), "if ((budget -= 1) < 0) goto L_limit;", "{c}");
+}
+
+/// A syscall's fixed cost (`syscalls::base_cost`) is part of the charge of the block its `call`
+/// ends; one the runtime does not implement costs nothing but its instruction.
+#[test]
+fn a_syscall_block_is_charged_the_syscalls_base_cost() {
+    let charge_of = |hash: u32| -> usize {
+        // 0: mov r1, 0 ; 1: call <hash> ; 2: exit — block 0 is the entry, so it checks.
+        let t = text(&[
+            i(opc::MOV64_IMM, 1, 0, 0, 0),
+            i(opc::CALL_IMM, 0, 1, 0, hash as i32),
+            i(opc::EXIT, 0, 0, 0, 0),
+        ]);
+        let p = Program::from_text(&t).unwrap();
+        let c = emit_program(&p, &scan(&p)).c;
+        let at = c.find("L_0:\n    if ((budget -= ").expect("the entry block checks") + 24;
+        c[at..].split(')').next().unwrap().parse().unwrap()
     };
-    // 0 has no unchecked neighbour yet: deferred. 1 and 2 follow it: checked. 3 follows only 2:
-    // deferred. 4 ends in exit: checked.
-    assert_eq!(head(0), "budget -= 1;");
-    assert_eq!(head(1), "if ((budget -= 1) < 0) goto L_limit;");
-    assert_eq!(head(2), "if ((budget -= 1) < 0) goto L_limit;");
-    assert_eq!(head(3), "budget -= 1;");
-    assert_eq!(head(4), "if ((budget -= 1) < 0) goto L_limit;");
+    for &(hash, name) in syscalls::SUPPORTED {
+        assert_eq!(charge_of(hash) as u64, 2 + syscalls::base_cost(hash), "{name}");
+    }
+    assert_eq!(charge_of(syscalls::SOL_LOG_PUBKEY), 102);
+    assert_eq!(charge_of(syscalls::SOL_MEMCPY), 12);
+    assert_eq!(charge_of(syscalls::SOL_ALLOC_FREE), 2);
+    assert_eq!(charge_of(syscalls::SOL_SHA256), 87);
+    assert_eq!(charge_of(syscalls::SOL_KECCAK256), 87);
+    assert_eq!(charge_of(syscalls::SOL_SET_RETURN_DATA), 102);
+    assert_eq!(charge_of(syscalls::SOL_GET_CLOCK_SYSVAR), 142);
+    assert_eq!(charge_of(syscalls::SOL_GET_RENT_SYSVAR), 126);
+    assert_eq!(charge_of(syscalls::SOL_GET_SYSVAR), 112);
+    assert_eq!(charge_of(syscalls::murmur3_32(b"sol_secp256k1_recover", 0)), 2);
 }
 
 /// Fix round 1 (critical): a callee that reads its argument only through a register store. The

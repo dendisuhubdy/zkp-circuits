@@ -5,7 +5,7 @@
 //!   and declaration order, read from both sources as text — so a variant added, removed or moved
 //!   on either side fails here — plus an exhaustive `match` over the compiled enum, so a new
 //!   variant cannot even compile until it has a code. Likewise the `Halt::Trap` strings
-//!   (`SBPF_TRAP_*`), the twelve syscall hashes against `syscalls::SUPPORTED` (and one
+//!   (`SBPF_TRAP_*`), the eighteen syscall hashes against `syscalls::SUPPORTED` (and one
 //!   `sbpf_sys_<name>` declared for each), and the machine's constants.
 //! * The differential: every region access and syscall in a directed list plus a seeded random
 //!   stream runs through `sbpf-core` (`Memory::load`/`store`, `syscalls::dispatch` on a `Vm` over
@@ -21,7 +21,7 @@ use std::process::{Command, Stdio};
 
 use rand_zkvm::sbpf::HostRef;
 use sbpf_core::elf::Program;
-use sbpf_core::interp::{Halt, Vm, MAX_INSTRUCTIONS};
+use sbpf_core::interp::{Halt, Vm, MAX_INSTRUCTIONS, SYSVAR_BYTES};
 use sbpf_core::memory::{
     Memory, HEAP_BYTES, MAX_CALL_DEPTH, REGION_HEAP, REGION_INPUT, REGION_PROGRAM, REGION_STACK,
     STACK_BYTES, STACK_FRAME,
@@ -219,6 +219,16 @@ fn the_machine_constants_are_the_interpreters() {
     assert_eq!(get("STACK_BYTES"), STACK_BYTES as u64);
     assert_eq!(get("HEAP_BYTES"), HEAP_BYTES as u64);
     assert_eq!(get("MAX_INSTRUCTIONS"), MAX_INSTRUCTIONS);
+    assert_eq!(get("MAX_RETURN_DATA"), sbpf_core::interp::MAX_RETURN_DATA as u64);
+    assert_eq!(get("SYSVAR_BYTES"), SYSVAR_BYTES as u64);
+    assert_eq!(get("CLOCK_BYTES"), sbpf_core::interp::CLOCK_BYTES as u64);
+    assert_eq!(get("RENT_BYTES"), sbpf_core::interp::RENT_BYTES as u64);
+    assert_eq!(get("RENT_STRUCT_BYTES"), syscalls::RENT_STRUCT_BYTES as u64);
+    assert_eq!(get("CU_SYSCALL_BASE"), syscalls::CU_SYSCALL_BASE);
+    assert_eq!(get("CU_MEM_OP_BASE"), syscalls::CU_MEM_OP_BASE);
+    assert_eq!(get("CU_BYTES_PER_UNIT"), syscalls::CU_BYTES_PER_UNIT);
+    assert_eq!(get("CU_HASH_BASE"), syscalls::CU_HASH_BASE);
+    assert_eq!(get("CU_SYSVAR_BASE"), syscalls::CU_SYSVAR_BASE);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -238,6 +248,9 @@ struct Case {
     rodata: Vec<u8>,
     rodata_va: u64,
     input: Vec<u8>,
+    /// The sysvar block (`Vm::sysvars`): empty or `SYSVAR_BYTES` long.
+    sysvars: Vec<u8>,
+    program_id: [u8; 32],
     ops: Vec<Op>,
 }
 
@@ -285,7 +298,7 @@ fn interpret(c: &Case) -> String {
     let mut heap = vec![0u8; HEAP_BYTES].into_boxed_slice();
     let mut input = c.input.clone();
     let mut out = String::new();
-    let heap_used;
+    let (heap_used, returned, cu);
     {
         let mem = Memory {
             text: program.text,
@@ -298,6 +311,9 @@ fn interpret(c: &Case) -> String {
         };
         let mut host = HostRef;
         let mut vm = Vm::new(&mut host, &program, mem);
+        vm.sysvars[..c.sysvars.len()].copy_from_slice(&c.sysvars);
+        vm.sysvars_len = c.sysvars.len();
+        vm.program_id = c.program_id;
         for op in &c.ops {
             let r = match *op {
                 Op::Ld(a, n) => vm.mem.load(a, n as usize),
@@ -317,8 +333,11 @@ fn interpret(c: &Case) -> String {
             }
         }
         heap_used = vm.heap_used;
+        returned = vm.return_data[..vm.return_len].to_vec();
+        cu = vm.compute_units_consumed().min(MAX_INSTRUCTIONS);
     }
     writeln!(out, "input {}", hex(&input)).unwrap();
+    writeln!(out, "return {}\ncu {cu}", hex(&returned)).unwrap();
     writeln!(out, "stack {:016x}\nheap {:016x}\nheap_used {heap_used}", fnv(&stack), fnv(&heap)).unwrap();
     out
 }
@@ -327,6 +346,7 @@ fn case_text(c: &Case) -> String {
     let mut s = String::new();
     writeln!(s, "case\ntext {}\ntext_va {}", hex(&c.text), c.text_va).unwrap();
     writeln!(s, "rodata {}\nrodata_va {}\ninput {}", hex(&c.rodata), c.rodata_va, hex(&c.input)).unwrap();
+    writeln!(s, "sysvars {}\nprogram_id {}", hex(&c.sysvars), hex(&c.program_id)).unwrap();
     for op in &c.ops {
         match *op {
             Op::Ld(a, n) => writeln!(s, "ld {a} {n}").unwrap(),
@@ -430,7 +450,16 @@ fn layout(split: bool, input_len: usize) -> Case {
     } else {
         (rodata[0x20..0x60].to_vec(), TV)
     };
-    Case { text, text_va, rodata, rodata_va: RV, input: (0..input_len).map(|i| i as u8).collect(), ops: vec![] }
+    Case {
+        text,
+        text_va,
+        rodata,
+        rodata_va: RV,
+        input: (0..input_len).map(|i| i as u8).collect(),
+        sysvars: (0..SYSVAR_BYTES).map(|i| 0xc0 ^ i as u8).collect(),
+        program_id: core::array::from_fn(|i| 0x70 + i as u8),
+        ops: vec![],
+    }
 }
 
 fn pair(ptr: u64, len: u64) -> [u8; 16] {
@@ -638,6 +667,111 @@ fn directed() -> Vec<Case> {
     }
     ops.push(s(SOL_SHA256, &[REGION_HEAP, 40, at(0)]));
     ops.push(s(SOL_SHA256, &[REGION_HEAP, 39, at(32)]));
+    // The same pairs through the other chip, crossing Keccak's 136-byte rate many times.
+    ops.push(s(SOL_KECCAK256, &[REGION_HEAP, 40, at(64)]));
+    ops.push(s(SOL_KECCAK256, &[REGION_HEAP, 0, at(96)]));
+    k.ops = ops;
+    v.push(k);
+    // sol_keccak256: the order of the checks, as sol_sha256's.
+    for a in [[at(120), 1, at(200)], [at(0), 1, at(100)], [at(0), 9, at(64)], [at(0), 1, RV], [at(0), 1 << 32, at(64)]] {
+        let mut k = layout(false, 128);
+        k.input[..16].copy_from_slice(&pair(at(200), 1));
+        k.ops = vec![s(SOL_KECCAK256, &a)];
+        v.push(k);
+    }
+    // Return data: get before set, set, get whole / short / long, overlap, clear, too large, bad
+    // pointers, a zero-length set with a wild pointer.
+    c_(&mut v, false, 128, vec![
+        s(SOL_GET_RETURN_DATA, &[at(0), 64, at(64)]),
+        s(SOL_SET_RETURN_DATA, &[RV + 8, 40]),
+        s(SOL_GET_RETURN_DATA, &[at(0), 64, at(64)]),
+        s(SOL_GET_RETURN_DATA, &[REGION_STACK, 7, REGION_HEAP + 5]),
+        s(SOL_GET_RETURN_DATA, &[at(0), 0, 0x9_0000_0000]),
+        s(SOL_SET_RETURN_DATA, &[0x9_0000_0000, 0]),
+        s(SOL_GET_RETURN_DATA, &[at(0), 64, at(64)]),
+        s(SOL_SET_RETURN_DATA, &[REGION_STACK, 1024]),
+        s(SOL_GET_RETURN_DATA, &[REGION_HEAP, 2000, at(0)]),
+        s(SOL_GET_RETURN_DATA, &[at(0), 40, at(39)]),
+    ]);
+    c_(&mut v, false, 128, vec![s(SOL_SET_RETURN_DATA, &[at(0), 16]), s(SOL_GET_RETURN_DATA, &[at(40), 16, at(8)])]);
+    c_(&mut v, false, 128, vec![s(SOL_SET_RETURN_DATA, &[at(0), 16]), s(SOL_GET_RETURN_DATA, &[at(120), 16, at(8)])]);
+    c_(&mut v, false, 128, vec![s(SOL_SET_RETURN_DATA, &[at(0), 16]), s(SOL_GET_RETURN_DATA, &[at(0), 16, at(100)])]);
+    c_(&mut v, false, 128, vec![s(SOL_SET_RETURN_DATA, &[at(0), 16]), s(SOL_GET_RETURN_DATA, &[at(0), 16, RV])]);
+    c_(&mut v, false, 128, vec![s(SOL_SET_RETURN_DATA, &[REGION_STACK, 1025])]);
+    c_(&mut v, false, 128, vec![s(SOL_SET_RETURN_DATA, &[at(100), 29])]);
+    c_(&mut v, false, 128, vec![s(SOL_SET_RETURN_DATA, &[at(0), 1 << 32])]);
+    // Sysvars: the two typed getters (aligned, misaligned, out of range, read-only), then
+    // sol_get_sysvar by id — whole, partial, past the end, an unknown id, overflowing offsets.
+    let ids = |k: &mut Case| {
+        k.input[..32].copy_from_slice(&CLOCK_ID);
+        k.input[32..64].copy_from_slice(&RENT_ID);
+        k.input[64..96].copy_from_slice(&[9u8; 32]);
+    };
+    for with in [true, false] {
+        let mut k = layout(false, 128);
+        ids(&mut k);
+        if !with {
+            k.sysvars.clear();
+        }
+        k.ops = vec![
+            s(SOL_GET_CLOCK_SYSVAR, &[REGION_STACK + 64]),
+            s(SOL_GET_RENT_SYSVAR, &[REGION_HEAP + 8]),
+            s(SOL_GET_SYSVAR, &[at(0), REGION_STACK + 512, 0, 40]),
+            s(SOL_GET_SYSVAR, &[at(32), REGION_STACK + 600, 0, 17]),
+            s(SOL_GET_SYSVAR, &[at(32), REGION_STACK + 700, 8, 8]),
+            s(SOL_GET_SYSVAR, &[at(0), REGION_STACK + 800, 39, 1]),
+            s(SOL_GET_SYSVAR, &[at(0), REGION_STACK + 900, 40, 0]),
+            s(SOL_GET_SYSVAR, &[at(0), REGION_STACK + 900, 40, 1]),
+            s(SOL_GET_SYSVAR, &[at(32), REGION_STACK + 900, 0, 18]),
+            s(SOL_GET_SYSVAR, &[at(32), REGION_STACK + 900, 1 << 40, 1]),
+            s(SOL_GET_SYSVAR, &[at(64), REGION_STACK + 900, 0, 8]),
+        ];
+        v.push(k);
+    }
+    for op in [
+        s(SOL_GET_CLOCK_SYSVAR, &[REGION_STACK + 4]),
+        s(SOL_GET_CLOCK_SYSVAR, &[REGION_STACK + STACK_BYTES as u64 - 32]),
+        s(SOL_GET_CLOCK_SYSVAR, &[RV]),
+        s(SOL_GET_RENT_SYSVAR, &[REGION_HEAP + 1]),
+        s(SOL_GET_RENT_SYSVAR, &[REGION_HEAP + HEAP_BYTES as u64 - 16]),
+        s(SOL_GET_SYSVAR, &[at(100), REGION_STACK, 0, 8]),
+        s(SOL_GET_SYSVAR, &[at(0), RV, 0, 8]),
+        s(SOL_GET_SYSVAR, &[at(0), REGION_STACK, u64::MAX, 2]),
+        s(SOL_GET_SYSVAR, &[at(0), REGION_STACK, 0, 1 << 32]),
+        s(SOL_GET_SYSVAR, &[at(0), REGION_STACK, 0, 3000]),
+    ] {
+        let mut k = layout(false, 128);
+        ids(&mut k);
+        k.ops = vec![op];
+        v.push(k);
+    }
+    // Compute units: the length-dependent charges at their thresholds, and the budget running out
+    // on a charge (a 32 KiB sol_sha256 slice costs 16 384, so the thirteenth does not fit).
+    let mut k = layout(false, 200);
+    k.input[..16].copy_from_slice(&pair(REGION_HEAP, HEAP_BYTES as u64));
+    let mut ops = vec![
+        s(SOL_LOG, &[at(0), 100]),
+        s(SOL_LOG, &[at(0), 101]),
+        s(SOL_LOG, &[at(0), 200]),
+        s(SOL_MEMSET, &[REGION_HEAP, 1, 2749]),
+        s(SOL_MEMSET, &[REGION_HEAP, 2, 2750]),
+        s(SOL_MEMSET, &[REGION_HEAP, 3, 32768]),
+        s(SOL_MEMCPY, &[REGION_STACK, REGION_HEAP, 32768]),
+        s(SOL_MEMMOVE, &[REGION_STACK, REGION_HEAP, 5000]),
+        s(SOL_MEMCMP, &[REGION_STACK, REGION_HEAP, 32768, at(64)]),
+        s(SOL_SET_RETURN_DATA, &[REGION_HEAP, 249]),
+        s(SOL_SET_RETURN_DATA, &[REGION_HEAP, 250]),
+        s(SOL_SET_RETURN_DATA, &[REGION_HEAP, 1024]),
+        s(SOL_GET_RETURN_DATA, &[REGION_STACK, 217, at(64)]),
+        s(SOL_GET_RETURN_DATA, &[REGION_STACK, 218, at(64)]),
+        s(SOL_LOG_64, &[]),
+        s(SOL_LOG_PUBKEY, &[at(0)]),
+        s(SOL_LOG_COMPUTE_UNITS, &[]),
+        s(SOL_ALLOC_FREE, &[8, 0]),
+    ];
+    for _ in 0..13 {
+        ops.push(s(SOL_SHA256, &[at(0), 1, at(64)]));
+    }
     k.ops = ops;
     v.push(k);
     v
@@ -691,8 +825,16 @@ fn random(n: usize) -> Vec<Case> {
             c.input[i..i + 16].copy_from_slice(&p);
             i += 16;
         }
+        match m.below(4) {
+            0 if c.input.len() >= 32 => c.input[..32].copy_from_slice(&CLOCK_ID),
+            1 if c.input.len() >= 32 => c.input[..32].copy_from_slice(&RENT_ID),
+            _ => {}
+        }
+        if m.below(5) == 0 {
+            c.sysvars.clear();
+        }
         for _ in 0..1 + m.below(6) {
-            let op = match m.below(11) {
+            let op = match m.below(17) {
                 0 => Op::Ld(ptr(&mut m), m.pick(&[1, 2, 4, 8])),
                 1 => Op::St(ptr(&mut m), m.pick(&[1, 2, 4, 8]), m.next()),
                 2 => Op::Sys(SOL_MEMCPY, [ptr(&mut m), ptr(&mut m), len(&mut m), 0, 0]),
@@ -703,6 +845,19 @@ fn random(n: usize) -> Vec<Case> {
                 7 => Op::Sys(SOL_SHA256, [ptr(&mut m), m.pick(&[0, 1, 2, 3, 1 << 32]), ptr(&mut m), 0, 0]),
                 8 => Op::Sys(SOL_LOG, [ptr(&mut m), len(&mut m), 0, 0, 0]),
                 9 => Op::Sys(SOL_LOG_PUBKEY, [ptr(&mut m), 0, 0, 0, 0]),
+                10 => Op::Sys(SOL_KECCAK256, [ptr(&mut m), m.pick(&[0, 1, 2, 3, 1 << 32]), ptr(&mut m), 0, 0]),
+                11 => Op::Sys(SOL_SET_RETURN_DATA, [ptr(&mut m), m.pick(&[0, 1, 31, 64, 200, 1024, 1025, 1 << 32]), 0, 0, 0]),
+                12 => Op::Sys(SOL_GET_RETURN_DATA, [ptr(&mut m), len(&mut m), ptr(&mut m), 0, 0]),
+                13 => Op::Sys(SOL_GET_CLOCK_SYSVAR, [ptr(&mut m) & !m.pick(&[0u64, 7, 7, 7]), 0, 0, 0, 0]),
+                14 => Op::Sys(SOL_GET_RENT_SYSVAR, [ptr(&mut m) & !m.pick(&[0u64, 7, 7, 7]), 0, 0, 0, 0]),
+                15 => {
+                    // The id usually sits at the start of the input region, where the case below
+                    // sometimes put Clock's or Rent's.
+                    let id = if m.below(4) == 0 { ptr(&mut m) } else { IN };
+                    let off = m.pick(&[0, 0, 1, 8, 16, 17, 39, 40, 41, u64::MAX]);
+                    let n = m.pick(&[0, 1, 8, 16, 17, 18, 40, 41, 1 << 32]);
+                    Op::Sys(SOL_GET_SYSVAR, [id, ptr(&mut m), off, n, 0])
+                }
                 _ => {
                     let other = m.next() as u32;
                     let h = m.pick(&[ABORT, SOL_PANIC, SOL_LOG_64, SOL_LOG_COMPUTE_UNITS, other]);
@@ -736,7 +891,7 @@ fn every_region_access_and_syscall_matches_the_interpreter() {
     }
     // The stream must actually reach the halts it is meant to compare.
     let names = halt_variants_in_source();
-    for (code, name) in [(1, "AccessViolation"), (4, "UnknownSyscall"), (10, "Trap")] {
+    for (code, name) in [(1, "AccessViolation"), (4, "UnknownSyscall"), (6, "InstructionLimit"), (10, "Trap")] {
         assert_eq!(names[code], name);
         assert!(halts[code] > 20, "only {} {name} halts", halts[code]);
     }
@@ -757,4 +912,287 @@ fn the_c_suite_passes_in_both_usize_widths() {
         let s = String::from_utf8_lossy(&o.stdout);
         assert!(o.status.success() && s.contains(" 0 failures"), "{name}:\n{s}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ZKVM-116: reference vectors for the new syscalls and for the compute-unit charges.
+//
+// Every expected value below is fixed outside both implementations: Keccak-256 digests from the
+// Keccak team's own vectors, the sysvar layouts from `solana-program` (`Clock` is five 8-byte
+// integers; `Rent` is `u64, f64, u8`), return-data and sysvar results from Agave's
+// `SyscallSetReturnData` / `SyscallGetReturnData` / `SyscallGetSysvar`, and the charges from
+// Agave's `SVMTransactionExecutionCost` defaults (syscall 100, mem-op 10, 250 bytes per unit,
+// sha256 85 + a unit per two bytes, sysvar 100). The interpreter and the C runtime must each
+// produce them.
+
+/// What a vector's ops must print (`ok <r0>` / `halt <code> <arg>` per op), the return data left,
+/// and the compute units charged.
+struct Vector {
+    name: &'static str,
+    case: Case,
+    ops: Vec<String>,
+    returned: Vec<u8>,
+    cu: u64,
+}
+
+/// `bytes` (a multiple of 8 long) read back from `addr` with 8-byte loads: the ops and what each
+/// prints.
+fn read_back(addr: u64, bytes: &[u8]) -> (Vec<Op>, Vec<String>) {
+    assert_eq!(bytes.len() % 8, 0);
+    let ops = (0..bytes.len() / 8).map(|i| Op::Ld(addr + 8 * i as u64, 8)).collect();
+    let lines = bytes.chunks(8).map(|c| format!("ok {}", u64::from_le_bytes(c.try_into().unwrap()))).collect();
+    (ops, lines)
+}
+
+fn unhex(h: &str) -> Vec<u8> {
+    (0..h.len() / 2).map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap()).collect()
+}
+
+fn reference_vectors() -> Vec<Vector> {
+    use rand_zkvm::sbpf::{sysvar_block, DEFAULT_RENT, FIXTURE_CLOCK, SPL_TOKEN_ID};
+    use syscalls::*;
+    let at = |o: u64| IN + o;
+    let s = |h: u32, a: &[u64]| {
+        let mut r = [0u64; 5];
+        r[..a.len()].copy_from_slice(a);
+        Op::Sys(h, r)
+    };
+    let base = || {
+        let mut k = layout(false, 128);
+        k.sysvars = sysvar_block(&FIXTURE_CLOCK, &DEFAULT_RENT).to_vec();
+        k.program_id = SPL_TOKEN_ID;
+        k
+    };
+    let trap = |name: &str| header_traps().iter().find(|(_, t)| t == name).unwrap().0;
+    let mut v = Vec::new();
+
+    // ---- sol_keccak256 --------------------------------------------------------------------------
+    for (name, msg, slices, digest) in [
+        ("keccak256(\"\")", &b""[..], vec![], "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"),
+        ("keccak256(\"abc\")", &b"abc"[..], vec![3], "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45"),
+        // 56 bytes in three slices.
+        (
+            "keccak256(abcdbcde…nopq) in three slices",
+            &b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"[..],
+            vec![1, 30, 25],
+            "45d3b367a6904e6e8d502ee04999a7c27647f91fa845d456525fd352ae3d7371",
+        ),
+    ] {
+        let mut k = base();
+        k.input[64..64 + msg.len()].copy_from_slice(msg);
+        let mut off = 0;
+        let mut cu = CU_HASH_BASE;
+        for (i, len) in slices.iter().enumerate() {
+            k.input[16 * i..16 * i + 16].copy_from_slice(&pair(at(64 + off), *len));
+            off += len;
+            cu += core::cmp::max(CU_MEM_OP_BASE, len / 2);
+        }
+        let (rd, lines) = read_back(REGION_HEAP, &unhex(digest));
+        k.ops = vec![s(SOL_KECCAK256, &[at(0), slices.len() as u64, REGION_HEAP])];
+        k.ops.extend(rd);
+        let mut ops = vec!["ok 0".to_string()];
+        ops.extend(lines);
+        v.push(Vector { name, case: k, ops, returned: vec![], cu });
+    }
+
+    // ---- return data ----------------------------------------------------------------------------
+    // rodata[i] is 0xa0 ^ i (`layout`), so 40 bytes from RV + 8 are 0xa8 ^ … .
+    let data: Vec<u8> = (8..48u32).map(|i| (0xa0 ^ i) as u8).collect();
+    let mut k = base();
+    let (rd_data, data_lines) = read_back(REGION_STACK, &data);
+    let (rd_id, id_lines) = read_back(REGION_HEAP, &SPL_TOKEN_ID);
+    k.ops = vec![
+        s(SOL_GET_RETURN_DATA, &[REGION_STACK, 64, REGION_HEAP]), // nothing set: 0, nothing written
+        Op::Ld(REGION_HEAP, 8),
+        s(SOL_SET_RETURN_DATA, &[RV + 8, 40]),
+        s(SOL_GET_RETURN_DATA, &[REGION_STACK, 64, REGION_HEAP]), // 40 set, 40 copied
+    ];
+    k.ops.extend(rd_data);
+    k.ops.push(Op::Ld(REGION_STACK + 40, 8)); // nothing past the 40
+    k.ops.extend(rd_id);
+    k.ops.push(s(SOL_GET_RETURN_DATA, &[REGION_STACK + 100, 3, REGION_HEAP + 100])); // a short buffer still reports 40
+    k.ops.push(Op::Ld(REGION_STACK + 100, 8));
+    let mut ops = vec!["ok 0".into(), "ok 0".into(), "ok 0".into(), "ok 40".into()];
+    ops.extend(data_lines);
+    ops.push("ok 0".into());
+    ops.extend(id_lines);
+    ops.push("ok 40".into());
+    ops.push(format!("ok {}", u64::from_le_bytes([data[0], data[1], data[2], 0, 0, 0, 0, 0])));
+    // get(0 copied) 100; set 100 + 40/250; get 100 + 72/250; get 100 + 35/250.
+    v.push(Vector { name: "set then get return data", case: k, ops, returned: data.clone(), cu: 400 });
+
+    let mut k = base();
+    k.ops = vec![s(SOL_SET_RETURN_DATA, &[RV, 16]), s(SOL_SET_RETURN_DATA, &[0x9_0000_0000, 0]), s(SOL_GET_RETURN_DATA, &[at(0), 8, at(64)])];
+    v.push(Vector { name: "a zero-length set clears, whatever the pointer", case: k, ops: vec!["ok 0".into(); 3], returned: vec![], cu: 300 });
+
+    let mut k = base();
+    k.ops = vec![s(SOL_SET_RETURN_DATA, &[REGION_STACK, 1024]), s(SOL_SET_RETURN_DATA, &[REGION_STACK, 1025])];
+    let ops = vec!["ok 0".into(), format!("halt 10 {}", trap("return data too large"))];
+    // 100 + 1024/250, then 100 + 1025/250 charged before the refusal.
+    v.push(Vector { name: "MAX_RETURN_DATA is 1024", case: k, ops, returned: vec![0; 1024], cu: 208 });
+
+    let mut k = base();
+    k.ops = vec![s(SOL_SET_RETURN_DATA, &[RV, 40]), s(SOL_GET_RETURN_DATA, &[at(0), 40, at(39)])];
+    let ops = vec!["ok 0".into(), format!("halt 10 {}", trap("return data overlap"))];
+    v.push(Vector { name: "the data and the program id may not overlap", case: k, ops, returned: (0..40u32).map(|i| (0xa0 ^ i) as u8).collect(), cu: 200 });
+
+    // ---- sysvars --------------------------------------------------------------------------------
+    let clock = FIXTURE_CLOCK.account_data();
+    let rent = DEFAULT_RENT.account_data();
+    assert_eq!(&rent[..8], &3480u64.to_le_bytes());
+    assert_eq!(&rent[8..16], &[0, 0, 0, 0, 0, 0, 0, 0x40], "2.0 as an IEEE-754 double");
+    assert_eq!(rent[16], 50);
+
+    let mut k = base();
+    let (rd, lines) = read_back(REGION_STACK + 64, &clock);
+    k.ops = vec![s(SOL_GET_CLOCK_SYSVAR, &[REGION_STACK + 64])];
+    k.ops.extend(rd);
+    let mut ops = vec!["ok 0".to_string()];
+    ops.extend(lines);
+    v.push(Vector { name: "sol_get_clock_sysvar", case: k, ops, returned: vec![], cu: 140 });
+
+    let mut k = base();
+    // The struct is 24 bytes: 17 of fields, 7 of padding, written as zeros over what was there.
+    let mut rent_struct = rent.to_vec();
+    rent_struct.extend_from_slice(&[0; 7]);
+    let (rd, lines) = read_back(REGION_HEAP + 8, &rent_struct);
+    k.ops = vec![s(SOL_MEMSET, &[REGION_HEAP, 0xee, 64]), s(SOL_GET_RENT_SYSVAR, &[REGION_HEAP + 8])];
+    k.ops.extend(rd);
+    k.ops.push(Op::Ld(REGION_HEAP + 32, 8));
+    let mut ops = vec!["ok 0".to_string(), "ok 0".to_string()];
+    ops.extend(lines);
+    ops.push(format!("ok {}", 0xeeee_eeee_eeee_eeeeu64));
+    v.push(Vector { name: "sol_get_rent_sysvar", case: k, ops, returned: vec![], cu: 10 + 124 });
+
+    let mut k = base();
+    k.ops = vec![s(SOL_GET_CLOCK_SYSVAR, &[REGION_STACK + 4])];
+    v.push(Vector { name: "a misaligned sysvar struct", case: k, ops: vec![format!("halt 1 {}", REGION_STACK + 4)], returned: vec![], cu: 140 });
+
+    let mut k = base();
+    k.sysvars.clear();
+    k.ops = vec![s(SOL_GET_RENT_SYSVAR, &[REGION_HEAP])];
+    v.push(Vector { name: "no sysvar block on the tape", case: k, ops: vec![format!("halt 10 {}", trap("sysvar unavailable"))], returned: vec![], cu: 124 });
+
+    let mut k = base();
+    k.input[..32].copy_from_slice(&CLOCK_ID);
+    k.input[32..64].copy_from_slice(&RENT_ID);
+    let (rd_ts, ts_lines) = read_back(REGION_STACK, &clock[32..40]);
+    let mut rent_16 = rent[..16].to_vec();
+    let (rd_rent, rent_lines) = read_back(REGION_STACK + 64, &rent_16);
+    rent_16.clear();
+    k.ops = vec![s(SOL_GET_SYSVAR, &[at(0), REGION_STACK, 32, 8])];
+    k.ops.extend(rd_ts);
+    k.ops.push(s(SOL_GET_SYSVAR, &[at(32), REGION_STACK + 64, 0, 17]));
+    k.ops.extend(rd_rent);
+    k.ops.push(Op::Ld(REGION_STACK + 80, 8));
+    k.ops.push(s(SOL_GET_SYSVAR, &[at(32), REGION_STACK + 200, 0, 18])); // past Rent's 17 bytes: 1
+    k.ops.push(s(SOL_GET_SYSVAR, &[at(0), REGION_STACK + 200, 40, 0])); // an empty read at the end: 0
+    k.ops.push(s(SOL_GET_SYSVAR, &[at(0), REGION_STACK + 200, 41, 0])); // and past it: 1
+    k.ops.push(Op::Ld(REGION_STACK + 200, 8)); // none of the three wrote
+    let mut ops = vec!["ok 0".to_string()];
+    ops.extend(ts_lines);
+    ops.push("ok 0".into());
+    ops.extend(rent_lines);
+    ops.push("ok 50".into());
+    ops.extend(["ok 1".to_string(), "ok 0".into(), "ok 1".into(), "ok 0".into()]);
+    v.push(Vector { name: "sol_get_sysvar by id, offset and length", case: k, ops, returned: vec![], cu: 5 * 110 });
+
+    let mut k = base();
+    k.input[..32].copy_from_slice(&[9; 32]);
+    k.ops = vec![s(SOL_GET_SYSVAR, &[at(0), REGION_STACK, 0, 8])];
+    v.push(Vector { name: "sol_get_sysvar for an id that is neither Clock nor Rent", case: k, ops: vec![format!("halt 10 {}", trap("sysvar unavailable"))], returned: vec![], cu: 110 });
+
+    // ---- the charges, one call each --------------------------------------------------------------
+    let hash_slice = |len: u64| {
+        let mut k = base();
+        k.input[..16].copy_from_slice(&pair(REGION_HEAP, len));
+        (k, s(SOL_SHA256, &[at(0), 1, at(64)]))
+    };
+    for (name, (mut k, op), cu) in [
+        ("sol_log_ of 100 bytes: max(100, len)", (base(), s(SOL_LOG, &[at(0), 100])), 100),
+        ("sol_log_ of 101 bytes", (base(), s(SOL_LOG, &[at(0), 101])), 101),
+        ("sol_log_64_", (base(), s(SOL_LOG_64, &[1, 2, 3, 4, 5])), 100),
+        ("sol_log_pubkey", (base(), s(SOL_LOG_PUBKEY, &[at(0)])), 100),
+        ("sol_log_compute_units_", (base(), s(SOL_LOG_COMPUTE_UNITS, &[])), 100),
+        ("sol_memcpy_ of 2 749 bytes: max(10, n / 250)", (base(), s(SOL_MEMCPY, &[REGION_STACK, REGION_HEAP, 2749])), 10),
+        ("sol_memcpy_ of 2 750 bytes", (base(), s(SOL_MEMCPY, &[REGION_STACK, REGION_HEAP, 2750])), 11),
+        ("sol_memmove_ of 32 768 bytes", (base(), s(SOL_MEMMOVE, &[REGION_STACK, REGION_HEAP, 32768])), 131),
+        ("sol_memset_ of 32 768 bytes", (base(), s(SOL_MEMSET, &[REGION_STACK, 7, 32768])), 131),
+        ("sol_memcmp_ of 5 000 bytes", (base(), s(SOL_MEMCMP, &[REGION_STACK, REGION_HEAP, 5000, at(0)])), 20),
+        ("sol_alloc_free_ is free", (base(), s(SOL_ALLOC_FREE, &[64, 0])), 0),
+        ("sol_sha256 of no slices: 85", (base(), s(SOL_SHA256, &[at(0), 0, at(64)])), 85),
+        ("sol_sha256 of one 21-byte slice: 85 + max(10, len / 2)", hash_slice(21), 95),
+        ("sol_sha256 of one 22-byte slice", hash_slice(22), 96),
+        ("sol_sha256 of one 32 768-byte slice", hash_slice(32768), 85 + 16384),
+        ("sol_set_return_data of 249 bytes: 100 + len / 250", (base(), s(SOL_SET_RETURN_DATA, &[REGION_HEAP, 249])), 100),
+        ("sol_set_return_data of 250 bytes", (base(), s(SOL_SET_RETURN_DATA, &[REGION_HEAP, 250])), 101),
+        ("sol_get_sysvar of 3 000 bytes: 100 + max(10, len / 250) — charged, then refused as out of range", (
+            {
+                let mut k = base();
+                k.input[..32].copy_from_slice(&CLOCK_ID);
+                k
+            },
+            s(SOL_GET_SYSVAR, &[at(0), REGION_STACK, 0, 3000]),
+        ), 112),
+    ] {
+        let alloc = matches!(op, Op::Sys(h, _) if h == SOL_ALLOC_FREE);
+        let past = matches!(op, Op::Sys(h, _) if h == SOL_GET_SYSVAR);
+        k.ops = vec![op];
+        let line = if alloc { format!("ok {REGION_HEAP}") } else if past { "ok 1".into() } else { "ok 0".into() };
+        let returned = match k.ops[0] {
+            Op::Sys(h, a) if h == SOL_SET_RETURN_DATA => vec![0; a[1] as usize],
+            _ => vec![],
+        };
+        v.push(Vector { name, case: k, ops: vec![line], returned, cu });
+    }
+    // The budget is 200 000 units and a charge that does not fit is refused: twelve 32 KiB slices
+    // cost 12 × (85 + 16 384) = 197 628, and the thirteenth call's slice does not fit.
+    let (mut k, op) = hash_slice(32768);
+    k.ops = vec![op; 13];
+    let mut ops = vec!["ok 0".to_string(); 12];
+    ops.push("halt 6 0".into());
+    v.push(Vector { name: "the thirteenth 32 KiB sol_sha256 runs out of budget", case: k, ops, returned: vec![], cu: 200_000 });
+    v
+}
+
+/// The op lines, the return data and the charge of a transcript (the region digests are compared
+/// between the two implementations by the differential above, not against a literal).
+fn summary(transcript: &str) -> (Vec<String>, String, String) {
+    let mut ops = Vec::new();
+    let (mut returned, mut cu) = (String::new(), String::new());
+    for l in transcript.lines() {
+        if l.starts_with("ok ") || l.starts_with("halt ") {
+            ops.push(l.to_string());
+        } else if let Some(r) = l.strip_prefix("return ") {
+            returned = r.to_string();
+        } else if let Some(c) = l.strip_prefix("cu ") {
+            cu = c.to_string();
+        }
+    }
+    (ops, returned, cu)
+}
+
+#[test]
+fn the_interpreter_produces_the_reference_vectors() {
+    for v in reference_vectors() {
+        let want = (v.ops.clone(), hex(&v.returned), v.cu.to_string());
+        assert_eq!(summary(&interpret(&v.case)), want, "{}", v.name);
+    }
+}
+
+#[test]
+fn the_c_runtime_produces_the_reference_vectors() {
+    if !host_cc() {
+        return;
+    }
+    let vectors = reference_vectors();
+    let cases: Vec<Case> = vectors.iter().map(|v| v.case.clone()).collect();
+    let got = drive(&cases);
+    assert_eq!(got.len(), vectors.len());
+    for (v, g) in vectors.iter().zip(&got) {
+        let want = (v.ops.clone(), hex(&v.returned), v.cu.to_string());
+        assert_eq!(summary(g), want, "{}", v.name);
+        assert_eq!(*g, interpret(&v.case), "{}", v.name);
+    }
+    eprintln!("{} reference vectors", vectors.len());
 }

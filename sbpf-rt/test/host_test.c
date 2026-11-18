@@ -37,6 +37,7 @@ static int failures, checks;
 /* ---- the machine ---------------------------------------------------------------------------- */
 
 static uint8_t text[64], rodata[256], stack[SBPF_STACK_BYTES], heap[SBPF_HEAP_BYTES], input[128];
+static uint8_t sysvars[SBPF_SYSVAR_BYTES], program_id[32], return_data[SBPF_MAX_RETURN_DATA];
 
 /* SBPF v1's shape: the rodata span starts before the text and contains it. */
 static void layout_v1(void) {
@@ -54,6 +55,12 @@ static void layout_v1(void) {
     sbpf_r.heap = heap;
     sbpf_r.input = input;
     sbpf_r.input_len = sizeof input;
+    for (int i = 0; i < SBPF_SYSVAR_BYTES; i++) sysvars[i] = (uint8_t)(0xc0 ^ i);
+    for (int i = 0; i < 32; i++) program_id[i] = (uint8_t)(0x70 + i);
+    sbpf_r.sysvars = sysvars;
+    sbpf_r.sysvars_len = SBPF_SYSVAR_BYTES;
+    sbpf_r.program_id = program_id;
+    sbpf_r.return_data = return_data;
     sbpf_rt_reset();
 }
 
@@ -82,6 +89,7 @@ static outcome call(sbpf_fn f, uint64_t a, uint64_t b, uint64_t c, uint64_t d, u
 static int OK(outcome o, uint64_t v) { return o.code == SBPF_HALT_EXIT && o.arg == v; }
 static int HALT(outcome o, uint32_t c, uint64_t a) { return o.code == c && o.arg == a; }
 static int AV(outcome o, uint64_t a) { return HALT(o, SBPF_HALT_ACCESS_VIOLATION, a); }
+static int LIMIT(outcome o) { return HALT(o, SBPF_HALT_INSTRUCTION_LIMIT, 0); }
 
 static uint64_t f_load(uint64_t addr, uint64_t size, uint64_t c, uint64_t d, uint64_t e) {
     (void)c, (void)d, (void)e;
@@ -312,7 +320,9 @@ static void test_memset(void) {
     /* RV32: a length that is not a usize faults with the length itself (`usize_of`). */
     CHECK(AV(call(sbpf_sys_memset, IN(0), 0xab, 1ull << 40, 0, 0), 1ull << 40), "memset huge (rv32)");
 #else
-    CHECK(AV(call(sbpf_sys_memset, IN(0), 0xab, 1ull << 40, 0, 0), IN(0)), "memset huge (64-bit)");
+    /* 64-bit: the length is a usize, and its charge (2^40 / 250 units) is refused first. */
+    CHECK(LIMIT(call(sbpf_sys_memset, IN(0), 0xab, 1ull << 40, 0, 0)), "memset huge (64-bit)");
+    sbpf_rt_reset();
 #endif
 }
 
@@ -382,7 +392,8 @@ static void test_logs_and_traps(void) {
 #if SBPF_USIZE_MAX == 0xffffffffu
     CHECK(AV(call(sbpf_sys_log, IN(0), 1ull << 32, 0, 0, 0), 1ull << 32), "log huge (rv32)");
 #else
-    CHECK(AV(call(sbpf_sys_log, IN(0), 1ull << 32, 0, 0, 0), IN(0)), "log huge (64-bit)");
+    CHECK(LIMIT(call(sbpf_sys_log, IN(0), 1ull << 32, 0, 0, 0)), "log huge (64-bit)");
+    sbpf_rt_reset();
 #endif
     CHECK(OK(call(sbpf_sys_log_pubkey, IN(96), 0, 0, 0, 0), 0), "pubkey");
     CHECK(AV(call(sbpf_sys_log_pubkey, IN(97), 0, 0, 0, 0), IN(97)), "pubkey past");
@@ -427,7 +438,6 @@ static int hex_eq(const uint8_t *b, const char *hex) {
 #define ABC "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 #define EMPTY "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 #define TWO_BLOCKS "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-#define MILLION_A "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
 
 static void test_sha256(void) {
     layout_v1();
@@ -451,12 +461,16 @@ static void test_sha256(void) {
     for (int i = 0; i < 7; i++) put_pair(heap + 200 + 16 * i, HEAP(100 + 8 * i), 8);
     CHECK(OK(call(sbpf_sys_sha256, HEAP(200), 7, IN(64), 0, 0), 0) && hex_eq(input + 64, TWO_BLOCKS),
           "56 in pieces");
-    /* A million 'a's: a thousand pairs over one 1000-byte buffer (FIPS 180-2's long vector),
-     * whole blocks and partial ones interleaved. The pair list lives in the stack region. */
+    /* A thousand pairs over one 1000-byte buffer. The pair list lives in the stack region. */
     memset(heap + 1024, 'a', 1000);
     for (int i = 0; i < 1000; i++) put_pair(stack + 16 * i, HEAP(1024), 1000);
-    CHECK(OK(call(sbpf_sys_sha256, STK(0), 1000, IN(64), 0, 0), 0) && hex_eq(input + 64, MILLION_A),
-          "a million a");
+    /* Each 1000-byte slice costs 500 units, so FIPS 180-2's million-`a` vector (500 085 with the
+     * base) is more than a program may spend: this call is refused at its 401st slice. */
+    CHECK(LIMIT(call(sbpf_sys_sha256, STK(0), 1000, IN(64), 0, 0)), "a million a costs 500 085 units");
+    CHECK(sbpf_cu == SBPF_MAX_INSTRUCTIONS, "a refused charge leaves nothing");
+    sbpf_rt_reset();
+    CHECK(OK(call(sbpf_sys_sha256, STK(0), 399, IN(64), 0, 0), 0) && sbpf_cu == 199500, "399 slices fit");
+    sbpf_rt_reset();
     /* The checks, in the interpreter's order: the pair array, the result, then each pair's data. */
     layout_v1();
     put_pair(input, IN(200), 1);
@@ -476,6 +490,53 @@ static void test_sha256(void) {
 }
 
 /* ---- the crypto known answers ----------------------------------------------------------------- */
+
+/* ZKVM-116: keccak, return data, sysvars and the compute-unit charges, against values fixed
+ * outside this runtime (Keccak's own test vectors; Agave's cost schedule). The interpreter is
+ * checked against the same values in research/tests/sbpf_rt.rs. */
+static void test_keccak_return_data_sysvars(void) {
+    layout_v1();
+    memcpy(input + 32, "abc", 3);
+    put_pair(input, IN(32), 3);
+    CHECK(OK(call(sbpf_sys_keccak256, IN(0), 1, IN(64), 0, 0), 0), "keccak abc");
+    CHECK(hex_eq(input + 64, "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45"), "keccak256(abc)");
+    CHECK(sbpf_cu == 10, "one short slice: 10 units beyond the base");
+    CHECK(OK(call(sbpf_sys_keccak256, IN(0), 0, IN(64), 0, 0), 0), "keccak no pairs");
+    CHECK(hex_eq(input + 64, "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"), "keccak256()");
+
+    layout_v1();
+    CHECK(OK(call(sbpf_sys_get_return_data, IN(0), 64, IN(64), 0, 0), 0), "nothing set");
+    CHECK(OK(call(sbpf_sys_set_return_data, PROG(0x108), 40, 0, 0, 0), 0) && sbpf_return_len == 40, "set 40");
+    CHECK(OK(call(sbpf_sys_get_return_data, IN(0), 64, IN(64), 0, 0), 40), "get all 40");
+    CHECK(memcmp(input, rodata + 8, 40) == 0 && input[40] == 40, "the data, and nothing past it");
+    CHECK(memcmp(input + 64, program_id, 32) == 0, "the program id");
+    CHECK(HALT(call(sbpf_sys_get_return_data, IN(0), 40, IN(39), 0, 0), SBPF_HALT_TRAP, SBPF_TRAP_RETURN_DATA_OVERLAP), "overlap");
+    CHECK(OK(call(sbpf_sys_set_return_data, 0x900000000ull, 0, 0, 0, 0), 0) && sbpf_return_len == 0, "clear");
+    CHECK(HALT(call(sbpf_sys_set_return_data, STK(0), 1025, 0, 0, 0), SBPF_HALT_TRAP, SBPF_TRAP_RETURN_DATA_TOO_LARGE), "1025");
+    CHECK(sbpf_cu == 4, "1025 / 250 units were charged before the refusal");
+
+    layout_v1();
+    CHECK(OK(call(sbpf_sys_get_clock_sysvar, STK(64), 0, 0, 0, 0), 0) && memcmp(stack + 64, sysvars, 40) == 0, "clock");
+    memset(heap, 0xee, 64);
+    CHECK(OK(call(sbpf_sys_get_rent_sysvar, HEAP(8), 0, 0, 0, 0), 0) && memcmp(heap + 8, sysvars + 40, 17) == 0, "rent");
+    CHECK(le(heap + 24, 8) == sysvars[56] && heap[32] == 0xee, "rent's padding is zero, 24 bytes written");
+    CHECK(AV(call(sbpf_sys_get_clock_sysvar, STK(4), 0, 0, 0, 0), STK(4)), "misaligned");
+    memcpy(input, "\x06\xa7\xd5\x17\x19\x2c\x5c\x51\x21\x8c\xc9\x4c\x3d\x4a\xf1\x7f\x58\xda\xee\x08\x9b\xa1\xfd\x44\xe3\xdb\xd9\x8a\0\0\0\0", 32);
+    CHECK(OK(call(sbpf_sys_get_sysvar, IN(0), STK(512), 8, 9, 0), 0) && memcmp(stack + 512, sysvars + 48, 9) == 0, "rent[8..17]");
+    CHECK(OK(call(sbpf_sys_get_sysvar, IN(0), STK(512), 8, 10, 0), 1), "past the end: 1");
+    input[4] = 0x18; /* neither id */
+    CHECK(HALT(call(sbpf_sys_get_sysvar, IN(0), STK(512), 0, 8, 0), SBPF_HALT_TRAP, SBPF_TRAP_SYSVAR_UNAVAILABLE), "unknown id");
+    sbpf_r.sysvars_len = 0;
+    CHECK(HALT(call(sbpf_sys_get_clock_sysvar, STK(64), 0, 0, 0, 0), SBPF_HALT_TRAP, SBPF_TRAP_SYSVAR_UNAVAILABLE), "no block");
+
+    /* `sbpf_rt_settle`: the emitted code's budget against the syscalls' charges. */
+    layout_v1();
+    sbpf_budget = 5, sbpf_cu = 5;
+    CHECK(sbpf_rt_settle(SBPF_HALT_EXIT) == SBPF_HALT_EXIT, "exactly the budget");
+    sbpf_cu = 6;
+    CHECK(sbpf_rt_settle(SBPF_HALT_EXIT) == SBPF_HALT_INSTRUCTION_LIMIT && sbpf_halt_code == SBPF_HALT_INSTRUCTION_LIMIT, "one over");
+    CHECK(sbpf_rt_settle(SBPF_HALT_TRAP) == SBPF_HALT_TRAP, "a halt stays what it was");
+}
 
 static void test_ed25519(void) {
     int n = (int)(sizeof ED25519_VECTORS / sizeof ED25519_VECTORS[0]);
@@ -537,6 +598,7 @@ int main(void) {
     test_logs_and_traps();
     test_dispatch();
     test_sha256();
+    test_keccak_return_data_sysvars();
     test_ed25519();
     test_secp256k1();
     printf("%d checks, %d failures (usize max %#llx)\n", checks, failures,

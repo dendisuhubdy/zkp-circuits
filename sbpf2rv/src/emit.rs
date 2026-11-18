@@ -23,7 +23,7 @@
 //! may read before writing and copies back only those it may write (0 for the rest — the callee
 //! cannot tell): see `Calls`.
 //!
-//! The call depth is the global `sbpf_depth`: `SBPF_CALL`/`SBPF_CALLX` increment it and trap
+//! The call depth is the global `sbpf_depth`: every function's first statement increments it and traps
 //! `CallDepth` when it reaches `SBPF_MAX_CALL_DEPTH` — `push_frame`'s check, made before the target
 //! is fetched (so a call to a bad target still checks depth first, then traps `BadJump`) — and
 //! decrement it on return. A `callx` target is looked up at run time by `sbpf_callx_target`, a
@@ -34,14 +34,22 @@
 //!
 //! # The instruction budget
 //!
-//! `interp.rs` counts one per instruction (an `lddw` once, a syscall once, a call and an exit once
-//! each) and halts `InstructionLimit` before the 200 001st. The emitted code charges each basic
-//! block's whole count at the block's head ([`emit_block_head`]) and traps when the budget goes
-//! negative — the amended Global Constraint: the halt lands at the head of the block that would
-//! cross the limit, and only in that block may its kind differ from the interpreter's. The budget
-//! is a function-local `budget`, handed over through `sbpf-rt`'s `sbpf_budget` around every call
-//! and return, and every function has one shared `L_limit` trap. Some blocks defer their check to
-//! their successors (`choose_checked`), which keeps the same guarantee. A block's count is its
+//! `interp.rs` counts one compute unit per instruction (an `lddw` once, a syscall's `call` once, a
+//! call and an exit once each), charges each syscall Agave's cost on the same meter, and halts
+//! `InstructionLimit` before the 200 001st unit. A syscall ends its block, so the part of its cost
+//! that depends only on which syscall it is (`syscalls::base_cost`) is added to that block's
+//! charge — a constant folded into a constant, no code — and the length-dependent part is charged
+//! by `sbpf-rt` to `sbpf_cu`, which the block checks do not see: `sbpf_rt_settle`, called by the
+//! entry when the program returns, makes the exact comparison, so a program that spent more than
+//! the budget in total halts `InstructionLimit` there at the latest. The emitted code charges each
+//! basic block's whole count at the block's head ([`emit_block_charge`]) and, at the heads
+//! [`choose_checked`] picks — a function's entries, a block that closes a loop, a block ending in
+//! `exit` — also traps when the budget has gone negative ([`emit_block_head`]). The charges are
+//! the interpreter's, so no run inside the budget is halted; a run that crosses it halts at the
+//! next check rather than at the instruction, and until then may fault with another kind — the
+//! status and the public words are the interpreter's either way. The budget is a function-local
+//! `budget`, handed over through `sbpf-rt`'s `sbpf_budget` around every call and return, and every
+//! function has one shared `L_limit` trap. A block's count is its
 //! instructions plus whatever failed fetch ends it: a register or opcode the interpreter refuses
 //! before dispatch still ran the meter ([`TrapKind::BadInsn`] — the instruction is charged but not
 //! translated), running off the end of the text is one more meter tick for the fetch that fails,
@@ -66,8 +74,11 @@
 //! fit it, measured on that ELF (words of RV32, program.c alone): the per-width access entries
 //! (−6k), the function-local budget with one trap label (−30k), `minsize` on every translated
 //! function (−6k), merging functions that are copies of another's tail (−8k), call-site liveness
-//! (−1.7k) and deferred checks (−3.8k). None changes the public output; only the deferred checks
-//! change anything observable at all — the halt kind, in the block that crosses the limit.
+//! (−1.7k) and deferred checks (−3.8k, then −4.6k more once only entries, loop heads and exits
+//! check), the call depth pushed and popped by the callee rather than at each call site with the
+//! handed-over budget a 32-bit word (−1.2k), and `sbpf-rt`'s narrow load and store entries
+//! returning and taking 32 bits (−1.1k). None changes the public output; only the deferred checks
+//! change anything observable at all — the halt kind of a run that has crossed the limit.
 
 use crate::scan::{Block, Function, Scan, Term, TrapKind};
 use sbpf_core::elf::Program;
@@ -75,10 +86,10 @@ use sbpf_core::isa::{self, opc, Class, Insn};
 use sbpf_core::syscalls;
 use std::fmt::Write as _;
 
-/// `syscalls::SUPPORTED`'s twelve, each with the `sbpf-rt` function that implements it
+/// `syscalls::SUPPORTED`'s eighteen, each with the `sbpf-rt` function that implements it
 /// (`sbpf_rt.h`: `sbpf_sys_<name>` with a leading `sol_` and a trailing `_` dropped). Any other hash
 /// is emitted as the interpreter's own `Halt::UnknownSyscall(hash)`.
-pub const SYSCALLS: [(u32, &str); 12] = [
+pub const SYSCALLS: [(u32, &str); 18] = [
     (syscalls::ABORT, "sbpf_sys_abort"),
     (syscalls::SOL_PANIC, "sbpf_sys_panic"),
     (syscalls::SOL_LOG, "sbpf_sys_log"),
@@ -94,6 +105,12 @@ pub const SYSCALLS: [(u32, &str); 12] = [
     (syscalls::SOL_MEMCMP, "sbpf_sys_memcmp"),
     (syscalls::SOL_ALLOC_FREE, "sbpf_sys_alloc_free"),
     (syscalls::SOL_SHA256, "sbpf_sys_sha256"),
+    (syscalls::SOL_KECCAK256, "sbpf_sys_keccak256"),
+    (syscalls::SOL_SET_RETURN_DATA, "sbpf_sys_set_return_data"),
+    (syscalls::SOL_GET_RETURN_DATA, "sbpf_sys_get_return_data"),
+    (syscalls::SOL_GET_CLOCK_SYSVAR, "sbpf_sys_get_clock_sysvar"),
+    (syscalls::SOL_GET_RENT_SYSVAR, "sbpf_sys_get_rent_sysvar"),
+    (syscalls::SOL_GET_SYSVAR, "sbpf_sys_get_sysvar"),
 ];
 
 /// The C entry point the shim calls: `uint32_t sbpf_entry(uint64_t *r0)`.
@@ -319,7 +336,7 @@ pub fn emit_block_head(n: usize) -> String {
     format!("if ((budget -= {n}) < 0) goto L_limit;")
 }
 
-/// The charge of a block whose check is deferred to its successors (see `choose_checked`).
+/// The charge of a block that does not check (see `choose_checked`).
 pub fn emit_block_charge(n: usize) -> String {
     format!("budget -= {n};")
 }
@@ -334,19 +351,29 @@ fn successors(b: &EBlock, n_slots: usize) -> Vec<usize> {
     }
 }
 
-/// Which blocks check the budget at their head; the rest only charge it. A block may skip its check
-/// when every block it can hand control to checks, it has no edge to or from another unchecked
-/// block, and it does not end in `exit` or a call (whose callee's blocks would run before any
-/// check). Then if the limit is crossed inside an unchecked block `X`, `X` runs to its end (it may
-/// fault there — a halt kind that differs from the interpreter's only in `X`, the block that crosses
-/// the limit, as the amended Global Constraint allows) and the next block's check halts
-/// `InstructionLimit`; the status and the eight public words are the interpreter's either way, since
-/// every exceptional halt publishes the pre-state. No run the interpreter completes within the limit
-/// is ever charged more than it has executed, so none is halted. What this buys is size: a check is
-/// three RV32 words in a large function (a branch over a jump to the shared trap), a charge none
-/// (clang folds it into the next check's constant), and the SPL Token program does not fit the
-/// machine's 65 535-word program cap with a check at every one of its ~3 500 block heads.
-fn choose_checked(blocks: &[EBlock], n_slots: usize) -> Vec<bool> {
+/// Which blocks check the budget at their head; the rest only charge it.
+///
+/// A block checks when it is a way into the function (`entries`: its own entry and every merged
+/// member's), when it ends in `exit`, or when it closes a loop — it is the target of a back edge of
+/// a depth-first walk of the function's blocks, so every cycle of blocks contains one. Every other
+/// block only charges.
+///
+/// What that keeps: the charges are the interpreter's, block for block, so no run the interpreter
+/// completes within the limit is ever halted. And a run that crosses the limit cannot complete:
+/// the unchecked blocks it runs on through form no cycle (so they are finitely many), a call out of
+/// them lands on a checked entry, and the only way out of the program is an `exit` block, which
+/// checks. Until it reaches one of those it may fault instead — a halt kind that differs from the
+/// interpreter's `InstructionLimit`, in the stretch of unchecked blocks after the one that crossed
+/// the limit — and the status and the eight public words are the interpreter's either way, since
+/// every exceptional halt publishes the pre-state.
+///
+/// What it buys is size: a check is about three RV32 words in a large function (a branch over a
+/// jump to the shared trap), a charge none (clang folds it into the next check's constant), and a
+/// whole SPL Token does not fit the machine's 65 535-word program cap with a check at every one of
+/// its ~3 500 block heads — nor, once the instructions that need `sol_get_sysvar` and
+/// `sol_set_return_data` are live code (ZKVM-116), with the earlier rule, which kept a check on
+/// every block next to an unchecked one.
+fn choose_checked(blocks: &[EBlock], n_slots: usize, entries: &[usize]) -> Vec<bool> {
     use std::collections::BTreeMap;
     let index: BTreeMap<usize, usize> = blocks
         .iter()
@@ -362,19 +389,45 @@ fn choose_checked(blocks: &[EBlock], n_slots: usize) -> Vec<bool> {
                 .collect()
         })
         .collect();
-    let mut pred: Vec<Vec<usize>> = vec![Vec::new(); blocks.len()];
-    for (i, ss) in succ.iter().enumerate() {
-        for &j in ss {
-            pred[j].push(i);
-        }
+    let mut checked: Vec<bool> = blocks
+        .iter()
+        .map(|b| matches!(b.term, Term::Exit) || entries.contains(&b.start))
+        .collect();
+    // Depth-first from the entries, then from anything they do not reach: an edge to a block still
+    // on the walk's stack is a back edge, and its target checks.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        New,
+        Open,
+        Done,
     }
-    let mut checked = vec![true; blocks.len()];
-    for (i, b) in blocks.iter().enumerate() {
-        let eligible = !matches!(b.term, Term::Exit | Term::Call { .. } | Term::CallX { .. })
-            && !succ[i].contains(&i)
-            && succ[i].iter().chain(&pred[i]).all(|&j| checked[j]);
-        if eligible {
-            checked[i] = false;
+    let mut mark = vec![Mark::New; blocks.len()];
+    let roots = entries
+        .iter()
+        .filter_map(|pc| index.get(pc).copied())
+        .chain(0..blocks.len());
+    for root in roots {
+        if mark[root] != Mark::New {
+            continue;
+        }
+        // (block, next successor to look at)
+        let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+        mark[root] = Mark::Open;
+        while let Some(&mut (b, ref mut k)) = stack.last_mut() {
+            if let Some(&t) = succ[b].get(*k) {
+                *k += 1;
+                match mark[t] {
+                    Mark::New => {
+                        mark[t] = Mark::Open;
+                        stack.push((t, 0));
+                    }
+                    Mark::Open => checked[t] = true,
+                    Mark::Done => {}
+                }
+            } else {
+                mark[b] = Mark::Done;
+                stack.pop();
+            }
         }
     }
     checked
@@ -404,52 +457,60 @@ typedef sbpf_ret (*sbpf_callee)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t
  * whole SPL program runs into first. The toolchain's flags are unchanged; this is per function. */
 #define SBPF_FN __attribute__((minsize)) static sbpf_ret
 
-/* The call depth: frames pushed and not yet popped (`Vm::depth`). */
+/* The call depth: frames pushed and not yet popped (`Vm::depth`). The *callee* pushes, as its
+ * first statement (SBPF_ENTER), and pops in its return (SBPF_RETURN): once per function instead of
+ * once per call site, which is some nine RV32 words at each of a whole program's call sites. The
+ * entry starts it at -1, so the entry function's own push makes it 0. */
 static uint32_t sbpf_depth;
 /* Which entry of a merged function to start at: 0 for its own, else the entry's pc + 1. Set
- * immediately before a call and cleared by the callee's first statement. */
+ * immediately before a call and cleared by the callee's first statements. */
 static uint32_t sbpf_sel;
 
-/* `push_frame`: the depth check comes first; the callee gets the caller's registers (those it may
- * read before writing: sbpf2rv/src/emit.rs, "register liveness across calls"), r10 one frame up;
- * the caller continues with the callee's r0..r5 (those it may write) and its own r6..r10. The
- * instruction budget lives in each function's local `budget` and is handed over through
- * `sbpf_budget` around the call. `call` is the whole call expression, `copy` the copy-back. */
-#define SBPF_DEPTH_PUSH() \
+/* `push_frame`: the depth check comes first — in the callee, before it charges anything; the
+ * callee gets the caller's registers (those it may read before writing: sbpf2rv/src/emit.rs,
+ * "register liveness across calls"), r10 one frame up; the caller continues with the callee's
+ * r0..r5 (those it may write) and its own r6..r10. The instruction budget lives in each function's
+ * local `budget` and is handed over through `sbpf_budget` around the call. `call` is the whole
+ * call expression, `copy` the copy-back. */
+#define SBPF_ENTER() \
     do { \
         if (++sbpf_depth == SBPF_MAX_CALL_DEPTH) sbpf_trap(SBPF_HALT_CALL_DEPTH, 0); \
     } while (0)
+/* The same check without the push, where the push's own trap must come before another. */
+#define SBPF_DEPTH_CHECK() \
+    do { \
+        if (sbpf_depth + 1 == SBPF_MAX_CALL_DEPTH) sbpf_trap(SBPF_HALT_CALL_DEPTH, 0); \
+    } while (0)
 #define SBPF_CALL(call, copy) \
     do { \
-        SBPF_DEPTH_PUSH(); \
         sbpf_budget = budget; \
         sbpf_ret x_ = call; \
-        budget = (int32_t)sbpf_budget; \
-        sbpf_depth--; \
+        budget = sbpf_budget; \
         copy \
     } while (0)
-/* `callx`: the address is read, the frame pushed, then the target fetched (`interp.rs`). */
+/* `callx`: the address is read, the frame pushed (its depth check here, the push in the callee),
+ * then the target fetched (`interp.rs`). */
 #define SBPF_CALLX(a, args, copy) \
     do { \
         uint64_t a_ = (a); \
-        SBPF_DEPTH_PUSH(); \
+        SBPF_DEPTH_CHECK(); \
         sbpf_callee f_ = sbpf_callx_target(a_); \
         sbpf_budget = budget; \
         sbpf_ret x_ = f_ args; \
-        budget = (int32_t)sbpf_budget; \
-        sbpf_depth--; \
+        budget = sbpf_budget; \
         copy \
     } while (0)
-/* An internal call whose target is not code: the frame push (and its depth check) still runs. */
+/* An internal call whose target is not code: the frame push's depth check still runs. */
 #define SBPF_CALL_BAD_TARGET() \
     do { \
-        SBPF_DEPTH_PUSH(); \
+        SBPF_DEPTH_CHECK(); \
         sbpf_trap(SBPF_HALT_BAD_JUMP, 0); \
     } while (0)
-/* `exit`. */
+/* `exit`: pops the frame SBPF_ENTER pushed. */
 #define SBPF_RETURN() \
     do { \
         sbpf_budget = budget; \
+        sbpf_depth--; \
         return (sbpf_ret){r0, r1, r2, r3, r4, r5}; \
     } while (0)
 
@@ -595,9 +656,9 @@ pub fn emit_program(program: &Program<'_>, scan: &Scan) -> Emitted {
          /* Runs the program over the regions the caller put in `sbpf_r`, after `sbpf_rt_reset`. Returns an\n \
          * SBPF_HALT_* code (`sbpf_halt_arg` holds its payload); SBPF_HALT_EXIT sets `*r0`. */\n\
          uint32_t {ENTRY_SYMBOL}(uint64_t *r0) {{\n    \
-         sbpf_depth = 0;\n    \
+         sbpf_depth = (uint32_t)-1;\n    \
          sbpf_sel = 0;\n    \
-         return sbpf_rt_enter(sbpf_entry_fn, SBPF_REGION_INPUT, 0, 0, 0, 0, r0);\n}}\n",
+         return sbpf_rt_settle(sbpf_rt_enter(sbpf_entry_fn, SBPF_REGION_INPUT, 0, 0, 0, 0, r0));\n}}\n",
         callee = hosts.callee(scan.entry)
     );
 
@@ -646,10 +707,12 @@ fn emit_function(
         eblocks.push(cur);
     }
 
-    let checked = choose_checked(&eblocks, n_slots);
+    let mut entries = vec![f.entry];
+    entries.extend(members.iter().copied());
+    let checked = choose_checked(&eblocks, n_slots, &entries);
 
     let _ = writeln!(c, "SBPF_FN f_{}({}) {{", f.entry, PARAMS);
-    c.push_str("    int32_t budget = (int32_t)sbpf_budget;\n");
+    c.push_str("    SBPF_ENTER();\n    int32_t budget = sbpf_budget;\n");
     if !members.is_empty() {
         c.push_str("    uint32_t sel = sbpf_sel;\n    sbpf_sel = 0;\n    switch (sel) {\n");
         for m in &members {
@@ -714,7 +777,12 @@ fn emit_block(
         },
         _ => 0,
     };
-    let cost = b.insns.len() + extra;
+    // And what the syscall that ends it costs whatever its arguments (`syscalls::base_cost`).
+    let syscall = match b.term {
+        Term::Syscall { hash, .. } => syscalls::base_cost(hash) as usize,
+        _ => 0,
+    };
+    let cost = b.insns.len() + extra + syscall;
     if cost > 0 {
         if checked {
             let _ = writeln!(c, "    {}", emit_block_head(cost));

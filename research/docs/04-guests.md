@@ -61,12 +61,14 @@ function per sBPF function into a shim crate `rand-guest build` turns into an im
 interpreter's own ABI harness so the chain-visible contract does not change. It refuses nothing —
 unknown syscalls, CPI, bad registers/opcodes/jumps become scanner warnings plus the interpreter's
 own runtime trap, never a translation-time refusal, matching `interp.rs`'s raise-only-on-execution
-rule. The committed SPL Token `Transfer`/`MintTo`/`Burn` all match the interpreter word for word
-(the eight public output words and the halt) at 65 096 of the 65 535-word cap. Measured on this
+rule. The committed SPL Token `Transfer`/`MintTo`/`Burn` — and, since ZKVM-116,
+`InitializeAccount`/`InitializeAccount3`/`GetAccountDataSize`/`AmountToUiAmount` — all match the
+interpreter word for word (the eight public output words and the halt) at 64 465 of the
+65 535-word cap. Measured on this
 translated program: about 2.4–2.5× fewer cycles per sBPF instruction, but the shared harness
 (decoding both tapes, `elf::load`, the region scan) is about 98% of every run's cycles either way,
 and the translated image adds 73 k for its ELF guard, so for SPL Token the translation is dearer
-(766 k cycles against 694 k for the transfer) and both sides land in tier 20 — translation only
+(753 k cycles against 686 k for the transfer) and both sides land in tier 20 — translation only
 pays off once a program's own execution, not the harness, dominates the run. The ELF guard is what
 makes `hc` bind what ran: the ELF is on the public tape (bound by `H_PUB`, not by
 `public_output`, whose preimage has no ELF; `program_id` comes from the instruction region), and the
@@ -625,7 +627,8 @@ vendoring time, not here.
 ### The `sbpf` guest — M4.4's exit test, and what constraint set 6 did to it
 
 `guests-compiled/sbpf` is an **sBPF interpreter** compiled to RV32IM: 91 v1
-opcodes, the four memory regions, twelve syscalls, an ELF64 loader that applies
+opcodes, the four memory regions, eighteen syscalls metered in Solana's compute units, an
+ELF64 loader that applies
 relocations in place, and the ABI that binds a run — all of it `sbpf-core`, a
 `no_std` `#![forbid(unsafe_code)]` library unit-tested natively and
 differentially tested against `solana-sbpf` 0.11.1 (M4.4 Task 5). `src/main.rs`
@@ -738,6 +741,17 @@ the mint as a fourth read-only account:
 | `sha256_log_height` | 18 (2 368 × 64 = 151 552 rows) | **11** (30 × 64 = 1 920 rows) |
 | tier | **none — above `Tier(20)`'s 1 048 575-cycle budget** | **`Tier(20)`** — 694 498 against 1 048 575; above `Tier(18)`'s 262 143 |
 | `public_log_height`, `mem_log_height`, proof size | not measurable | not measured here — they are computed inside `build_traces_salted`, and no proof was produced on this machine (below) |
+
+**Since ZKVM-116 (2026-11-18)** the same call measures: **10 227** program words
+(8 834 text + a 1 393-word prologue for 503 words of data), image 37372 B, 10 458
+private and **27 152** public input words (the ELF, then the sysvar block's length
+word — 0 for this call), **685 749** cycles, 143 instructions and 143 compute units,
+30 SHA-256 compressions (the empty return data's digest is a constant, not a 31st),
+tier 20. The guest gained six syscalls, Solana's compute-unit costs on the meter, the
+sysvar block on the public tape and a third digest in the output's preimage — see
+"Syscalls" below — and its `hc` moved (`19c82f18…8a9e`, program id `bcda3c27…f0b2`;
+before: `059a7086…f476`, `e7d22c84…5533`), so the full node re-vendors it at a chain
+cut. The table above is kept as measured at the time.
 
 The 2.5× cycle saving is where the projection said it would be. Spec §9.5
 projected **~699 000** cycles from M4.4's own pc histogram; the measurement is
@@ -928,26 +942,84 @@ knowing for any future guest on this target:
   wants an opcode and a register nibble; decoding the whole `u64` cost 430 570 cycles
   across 12 826 slots.
 
-### Syscalls: what traps, and why
+### Syscalls: what is implemented, what traps, and what they cost
 
-`sbpf-core` implements `abort`, `sol_panic_`, `sol_log_`, `sol_log_64_`,
-`sol_log_compute_units_`, `sol_log_pubkey`, `sol_memcpy_`, `sol_memmove_`,
-`sol_memset_`, `sol_memcmp_`, `sol_alloc_free_` and `sol_sha256` — the last through
-the M4.4 chip. Everything else is `Halt::UnknownSyscall`, which is status 2 over the
-pre-state: nothing happened. The committed SPL Token ELF names seven syscalls, five
-of them implemented; the two that trap are
+`sbpf-core` implements eighteen syscalls. The M4.4 twelve: `abort`, `sol_panic_`,
+`sol_log_`, `sol_log_64_`, `sol_log_compute_units_`, `sol_log_pubkey`, `sol_memcpy_`,
+`sol_memmove_`, `sol_memset_`, `sol_memcmp_`, `sol_alloc_free_` and `sol_sha256` (the
+M4.4 chip). And ZKVM-116's six (2026-11-18): `sol_keccak256` (the Keccak chip, the same
+call shape as `sol_sha256`), `sol_set_return_data`, `sol_get_return_data`,
+`sol_get_clock_sysvar`, `sol_get_rent_sysvar` and `sol_get_sysvar` (SIMD-0127; Clock and
+Rent only). `sbpf-rt` has the same eighteen for translated programs, and
+`tests/sbpf_rt.rs` holds both to the same reference vectors and to each other over
+4 000 random cases. Everything else is `Halt::UnknownSyscall`, which is status 2 over the
+pre-state: nothing happened.
 
-* `sol_set_return_data` — `GetAccountDataSize`, `AmountToUiAmount`, `UiAmountToAmount`;
-* `sol_get_sysvar` — the rent read `InitializeAccount` does.
+The committed SPL Token ELF names seven syscalls and all seven are now implemented, so
+`GetAccountDataSize`, `AmountToUiAmount`, `UiAmountToAmount` (`sol_set_return_data`) and
+`InitializeAccount2`/`3`, `InitializeMint2`, `InitializeMultisig2` (rent through
+`sol_get_sysvar`) run; `InitializeAccount` itself reads rent from its fourth *account* and
+needed no syscall. `tests/sbpf_syscalls.rs` runs them natively and through `sbpf.bin`, and
+`sbpf2rv/tests/parity.rs` through the translated image, with equal public outputs.
 
-Neither is on the `Transfer` path, so this is a scope boundary rather than dead code:
-those instructions are out of scope, not broken. The out-of-scope list the design spec
-names is unchanged and unreached here — `sol_ed25519_verify`, `sol_secp256k1_recover`,
-`sol_keccak256`, `sol_invoke_signed_*`, `sol_get_*_sysvar`, and the two PDA
-derivations (`sol_create_program_address`, `sol_try_find_program_address`), which need
-`sol_sha256` with the `"ProgramDerivedAddress"` marker *and* an Ed25519 curve check —
-the curve check being the Ed25519 work this path does not have. Compute-unit costs are
-not modelled at all; the only meter is `MAX_INSTRUCTIONS = 200 000`.
+**Return data is bound by the public output.** A program such as `GetAccountDataSize`
+changes no account and answers only in its return data, so the digest's preimage is now
+`input_hash ‖ output_hash ‖ return_hash` — 24 words — where `return_hash` is `sha256` of
+what `sol_set_return_data` last set (of the empty string if nothing was set or the status
+is not 1: a failed run publishes neither a state change nor an answer). `MAX_RETURN_DATA`
+is Solana's 1 024 bytes. `sol_get_return_data` reports this program's id as the setter's,
+which is the only possibility without CPI.
+
+**Sysvars come from the public tape and nowhere else.** Clock and Rent are chain facts. A
+value read with `READ_INPUT` is hidden and bound to nothing unless the output digest
+binds it, so a sysvar on the private tape would be whatever the prover liked. The public
+vector is therefore `[n_elf, elf bytes…, n_sysvars, sysvar bytes…]`: `n_sysvars` is 0
+(none: every getter halts with the trap "sysvar unavailable") or 57, and then the bytes
+are Clock's 40-byte and Rent's 17-byte account data. `H_PUB` binds every word of that
+vector and the chain checks it against the ELF it published **and its own clock and
+rent** (`Machine::verify_public`). Any other block length is not a call (status 2, the
+canonical malformed output). The same private instruction under a different sysvar block
+is a different statement with, possibly, a different answer — `InitializeAccount3` with
+the rent doubled is `NotRentExempt` (`tests/sbpf_syscalls.rs`). `sol_get_sysvar` for any
+id but Clock's and Rent's halts rather than answering `2` ("not found") as Agave would
+for an id outside its seven, or serving one of the five this guest does not carry: a halt
+never completes a run with an answer the chain did not supply. The two typed getters
+refuse a pointer that is not 8-aligned, as Agave's `translate_type_mut` does for a
+program on the aligned loader, and `sol_get_rent_sysvar` writes Rent's 7 padding bytes as
+zeros (Agave copies its own struct's padding there).
+
+**Compute units.** The meter is Solana's: one unit per instruction, each syscall charged
+Agave's default cost (`SVMTransactionExecutionCost`) on the same meter, 200 000 units per
+call, and a charge that does not fit is `Halt::InstructionLimit`. The schedule is
+`syscalls::base_cost`'s table: 100 for the log family and return data (plus `len / 250`
+bytes moved; `sol_log_` is `max(100, len)`), `max(10, n / 250)` for the four memory
+syscalls, 85 plus `max(10, len / 2)` per slice for the two hashes, 140 and 124 for the
+typed sysvar getters, 110 plus for `sol_get_sysvar`, nothing for `abort` and
+`sol_alloc_free_`. The SPL Token vectors: `Transfer` 143 instructions and 143 units (no
+syscall), `InitializeAccount3` 127 and 237, `GetAccountDataSize` 79 and 179,
+`AmountToUiAmount` 292 and 412. A translated program pays each syscall's fixed part in
+the charge of the block its `call` ends (a constant folded into a constant) and the
+length-dependent part in `sbpf-rt`, settled against the budget when the program returns
+(`sbpf2rv/README.md`).
+
+**Still trapping** — ZKVM-116's remaining steps, none of them reachable from the
+committed ELF: both PDA derivations (`sol_create_program_address`,
+`sol_try_find_program_address`: SHA-256 with the `"ProgramDerivedAddress"` marker *and*
+an Ed25519 off-curve check, which needs a field square root — the modular-arithmetic chip
+of ZKVM-115, or a hint-and-verify formulation); `sol_secp256k1_recover` and the Ed25519
+syscalls (software versions exist in `sbpf-rt` and cost 14–16 M cycles each, far past
+any tier: a chip); every other sysvar (Instructions, EpochSchedule, …); and
+`sol_invoke_signed_*`. CPI is a design decision before it is code, because the model
+today is one program per proof: either nested execution inside one proof (the callee's
+ELF on the public tape beside the caller's, one cycle and compute budget shared, the
+account borrow rules enforced by the harness between the two) or one proof per program
+linked by the aggregator (each proof's statement carrying the call's instruction and
+account digests, so the aggregator checks that the caller's CPI output is the callee's
+input). Neither is built, and which one is right depends on whether the callee is known
+when the caller is deployed; it is not decided here. Two smaller divergences from Agave
+also remain: `sol_log_` does not refuse a message that is not UTF-8 (Agave fails the
+instruction), and `sol_panic_` is not charged its message length (it halts either way).
+The call depth is still 8 against Solana's 64, and the loader takes SBPF v1 ELFs only.
 
 Two more caps are measured rather than assumed. `MAX_INPUT_BYTES` is **49 152**, not
 the plan's 16 384: the aligned format the entrypoint deserializes skips 10 240 bytes

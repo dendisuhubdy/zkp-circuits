@@ -428,7 +428,7 @@ pub const MAIN_RS: &str = r#"#![no_std]
 //! and heap, and the status mapping — so the eight output words are the interpreter guest's.
 
 use core::ptr::{addr_of, addr_of_mut};
-use sbpf_core::abi::{run_call_with_executor, Workspace};
+use sbpf_core::abi::{run_call_with_executor, CallEnv, Workspace};
 use sbpf_core::elf::Program;
 use sbpf_core::interp::Halt;
 use sbpf_core::memory::Memory;
@@ -447,6 +447,12 @@ impl sbpf_core::Host for Syscalls {
         // is a live, exclusive `&mut` for the call — `guest_sdk::poseidon2`'s `# Safety` contract.
         unsafe { guest_sdk::poseidon2(words.as_mut_ptr(), n) };
     }
+
+    /// Never called here: only the interpreter's `sol_keccak256` reaches it, and a translated
+    /// program's goes to the coprocessor from C.
+    fn keccak_f(&mut self, state: &mut [u32; 50]) {
+        guest_sdk::keccak(state);
+    }
 }
 
 /// `sbpf_regions` (`sbpf-rt/sbpf_rt.h`), field for field.
@@ -462,11 +468,17 @@ struct SbpfRegions {
     heap: *mut u8,
     input: *mut u8,
     input_len: u32,
+    sysvars: *const u8,
+    sysvars_len: u32,
+    program_id: *const u8,
+    return_data: *mut u8,
 }
 
 extern "C" {
     static mut sbpf_r: SbpfRegions;
     static mut sbpf_halt_arg: u64;
+    /// Bytes of `sbpf_r.return_data` the program set (`sol_set_return_data`).
+    static mut sbpf_return_len: u32;
     fn sbpf_rt_reset();
     /// `program.c`'s entry: runs the program from `Vm::new`'s register state, returns an
     /// `SBPF_HALT_*` code, and on `SBPF_HALT_EXIT` (0) sets `*r0`.
@@ -474,7 +486,14 @@ extern "C" {
 }
 
 /// `Halt::Trap`'s strings, by `SBPF_TRAP_*` index.
-const TRAPS: [&str; 3] = ["abort", "sol_panic_", "sol_memcpy_ overlap"];
+const TRAPS: [&str; 6] = [
+    "abort",
+    "sol_panic_",
+    "sol_memcpy_ overlap",
+    "return data too large",
+    "return data overlap",
+    "sysvar unavailable",
+];
 
 /// An `SBPF_HALT_*` code (the `Halt` variant's declaration index) and its payload, back to the
 /// interpreter's `Halt`.
@@ -668,7 +687,7 @@ fn is_the_translated_program(p: &Program<'_>) -> bool {
 /// interpreter's own memory (text and read-only data from the loaded ELF, the stack and heap from
 /// the `Workspace`, the instruction region), resets the per-run state, and runs the translated
 /// entry.
-fn execute(_h: &mut Syscalls, p: &Program<'_>, mem: Memory<'_>) -> Result<u64, Halt> {
+fn execute(_h: &mut Syscalls, p: &Program<'_>, mem: Memory<'_>, env: &mut CallEnv<'_>) -> Result<u64, Halt> {
     if !is_the_translated_program(p) {
         return Err(Halt::BadElf);
     }
@@ -687,9 +706,16 @@ fn execute(_h: &mut Syscalls, p: &Program<'_>, mem: Memory<'_>) -> Result<u64, H
         r.heap = heap.as_mut_ptr();
         r.input = input.as_mut_ptr();
         r.input_len = input.len() as u32;
+        r.sysvars = env.sysvars.as_ptr();
+        r.sysvars_len = env.sysvars.len() as u32;
+        r.program_id = env.program_id.as_ptr();
+        r.return_data = env.return_data.as_mut_ptr();
         sbpf_rt_reset();
         let mut r0 = 0u64;
-        match sbpf_entry(&mut r0) {
+        let code = sbpf_entry(&mut r0);
+        // `sbpf-rt` never sets more than the buffer holds (`SBPF_MAX_RETURN_DATA`).
+        *env.return_len = *core::ptr::addr_of!(sbpf_return_len) as usize;
+        match code {
             0 => Ok(r0),
             code => Err(halt_from(code, *core::ptr::addr_of!(sbpf_halt_arg))),
         }

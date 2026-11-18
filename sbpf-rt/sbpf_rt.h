@@ -1,6 +1,6 @@
 /* sbpf-rt: the runtime an `sbpf2rv`-translated program calls — the C twin of `sbpf-core`'s
  * `memory.rs` (the four regions, `load`/`store`), `interp.rs` (`Halt`) and `syscalls.rs` (the
- * twelve implemented syscalls). Those three files are the authority for every behaviour here; this
+ * eighteen implemented syscalls). Those three files are the authority for every behaviour here; this
  * is a one-for-one port, not a reimplementation from Solana's documentation, because the translated
  * program's public output must equal the interpreter's on every input, failing ones included.
  *
@@ -9,7 +9,7 @@
  * the SHA-256 coprocessor through `guest.h` and the trap path is this runtime's own setjmp. A host
  * build (the tests, `sbpf2rv`'s differential fuzzing) links `test/host_glue.c` for both instead.
  *
- * Files: `sbpf_rt.c` (regions, traps, the twelve syscalls, SHA-256's padding) is all a translated
+ * Files: `sbpf_rt.c` (regions, traps, the eighteen syscalls, the two hashes' padding) is all a translated
  * program needs. `sbpf_bn.c` + `sbpf_ed25519.c` and `sbpf_bn.c` + `sbpf_secp256k1.c` are the
  * software signature checks, each in its own file so its cycle cost is measurable on its own,
  * declared in `sbpf_crypto.h`; see the note there before wiring either into a translation.
@@ -30,6 +30,18 @@
 #define SBPF_STACK_BYTES 32768             /* memory::STACK_BYTES */
 #define SBPF_HEAP_BYTES 32768              /* memory::HEAP_BYTES */
 #define SBPF_MAX_INSTRUCTIONS 200000       /* interp::MAX_INSTRUCTIONS */
+#define SBPF_MAX_RETURN_DATA 1024          /* interp::MAX_RETURN_DATA */
+#define SBPF_SYSVAR_BYTES 57               /* interp::SYSVAR_BYTES */
+#define SBPF_CLOCK_BYTES 40                /* interp::CLOCK_BYTES */
+#define SBPF_RENT_BYTES 17                 /* interp::RENT_BYTES */
+#define SBPF_RENT_STRUCT_BYTES 24          /* syscalls::RENT_STRUCT_BYTES */
+
+/* ---- compute units (`syscalls.rs`: Agave's `SVMTransactionExecutionCost` defaults) ------------- */
+#define SBPF_CU_SYSCALL_BASE 100           /* syscalls::CU_SYSCALL_BASE */
+#define SBPF_CU_MEM_OP_BASE 10             /* syscalls::CU_MEM_OP_BASE */
+#define SBPF_CU_BYTES_PER_UNIT 250         /* syscalls::CU_BYTES_PER_UNIT */
+#define SBPF_CU_HASH_BASE 85               /* syscalls::CU_HASH_BASE */
+#define SBPF_CU_SYSVAR_BASE 100            /* syscalls::CU_SYSVAR_BASE */
 
 /* ---- `Halt`, by declaration order ------------------------------------------------------------
  * One code per `interp::Halt` variant, numbered in the enum's declaration order, so the shim maps a
@@ -55,9 +67,12 @@
 #define SBPF_TRAP_ABORT 0           /* "abort" */
 #define SBPF_TRAP_SOL_PANIC 1       /* "sol_panic_" */
 #define SBPF_TRAP_MEMCPY_OVERLAP 2  /* "sol_memcpy_ overlap" */
+#define SBPF_TRAP_RETURN_DATA_TOO_LARGE 3 /* "return data too large" */
+#define SBPF_TRAP_RETURN_DATA_OVERLAP 4   /* "return data overlap" */
+#define SBPF_TRAP_SYSVAR_UNAVAILABLE 5    /* "sysvar unavailable" */
 
 /* ---- the syscall hashes (`syscalls.rs`: murmur3-32, seed 0, of the name) ----------------------
- * The twelve `syscalls::SUPPORTED` lists, in its order; each has an `sbpf_sys_<name>` below, where
+ * The eighteen `syscalls::SUPPORTED` lists, in its order; each has an `sbpf_sys_<name>` below, where
  * `<name>` is the syscall's name with a leading `sol_` and a trailing `_` removed. */
 #define SBPF_SYSCALL_ABORT 0xb6fc1a11u                 /* abort */
 #define SBPF_SYSCALL_SOL_PANIC_ 0x686093bbu            /* sol_panic_ */
@@ -71,6 +86,12 @@
 #define SBPF_SYSCALL_SOL_MEMCMP_ 0x5fdcde31u           /* sol_memcmp_ */
 #define SBPF_SYSCALL_SOL_ALLOC_FREE_ 0x83f00e8fu       /* sol_alloc_free_ */
 #define SBPF_SYSCALL_SOL_SHA256 0x11f49d86u            /* sol_sha256 */
+#define SBPF_SYSCALL_SOL_KECCAK256 0xd7793abbu         /* sol_keccak256 */
+#define SBPF_SYSCALL_SOL_SET_RETURN_DATA 0xa226d3ebu   /* sol_set_return_data */
+#define SBPF_SYSCALL_SOL_GET_RETURN_DATA 0x5d2245e4u   /* sol_get_return_data */
+#define SBPF_SYSCALL_SOL_GET_CLOCK_SYSVAR 0xd56b5fe9u  /* sol_get_clock_sysvar */
+#define SBPF_SYSCALL_SOL_GET_RENT_SYSVAR 0xbf7188f6u   /* sol_get_rent_sysvar */
+#define SBPF_SYSCALL_SOL_GET_SYSVAR 0x13c1b505u        /* sol_get_sysvar */
 
 /* ---- the regions ----------------------------------------------------------------------------
  * `memory::Memory`, as pointers: set by the shim before entry, from the loaded `Program` and the
@@ -91,19 +112,40 @@ typedef struct {
     uint8_t *heap;
     uint8_t *input;
     uint32_t input_len;
+    /* `abi::CallEnv`: the sysvar block from the public tape (`sysvars_len` is 0 or
+     * `SBPF_SYSVAR_BYTES`), the running program's id (32 bytes), and the `SBPF_MAX_RETURN_DATA`-byte
+     * buffer `sol_set_return_data` writes — the harness's own, so what it hashes is what was set. */
+    const uint8_t *sysvars;
+    uint32_t sysvars_len;
+    const uint8_t *program_id;
+    uint8_t *return_data;
 } sbpf_regions;
 extern sbpf_regions sbpf_r;
 
-/* Instructions remaining. `sbpf_rt_reset` sets it to `SBPF_MAX_INSTRUCTIONS`; the emitted code
- * subtracts each basic block's length at the block's head (sbpf2rv keeps a function-local copy,
- * handed over through this variable around every call and return) and traps InstructionLimit when
- * it goes negative — at that block's head, or, for a block whose check sbpf2rv defers to its
- * successors, at the head of the next block (sbpf2rv/src/emit.rs, `choose_checked`). Either way the
- * halt kind may differ from the interpreter's, which counts one instruction at a time, only in the
- * block that crosses the limit: a fault part-way through it may be reported as InstructionLimit, or
- * (deferred) the other way round. The status (2) and the eight public words are equal, since an
- * exceptional halt publishes the pre-state whatever its kind. */
-extern int64_t sbpf_budget;
+/* Compute units remaining, as the emitted code counts them. `sbpf_rt_reset` sets it to
+ * `SBPF_MAX_INSTRUCTIONS`; the emitted code subtracts each basic block's charge — its instructions
+ * and the fixed cost of the syscall that ends it — at the block's head (sbpf2rv keeps a
+ * function-local copy, handed over through this variable around every call and return) and traps
+ * InstructionLimit when it has gone negative at a head that checks: a function's entry, a block
+ * that closes a loop, a block ending in `exit` (sbpf2rv/src/emit.rs, `choose_checked`). So a run
+ * that crosses the limit halts at the next such head rather than at the instruction, and until
+ * then may fault with another kind; the status (2) and the eight public words are the
+ * interpreter's, since an exceptional halt publishes the pre-state whatever its kind. 32 bits: the
+ * budget is 200 000 and a run goes below zero by fewer units than its unchecked blocks charge. */
+extern int32_t sbpf_budget;
+/* The compute units the syscalls have charged beyond what the emitted code already has. A syscall's
+ * charge is `syscalls::base_cost(hash)` plus a length-dependent part: the translation folds the
+ * base into the charge of the block the call ends (it is a constant, so it costs no code), and
+ * the syscall adds the rest here, trapping InstructionLimit once this alone would pass
+ * `SBPF_MAX_INSTRUCTIONS`. The emitted code's own checks do not see it, so `sbpf_rt_settle` makes
+ * the exact comparison when the program returns: a run that spent more than the budget in total
+ * halts InstructionLimit there, where the interpreter halted at the charge that crossed it. The
+ * status (2) and the public words are the interpreter's either way.
+ * `sbpf_syscall` — dispatch by hash, which the emitted code never uses — charges the base as well,
+ * so a caller of it alone sees the interpreter's whole meter. */
+extern uint32_t sbpf_cu;
+/* `Vm::return_len`: bytes of `sbpf_r.return_data` set by `sol_set_return_data`. */
+extern uint32_t sbpf_return_len;
 /* `Vm::heap_used`: the bump allocator's cursor, bytes handed out by `sol_alloc_free_`. */
 extern uint32_t sbpf_heap_used;
 /* Why the run stopped: an `SBPF_HALT_*` code (EXIT while running or after a normal return) and the
@@ -111,9 +153,13 @@ extern uint32_t sbpf_heap_used;
 extern uint32_t sbpf_halt_code;
 extern uint64_t sbpf_halt_arg;
 
-/* The per-run state a fresh `Vm::new` has: heap cursor 0, full budget, no halt. The regions are the
- * caller's to set. */
+/* The per-run state a fresh `Vm::new` has: heap cursor 0, full budget, nothing charged, no return
+ * data, no halt. The regions are the caller's to set. */
 void sbpf_rt_reset(void);
+/* The end of a run: `code` is what `sbpf_rt_enter` returned. A normal return whose total charge —
+ * the emitted code's (`SBPF_MAX_INSTRUCTIONS - sbpf_budget`) plus the syscalls' (`sbpf_cu`) — is
+ * over the budget becomes InstructionLimit; anything else is returned unchanged. */
+uint32_t sbpf_rt_settle(uint32_t code);
 
 /* ---- the trap path --------------------------------------------------------------------------
  * `sbpf_trap` records the halt and unwinds to the frame `sbpf_rt_enter` is running in, which then
@@ -143,14 +189,16 @@ void sbpf_store(uint64_t addr, uint32_t size, uint64_t v);
 /* The emitted `ldx`/`st`/`stx`: one entry per width taking the base register and the instruction's
  * offset, so the address is `interp.rs`'s `(base as i64).wrapping_add(off as i64) as u64`, computed
  * once here rather than at every one of the translated program's thousands of access sites. The
- * fault payload is that wrapped address, as the interpreter's is. */
-uint64_t sbpf_ld1(uint64_t base, int32_t off);
-uint64_t sbpf_ld2(uint64_t base, int32_t off);
-uint64_t sbpf_ld4(uint64_t base, int32_t off);
+ * fault payload is that wrapped address, as the interpreter's is. The narrow loads return 32 bits
+ * (the value is zero-extended, so the high word is zero and the type says so) and the narrow stores
+ * take 32 (only the low bytes are written). */
+uint32_t sbpf_ld1(uint64_t base, int32_t off);
+uint32_t sbpf_ld2(uint64_t base, int32_t off);
+uint32_t sbpf_ld4(uint64_t base, int32_t off);
 uint64_t sbpf_ld8(uint64_t base, int32_t off);
-void sbpf_st1(uint64_t base, int32_t off, uint64_t v);
-void sbpf_st2(uint64_t base, int32_t off, uint64_t v);
-void sbpf_st4(uint64_t base, int32_t off, uint64_t v);
+void sbpf_st1(uint64_t base, int32_t off, uint32_t v);
+void sbpf_st2(uint64_t base, int32_t off, uint32_t v);
+void sbpf_st4(uint64_t base, int32_t off, uint32_t v);
 void sbpf_st8(uint64_t base, int32_t off, uint64_t v);
 
 /* ---- the syscalls ---------------------------------------------------------------------------
@@ -169,7 +217,15 @@ uint64_t sbpf_sys_memset(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uin
 uint64_t sbpf_sys_memcmp(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
 uint64_t sbpf_sys_alloc_free(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
 uint64_t sbpf_sys_sha256(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
-/* The whole of `dispatch`: the twelve above by hash, anything else UnknownSyscall(hash) — CPI
+uint64_t sbpf_sys_keccak256(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
+uint64_t sbpf_sys_set_return_data(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
+uint64_t sbpf_sys_get_return_data(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
+uint64_t sbpf_sys_get_clock_sysvar(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
+uint64_t sbpf_sys_get_rent_sysvar(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
+uint64_t sbpf_sys_get_sysvar(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
+/* `syscalls::base_cost`: the part of a syscall's charge that depends only on which it is. */
+uint32_t sbpf_base_cost(uint32_t hash);
+/* The whole of `dispatch`: the base charge, then the eighteen above by hash, anything else UnknownSyscall(hash) — CPI
  * (`sol_invoke_signed_*`) and the two crypto syscalls of `sbpf_crypto.h` included, since the
  * interpreter implements none of them. */
 uint64_t sbpf_syscall(uint32_t hash, uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5);
@@ -178,5 +234,9 @@ uint64_t sbpf_syscall(uint32_t hash, uint64_t r1, uint64_t r2, uint64_t r3, uint
  * 0..16 the block as big-endian-valued words, 16..24 the chaining state, updated in place. On RV32
  * `sbpf_rt.c` defines it over `rand_sha256_compress`; a host build links a portable one. */
 void sbpf_sha256_compress(uint32_t w[24]);
+/* One Keccak-f[1600] permutation of the 25 lanes as 50 little-endian words, low word first
+ * (`Host::keccak_f`). On RV32 `sbpf_rt.c` defines it over `rand_keccak`; a host build links a
+ * portable one. */
+void sbpf_keccak_f(uint32_t st[50]);
 
 #endif

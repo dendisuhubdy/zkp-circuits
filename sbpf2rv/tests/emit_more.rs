@@ -285,17 +285,23 @@ fn every_call_hands_the_callee_r10_one_frame_up_and_the_prelude_checks_the_depth
     }
     assert!(sites[0].starts_with("    SBPF_CALL(f_6(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, r10 + SBPF_STACK_FRAME), r0 = x_.r0;);"), "{}", sites[0]);
     assert!(sites[1].starts_with("    SBPF_CALL(f_8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, r10 + SBPF_STACK_FRAME), r1 = x_.r1;);"), "{}", sites[1]);
-    // The prelude: one global depth, checked before the callee runs, decremented after.
+    // The prelude: one global depth, pushed (and checked) by the callee's first statement and
+    // popped by its return — once per function, not once per call site.
     assert!(c.contains("static uint32_t sbpf_depth;"), "{c}");
     assert!(
-        c.contains("if (++sbpf_depth == SBPF_MAX_CALL_DEPTH) sbpf_trap(SBPF_HALT_CALL_DEPTH, 0);"),
+        c.contains("#define SBPF_ENTER() \\\n    do { \\\n        if (++sbpf_depth == SBPF_MAX_CALL_DEPTH) sbpf_trap(SBPF_HALT_CALL_DEPTH, 0); \\\n    } while (0)"),
         "{c}"
     );
-    assert!(c.contains("sbpf_depth--;"), "{c}");
-    // The entry resets it, and the entry function gets frame 0's top.
+    assert_eq!(c.matches("    SBPF_ENTER();\n    int32_t budget = sbpf_budget;\n").count(), 3, "one per function:\n{c}");
+    assert!(c.contains("        sbpf_budget = budget; \\\n        sbpf_depth--; \\\n        return (sbpf_ret){r0, r1, r2, r3, r4, r5}; \\\n"), "{c}");
+    // A `callx` checks the depth itself, before it looks the target up (the interpreter pushes
+    // the frame, then fetches): the push is still the callee's.
+    assert!(c.contains("        uint64_t a_ = (a); \\\n        SBPF_DEPTH_CHECK(); \\\n        sbpf_callee f_ = sbpf_callx_target(a_); \\\n"), "{c}");
+    // The entry starts the depth one below zero, so the entry function's own push makes it 0, and
+    // the entry function gets frame 0's top.
     assert!(
         c.contains(&format!(
-            "uint32_t {ENTRY_SYMBOL}(uint64_t *r0) {{\n    sbpf_depth = 0;\n"
+            "uint32_t {ENTRY_SYMBOL}(uint64_t *r0) {{\n    sbpf_depth = (uint32_t)-1;\n"
         )),
         "{c}"
     );
@@ -308,13 +314,12 @@ fn every_call_hands_the_callee_r10_one_frame_up_and_the_prelude_checks_the_depth
 #[test]
 fn a_call_to_a_bad_target_pushes_the_frame_before_trapping() {
     let c = c_of(&[i(opc::CALL_IMM, 0, 0, 0, 100), i(opc::EXIT, 0, 0, 0, 0)]);
-    // A block with no successor defers its check (there is nothing after it to check at, and it
-    // traps anyway): charged, not checked.
+    // The entry block checks; the call's depth check comes before the bad target's trap.
     assert!(
-        c.contains("L_0:\n    budget -= 1;\n    SBPF_CALL_BAD_TARGET();\n"),
+        c.contains("L_0:\n    if ((budget -= 1) < 0) goto L_limit;\n    SBPF_CALL_BAD_TARGET();\n"),
         "{c}"
     );
-    assert!(c.contains("#define SBPF_CALL_BAD_TARGET() \\\n    do { \\\n        SBPF_DEPTH_PUSH(); \\\n        sbpf_trap(SBPF_HALT_BAD_JUMP, 0); \\\n    } while (0)"), "{c}");
+    assert!(c.contains("#define SBPF_CALL_BAD_TARGET() \\\n    do { \\\n        SBPF_DEPTH_CHECK(); \\\n        sbpf_trap(SBPF_HALT_BAD_JUMP, 0); \\\n    } while (0)"), "{c}");
 }
 
 #[test]
@@ -408,7 +413,7 @@ fn functions_are_emitted_entry_first_then_ascending_and_counted_once() {
 fn an_lddw_in_the_last_slot_is_charged_once_and_traps_as_the_fetch_of_its_high_half() {
     let c = c_of(&[i(opc::LD_DW_IMM, 0, 0, 0, 1)]);
     assert!(
-        c.contains("L_0:\n    budget -= 1;\n    sbpf_trap(SBPF_HALT_BAD_JUMP, 0);\n"),
+        c.contains("L_0:\n    if ((budget -= 1) < 0) goto L_limit;\n    sbpf_trap(SBPF_HALT_BAD_JUMP, 0);\n"),
         "{c}"
     );
     assert!(
@@ -418,7 +423,7 @@ fn an_lddw_in_the_last_slot_is_charged_once_and_traps_as_the_fetch_of_its_high_h
     // After a real instruction: two charged — the mov, and the lddw whose own fetch fails.
     let c = c_of(&[i(opc::MOV64_IMM, 0, 0, 0, 3), i(opc::LD_DW_IMM, 0, 0, 0, 1)]);
     assert!(
-        c.contains("L_0:\n    budget -= 2;\n    r0 = 3;\n    sbpf_trap(SBPF_HALT_BAD_JUMP, 0);\n"),
+        c.contains("L_0:\n    if ((budget -= 2) < 0) goto L_limit;\n    r0 = 3;\n    sbpf_trap(SBPF_HALT_BAD_JUMP, 0);\n"),
         "{c}"
     );
 }
@@ -436,10 +441,11 @@ fn a_jump_to_a_bad_target_is_a_shared_block_charged_for_the_failed_fetch() {
         "{c}"
     );
     assert!(
-        c.contains("L_1:\n    if ((budget -= 1) < 0) goto L_limit;\n    goto L_3;\n"),
+        c.contains("L_1:\n    budget -= 1;\n    goto L_3;\n"),
         "{c}"
     );
-    assert!(c.contains("L_3:\n    if ((budget -= 1) < 0) goto L_limit;\n    sbpf_trap(SBPF_HALT_BAD_JUMP, 0);\n"), "{c}");
+    // Neither is an entry, a loop head or an exit: both only charge (and the shared block traps).
+    assert!(c.contains("L_3:\n    budget -= 1;\n    sbpf_trap(SBPF_HALT_BAD_JUMP, 0);\n"), "{c}");
     assert_eq!(c.matches("L_3:\n").count(), 1, "one shared block");
     assert!(
         !c.contains("L_2:"),
@@ -456,14 +462,15 @@ fn a_syscall_inside_a_function_sets_r0_and_continues_or_traps() {
         i(opc::CALL_IMM, 0, 1, 0, nope as i32),
         i(opc::EXIT, 0, 0, 0, 0),
     ]);
-    // Block 0's one successor checks, so block 0 only charges.
+    // Block 0 is the entry, so it checks; its charge is the `call` and `sol_log_`'s 100 units.
     assert!(
         c.contains(
-            "L_0:\n    budget -= 1;\n    r0 = sbpf_sys_log(r1, r2, r3, r4, r5);\n    goto L_1;\n"
+            "L_0:\n    if ((budget -= 101) < 0) goto L_limit;\n    r0 = sbpf_sys_log(r1, r2, r3, r4, r5);\n    goto L_1;\n"
         ),
         "{c}"
     );
-    assert!(c.contains(&format!("L_1:\n    if ((budget -= 1) < 0) goto L_limit;\n    sbpf_trap(SBPF_HALT_UNKNOWN_SYSCALL, {nope:#010x}u);\n    goto L_2;\n")), "{c}");
+    // An unknown syscall costs its instruction only, and its block only charges.
+    assert!(c.contains(&format!("L_1:\n    budget -= 1;\n    sbpf_trap(SBPF_HALT_UNKNOWN_SYSCALL, {nope:#010x}u);\n    goto L_2;\n")), "{c}");
 }
 
 #[test]

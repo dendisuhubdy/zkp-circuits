@@ -320,7 +320,14 @@ fn run_tiered(image: &Path, call: &SbpfCall) -> ([u32; 8], usize, Option<usize>)
 
 /// `Result<u64, Halt>` as the `halt-words` image writes it after `status`.
 fn halt_words(r: &Result<u64, Halt>) -> [u32; 3] {
-    const TRAPS: [&str; 3] = ["abort", "sol_panic_", "sol_memcpy_ overlap"];
+    const TRAPS: [&str; 6] = [
+        "abort",
+        "sol_panic_",
+        "sol_memcpy_ overlap",
+        "return data too large",
+        "return data overlap",
+        "sysvar unavailable",
+    ];
     let (code, payload) = match *r {
         Ok(r0) => (0, r0),
         Err(Halt::Exit) => (0, 0),
@@ -529,6 +536,7 @@ fn spl_mint_to(amount: u64, signer: [u8; 32]) -> SbpfCall {
     SbpfCall {
         elf: sbpf::SPL_TOKEN_ELF.to_vec(),
         input: sbpf::serialize_aligned(&accounts, &data, &sbpf::SPL_TOKEN_ID),
+        sysvars: None,
     }
 }
 
@@ -558,13 +566,14 @@ fn spl_burn(amount: u64) -> SbpfCall {
     SbpfCall {
         elf: sbpf::SPL_TOKEN_ELF.to_vec(),
         input: sbpf::serialize_aligned(&accounts, &data, &sbpf::SPL_TOKEN_ID),
+        sysvars: None,
     }
 }
 
 /// `hc` of the translated SPL Token image (Homebrew clang 23.1.1, rustc 1.98.1), and its program
 /// words (the loader's count, against the 65 535-word cap).
-const SPL_TOKEN_HC: &str = "8ca905ae3c62f503de7de86829040f323e098b53dba5fffe09b42f1aad16758b";
-const SPL_TOKEN_WORDS: usize = 65_096;
+const SPL_TOKEN_HC: &str = "bae423b49d0c762e403f0331663321dc59209b6192caf3f93d2cc8b2118b755a";
+const SPL_TOKEN_WORDS: usize = 64_465;
 
 /// The SPL Token translation, built once per test binary: several tests use it, and two builds of
 /// the same crate directory at once would race.
@@ -691,6 +700,7 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
     let short = SbpfCall {
         elf: full.elf.clone(),
         input: sbpf::serialize_aligned(&accounts[..2], &data, &id),
+        sysvars: None,
     };
     let r = measure("transfer with two accounts", &short, 0);
     assert!(matches!(r, Ok(c) if c != 0), "{r:?}");
@@ -701,6 +711,54 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
         measure("an account count above MAX_ACCOUNTS", &over, 2),
         Err(Halt::BadElf)
     );
+
+    // ZKVM-116: the instructions that need the Rent sysvar or return data — which this image could
+    // not run while `sol_get_sysvar` and `sol_set_return_data` trapped.
+    let rent = sbpf::DEFAULT_RENT;
+    let min = rent.minimum_balance(sbpf::TOKEN_ACCOUNT_LEN);
+    let block = sbpf::sysvar_block(&sbpf::FIXTURE_CLOCK, &rent);
+    // `InitializeAccount`: rent from its fourth account. Exempt, and one lamport short
+    // (`TokenError::NotRentExempt`, custom error 0, which the entrypoint returns as 1 << 32).
+    assert_eq!(
+        measure("InitializeAccount", &sbpf::spl_initialize_account(min, &rent), 1),
+        Ok(0)
+    );
+    assert_eq!(
+        measure(
+            "InitializeAccount, one lamport short of rent-exempt",
+            &sbpf::spl_initialize_account(min - 1, &rent),
+            0
+        ),
+        Ok(1 << 32)
+    );
+    // `InitializeAccount3`: rent through `sol_get_sysvar`, from the public tape's sysvar block —
+    // and with no block there, a trap.
+    assert_eq!(
+        measure("InitializeAccount3", &sbpf::spl_initialize_account3(min, Some(block)), 1),
+        Ok(0)
+    );
+    let dear = sbpf::Rent { lamports_per_byte_year: 2 * rent.lamports_per_byte_year, ..rent };
+    assert_eq!(
+        measure(
+            "InitializeAccount3 under a rent twice as dear on the public tape",
+            &sbpf::spl_initialize_account3(min, Some(sbpf::sysvar_block(&sbpf::FIXTURE_CLOCK, &dear))),
+            0
+        ),
+        Ok(1 << 32)
+    );
+    assert_eq!(
+        measure("InitializeAccount3 with no sysvars on the tape", &sbpf::spl_initialize_account3(min, None), 2),
+        Err(Halt::Trap("sysvar unavailable"))
+    );
+    // `GetAccountDataSize` and `AmountToUiAmount`: the answer is return data, which the public
+    // output binds (`parity_measured` compares all eight words, so the return hash too).
+    let size = sbpf::spl_get_account_data_size();
+    assert_eq!(size.return_data(), 165u64.to_le_bytes());
+    assert_eq!(measure("GetAccountDataSize", &size, 1), Ok(0));
+    let ui = sbpf::spl_amount_to_ui_amount(1_234_567);
+    assert_eq!(ui.return_data(), b"1.234567");
+    assert_eq!(measure("AmountToUiAmount 1 234 567", &ui, 1), Ok(0));
+
     eprintln!(
         "cycles, from rand-guest run on each image:\n{}",
         table(&rows, t.words, image_words(&interp))
@@ -743,6 +801,7 @@ fn an_elf_one_rodata_byte_away_is_refused_where_the_interpreter_runs_it() {
     let other = SbpfCall {
         elf,
         input: good.input.clone(),
+        sysvars: None,
     };
 
     // The interpreter runs it, to the same outcome as the untouched ELF.
@@ -769,6 +828,7 @@ fn an_elf_one_rodata_byte_away_is_refused_where_the_interpreter_runs_it() {
             status,
             &sbpf::canonical_input_hash_of(&good.input),
             &sbpf::output_hash_of(post),
+            &sbpf::return_hash_of(&[]),
         )
     };
     assert_eq!(
@@ -802,6 +862,7 @@ fn two_elfs_that_load_to_the_same_program_both_run() {
     let other = SbpfCall {
         elf,
         input: good.input.clone(),
+        sysvars: None,
     };
     // Same view, same digest, on the host.
     let (mut a, mut b) = (good.elf.clone(), other.elf.clone());
@@ -847,6 +908,7 @@ fn an_access_violation_halts_exactly_as_the_interpreter_does() {
     let call = SbpfCall {
         elf,
         input: full.input.clone(),
+        sysvars: None,
     };
     assert_eq!(
         parity(
@@ -1215,12 +1277,13 @@ fn vector_call(elf: &[u8], case: u64, a: u64, b: u64, c: u64) -> SbpfCall {
     SbpfCall {
         elf: elf.to_vec(),
         input: sbpf::serialize_aligned(&[], &data, &[9u8; 32]),
+        sysvars: None,
     }
 }
 
 /// How many instructions the interpreter executes on a vector (natively).
 fn instructions(call: &SbpfCall) -> u64 {
-    sbpf::run_elf(&mut call.elf.clone(), &mut call.input.clone()).instructions
+    sbpf::measure(call).instructions
 }
 
 /// Fix round 1: the call convention's corners and the budget boundary, through the emulator,
@@ -1532,6 +1595,7 @@ fn a_sample_of_the_fuzz_corpus_matches_through_the_real_pipeline() {
             let call = SbpfCall {
                 elf: elf.clone(),
                 input: sbpf::serialize_aligned(&[], &data, &[7u8; 32]),
+                sysvars: None,
             };
             let (want, result, _) = call.expected();
             let what = format!("{name} case {k} (seed {})", c.seed);
@@ -1667,6 +1731,7 @@ fn a_callx_returns_r5_as_the_callee_left_it_not_the_address_of_a_tail_call() {
     let call = SbpfCall {
         elf: elf.clone(),
         input: sbpf::serialize_aligned(&[], &[], &[7u8; 32]),
+        sysvars: None,
     };
     let r = parity(&t, None, "r5 across a callx", &call, 0);
     assert_eq!(r, Ok(R5 as u64));

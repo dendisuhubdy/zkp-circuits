@@ -462,7 +462,7 @@ fn callx_to_code_that_is_not_a_known_entry_is_the_accepted_divergence() {
 #[test]
 fn syscalls_by_hash_run_trap_or_halt_unknown() {
     let sys = |hash: u32| i(opc::CALL_IMM, 0, 1, 0, hash as i32);
-    let unknown = syscalls::murmur3_32(b"sol_get_sysvar", 0);
+    let unknown = syscalls::murmur3_32(b"sol_secp256k1_recover", 0);
     let cpi = syscalls::murmur3_32(b"sol_invoke_signed_rust", 0);
     let r = parity_bare(
         "syscalls_hash",

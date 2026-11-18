@@ -9,12 +9,14 @@
  *   text <hex>        text_va <u64>
  *   rodata <hex>      rodata_va <u64>
  *   input <hex>
+ *   sysvars <hex>     program_id <hex>
  *   ld <addr> <size> | st <addr> <size> <v> | sys <hash> <r1> <r2> <r3> <r4> <r5>   (any number)
  *   end
  *
  * The stack and heap start zeroed and the allocator's cursor at 0 (`Vm::new`). The ops run in order
  * until one halts. Printed per op: `ok <r0>` (a load's value; 0 for a store) or
- * `halt <code> <arg>`; then `input <hex>`, `stack <fnv1a64>`, `heap <fnv1a64>`, `heap_used <n>`.
+ * `halt <code> <arg>`; then `input <hex>`, `return <hex>` (the return data), `cu <n>` (compute
+ * units charged), `stack <fnv1a64>`, `heap <fnv1a64>`, `heap_used <n>`.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +26,7 @@
 
 static uint8_t text[1 << 16], rodata[1 << 16], input[1 << 16];
 static uint8_t stack[SBPF_STACK_BYTES], heap[SBPF_HEAP_BYTES];
+static uint8_t sysvars[256], program_id[64], return_data[SBPF_MAX_RETURN_DATA];
 
 static size_t unhex(uint8_t *out, const char *h) {
     if (strcmp(h, "-") == 0) return 0;
@@ -76,6 +79,11 @@ int main(void) {
             sbpf_r.stack = stack;
             sbpf_r.heap = heap;
             sbpf_r.input = input;
+            memset(program_id, 0, sizeof program_id);
+            memset(return_data, 0, sizeof return_data);
+            sbpf_r.sysvars = sysvars;
+            sbpf_r.program_id = program_id;
+            sbpf_r.return_data = return_data;
             sbpf_rt_reset();
             halted = 0;
         } else if (!strcmp(k, "text")) {
@@ -88,6 +96,10 @@ int main(void) {
             sbpf_r.rodata_va = num(tok[1]);
         } else if (!strcmp(k, "input")) {
             sbpf_r.input_len = (uint32_t)unhex(input, tok[1]);
+        } else if (!strcmp(k, "sysvars")) {
+            sbpf_r.sysvars_len = (uint32_t)unhex(sysvars, tok[1]);
+        } else if (!strcmp(k, "program_id")) {
+            unhex(program_id, tok[1]);
         } else if (!strcmp(k, "ld") || !strcmp(k, "st") || !strcmp(k, "sys")) {
             if (halted) continue;
             uint64_t r0 = 0;
@@ -111,6 +123,10 @@ int main(void) {
             printf("input ");
             if (sbpf_r.input_len == 0) printf("-");
             for (uint32_t i = 0; i < sbpf_r.input_len; i++) printf("%02x", input[i]);
+            printf("\nreturn ");
+            if (sbpf_return_len == 0) printf("-");
+            for (uint32_t i = 0; i < sbpf_return_len; i++) printf("%02x", return_data[i]);
+            printf("\ncu %u", sbpf_cu);
             printf("\nstack %016llx\nheap %016llx\nheap_used %u\n",
                    (unsigned long long)fnv(stack, sizeof stack), (unsigned long long)fnv(heap, sizeof heap),
                    sbpf_heap_used);

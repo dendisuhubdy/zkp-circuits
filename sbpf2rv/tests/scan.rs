@@ -540,17 +540,14 @@ fn callx_is_a_terminator_and_does_not_add_call_targets() {
 
 // ---- the real SPL Token ELF ------------------------------------------------------------------
 
-/// The committed SPL Token ELF (`research/tests/sbpf_elf.rs`'s own fixture) names two syscalls
-/// `syscalls::SUPPORTED` does not implement — `sol_set_return_data` and `sol_get_sysvar` — from
-/// instruction handlers the `Transfer` vector never reaches (`GetAccountDataSize`/
-/// `AmountToUiAmount`/`UiAmountToAmount`, and the rent read `InitializeAccount` does). It is real,
-/// valid, compiler-emitted code: the scan produces no `RegisterOutOfRange`/`UnknownOpcode`/
-/// `JumpOutOfText` warning at all, only the two unsupported-syscall ones — and there is nothing
-/// left in this crate that could refuse it outright: refusing the whole program over a syscall no
-/// vector this translator is asked to prove ever reaches would break parity with the interpreter,
-/// which loads and runs this exact file today.
+/// The committed SPL Token ELF scans with no warning at all: no `RegisterOutOfRange`,
+/// `UnknownOpcode` or `JumpOutOfText`, no CPI, and — since ZKVM-116 gave the runtime
+/// `sol_set_return_data` and `sol_get_sysvar`, the two syscalls it names beyond the original
+/// twelve — no unsupported syscall either. Every one of its instructions is now code the
+/// translation can run: `GetAccountDataSize` / `AmountToUiAmount` / `UiAmountToAmount` (return
+/// data) and the rent read `InitializeAccount2`/`3` do (`sol_get_sysvar`) included.
 #[test]
-fn the_real_spl_token_elf_scans_clean_and_warns_only_the_two_unsupported_syscalls() {
+fn the_real_spl_token_elf_scans_clean_with_no_warning() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../guests-compiled/sbpf/programs/spl_token.so"
@@ -559,36 +556,26 @@ fn the_real_spl_token_elf_scans_clean_and_warns_only_the_two_unsupported_syscall
     let program = sbpf_core::elf::load(&mut bytes).expect("SPL Token must load");
 
     let scanned = scan(&program);
+    assert_eq!(scanned.warnings, vec![], "SPL Token should scan with no warning");
 
-    let unsupported = ["sol_set_return_data", "sol_get_sysvar"];
-    let unsupported_hashes: Vec<u32> = unsupported
+    // The two it used to warn about are called, and are supported.
+    let sites: Vec<u32> = scanned
+        .functions
         .iter()
-        .map(|n| syscalls::murmur3_32(n.as_bytes(), 0))
+        .flat_map(|f| &f.blocks)
+        .filter_map(|b| match b.term {
+            Term::Syscall { hash, .. } => Some(hash),
+            _ => None,
+        })
         .collect();
-    for (name, hash) in unsupported.iter().zip(&unsupported_hashes) {
-        assert!(
-            scanned
-                .warnings
-                .iter()
-                .any(|w| matches!(w, Warning::UnknownSyscall { hash: h, .. } if *h == *hash)),
-            "expected a Warning::UnknownSyscall naming {name} ({hash:#010x}); got {:?}",
-            scanned.warnings
-        );
+    for name in ["sol_set_return_data", "sol_get_sysvar"] {
+        let hash = syscalls::murmur3_32(name.as_bytes(), 0);
+        assert!(sites.contains(&hash), "{name} is called");
+        assert!(syscalls::SUPPORTED.iter().any(|(h, _)| *h == hash), "{name} is supported");
     }
-    // Nothing else in the committed file is unrecognised or structurally bad — every warning is
-    // one of the two known-unsupported syscalls above, never a Cpi, a RegisterOutOfRange, an
-    // UnknownOpcode, or a JumpOutOfText.
-    for w in &scanned.warnings {
-        match *w {
-            Warning::UnknownSyscall { hash, .. } => {
-                assert!(
-                    unsupported_hashes.contains(&hash),
-                    "unexpected unknown syscall hash {hash:#010x}"
-                );
-            }
-            other => panic!("SPL Token should not produce this warning: {other:?}"),
-        }
-    }
+    // A syscall the runtime still lacks is what a warning looks like.
+    let h = syscalls::murmur3_32(b"sol_secp256k1_recover", 0);
+    assert!(!syscalls::SUPPORTED.iter().any(|(s, _)| *s == h));
 }
 
 // ==== Review round 1 (2026-09-18) ==============================================================

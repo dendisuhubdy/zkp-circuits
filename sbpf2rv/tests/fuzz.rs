@@ -67,7 +67,14 @@ const HALT_TRAP: u32 = 10;
 /// `Result<u64, Halt>` as `(code, payload)` — `sbpf-rt`'s `SBPF_HALT_*` numbering (the enum's
 /// declaration order, which research's `sbpf_rt` test checks) and its `SBPF_TRAP_*` indices.
 fn halt_code(r: &Result<u64, Halt>) -> (u32, u64) {
-    const TRAPS: [&str; 3] = ["abort", "sol_panic_", "sol_memcpy_ overlap"];
+    const TRAPS: [&str; 6] = [
+        "abort",
+        "sol_panic_",
+        "sol_memcpy_ overlap",
+        "return data too large",
+        "return data overlap",
+        "sysvar unavailable",
+    ];
     match *r {
         Ok(_) | Err(Halt::Exit) => (0, 0),
         Err(Halt::AccessViolation(a)) => (1, a),
@@ -105,23 +112,53 @@ struct Seen {
     stack: u64,
     heap: u64,
     input: u64,
+    /// The return data left: its length and digest.
+    ret_len: u64,
+    ret: u64,
 }
 
 /// The interpreter's run, plus what only it can tell: the meter and the pc it stopped at, and the
 /// coverage marks.
 struct Interp {
     seen: Seen,
+    /// The compute units the translation charges in its block heads: the instructions executed
+    /// plus every syscall's `base_cost`, as requested (a refused charge included).
     meter: u64,
+    /// The syscalls' length-dependent charges, as requested: what `sbpf-rt` adds to `sbpf_cu`,
+    /// which no block head sees.
+    dynamic: u64,
+    /// Everything the interpreter's meter consumed (it stops at the budget).
+    total: u64,
     pc: u64,
     marks: Vec<u8>,
 }
+
+/// The sysvar block and the program id both sides run with (the driver builds the same bytes).
+const SYSVARS: [u8; sbpf_core::interp::SYSVAR_BYTES] = {
+    let mut b = [0u8; sbpf_core::interp::SYSVAR_BYTES];
+    let mut i = 0;
+    while i < b.len() {
+        b[i] = 0xc0 ^ i as u8;
+        i += 1;
+    }
+    b
+};
+const PROGRAM_ID: [u8; 32] = {
+    let mut b = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        b[i] = 0x70 + i as u8;
+        i += 1;
+    }
+    b
+};
 
 fn interpret(text: &[u8], data: &[u8]) -> Interp {
     let p = Program::from_text(text).unwrap();
     let mut stack = vec![0u8; STACK_BYTES].into_boxed_slice();
     let mut heap = vec![0u8; HEAP_BYTES].into_boxed_slice();
     let mut input = input_region(data);
-    let (result, meter, pc, heap_used) = {
+    let (result, meter, dynamic, total, pc, heap_used, ret) = {
         let mem = Memory {
             text: p.text,
             text_va: p.text_va,
@@ -133,8 +170,19 @@ fn interpret(text: &[u8], data: &[u8]) -> Interp {
         };
         let mut h = rand_zkvm::sbpf::HostRef;
         let mut vm = Vm::new(&mut h, &p, mem);
+        vm.sysvars = SYSVARS;
+        vm.sysvars_len = SYSVARS.len();
+        vm.program_id = PROGRAM_ID;
         let r = vm.run();
-        (r, vm.instructions_executed(), vm.pc, vm.heap_used)
+        (
+            r,
+            vm.instructions_executed() + vm.syscall_base_units,
+            vm.syscall_extra_units,
+            vm.compute_units_consumed(),
+            vm.pc,
+            vm.heap_used,
+            vm.return_data[..vm.return_len].to_vec(),
+        )
     };
     let (code, arg) = halt_code(&result);
     let m = (MARK_BASE - REGION_HEAP) as usize;
@@ -148,8 +196,12 @@ fn interpret(text: &[u8], data: &[u8]) -> Interp {
             stack: fnv(&stack),
             heap: fnv(&heap),
             input: fnv(&input),
+            ret_len: ret.len() as u64,
+            ret: fnv(&ret),
         },
         meter,
+        dynamic,
+        total,
         pc,
         marks,
     }
@@ -182,7 +234,7 @@ fn prepare(c: &Case) -> Prepared {
             for (i, v) in [t, p, k].into_iter().enumerate() {
                 d[8 + 8 * i..16 + 8 * i].copy_from_slice(&v.to_le_bytes());
             }
-            interpret(&text, &d).meter
+            interpret(&text, &d).total
         };
         let m0 = count(1, 1, 0);
         let per = count(2, 1, 0) - m0;
@@ -243,9 +295,10 @@ fn work(name: &str) -> PathBuf {
 }
 
 /// Reads `<idx> <text hex> <input hex>` per line, runs entry `idx` over those regions, prints
-/// `<idx> <code> <arg> <r0> <heap_used> <stack fnv> <heap fnv> <input fnv> <budget at L_limit>` —
-/// the last is what the emitted `SBPF_AT_LIMIT` hook recorded ([`AT_LIMIT_HOOK`]), or `LLONG_MIN`
-/// if no `L_limit` ran.
+/// `<idx> <code> <arg> <r0> <heap_used> <stack fnv> <heap fnv> <input fnv> <budget at L_limit>
+/// <sbpf_cu> <return len> <return fnv>` — the ninth is what the emitted `SBPF_AT_LIMIT` hook
+/// recorded ([`AT_LIMIT_HOOK`]), or `LLONG_MIN` if no `L_limit` ran; the tenth is what the syscalls
+/// charged at run time.
 const DRIVER: &str = r#"
 #include <limits.h>
 #include <stdio.h>
@@ -257,6 +310,7 @@ typedef uint32_t (*entry_t)(uint64_t *);
 extern const entry_t fuzz_entries[];
 
 static uint8_t text[1 << 20], input[1 << 16], stack[SBPF_STACK_BYTES], heap[SBPF_HEAP_BYTES];
+static uint8_t sysvars[SBPF_SYSVAR_BYTES], program_id[32], return_data[SBPF_MAX_RETURN_DATA];
 long long sbpf_fuzz_at_limit;
 
 static size_t unhex(uint8_t *out, const char *h) {
@@ -299,14 +353,21 @@ int main(void) {
         sbpf_r.heap = heap;
         sbpf_r.input = input;
         sbpf_r.input_len = (uint32_t)il;
+        for (int i = 0; i < SBPF_SYSVAR_BYTES; i++) sysvars[i] = (uint8_t)(0xc0 ^ i);
+        for (int i = 0; i < 32; i++) program_id[i] = (uint8_t)(0x70 + i);
+        sbpf_r.sysvars = sysvars;
+        sbpf_r.sysvars_len = SBPF_SYSVAR_BYTES;
+        sbpf_r.program_id = program_id;
+        sbpf_r.return_data = return_data;
         sbpf_rt_reset();
         sbpf_fuzz_at_limit = LLONG_MIN;
         uint64_t r0 = 0;
         uint32_t code = fuzz_entries[idx](&r0);
-        printf("%d %u %llu %llu %u %llu %llu %llu %lld\n", idx, code, (unsigned long long)sbpf_halt_arg,
+        printf("%d %u %llu %llu %u %llu %llu %llu %lld %u %u %llu\n", idx, code, (unsigned long long)sbpf_halt_arg,
                (unsigned long long)r0, sbpf_heap_used, (unsigned long long)fnv(stack, sizeof stack),
                (unsigned long long)fnv(heap, sizeof heap), (unsigned long long)fnv(input, il),
-               sbpf_fuzz_at_limit);
+               sbpf_fuzz_at_limit, sbpf_cu, sbpf_return_len,
+               (unsigned long long)fnv(return_data, sbpf_return_len));
         fflush(stdout);
     }
     free(line);
@@ -342,6 +403,8 @@ const AT_LIMIT_HOOK: &str = "extern long long sbpf_fuzz_at_limit;\n\
 /// when it stopped at an `L_limit` (`MAX_INSTRUCTIONS` minus the recorded budget), if it did.
 struct CRun {
     seen: Seen,
+    /// What the syscalls charged at run time (`sbpf_cu`).
+    cu: u64,
     at_limit: Option<u64>,
 }
 
@@ -427,7 +490,10 @@ fn run_c(name: &str, batch: &[&Prepared], sanitize: bool) -> Vec<CRun> {
                 stack: n(5),
                 heap: n(6),
                 input: n(7),
+                ret_len: n(10),
+                ret: n(11),
             },
+            cu: n(9),
             at_limit: (budget != i64::MIN).then(|| (MAX_INSTRUCTIONS as i64 - budget) as u64),
         });
     }
@@ -560,6 +626,11 @@ fn blocks_containing(p: &Prepared, pc: u64) -> Vec<(CBlock, u64)> {
 /// containing `pc` plus its largest in-function predecessor, each with one extra instruction for a
 /// failed fetch.
 fn limit_window(s: &Scan, pc: u64) -> u64 {
+    // What the syscall ending a block adds to its charge (`syscalls::base_cost`).
+    let syscall_base = |b: &sbpf2rv::scan::Block| match b.term {
+        sbpf2rv::scan::Term::Syscall { hash, .. } => sbpf_core::syscalls::base_cost(hash),
+        _ => 0,
+    };
     let mut w = 1;
     for f in &s.functions {
         for b in &f.blocks {
@@ -576,14 +647,31 @@ fn limit_window(s: &Scan, pc: u64) -> u64 {
                             _ => false,
                         }
                     })
-                    .map(|p| p.insns.len() as u64 + 1)
+                    .map(|p| p.insns.len() as u64 + 1 + syscall_base(p))
                     .max()
                     .unwrap_or(0);
-                w = w.max(b.insns.len() as u64 + 1 + pred);
+                w = w.max(b.insns.len() as u64 + 1 + syscall_base(b) + pred);
             }
         }
     }
     w
+}
+
+/// The fixed charge of the syscall at `pc`, if the instruction there is a `call` of a syscall the
+/// interpreter dispatches (`syscalls::base_cost`; 0 for anything else).
+fn syscall_base_at(p: &Prepared, pc: u64) -> u64 {
+    let k = pc as usize * 8;
+    match p.text.get(k..k + 8) {
+        Some(b) => {
+            let i = isa::decode(u64::from_le_bytes(b.try_into().unwrap()));
+            if i.opc == opc::CALL_IMM && i.src == 1 {
+                sbpf_core::syscalls::base_cost(i.imm as u32)
+            } else {
+                0
+            }
+        }
+        None => 0,
+    }
 }
 
 /// How the two runs relate: equal, or one of the two accepted differences (checked here), or a
@@ -603,8 +691,11 @@ fn compare(p: &Prepared, i: &Interp, run: &CRun) -> Result<Verdict, String> {
     let c = &run.seen;
     // The count the translation stopped at, recorded at `L_limit`: present exactly when it halted
     // there, and past the limit, or the head check itself is wrong.
+    // The exception is a limit the block heads cannot see: a syscall's run-time charge refused by
+    // `sbpf-rt`, or the settlement when the program returns — both only with `sbpf_cu` above zero.
     let count = match (c.code == HALT_LIMIT, run.at_limit) {
         (true, Some(n)) if n > MAX_INSTRUCTIONS => Some(n),
+        (true, None) if run.cu > 0 => None,
         (false, None) => None,
         (_, n) => {
             return Err(format!(
@@ -619,13 +710,23 @@ fn compare(p: &Prepared, i: &Interp, run: &CRun) -> Result<Verdict, String> {
             // block holding `pc` checks at its head, the translation stopped at that head, having
             // charged exactly what ran before `pc` in the block plus the block's whole count. (If
             // one only charges, the translation ran on to a later head; the count is only bounded.)
-            let n = count.unwrap();
+            //
+            // Two things loosen that. The interpreter may have stopped *at* `pc` rather than before
+            // it — a syscall whose fixed charge did not fit — and then the translation, which pays
+            // that charge with the block, stopped at the head having charged exactly what the
+            // interpreter asked for (`i.meter`). And once any length-dependent charge is in play
+            // the two meters are different numbers (the heads do not see `sbpf_cu`), so only the
+            // halt itself is compared.
+            let Some(n) = count else {
+                return Ok(Verdict::Equal); // a run-time charge or the settlement stopped it
+            };
             let bs = blocks_containing(p, i.pc);
-            if !bs.is_empty()
+            if i.dynamic == 0
+                && !bs.is_empty()
                 && bs.iter().all(|(b, _)| b.checked)
                 && !bs
                     .iter()
-                    .any(|(b, before)| MAX_INSTRUCTIONS - before + b.charge == n)
+                    .any(|(b, before)| MAX_INSTRUCTIONS - before + b.charge == n || i.meter == n)
             {
                 return Err(format!(
                     "both at the limit (interpreter before pc {}), but the translation stopped at \
@@ -650,8 +751,14 @@ fn compare(p: &Prepared, i: &Interp, run: &CRun) -> Result<Verdict, String> {
         // start plus B's charge passes the limit, and the count it recorded there is that sum. The
         // interpreter stopped inside B, at `pc`, having run `before + 1` of B's instructions (its
         // meter counts the one at `pc`).
+        //
+        // If the instruction at `pc` is a syscall that was dispatched, the interpreter's meter also
+        // holds that syscall's fixed charge, which is part of B's.
+        let at_pc = syscall_base_at(p, i.pc);
         let exact = blocks_containing(p, i.pc).iter().any(|(b, before)| {
-            b.checked && i.meter > *before && i.meter - before - 1 + b.charge == n
+            b.checked
+                && i.meter > *before + at_pc
+                && i.meter - before - 1 - at_pc + b.charge == n
         });
         let w = limit_window(&p.scan, i.pc);
         if exact && MAX_INSTRUCTIONS - i.meter < w {
@@ -668,8 +775,12 @@ fn compare(p: &Prepared, i: &Interp, run: &CRun) -> Result<Verdict, String> {
     if a.code == HALT_LIMIT {
         // The interpreter stopped before running `pc`; the translation ran on only if `pc` lies in
         // a block that only charges, and then it must have faulted before the next check.
+        //
+        // Or the interpreter's limit came from a length-dependent syscall charge, which the block
+        // heads never see: the translation runs on until it faults, or `sbpf-rt` refuses a charge,
+        // or the settlement at the program's return stops it — anything but a normal return.
         let unchecked = blocks_containing(p, i.pc).iter().any(|(b, _)| !b.checked);
-        if c.code != HALT_EXIT && unchecked {
+        if c.code != HALT_EXIT && (unchecked || i.dynamic > 0) {
             return Ok(Verdict::LimitInterpreterOnly);
         }
         return Err(format!(
@@ -808,6 +919,9 @@ fn halt_classes(p: &Prepared, i: &Interp) -> Vec<String> {
             "halt:Trap abort",
             "halt:Trap sol_panic_",
             "halt:Trap sol_memcpy_ overlap",
+            "halt:Trap return data too large",
+            "halt:Trap return data overlap",
+            "halt:Trap sysvar unavailable",
         ][a.arg as usize]),
         other => vec![format!("halt:code {other}")],
     }

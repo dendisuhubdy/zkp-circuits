@@ -36,7 +36,8 @@ it correctly. `rand-guest check` refuses an image with that shape (`TailScratch`
 
 ## Usage: a real SPL Token walkthrough
 
-Every command below was run on this machine, 2026-09-18, against the committed ELF
+Every command below was run on this machine (2026-09-18; the outputs re-taken 2026-11-18 after
+ZKVM-116, with LLVM's own clang 23.1.1 for macOS), against the committed ELF
 `guests-compiled/sbpf/programs/spl_token.so` — the interpreter's own test fixture
 (`sbpf-core`'s `spl_transfer`, `SPL_TOKEN_ELF`). Output is pasted, not summarized, and
 abbreviated only where it repeats. This is the walkthrough the website docs should copy.
@@ -45,22 +46,21 @@ abbreviated only where it repeats. This is the walkthrough the website docs shou
 
 ```text
 $ sbpf2rv guests-compiled/sbpf/programs/spl_token.so --out <dir> --name spl-token
-entry pc 225: 30 function(s), 3546 block(s), 12061 instruction(s), 30 callx target(s), 0 refusal(s), 4 warning(s)
+entry pc 225: 30 function(s), 3546 block(s), 12061 instruction(s), 30 callx target(s), 0 refusal(s), 0 warning(s)
   fn 225: 2065 block(s)
   fn 0: 41 block(s)
   fn 117: 52 block(s)
   ...                                              (30 functions in all)
-  warning: UnknownSyscall { pc: 7803, hash: 2720453611 }
-  warning: UnknownSyscall { pc: 9530, hash: 2720453611 }
-  warning: UnknownSyscall { pc: 8698, hash: 2720453611 }
-  warning: UnknownSyscall { pc: 11547, hash: 331461893 }
-wrote <dir>/program.c (521757 bytes of C) and the spl-token shim crate: rand-guest build <dir>
+wrote <dir>/program.c (477259 bytes of C) and the spl-token shim crate: rand-guest build <dir>
 ```
 
 `0 refusal(s)`: nothing about the ELF's instructions is refused (see "What is refused, and what
-traps" below). The four warnings are real syscalls the ELF calls but the `Transfer` instruction
-never reaches: hash `2720453611` is `sol_set_return_data` (three call sites), hash `331461893`
-is `sol_get_sysvar` (one).
+traps" below). `0 warning(s)`: every syscall the ELF calls is one `sbpf-rt` implements. Before
+ZKVM-116 there were four — three call sites of `sol_set_return_data` (hash `2720453611`) and one
+of `sol_get_sysvar` (hash `331461893`), translated as the `UnknownSyscall` trap — and the code
+behind them was dead in the image; it is live now (`GetAccountDataSize`, `AmountToUiAmount`,
+`UiAmountToAmount`, and the `Rent::get()` of `InitializeAccount2`/`3`, `InitializeMint2` and
+`InitializeMultisig2`).
 
 ### 2. Build
 
@@ -70,11 +70,11 @@ $ rand-guest build <dir> --max-words 65535 --allow-panic
    Compiling guest-sdk v0.1.0 (…/guest-sdk)
    Compiling cc v1.4.6
    Compiling spl-token v0.1.0 (<dir>)
-warning: spl-token@0.1.0: sbpf2rv: clang Homebrew clang version 23.1.1
-    Finished `release` profile [optimized] target(s) in 5.81s
-65096 words against a cap of 65535 (fits); 2 ecall(s) with a non-static a7
+warning: spl-token@0.1.0: sbpf2rv: clang clang version 23.1.1 (https://github.com/llvm/llvm-project 6dfe1677ab8dffbc6ec13d53a1e0215d75147689)
+    Finished `release` profile [optimized] target(s) in 5.53s
+64465 words against a cap of 65535 (fits); 2 ecall(s) with a non-static a7
 OK
-wrote <dir>/image.bin and its .sha256 (65096 words, hc 8ca905ae3c62f503de7de86829040f323e098b53dba5fffe09b42f1aad16758b, program id 65d234ce9ca4d082f487c038abfa76e67f41a0d91e10b9ac388f1e1541d59184)
+wrote <dir>/image.bin and its .sha256 (64465 words, hc bae423b49d0c762e403f0331663321dc59209b6192caf3f93d2cc8b2118b755a, program id b9af92f6884207c86c70acf866577fb65a08b810b1d82644bf85d9a3b392c3df)
 ```
 
 `hc` is the image's own digest; `program id` is the id `rand-guest` derives for the deployed
@@ -85,25 +85,26 @@ verification" below).
 ### 3. Run, and compare with the interpreter
 
 The `Transfer` 250 vector's inputs are two word lists, exactly as `tests/parity.rs` builds them
-from `SbpfCall::public_words()` / `input_words()`: **27 151 public words** (the ELF itself,
-word-encoded — this is why the image still carries the whole ELF, not just its hash) and
-**10 458 private words** (the serialized instruction: the accounts `spl_transfer` builds, then
+from `SbpfCall::public_words()` / `input_words()`: **27 152 public words** (the ELF itself,
+word-encoded — this is why the image still carries the whole ELF, not just its hash — and then the
+sysvar block, here its length word alone: 0, this call carries no sysvars; a call that does
+carries 57 bytes after it, Clock then Rent) and **10 458 private words** (the serialized instruction: the accounts `spl_transfer` builds, then
 the `Transfer` discriminant and the amount). `rand-guest run` takes them as `--public w0 w1 …`
 and `--input w0 w1 …`. Abbreviated to the first handful of words of each list:
 
 ```text
 $ rand-guest run <dir>/image.bin \
-    --public 108600 1179403647 65794 0 0 17235971 1 2088 …   (27 151 words)
+    --public 108600 1179403647 65794 0 0 17235971 1 2088 … 0 (27 152 words)
     --input  41825 4 0 65791 0 50529027 50529027 50529027 …  (10 458 words)
 out[0] = 1
-out[1] = 2892832079
-out[2] = 376091303
-out[3] = 1311040261
-out[4] = 2015764099
-out[5] = 3682593600
-out[6] = 3311553006
-out[7] = 141115266
-cycles 765851
+out[1] = 3392882403
+out[2] = 2131909648
+out[3] = 3952069092
+out[4] = 1651185809
+out[5] = 567649743
+out[6] = 4049030460
+out[7] = 1478577172
+cycles 753424
 tier 20
 ```
 
@@ -111,25 +112,25 @@ The same two word lists, unchanged, against the interpreter's own committed gues
 
 ```text
 $ rand-guest run guests-compiled/bin/sbpf.bin \
-    --public 108600 1179403647 65794 0 0 17235971 1 2088 …   (27 151 words)
+    --public 108600 1179403647 65794 0 0 17235971 1 2088 … 0 (27 152 words)
     --input  41825 4 0 65791 0 50529027 50529027 50529027 …  (10 458 words)
 out[0] = 1
-out[1] = 2892832079
-out[2] = 376091303
-out[3] = 1311040261
-out[4] = 2015764099
-out[5] = 3682593600
-out[6] = 3311553006
-out[7] = 141115266
-cycles 694498
+out[1] = 3392882403
+out[2] = 2131909648
+out[3] = 3952069092
+out[4] = 1651185809
+out[5] = 567649743
+out[6] = 4049030460
+out[7] = 1478577172
+cycles 685749
 tier 20
 ```
 
-All eight words are identical, word for word. The interpreter costs 694 498 cycles against the
-translated program's 765 851: the translated image is 71 353 cycles dearer, because the ELF guard
-costs 72 949 (copying the loaded program's 26 364 words into its hash buffer and hashing them)
-against the program's own 13 k saving. Both land in tier 20; "Does translation pay off for SPL
-Token?" below has the split.
+All eight words are identical, word for word. The interpreter costs 685 749 cycles against the
+translated program's 753 424: the translated image is 67 675 cycles dearer, because the ELF guard
+costs about 73 k (copying the loaded program's 26 364 words into its hash buffer and hashing
+them) against the program's own 13 k saving. Both land in tier 20; "Does translation pay off for
+SPL Token?" below has the split.
 
 ### 4. Deploy
 
@@ -137,7 +138,7 @@ Token?" below has the split.
 rand program deploy <dir>/image.bin
 ```
 
-deploys the image, on a chain whose genesis sets `max_program_words >= 65 096` — this image's own
+deploys the image, on a chain whose genesis sets `max_program_words >= 64 465` — this image's own
 word count. **Today's chain 12 caps a deploy at 4 096 words**
 (`docs/superpowers/specs/2026-09-18-rand-guest-toolchain-design.md` §8's
 `MAX_PROGRAM_WORDS`), about 16× too small for this image, so the command above is not runnable
@@ -150,8 +151,13 @@ What each part of a proof binds:
 * **The ELF arrives on the public tape** (step 3 above), so the proof's public-input digest
   `H_PUB` binds it word for word — and nothing else in the published output does.
   `public_output` has no ELF in its preimage (it is `status` and the digest of
-  `input_hash ‖ output_hash`), and `program_id` is read from the *instruction region* on the
-  private tape, not derived from the ELF.
+  `input_hash ‖ output_hash ‖ return_hash`), and `program_id` is read from the *instruction
+  region* on the private tape, not derived from the ELF.
+* **The sysvars arrive on the public tape too**, after the ELF: Clock and Rent are the chain's
+  facts, so `H_PUB` is what binds them and the chain checks them against its own. Nothing a
+  sysvar getter returns is ever read from the private tape (`sbpf_core::abi`).
+* **The return data is in the output digest.** `return_hash` is `sha256` of what
+  `sol_set_return_data` last set, for a run that returns success (of nothing, otherwise).
 * **The image bakes the translated text, and the ELF guard.** The harness hands the translated
   code the text, `.rodata` and their addresses loaded from the tape's ELF, and the interpreter
   would start at its entry, so without a guard one image could be run over a different,
@@ -210,8 +216,8 @@ Every one of these is a *runtime* trap carrying the interpreter's own `Halt` val
 never a translation-time refusal — matching `interp.rs`, which only ever raises them when the
 instruction actually executes. A translator that refused a program over unreached code would
 refuse programs the interpreter runs successfully today, and the committed SPL Token ELF is
-exactly that case: its `sol_set_return_data`/`sol_get_sysvar` calls, warned about above, are dead
-code on the transfer path.
+that case until ZKVM-116: its `sol_set_return_data`/`sol_get_sysvar` calls were unreached by
+the transfer.
 
 ### The accepted divergences
 
@@ -223,13 +229,24 @@ Each errs on the safe side: the translation never completes a run the interprete
    gives `BadJump`, where the interpreter may execute real code at that address. Fuzzed
    117-for-117: re-running each such case with the target added as a named entry makes both sides
    agree exactly (Task 5).
-2. **Budget checks may be deferred one basic block.** To fit SPL Token under the 65 535-word cap,
-   1 505 of its 3 546 blocks skip their own instruction-limit check and only decrement the counter;
-   the next block's head then halts `InstructionLimit` if the limit was crossed. The one place the
-   translation's halt *kind* can differ from the interpreter's own one-instruction-at-a-time count
-   is inside that single limit-crossing block (a fault partway through it may be reported as
-   `InstructionLimit` instead) — never anywhere else — and the published status and eight words
-   are equal either way, since every exceptional halt publishes status 2 over the pre-state.
+2. **A run that passes the compute budget halts at the next check, not at the instruction.**
+   The interpreter counts one unit an instruction and charges each syscall as it is made; the
+   translation charges a basic block's whole count at the block's head, and only **153** of SPL
+   Token's 3 546 block heads also *check* the budget: a function's entries, a block that closes a
+   loop, and a block ending in `exit` (`emit.rs`, `choose_checked`). A syscall's
+   length-dependent charge (`sol_memcpy_` above 2 750 bytes, each hashed slice, a long
+   `sol_log_`) is added by `sbpf-rt` to a counter the heads do not see, and settled exactly when
+   the program returns (`sbpf_rt_settle`). So the charges are the interpreter's, unit for unit,
+   and no run inside the budget is ever halted; but a run that crosses it carries on — through
+   blocks that form no cycle and cannot return from the program — until a check, the settlement,
+   or a fault of its own. Its halt *kind* may then differ from the interpreter's
+   `InstructionLimit`; the published status and eight words are equal either way, since every
+   exceptional halt publishes status 2 over the pre-state and no return data. The fuzzer accepts
+   exactly this difference and no other (22 of 10 000 cases reach it, each re-run with a smaller
+   loop count to show the fault is the interpreter's own). What it buys is size — see "Size" in
+   `emit.rs`: with a check at every block next to an unchecked one (the rule before ZKVM-116,
+   2 041 checks) the whole SPL Token, with the code behind `sol_get_sysvar` and
+   `sol_set_return_data` now live, is 69 178 words, 3 643 over the machine's cap.
 3. **Only the source program runs.** An image refuses, with `BadElf` (status 2 over the pre-state),
    any ELF on the public tape that loads to a program other than the one it was translated from
    (text, rodata, addresses, entry), where the interpreter runs whatever ELF it is given.
@@ -240,33 +257,49 @@ Each errs on the safe side: the translation never completes a run the interprete
 
 ## Measured: SPL Token, translated against interpreted
 
-Every number here is from a run on this machine (a 16-core macOS laptop with 48 GB), 2026-09-18,
-re-measured with the ELF guard in place. The cycles and tier are what `rand-guest run` prints; the
+Every number here is from a run on this machine (a 16-core macOS laptop with 48 GB): the
+images and the vector table on 2026-11-18, after ZKVM-116; the stage split below it on 2026-09-18,
+on the images before ZKVM-116. The cycles and tier are what `rand-guest run` prints; the
 instruction counts are `sbpf_core`'s meter natively. Regenerate the table with
 
 ```text
 cd sbpf2rv && cargo +1.98.1 test --test parity the_spl_token -- --nocapture
 ```
 
-**Images.** Translated SPL Token: **65 096** program words against the 65 535-word cap (439 spare;
-the ELF guard added 271), `hc 8ca905ae…758b`. Interpreter `sbpf.bin`: **8 317** program words. Both
-need the same inputs: the ELF on the public tape (27 151 words, the length word included), the
-serialized instruction on the private one.
+**Images.** Translated SPL Token: **64 465** program words against the 65 535-word cap (1 070
+spare), `hc bae423b4…755a`. Interpreter `sbpf.bin`: **10 227** program words. Both need the same
+inputs: the ELF and the sysvar block on the public tape (27 152 words with no sysvars, 27 167
+with them), the serialized instruction on the private one.
 
-| vector | result | status | sBPF insns | translated cycles | tier | `sbpf.bin` cycles | tier | translated saves |
-|---|---|---|---|---|---|---|---|---|
-| `Transfer` 250 | `Ok(0)` | 1 | 143 | 765 851 | 20 | 694 498 | 20 | −71 353 |
-| `Transfer` more than the balance | `Ok(1)` `InsufficientFunds` | 0 | 133 | 748 836 | 20 | 679 814 | 20 | −69 022 |
-| `MintTo` 250 | `Ok(0)` | 1 | 120 | 708 648 | 20 | 634 423 | 20 | −74 225 |
-| `MintTo` 250 signed by someone other than the mint authority | `Ok(4)` `OwnerMismatch` | 0 | 134 | 696 694 | 20 | 627 241 | 20 | −69 453 |
-| `Burn` 250 | `Ok(0)` | 1 | 131 | 710 245 | 20 | 637 038 | 20 | −73 207 |
-| `Burn` 1 000 001 of a 1 000 000 balance | `Ok(1)` `InsufficientFunds` | 0 | 121 | 695 434 | 20 | 624 781 | 20 | −70 653 |
-| `Transfer` with two accounts | `Ok(0xb_0000_0000)` `NotEnoughAccountKeys` | 0 | 69 | 645 015 | 20 | 569 656 | 20 | −75 359 |
-| an account count above `MAX_ACCOUNTS` (refused by the harness) | `Err(BadElf)` | 2 | 0 | 303 933 | 20 | 304 616 | 20 | 683 |
+How the image got smaller while gaining six syscalls and about 5 000 words of SPL code that had
+been dead behind two trapping ones (words of RV32, measured on this ELF at each step): the call
+depth pushed and popped by the callee instead of at each call site, and the handed-over budget a
+32-bit word (−1 239); the 1-, 2- and 4-byte load and store entries of `sbpf-rt` returning and
+taking 32 bits, so a narrow load's zero high word is known to the compiler (−1 080); budget
+checks only at entries, loop heads and exits (−4 554).
+
+| vector | result | status | sBPF insns | compute units | translated cycles | tier | `sbpf.bin` cycles | tier | translated saves |
+|---|---|---|---|---|---|---|---|---|---|
+| `Transfer` 250 | `Ok(0)` | 1 | 143 | 143 | 753 424 | 20 | 685 749 | 20 | −67 675 |
+| `Transfer` more than the balance | `Ok(1)` `InsufficientFunds` | 0 | 133 | | 736 340 | 20 | 670 931 | 20 | −65 409 |
+| `MintTo` 250 | `Ok(0)` | 1 | 120 | | 696 234 | 20 | 625 347 | 20 | −70 887 |
+| `MintTo` 250 signed by someone other than the mint authority | `Ok(4)` `OwnerMismatch` | 0 | 134 | | 684 212 | 20 | 618 371 | 20 | −65 841 |
+| `Burn` 250 | `Ok(0)` | 1 | 131 | | 697 850 | 20 | 628 119 | 20 | −69 731 |
+| `Burn` 1 000 001 of a 1 000 000 balance | `Ok(1)` `InsufficientFunds` | 0 | 121 | | 682 969 | 20 | 615 729 | 20 | −67 240 |
+| `Transfer` with two accounts | `Ok(0xb_0000_0000)` `NotEnoughAccountKeys` | 0 | 69 | | 632 511 | 20 | 559 873 | 20 | −72 638 |
+| an account count above `MAX_ACCOUNTS` (refused by the harness) | `Err(BadElf)` | 2 | 0 | | 304 306 | 20 | 304 792 | 20 | 486 |
+| `InitializeAccount` (rent from its fourth account) | `Ok(0)` | 1 | 153 | 153 | 750 444 | 20 | 683 394 | 20 | −67 050 |
+| `InitializeAccount`, one lamport short of rent-exempt | `Ok(1 << 32)` `NotRentExempt` | 0 | 158 | | 735 518 | 20 | 672 435 | 20 | −63 083 |
+| `InitializeAccount3` (rent through `sol_get_sysvar`, from the public tape) | `Ok(0)` | 1 | 127 | 237 | 649 946 | 20 | 579 611 | 20 | −70 335 |
+| `InitializeAccount3` under a rent twice as dear on the public tape | `Ok(1 << 32)` `NotRentExempt` | 0 | 133 | | 636 735 | 20 | 570 549 | 20 | −66 186 |
+| `InitializeAccount3` with no sysvars on the tape | `Err(Trap("sysvar unavailable"))` | 2 | 49 | | 632 401 | 20 | 557 130 | 20 | −75 271 |
+| `GetAccountDataSize` (returns 165 as return data) | `Ok(0)` | 1 | 79 | 179 | 589 610 | 20 | 513 448 | 20 | −76 162 |
+| `AmountToUiAmount` 1 234 567 (returns `"1.234567"`) | `Ok(0)` | 1 | 292 | 412 | 594 082 | 20 | 540 866 | 20 | −53 216 |
+
+(The compute-unit column is `research/tests/sbpf_syscalls.rs`'s pin, where it has one.)
 
 Before the ELF guard (at `16580bf`) the translated column was about 73 k lower on every row that
-runs the program (692 854 for the transfer, a 1 644-cycle saving); the last row never reaches the
-guard.
+runs the program; the row the harness refuses never reaches the guard.
 
 `tier` is `Tier::for_workload` over the executed cycles plus the digest rows, which is what
 `prove` picks. Every vector lands in tier 20 on both sides (tier 18 is 262 143 cycles).
@@ -274,8 +307,10 @@ guard.
 ### Where the cycles go
 
 About 98 % of every run is the harness, the same `sbpf-core` code on both sides (plus, in the
-translated image, the ELF guard). The program's own execution is 1–3 %. Split by stage, for the
-three successful vectors
+translated image, the ELF guard). The program's own execution is 1–3 %. **This split is the
+2026-09-18 one, of the images before ZKVM-116** (translated `hc 8ca905ae…`, 765 851 cycles for
+the transfer; `sbpf.bin` `d49f10…b759`, 694 498): the totals moved by about 1 % since (table
+above) and the stages were not re-profiled. Split by stage, for the three successful vectors
 (`cargo +1.98.1 test --test parity where_the_cycles_go -- --ignored --nocapture`):
 
 | stage | `Transfer` translated | `Transfer` `sbpf.bin` | `MintTo` translated | `MintTo` `sbpf.bin` | `Burn` translated | `Burn` `sbpf.bin` |

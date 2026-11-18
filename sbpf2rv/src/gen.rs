@@ -154,6 +154,12 @@ pub const NAMED: &[&str] = &[
     "sys:sol_memcmp_",
     "sys:sol_alloc_free_",
     "sys:sol_sha256",
+    "sys:sol_keccak256",
+    "sys:sol_set_return_data",
+    "sys:sol_get_return_data",
+    "sys:sol_get_clock_sysvar",
+    "sys:sol_get_rent_sysvar",
+    "sys:sol_get_sysvar",
     "r10:write-balanced",
     "r10:write-callee-unrestored",
     "arg-through:stxb",
@@ -971,8 +977,81 @@ impl Gen {
 
     fn syscall(&mut self) {
         use syscalls::*;
-        let pick = self.r.below(10);
+        let pick = self.r.below(15);
         let (hash, name) = match pick {
+            10 => {
+                // The same two pairs as `sol_sha256` below, through the other chip.
+                self.frame_ptr(1, 128);
+                self.i(opc::ST_DW_REG, 10, 1, -200, 0);
+                let n0 = self.r.below(65) as i32;
+                self.i(opc::ST_DW_IMM, 10, 0, -192, n0);
+                self.out.push(It::Lddw(1, RAW - 64));
+                self.i(opc::ST_DW_REG, 10, 1, -184, 0);
+                let n1 = self.r.below(129) as i32;
+                self.i(opc::ST_DW_IMM, 10, 0, -176, n1);
+                self.frame_ptr(1, 200);
+                let pairs = self.r.below(3) as i32;
+                self.i(opc::MOV64_IMM, 2, 0, 0, pairs);
+                let o = 40 + self.r.below(32) as i32;
+                self.frame_ptr(3, o);
+                (SOL_KECCAK256, "sol_keccak256")
+            }
+            11 => {
+                // From the frame or the instruction data; now and then too long, or empty.
+                if self.r.chance(1, 3) {
+                    self.out.push(It::Lddw(1, RAW - 64));
+                } else {
+                    let off = 64 + self.r.below(300) as i32;
+                    self.frame_ptr(1, off);
+                }
+                let n = match self.r.below(12) {
+                    0 => 1025,
+                    1 => 0,
+                    _ => self.r.below(65) as i32,
+                };
+                self.i(opc::MOV64_IMM, 2, 0, 0, n);
+                (SOL_SET_RETURN_DATA, "sol_set_return_data")
+            }
+            12 => {
+                // The data to r10-a, the program id to r10-b: usually apart, sometimes overlapping.
+                let a = 96 + self.r.below(200) as i32;
+                let b = if self.r.chance(1, 6) { a + self.r.below(40) as i32 - 20 } else { a + 64 };
+                self.frame_ptr(1, a);
+                let n = self.r.below(80) as i32;
+                self.i(opc::MOV64_IMM, 2, 0, 0, n);
+                self.frame_ptr(3, b.max(32));
+                (SOL_GET_RETURN_DATA, "sol_get_return_data")
+            }
+            13 => {
+                // 8-aligned in the frame (r10 is), or one in four not.
+                let off = 8 * (8 + self.r.below(40) as i32) + if self.r.chance(1, 4) { 4 } else { 0 };
+                self.frame_ptr(1, off);
+                if self.r.chance(1, 2) {
+                    (SOL_GET_CLOCK_SYSVAR, "sol_get_clock_sysvar")
+                } else {
+                    (SOL_GET_RENT_SYSVAR, "sol_get_rent_sysvar")
+                }
+            }
+            14 => {
+                // The id at r10-64: Clock's, Rent's, or one byte off; then (var, offset, length).
+                let mut id = if self.r.chance(1, 2) { CLOCK_ID } else { RENT_ID };
+                if self.r.chance(1, 6) {
+                    id[5] ^= 1;
+                }
+                for k in 0..4 {
+                    let w = u64::from_le_bytes(id[8 * k..8 * k + 8].try_into().unwrap());
+                    self.out.push(It::Lddw(1, w));
+                    self.i(opc::ST_DW_REG, 10, 1, -64 + 8 * k as i16, 0);
+                }
+                self.frame_ptr(1, 64);
+                let var = 128 + self.r.below(200) as i32;
+                self.frame_ptr(2, var);
+                let off = self.r.pick(&[0, 0, 8, 16, 17, 32, 40, 41]);
+                self.i(opc::MOV64_IMM, 3, 0, 0, off);
+                let n = self.r.pick(&[0, 1, 8, 17, 18, 40, 41]);
+                self.i(opc::MOV64_IMM, 4, 0, 0, n);
+                (SOL_GET_SYSVAR, "sol_get_sysvar")
+            }
             0 => {
                 let off = 32 + self.r.below(400) as i32;
                 self.frame_ptr(1, off);

@@ -61,4 +61,43 @@ void sbpf_sha256_compress(uint32_t w24[24]) {
     }
     for (int i = 0; i < 8; i++) w24[16 + i] += s[i];
 }
+
+/* Keccak-f[1600] (FIPS 202) in portable C over the 50-word state `rand_keccak` permutes: lane i is
+ * words 2i (low) and 2i+1 (high). */
+void sbpf_keccak_f(uint32_t st[50]) {
+    static const uint64_t RC[24] = {
+        0x0000000000000001ull, 0x0000000000008082ull, 0x800000000000808aull, 0x8000000080008000ull,
+        0x000000000000808bull, 0x0000000080000001ull, 0x8000000080008081ull, 0x8000000000008009ull,
+        0x000000000000008aull, 0x0000000000000088ull, 0x0000000080008009ull, 0x000000008000000aull,
+        0x000000008000808bull, 0x800000000000008bull, 0x8000000000008089ull, 0x8000000000008003ull,
+        0x8000000000008002ull, 0x8000000000000080ull, 0x000000000000800aull, 0x800000008000000aull,
+        0x8000000080008081ull, 0x8000000000008080ull, 0x0000000080000001ull, 0x8000000080008008ull,
+    };
+    static const int ROTC[24] = {1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14,
+                                 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44};
+    static const int PILN[24] = {10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4,
+                                 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1};
+    uint64_t a[25], bc[5];
+    for (int i = 0; i < 25; i++) a[i] = (uint64_t)st[2 * i] | (uint64_t)st[2 * i + 1] << 32;
+    for (int round = 0; round < 24; round++) {
+        for (int i = 0; i < 5; i++) bc[i] = a[i] ^ a[i + 5] ^ a[i + 10] ^ a[i + 15] ^ a[i + 20];
+        for (int i = 0; i < 5; i++) {
+            uint64_t t = bc[(i + 4) % 5] ^ (bc[(i + 1) % 5] << 1 | bc[(i + 1) % 5] >> 63);
+            for (int j = 0; j < 25; j += 5) a[j + i] ^= t;
+        }
+        uint64_t t = a[1];
+        for (int i = 0; i < 24; i++) {
+            int j = PILN[i];
+            uint64_t b = a[j];
+            a[j] = t << ROTC[i] | t >> (64 - ROTC[i]);
+            t = b;
+        }
+        for (int j = 0; j < 25; j += 5) {
+            for (int i = 0; i < 5; i++) bc[i] = a[j + i];
+            for (int i = 0; i < 5; i++) a[j + i] ^= ~bc[(i + 1) % 5] & bc[(i + 2) % 5];
+        }
+        a[0] ^= RC[round];
+    }
+    for (int i = 0; i < 25; i++) st[2 * i] = (uint32_t)a[i], st[2 * i + 1] = (uint32_t)(a[i] >> 32);
+}
 #endif

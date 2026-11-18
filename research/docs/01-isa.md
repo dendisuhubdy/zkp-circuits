@@ -346,10 +346,11 @@ place of the hand-maintained `mkimage.py` and per-guest Makefiles it replaced. `
 
 Two committed guests take this path. M4.3's `evm` is 2 444 bytes of `.rodata`
 (jump tables, panic locations, materialised constants) costing 1 639 prologue
-instructions, and M4.4's `sbpf` — the sBPF interpreter — is 1 856 bytes costing
-1 288, so the SPL Token exit guest is 8 317 program words of which the prologue
-is 15 % (`docs/04-guests.md`'s "The `sbpf` guest"; it was 7 715 words before
-constraint set 6 split the guest's input cursor in two). Both are well inside the
+instructions, and M4.4's `sbpf` — the sBPF interpreter — is 503 words of data
+costing 1 393 (1 856 bytes costing 1 288 before ZKVM-116's syscalls), so the SPL
+Token exit guest is 10 227 program words of which the prologue is 14 %
+(`docs/04-guests.md`'s "The `sbpf` guest"; it was 8 317 words before ZKVM-116 and
+7 715 before constraint set 6 split the guest's input cursor in two). Both are well inside the
 `0xf000` bytes `ORIGIN = 0x10000` reserves. Task 5's report predicted the need:
 a real compiler output always has read-only data, and `sbpf-core`'s is the
 `Halt::Trap(&'static str)` literals before anything else.

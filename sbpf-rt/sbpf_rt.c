@@ -1,4 +1,4 @@
-/* sbpf-rt: regions, traps, the twelve syscalls and SHA-256's padding. See sbpf_rt.h; every
+/* sbpf-rt: regions, traps, the eighteen syscalls and the two hashes' padding. See sbpf_rt.h; every
  * function here names the `sbpf-core` code it ports. Freestanding: no libc. */
 #include "sbpf_rt.h"
 
@@ -16,14 +16,18 @@
 #endif
 
 sbpf_regions sbpf_r;
-int64_t sbpf_budget;
+int32_t sbpf_budget;
 uint32_t sbpf_heap_used;
+uint32_t sbpf_cu;
+uint32_t sbpf_return_len;
 uint32_t sbpf_halt_code;
 uint64_t sbpf_halt_arg;
 
 void sbpf_rt_reset(void) {
     sbpf_budget = SBPF_MAX_INSTRUCTIONS;
     sbpf_heap_used = 0;
+    sbpf_cu = 0;
+    sbpf_return_len = 0;
     sbpf_halt_code = SBPF_HALT_EXIT;
     sbpf_halt_arg = 0;
 }
@@ -32,6 +36,15 @@ void sbpf_trap(uint32_t halt_code, uint64_t arg) {
     sbpf_halt_code = halt_code;
     sbpf_halt_arg = arg;
     sbpf_rt_unwind();
+}
+
+uint32_t sbpf_rt_settle(uint32_t code) {
+    if (code == SBPF_HALT_EXIT && sbpf_budget < (int32_t)sbpf_cu) {
+        sbpf_halt_code = SBPF_HALT_INSTRUCTION_LIMIT;
+        sbpf_halt_arg = 0;
+        return SBPF_HALT_INSTRUCTION_LIMIT;
+    }
+    return code;
 }
 
 /* ---- memory.rs ------------------------------------------------------------------------------- */
@@ -92,13 +105,16 @@ void sbpf_store(uint64_t addr, uint32_t size, uint64_t v) {
 /* `(regs[r] as i64).wrapping_add(off as i64) as u64`. */
 static uint64_t at(uint64_t base, int32_t off) { return base + (uint64_t)(int64_t)off; }
 
-uint64_t sbpf_ld1(uint64_t base, int32_t off) { return sbpf_load(at(base, off), 1); }
-uint64_t sbpf_ld2(uint64_t base, int32_t off) { return sbpf_load(at(base, off), 2); }
-uint64_t sbpf_ld4(uint64_t base, int32_t off) { return sbpf_load(at(base, off), 4); }
+/* The narrow entries return and take 32 bits: a 1-, 2- or 4-byte load is zero-extended, so its
+ * high word is zero and the caller, told so by the type, need not carry it; a narrow store writes
+ * only the value's low bytes, so the caller need not pass the rest. */
+uint32_t sbpf_ld1(uint64_t base, int32_t off) { return (uint32_t)sbpf_load(at(base, off), 1); }
+uint32_t sbpf_ld2(uint64_t base, int32_t off) { return (uint32_t)sbpf_load(at(base, off), 2); }
+uint32_t sbpf_ld4(uint64_t base, int32_t off) { return (uint32_t)sbpf_load(at(base, off), 4); }
 uint64_t sbpf_ld8(uint64_t base, int32_t off) { return sbpf_load(at(base, off), 8); }
-void sbpf_st1(uint64_t base, int32_t off, uint64_t v) { sbpf_store(at(base, off), 1, v); }
-void sbpf_st2(uint64_t base, int32_t off, uint64_t v) { sbpf_store(at(base, off), 2, v); }
-void sbpf_st4(uint64_t base, int32_t off, uint64_t v) { sbpf_store(at(base, off), 4, v); }
+void sbpf_st1(uint64_t base, int32_t off, uint32_t v) { sbpf_store(at(base, off), 1, v); }
+void sbpf_st2(uint64_t base, int32_t off, uint32_t v) { sbpf_store(at(base, off), 2, v); }
+void sbpf_st4(uint64_t base, int32_t off, uint32_t v) { sbpf_store(at(base, off), 4, v); }
 void sbpf_st8(uint64_t base, int32_t off, uint64_t v) { sbpf_store(at(base, off), 8, v); }
 
 /* `Memory::nonoverlapping`. */
@@ -116,6 +132,44 @@ static uint64_t usize_of(uint64_t n) {
     return n;
 }
 
+/* `Vm::consume` for the length-dependent part of a syscall's charge (see `sbpf_cu`): refuses a
+ * charge that would take the syscalls' total past the budget, so `sbpf_cu` never exceeds it. */
+static void charge(uint64_t units) {
+    if (units > (uint64_t)(SBPF_MAX_INSTRUCTIONS - sbpf_cu)) {
+        sbpf_cu = SBPF_MAX_INSTRUCTIONS; /* Agave zeroes what is left when a charge fails */
+        sbpf_trap(SBPF_HALT_INSTRUCTION_LIMIT, 0);
+    }
+    sbpf_cu += (uint32_t)units;
+}
+
+/* `mem_op_extra`: what a memory syscall over `n` bytes costs above its base. `n` is a usize by now
+ * (`usize_of`), so on RV32 the division is the machine's own 32-bit one. */
+static uint64_t mem_op_extra(uint64_t n) {
+    size_t units = (size_t)n / SBPF_CU_BYTES_PER_UNIT;
+    return units > SBPF_CU_MEM_OP_BASE ? units - SBPF_CU_MEM_OP_BASE : 0;
+}
+
+uint32_t sbpf_base_cost(uint32_t hash) {
+    switch (hash) {
+    case SBPF_SYSCALL_SOL_LOG_:
+    case SBPF_SYSCALL_SOL_LOG_64_:
+    case SBPF_SYSCALL_SOL_LOG_COMPUTE_UNITS_:
+    case SBPF_SYSCALL_SOL_LOG_PUBKEY:
+    case SBPF_SYSCALL_SOL_SET_RETURN_DATA:
+    case SBPF_SYSCALL_SOL_GET_RETURN_DATA: return SBPF_CU_SYSCALL_BASE;
+    case SBPF_SYSCALL_SOL_MEMCPY_:
+    case SBPF_SYSCALL_SOL_MEMMOVE_:
+    case SBPF_SYSCALL_SOL_MEMSET_:
+    case SBPF_SYSCALL_SOL_MEMCMP_: return SBPF_CU_MEM_OP_BASE;
+    case SBPF_SYSCALL_SOL_SHA256:
+    case SBPF_SYSCALL_SOL_KECCAK256: return SBPF_CU_HASH_BASE;
+    case SBPF_SYSCALL_SOL_GET_CLOCK_SYSVAR: return SBPF_CU_SYSVAR_BASE + SBPF_CLOCK_BYTES;
+    case SBPF_SYSCALL_SOL_GET_RENT_SYSVAR: return SBPF_CU_SYSVAR_BASE + SBPF_RENT_STRUCT_BYTES;
+    case SBPF_SYSCALL_SOL_GET_SYSVAR: return SBPF_CU_SYSVAR_BASE + SBPF_CU_MEM_OP_BASE;
+    default: return 0;
+    }
+}
+
 uint64_t sbpf_sys_abort(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
     (void)r1, (void)r2, (void)r3, (void)r4, (void)r5;
     sbpf_trap(SBPF_HALT_TRAP, SBPF_TRAP_ABORT);
@@ -129,7 +183,9 @@ uint64_t sbpf_sys_panic(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint
 /* The log family writes nothing, but its pointer arguments are still translated. */
 uint64_t sbpf_sys_log(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
     (void)r3, (void)r4, (void)r5;
-    slice(r1, usize_of(r2), 0);
+    uint64_t n = usize_of(r2);
+    if (n > SBPF_CU_SYSCALL_BASE) charge(n - SBPF_CU_SYSCALL_BASE);
+    slice(r1, n, 0);
     return 0;
 }
 
@@ -156,6 +212,7 @@ uint64_t sbpf_sys_log_compute_units(uint64_t r1, uint64_t r2, uint64_t r3, uint6
  * direction, since each chunk is read whole before it is written. */
 static uint64_t copy(uint64_t dst, uint64_t src, uint64_t c, int is_memcpy) {
     uint64_t n = usize_of(c);
+    charge(mem_op_extra(n));
     if (is_memcpy && !nonoverlapping(dst, src, c)) sbpf_trap(SBPF_HALT_TRAP, SBPF_TRAP_MEMCPY_OVERLAP);
     const uint8_t *s = slice(src, n, 0);
     uint8_t *d = (uint8_t *)slice(dst, n, 1);
@@ -180,6 +237,7 @@ uint64_t sbpf_sys_memmove(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, ui
 uint64_t sbpf_sys_memset(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
     (void)r4, (void)r5;
     uint64_t n = usize_of(r3);
+    charge(mem_op_extra(n));
     uint8_t *d = (uint8_t *)slice(r1, n, 1);
     for (uint64_t i = 0; i < n; i++) d[i] = (uint8_t)r2;
     return 0;
@@ -191,6 +249,7 @@ uint64_t sbpf_sys_memset(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uin
 uint64_t sbpf_sys_memcmp(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
     (void)r5;
     uint64_t n = usize_of(r3);
+    charge(mem_op_extra(n));
     const uint8_t *a = slice(r1, n, 0);
     const uint8_t *b = slice(r2, n, 0);
     slice(r4, 4, 1);
@@ -292,18 +351,58 @@ static void sha_finish(sha256_ctx *s, uint8_t out[32]) {
 void sbpf_sha256_compress(uint32_t w[24]) { rand_sha256_compress(w); }
 #endif
 
-/* `SOL_SHA256(vals, vals_len, result)`: the pair count is a usize, `16 * count` must not overflow
- * one (AccessViolation(vals) if it does), then the whole pair array and the 32-byte result are
- * translated; then each pair's length is a usize and its data is translated and hashed in turn. The
- * digest is written last. */
-uint64_t sbpf_sys_sha256(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
-    (void)r4, (void)r5;
+/* ---- Keccak-256 (lib.rs `Keccak256`) -----------------------------------------------------------
+ * The sponge over `sbpf_keccak_f`: rate 136 bytes, each byte XORed into the state word it belongs
+ * to, `0x01 … 0x80` padding, the digest the state's first 32 bytes. */
+typedef struct {
+    uint32_t st[50];
+    uint32_t fill;
+} keccak_ctx;
+
+static void keccak_xor(keccak_ctx *k, uint32_t at, uint8_t b) { k->st[at >> 2] ^= (uint32_t)b << (8 * (at & 3)); }
+
+static void keccak_init(keccak_ctx *k) {
+    for (int i = 0; i < 50; i++) k->st[i] = 0;
+    k->fill = 0;
+}
+
+static void keccak_update(keccak_ctx *k, const uint8_t *p, uint64_t n) {
+    for (uint64_t i = 0; i < n; i++) {
+        keccak_xor(k, k->fill, p[i]);
+        if (++k->fill == 136) {
+            sbpf_keccak_f(k->st);
+            k->fill = 0;
+        }
+    }
+}
+
+static void keccak_finish(keccak_ctx *k, uint8_t out[32]) {
+    keccak_xor(k, k->fill, 0x01);
+    keccak_xor(k, 135, 0x80);
+    sbpf_keccak_f(k->st);
+    for (int i = 0; i < 32; i++) out[i] = (uint8_t)(k->st[i >> 2] >> (8 * (i & 3)));
+}
+
+#if defined(__riscv) && __riscv_xlen == 32
+/* The coprocessor: `rand_keccak` takes the 50 words' *word* address (guest.h). */
+void sbpf_keccak_f(uint32_t st[50]) { rand_keccak(st); }
+#endif
+
+/* `hash_slices`, for `SOL_SHA256(vals, vals_len, result)` and `SOL_KECCAK256`: the pair count is a
+ * usize, `16 * count` must not overflow one (AccessViolation(vals) if it does), then the whole pair
+ * array and the 32-byte result are translated; then each pair's length is a usize, the slice is
+ * charged `max(10, len / 2)`, and its data is translated and hashed in turn. The digest is written
+ * last. Always inlined, so each syscall carries only its own hash. */
+static inline __attribute__((always_inline)) uint64_t hash_slices(uint64_t r1, uint64_t r2, uint64_t r3,
+                                                                  int keccak) {
     uint64_t pairs = usize_of(r2);
     if (pairs > (uint64_t)SBPF_USIZE_MAX / 16) sbpf_trap(SBPF_HALT_ACCESS_VIOLATION, r1);
     const uint8_t *vals = slice(r1, pairs * 16, 0);
     slice(r3, 32, 1);
     sha256_ctx s;
-    sha_init(&s);
+    keccak_ctx k;
+    if (keccak) keccak_init(&k);
+    else sha_init(&s);
     for (uint64_t p = 0; p < pairs; p++) {
         const uint8_t *pair = vals + 16 * p;
         uint64_t ptr = 0, len = 0;
@@ -312,18 +411,131 @@ uint64_t sbpf_sys_sha256(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uin
             len |= (uint64_t)pair[8 + i] << (8 * i);
         }
         len = usize_of(len);
-        sha_update(&s, slice(ptr, len, 0), len);
+        size_t units = (size_t)len / 2;
+        charge(units > SBPF_CU_MEM_OP_BASE ? units : SBPF_CU_MEM_OP_BASE);
+        const uint8_t *data = slice(ptr, len, 0);
+        if (keccak) keccak_update(&k, data, len);
+        else sha_update(&s, data, len);
     }
     uint8_t digest[32];
-    sha_finish(&s, digest);
+    if (keccak) keccak_finish(&k, digest);
+    else sha_finish(&s, digest);
     uint8_t *out = (uint8_t *)slice(r3, 32, 1);
     for (int i = 0; i < 32; i++) out[i] = digest[i];
+    return 0;
+}
+
+uint64_t sbpf_sys_sha256(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
+    (void)r4, (void)r5;
+    return hash_slices(r1, r2, r3, 0);
+}
+
+uint64_t sbpf_sys_keccak256(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
+    (void)r4, (void)r5;
+    return hash_slices(r1, r2, r3, 1);
+}
+
+/* ---- return data ----------------------------------------------------------------------------- */
+
+/* `SOL_SET_RETURN_DATA(data, len)`: the length is a usize and is charged `len / 250`; more than
+ * `SBPF_MAX_RETURN_DATA` traps; a zero length clears without translating the pointer. */
+uint64_t sbpf_sys_set_return_data(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
+    (void)r3, (void)r4, (void)r5;
+    uint64_t n = usize_of(r2);
+    charge((size_t)n / SBPF_CU_BYTES_PER_UNIT);
+    if (n > SBPF_MAX_RETURN_DATA) sbpf_trap(SBPF_HALT_TRAP, SBPF_TRAP_RETURN_DATA_TOO_LARGE);
+    if (n != 0) {
+        const uint8_t *src = slice(r1, n, 0);
+        for (uint64_t i = 0; i < n; i++) sbpf_r.return_data[i] = src[i];
+    }
+    sbpf_return_len = (uint32_t)n;
+    return 0;
+}
+
+/* `SOL_GET_RETURN_DATA(data, len, program_id)`: `min(len, set)` bytes and the program id, both
+ * ranges translated before either is written and refused if they overlap; nothing is translated
+ * when nothing is copied. Returns the number of bytes set. */
+uint64_t sbpf_sys_get_return_data(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
+    (void)r4, (void)r5;
+    uint64_t set = sbpf_return_len;
+    uint64_t n = r2 < set ? r2 : set;
+    if (n != 0) {
+        charge(((size_t)n + 32) / SBPF_CU_BYTES_PER_UNIT);
+        uint8_t *d = (uint8_t *)slice(r1, n, 1);
+        uint8_t *id = (uint8_t *)slice(r3, 32, 1);
+        if (!(r1 > r3 ? r1 - r3 >= 32 : r3 - r1 >= n)) sbpf_trap(SBPF_HALT_TRAP, SBPF_TRAP_RETURN_DATA_OVERLAP);
+        for (uint64_t i = 0; i < n; i++) d[i] = sbpf_r.return_data[i];
+        for (int i = 0; i < 32; i++) id[i] = sbpf_r.program_id[i];
+    }
+    return set;
+}
+
+/* ---- sysvars --------------------------------------------------------------------------------- */
+
+/* `SOL_GET_CLOCK_SYSVAR | SOL_GET_RENT_SYSVAR`: the address must be 8-aligned (AccessViolation),
+ * then `size` bytes are translated, then the block must be present; `fields` bytes come from the
+ * block at `from` and the rest of the struct (Rent's padding) is zero. */
+static uint64_t sysvar_struct(uint64_t addr, uint32_t from, uint32_t fields, uint32_t size) {
+    if (addr & 7) sbpf_trap(SBPF_HALT_ACCESS_VIOLATION, addr);
+    uint8_t *d = (uint8_t *)slice(addr, size, 1);
+    if (sbpf_r.sysvars_len != SBPF_SYSVAR_BYTES) sbpf_trap(SBPF_HALT_TRAP, SBPF_TRAP_SYSVAR_UNAVAILABLE);
+    for (uint32_t i = 0; i < size; i++) d[i] = i < fields ? sbpf_r.sysvars[from + i] : 0;
+    return 0;
+}
+
+uint64_t sbpf_sys_get_clock_sysvar(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
+    (void)r2, (void)r3, (void)r4, (void)r5;
+    return sysvar_struct(r1, 0, SBPF_CLOCK_BYTES, SBPF_CLOCK_BYTES);
+}
+
+uint64_t sbpf_sys_get_rent_sysvar(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
+    (void)r2, (void)r3, (void)r4, (void)r5;
+    return sysvar_struct(r1, SBPF_CLOCK_BYTES, SBPF_RENT_BYTES, SBPF_RENT_STRUCT_BYTES);
+}
+
+/* `syscalls::CLOCK_ID` and `RENT_ID` differ only in bytes 4..28; the first four and the last four
+ * are `06 a7 d5 17` and zeros in both. */
+static const uint8_t sysvar_ids[2][24] = {
+    {24, 199, 116, 201, 40, 86, 99, 152, 105, 29, 94, 182, 139, 94, 184, 163, 155, 75, 109, 92, 115, 85, 91, 33},
+    {25, 44, 92, 81, 33, 140, 201, 76, 61, 74, 241, 127, 88, 218, 238, 8, 155, 161, 253, 68, 227, 219, 217, 138},
+};
+
+/* Which sysvar `id` names: 0 for Clock, 1 for Rent, -1 for anything else. */
+static int sysvar_index(const uint8_t *id) {
+    static const uint8_t head[4] = {6, 167, 213, 23};
+    for (int i = 0; i < 4; i++)
+        if (id[i] != head[i] || id[28 + i] != 0) return -1;
+    for (int which = 0; which < 2; which++) {
+        int same = 1;
+        for (int i = 0; i < 24; i++) same &= id[4 + i] == sysvar_ids[which][i];
+        if (same) return which;
+    }
+    return -1;
+}
+
+/* `SOL_GET_SYSVAR(sysvar_id, var, offset, length)`: the length is a usize and is charged; the id
+ * and the destination are translated; `offset + length` must not overflow (AccessViolation(offset));
+ * an id other than Clock's or Rent's, or an absent block, traps; a range past the sysvar's end
+ * returns 1 and writes nothing. */
+uint64_t sbpf_sys_get_sysvar(uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
+    (void)r5;
+    uint64_t n = usize_of(r4);
+    charge(mem_op_extra(n));
+    int which = sysvar_index(slice(r1, 32, 0));
+    uint8_t *d = (uint8_t *)slice(r2, n, 1);
+    if (r4 > UINT64_MAX - r3) sbpf_trap(SBPF_HALT_ACCESS_VIOLATION, r3);
+    if (which < 0 || sbpf_r.sysvars_len != SBPF_SYSVAR_BYTES) sbpf_trap(SBPF_HALT_TRAP, SBPF_TRAP_SYSVAR_UNAVAILABLE);
+    uint32_t from = which ? SBPF_CLOCK_BYTES : 0;
+    uint32_t len = which ? SBPF_RENT_BYTES : SBPF_CLOCK_BYTES;
+    if (r3 + r4 > len) return 1;
+    for (uint64_t i = 0; i < n; i++) d[i] = sbpf_r.sysvars[from + r3 + i];
     return 0;
 }
 
 /* ---- dispatch -------------------------------------------------------------------------------- */
 
 uint64_t sbpf_syscall(uint32_t hash, uint64_t r1, uint64_t r2, uint64_t r3, uint64_t r4, uint64_t r5) {
+    charge(sbpf_base_cost(hash));
     switch (hash) {
     case SBPF_SYSCALL_ABORT: return sbpf_sys_abort(r1, r2, r3, r4, r5);
     case SBPF_SYSCALL_SOL_PANIC_: return sbpf_sys_panic(r1, r2, r3, r4, r5);
@@ -337,6 +549,12 @@ uint64_t sbpf_syscall(uint32_t hash, uint64_t r1, uint64_t r2, uint64_t r3, uint
     case SBPF_SYSCALL_SOL_MEMCMP_: return sbpf_sys_memcmp(r1, r2, r3, r4, r5);
     case SBPF_SYSCALL_SOL_ALLOC_FREE_: return sbpf_sys_alloc_free(r1, r2, r3, r4, r5);
     case SBPF_SYSCALL_SOL_SHA256: return sbpf_sys_sha256(r1, r2, r3, r4, r5);
+    case SBPF_SYSCALL_SOL_KECCAK256: return sbpf_sys_keccak256(r1, r2, r3, r4, r5);
+    case SBPF_SYSCALL_SOL_SET_RETURN_DATA: return sbpf_sys_set_return_data(r1, r2, r3, r4, r5);
+    case SBPF_SYSCALL_SOL_GET_RETURN_DATA: return sbpf_sys_get_return_data(r1, r2, r3, r4, r5);
+    case SBPF_SYSCALL_SOL_GET_CLOCK_SYSVAR: return sbpf_sys_get_clock_sysvar(r1, r2, r3, r4, r5);
+    case SBPF_SYSCALL_SOL_GET_RENT_SYSVAR: return sbpf_sys_get_rent_sysvar(r1, r2, r3, r4, r5);
+    case SBPF_SYSCALL_SOL_GET_SYSVAR: return sbpf_sys_get_sysvar(r1, r2, r3, r4, r5);
     default: sbpf_trap(SBPF_HALT_UNKNOWN_SYSCALL, hash);
     }
 }

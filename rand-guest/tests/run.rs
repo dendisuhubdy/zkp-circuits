@@ -6,7 +6,7 @@ use std::process::Command;
 
 const PIN_FIB: usize = 136;
 const PIN_KECCAK: usize = 2_848;
-const PIN_SBPF: usize = 694_498;
+const PIN_SBPF: usize = 685_749;
 
 fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..") }
 fn bin() -> PathBuf { PathBuf::from(env!("CARGO_BIN_EXE_rand-guest")) }
