@@ -106,6 +106,40 @@ use crate::tables::reduce::{fold_events, fold_rows, pow_events, pow_rows, provid
 const KEY_MMCS_LABEL: &[u8] = b"rvm/key/mmcs";
 const KEY_PCS_LABEL: &[u8] = b"rvm/key/pcs";
 
+/// The constraint-set version a verifier key is bound to (ZKVM-113 item 2;
+/// `docs/11-next-levers.md` §2).
+///
+/// [`KeyVersion::Unbound`] is every key that exists today: the salt labels above, verbatim, so
+/// the keys `tests/verifier_key.rs` pins do not move — and so a key says nothing about which
+/// AIR it belongs to, which is how phase 4 could reinterpret opcodes 25 and 27 under unchanged
+/// keys (`docs/09-phase4-spans.md` §6).
+///
+/// [`KeyVersion::Set`]`(n)` derives the key's salts from the labels with `/cs<n>` appended.
+/// The salts decide the preprocessed commitment, so two machines at different versions hold
+/// different keys for the same program, tier and shape, and neither accepts the other's
+/// proofs (`tests/key_version.rs`). It is **opt-in and no machine a node runs uses it**:
+/// `Machine::new` is `Unbound`. The next key move makes `Set(RVM_CONSTRAINT_SET)` the only
+/// version and bumps that number with every AIR change from then on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KeyVersion {
+    Unbound,
+    Set(u32),
+}
+
+/// The number the rVM's next constraint set would bind into its keys: one past the RV32
+/// machine's live `CONSTRAINT_SET` (the two machines have moved together since set 7, and the
+/// rVM has no number of its own yet). Used only by `Machine::with_key_version` callers.
+pub const NEXT_CONSTRAINT_SET: u32 = rand_zkvm::machine::CONSTRAINT_SET + 1;
+
+impl KeyVersion {
+    fn label(self, base: &[u8]) -> Vec<u8> {
+        match self {
+            KeyVersion::Unbound => base.to_vec(),
+            KeyVersion::Set(n) => [base, format!("/cs{n}").as_bytes()].concat(),
+        }
+    }
+}
+
 /// The alternative proving backends' Plonky3 configurations (M5.4 Task 1):
 /// `research/src/machine.rs`'s `reference_cfg`/`cuda_cfg`, mirrored on the rVM's own
 /// `generic_config`.
@@ -157,12 +191,23 @@ where
 /// The deterministic config behind `verifier_key`: any verifier recomputes the same preprocessed
 /// commitment from `(program, tier, reduce)` alone — `research`'s `key_config`, verbatim in role.
 fn key_config(fri: RvmFri) -> Config {
-    let (mmcs_rng, pcs_rng) = key_rngs();
+    key_config_at(fri, KeyVersion::Unbound)
+}
+
+/// [`key_config`] for a machine at `version`; `Unbound` is `key_config`.
+fn key_config_at(fri: RvmFri, version: KeyVersion) -> Config {
+    let (mmcs_rng, pcs_rng) = key_rngs_at(version);
     build_config(fri, mmcs_rng, pcs_rng)
 }
 
+// Only the alternative backends call the unversioned form by name (they are `Unbound` only).
+#[allow(dead_code)]
 fn key_rngs() -> (SaltRng, SaltRng) {
-    (SaltRng::key(KEY_MMCS_LABEL), SaltRng::key(KEY_PCS_LABEL))
+    key_rngs_at(KeyVersion::Unbound)
+}
+
+fn key_rngs_at(version: KeyVersion) -> (SaltRng, SaltRng) {
+    (SaltRng::key(&version.label(KEY_MMCS_LABEL)), SaltRng::key(&version.label(KEY_PCS_LABEL)))
 }
 
 pub fn make_config(profile: FriProfile) -> Config {
@@ -397,7 +442,7 @@ impl KeyCache {
     }
 }
 
-pub struct Machine { pub config: Config, pub profile: FriProfile, pub fri: RvmFri, keys: Mutex<KeyCache> }
+pub struct Machine { pub config: Config, pub profile: FriProfile, pub fri: RvmFri, keys: Mutex<KeyCache>, key_version: KeyVersion }
 
 impl Machine {
     pub fn new(profile: FriProfile) -> Self {
@@ -409,7 +454,22 @@ impl Machine {
     // test entry; not for production machines
     #[doc(hidden)]
     pub fn with_fri(profile: FriProfile, fri: RvmFri) -> Self {
-        Self { config: build_config(fri, SaltRng::fresh(), SaltRng::fresh()), profile, fri, keys: Mutex::new(KeyCache::default()) }
+        Self { config: build_config(fri, SaltRng::fresh(), SaltRng::fresh()), profile, fri, keys: Mutex::new(KeyCache::default()), key_version: KeyVersion::Unbound }
+    }
+
+    /// A machine whose verifier keys are bound to a constraint-set version ([`KeyVersion`]).
+    /// Opt-in, for the next key move and its tests: every machine a node or an aggregator runs
+    /// today is `new(profile)`'s, which is `KeyVersion::Unbound`. The CPU prover and verifier
+    /// honour the version; the alternative backends (`prove_with`) build `Unbound` keys only.
+    // next-set entry; not for production machines
+    #[doc(hidden)]
+    pub fn with_key_version(profile: FriProfile, version: KeyVersion) -> Self {
+        Self { key_version: version, ..Self::new(profile) }
+    }
+
+    /// The version this machine's keys are bound to.
+    pub fn key_version(&self) -> KeyVersion {
+        self.key_version
     }
 
     /// The preprocessed commitment for `(program, tier, reduce_log_height)` (R6), cached. The chip set
@@ -425,7 +485,7 @@ impl Machine {
         // reduce table is built at its own declared height, because its preprocessed region (Cut D:
         // the program's reduce layout) is committed at that height.
         let degrees = log_ext_degrees(program, tier, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, MIN_LOG_HEIGHT, reduce_log_height);
-        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config(self.fri), &airs, &degrees).common);
+        let common = Arc::new(ProverData::from_airs_and_degrees(&key_config_at(self.fri, self.key_version), &airs, &degrees).common);
         self.keys.lock().unwrap().insert(key, common.clone());
         common
     }
@@ -642,7 +702,7 @@ impl Machine {
         // Built with `key_config` so the preprocessed tree's commitment matches exactly what a
         // verifier recomputes via `verifier_key`; `prove_batch` itself runs against
         // `self.config` (fresh entropy) for the main/quotient/permutation commitments.
-        let key_cfg = key_config(self.fri);
+        let key_cfg = key_config_at(self.fri, self.key_version);
         let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &log_ext_degrees(program, tier, traces.reg_log_height, traces.ram_log_height, traces.poseidon2_log_height, traces.reduce_log_height));
         let batch = prove_batch_with_layout(&self.config, &instances, &prover_data, layout);
         Proof {
@@ -662,6 +722,11 @@ impl Machine {
     /// mirrored).
     #[cfg(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda"))]
     pub fn prove_with(&self, backend: Backend, program: &Program, witness: &[Val], tier: Option<Tier>) -> Result<(Proof, Execution), ProveError> {
+        // The alternative backends build their key config from the unversioned labels; on a
+        // versioned machine their proofs would carry the wrong preprocessed commitment.
+        if self.key_version != KeyVersion::Unbound && !matches!(backend, Backend::Cpu) {
+            return Err(ProveError::Backend("this backend builds unversioned verifier keys; a key-versioned machine proves on the CPU only".into()));
+        }
         match backend {
             Backend::Cpu => self.prove(program, witness, tier),
             #[cfg(feature = "reference-backend")]
