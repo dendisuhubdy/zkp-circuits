@@ -1,5 +1,6 @@
 # PTX_BUILD.md
-Status: **built and run on hardware once (2026-09-28, below); no PTX is committed.**
+Status: **built and run on hardware once (2026-09-28, below); no PTX is committed** (see "The
+committed-PTX question" below for the options).
 `GpuProver::probe()` returns `CudaError::MissingPtx` until `kernels.sm_80.ptx` exists here (or
 `RAND_ZKVM_PTX` names one), so build it on the proving machine.
 
@@ -11,6 +12,32 @@ To build: on a Linux box with an R580+ driver, CUDA 13, LLVM 21 and the pinned n
 - built on: DigitalOcean `gpu-h100x1-80gb` (NVIDIA H100 80GB HBM3, sm_90), Ubuntu 22.04, image
   "NVIDIA AI/ML Ready", 2026-09-28
 and run `cargo test -p rand-zkvm-cuda --features cuda-hw` (`tests/gpu_hw.rs`).
+
+## The committed-PTX question (ZKVM-114, 2026-11-18) — open, with a recommendation
+
+No PTX is in the repository, so `GpuProver::probe()` fails with `MissingPtx` from a clean clone
+and the crate cannot be used without a local cuda-oxide build. Three ways to close that, and
+what is known about each:
+
+1. **Commit the PTX.** It is text, and the driver JIT-compiles it. Against: it is a build
+   output of a nightly toolchain and a git dependency, so a committed copy goes stale silently
+   unless something rebuilds and compares it — which is option 2 anyway.
+2. **Build it in CI at the pinned toolchain and compare a pinned digest** (recommended, with
+   the file committed alongside so a clean clone works). The compile-only check below shows the
+   build needs no GPU and no CUDA toolkit (`cargo oxide build` on a GPU-less Ubuntu 24.04 box).
+   **What is not known is whether the build is byte-reproducible**: the only two digests on
+   record are from one host and one run, and this page records them truncated
+   (`4142929d…be8f5`, `4a16612d…7c5a7`), so there is nothing to pin yet. The first step is two
+   builds on two hosts and a comparison.
+3. **Publish it as a signed release asset** and have the prover fetch and verify it. More
+   moving parts; only worth it if option 2's build turns out not to be reproducible.
+
+What exists now, usable under any of the three: `ptx/check-ptx.sh <file.ptx> [sha256]` checks
+that all eleven kernels are `.visible .entry` points of a file and compares its sha256 with a
+given digest or a sibling `<file>.sha256`; `just kernels` runs it after the build;
+`tests/ptx_check.rs` holds its kernel list to `gpu-kernels/src/main.rs` and exercises it on
+synthetic files. No real PTX was built or checked for this change (no cuda-oxide toolchain on
+the development machine).
 
 ## Compile-only check (2026-09-28, no GPU)
 

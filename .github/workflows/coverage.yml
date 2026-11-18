@@ -11,8 +11,9 @@
 # `sbpf2rv` and `rand-guest` build guests with the clang `rand-guest` pins, installed from LLVM's
 # own release by digest — not the runner's: `ubuntu-latest` has installed clang 21.1.6 since the run
 # of 2026-10-27, and its RISC-V outliner miscompiles translated programs (ZKVM-101;
-# rand-guest/README.md, `TailScratch`). `rand-guest` and `zkp1`–`zkp6` run whole. Not measured: `gpu-kernels` (nightly
-# Rust), `rand-zkvm-cuda` (needs CUDA), `guest-sdk` and the C runtimes (no cargo tests).
+# rand-guest/README.md, `TailScratch`). `rand-guest` and `zkp1`–`zkp6` run whole. `rand-zkvm-cuda` runs its default
+# (CPU-twin) and `mock-driver` suites; its `cuda` features need a device. Not measured: `gpu-kernels`
+# (nightly Rust, cuda-oxide), `guest-sdk` and the C runtimes (no cargo tests).
 #
 # The upload needs `CODECOV_TOKEN` (an organisation secret on randprotocol, or this repository's):
 # Codecov refuses a push upload without it. The job runs only on randprotocol/zkp-circuits: Codecov
@@ -122,6 +123,15 @@ jobs:
           - crate: rand-guest
             guest_clang: true
             args: --release
+          # The GPU backend without a GPU (ZKVM-114): the default build is the CPU twins and their
+          # comparisons with Plonky3, `mock-driver` runs the kernel bodies and the device engines
+          # on the host. Neither needs CUDA; `cuda` and `cuda-hw` do and stay out, as does
+          # `gpu-kernels` (nightly, cuda-oxide).
+          - crate: rand-zkvm-cuda
+            args: --release
+          - crate: rand-zkvm-cuda
+            part: rand-zkvm-cuda-mock
+            args: --release --features mock-driver
           - crate: zkp1
             args: --release
           - crate: zkp2

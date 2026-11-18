@@ -243,6 +243,44 @@ so 11 follows 3 on the same machine.
   estimate — one ≥ 64 GB session clears runs 1–6 after chain-side aggregation lands, and the
   GPU node clears 9–10 (and accelerates 6–8, 11) when provisioned.
 
+## The device model at the current tiers (ZKVM-114, 2026-11-18)
+
+The tables above are for tiers 21 to 23 at blowup 8, where production aggregates stood in
+September. Since phase 5 and the rate-1/4 profile the production N=1 aggregate is tier 18 and
+N=2 tier 19, at blowup 4. The same arithmetic for the N=1 shape
+(`tests/device_model.rs::the_production_n1_main_trace_ldes_fit_any_card_class`; widths read off
+the chips, heights from `tests/pins.json` and docs/10 §6; a committed main-trace LDE is the
+table's columns plus four random-codeword columns at `2^(h + 1 + 2)` rows):
+
+| table | columns | rows | main-trace LDE |
+|---|---:|---:|---:|
+| program | 3 | 2^18 | 0.109 GiB |
+| cpu | 84 | 2^18 | 1.375 GiB |
+| reg | 11 | 2^19 | 0.469 GiB |
+| ram | 11 | 2^21 | 1.875 GiB |
+| poseidon2 | 343 | 2^16 | 1.355 GiB |
+| reduce | 81 | 2^18 | 1.328 GiB |
+| **total** | | | **6.512 GiB** |
+
+`max_columns` at the cpu LDE height 2^21 is 192 / 320 / 640 at 24 / 40 / 80 GiB, so every table
+transforms in one pass on every card class.
+
+What this changes: the reason given for keeping traces on the host — the committed matrices do
+not fit a card (docs/04, docs/05, docs/10) — no longer holds for N=1 by the size of the
+main-trace LDEs. What it does not establish: that a whole prove fits. The permutation and
+quotient commits, the Merkle trees and the NTT working set are not in the sum, and **no
+production N=1 proof has been measured, on host or device** (ZKVM-102). The measured data
+there is: on the host, at tier 16, a 16-thread prove spends 51 % of its wall in
+`compute quotient` and 22 % in `randomize polys` (docs/11, added by ZKVM-113's change), neither of which this backend
+touches; Merkle commits and LDEs, which it does, are 16 %.
+
+`rand-zkvm-cuda/tests/timing.rs` is the harness for the device side: it times the coset LDE
+and the Merkle commit per engine and shape and checks the engines agree. On the development
+machine (no GPU; Plonky3's own engines single-threaded against this crate's CPU twins, four
+shapes with the rVM tables' widths at reduced heights, blowup 4): Plonky3 0.95 s LDE and 14.2 s
+commit; the CPU twins 7.8 s and 32.3 s. The device column is empty until the command in that
+file's header is run on a GPU host.
+
 ## Still ahead (blocked-on-provisioning)
 
 - **T3** — the PTX build and hardware bring-up on the fleet GPU node

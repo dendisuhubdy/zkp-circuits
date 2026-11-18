@@ -2,4 +2,5 @@
 kernels arch="sm_80":
     cargo oxide build --arch {{arch}}
     cp rand_zkvm_kernels.ptx ../rand-zkvm-cuda/ptx/kernels.{{arch}}.ptx
+    ../rand-zkvm-cuda/ptx/check-ptx.sh ../rand-zkvm-cuda/ptx/kernels.{{arch}}.ptx
     @echo "record the cuda-oxide commit and toolkit version in ../rand-zkvm-cuda/ptx/PTX_BUILD.md"
