@@ -273,3 +273,7 @@ pub fn dhash<H: Host>(h: &mut H, domain: u32, msg: &[u32]) -> [u32; 8] {
     out.copy_from_slice(&buf[..8]);
     out
 }
+
+/// ZKVM-117: the harness of an image that carries its own code (`sbpf2rv`). Declared last so the
+/// lines above keep their numbers — see the module docs.
+pub mod baked;

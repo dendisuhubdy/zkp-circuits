@@ -751,7 +751,7 @@ fn the_cli_writes_the_six_shim_files_named_after_the_stem() {
     assert!(toml.contains("name = \"my_prog\""), "{toml}");
     let c = std::fs::read_to_string(out.join("program.c")).unwrap();
     assert!(
-        c.contains("const uint32_t sbpf_view_digest[8] = {"),
+        c.contains("const uint64_t sbpf_baked[2] = {") && c.contains("const uint8_t sbpf_rodata["),
         "the guard"
     );
     assert!(

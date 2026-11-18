@@ -397,6 +397,14 @@ impl SbpfCall {
         w
     }
 
+    /// The **public** input vector of an `sbpf2rv`-translated image of this call's program:
+    /// `[n_sysvars, sysvar bytes…]` and nothing else. The image carries the whole program — code,
+    /// addresses and read-only data (`sbpf_core::baked`) — so there is no ELF for the tape to
+    /// carry; `hc` binds the program, and `H_PUB` the sysvars.
+    pub fn translated_public_words(&self) -> Vec<u32> {
+        self.sysvar_words()
+    }
+
     /// The sysvar block's words alone: `[n_sysvars, sysvar bytes…]` — one zero word if the call
     /// carries none.
     pub fn sysvar_words(&self) -> Vec<u32> {

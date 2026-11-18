@@ -25,6 +25,11 @@ struct Cli {
     /// The crate's name (default: the ELF's file stem).
     #[arg(long)]
     name: Option<String>,
+    /// Keep the program's own instruction bytes in the image, readable at their addresses, for a
+    /// program that loads from its text. Without it such a load faults (README, accepted
+    /// divergence #3). Costs about 2.8 program words per word of text.
+    #[arg(long)]
+    text_in_image: bool,
 }
 
 fn main() -> Result<()> {
@@ -73,7 +78,7 @@ fn main() -> Result<()> {
             }
             None => shim::crate_name(&stem),
         };
-        shim::write_crate(out, &name, &emitted.c, &shim::view_digest(&program))?;
+        shim::write_crate(out, &name, &emitted.c, &program, cli.text_in_image)?;
         println!(
             "wrote {} ({} bytes of C) and the {name} shim crate: rand-guest build {}",
             out.join("program.c").display(),

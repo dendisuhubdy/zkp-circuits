@@ -63,8 +63,11 @@ unknown syscalls, CPI, bad registers/opcodes/jumps become scanner warnings plus 
 own runtime trap, never a translation-time refusal, matching `interp.rs`'s raise-only-on-execution
 rule. The committed SPL Token `Transfer`/`MintTo`/`Burn` — and, since ZKVM-116,
 `InitializeAccount`/`InitializeAccount3`/`GetAccountDataSize`/`AmountToUiAmount` — all match the
-interpreter word for word (the eight public output words and the halt) at 64 465 of the
-65 535-word cap. Measured on this
+interpreter word for word (the eight public output words and the halt) at 63 968 of the
+65 535-word cap. **Since ZKVM-117 the image carries its whole program and takes no ELF on the
+public tape** — the transfer is 249 422 cycles against the interpreter's 685 749, and thirteen of
+fifteen measured vectors are tier 18 (`sbpf2rv/README.md`, `docs/07-harness-cost.md`); the next
+sentences describe the images before that. Measured on this
 translated program: about 2.4–2.5× fewer cycles per sBPF instruction, but the shared harness
 (decoding both tapes, `elf::load`, the region scan) is about 98% of every run's cycles either way,
 and the translated image adds 73 k for its ELF guard, so for SPL Token the translation is dearer
@@ -820,13 +823,16 @@ which point the proof and this table are re-measured and re-tiered.
 **Getting to tier 18 needs the tape, and that is the remaining lever.** What did
 *not* come off in the move to the public segment is the cost of *reading* the
 program: the guest still walks all 27 151 ELF words to run them, now with
-`READ_PUBLIC` instead of `READ_INPUT` and at the same ~15.8 cycles per word —
-about 430 K of the 694 498, well over half. One cpu row per word is the whole of
-that cost, so the lever is a **bulk public-read syscall**: "read `n` public words
-into memory", one cpu row per four words the way an absorb row already works.
-That is out of constraint set 6's scope and recorded as an open item in spec
-§9.5. Nothing guest-side closes it — the words have to cross into the machine one
-way or another.
+`READ_PUBLIC` instead of `READ_INPUT`, at **8.00 cycles per word** — about 217 K
+of the run, a third of it. (This paragraph said "~15.8 cycles per word, about
+430 K, well over half" until ZKVM-117: that was the cost before the decode loop
+was rewritten to move a word at a time, and it disagreed with `sbpf2rv/README.md`'s
+8.05. Re-measured on the emulator, 2026-11-18: `docs/07-harness-cost.md` has the
+table.) One syscall row and a short loop per word is the whole of that cost, so
+the lever for the *interpreter* is a **bulk public-read syscall** — designed in
+`docs/07-harness-cost.md`, not built: it changes the constraint set. A
+*translated* image no longer has the cost at all: since ZKVM-117 it carries its
+program and takes no ELF on the tape (`sbpf2rv/README.md`).
 
 ### What does *not* work: declaring `program_hash` instead of computing it
 

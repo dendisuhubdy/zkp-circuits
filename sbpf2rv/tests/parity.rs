@@ -148,6 +148,18 @@ struct Translated {
     hc: String,
 }
 
+/// `--text-in-image` for every test program but the two that are about going without it: the
+/// hand-built and fuzzed programs here read their own instructions freely (the generator's
+/// `mem:text` class), which an image without them refuses (accepted divergence #3). SPL Token
+/// never does, and could not afford the 68 000 words.
+fn text_flag(name: &str) -> &'static [&'static str] {
+    if name == "spl-token" || name == "reads-text" || name == "reads-rodata" {
+        &[]
+    } else {
+        &["--text-in-image"]
+    }
+}
+
 fn translate(elf: &Path, name: &str) -> Translated {
     require_clang();
     let dir = work().join(name);
@@ -156,6 +168,7 @@ fn translate(elf: &Path, name: &str) -> Translated {
         .arg("--out")
         .arg(&dir)
         .args(["--name", name])
+        .args(text_flag(name))
         .output()
         .unwrap();
     let report = check(&o, "sbpf2rv");
@@ -189,6 +202,7 @@ fn translate(elf: &Path, name: &str) -> Translated {
         .arg("--out")
         .arg(&halt_dir)
         .args(["--name", name])
+        .args(text_flag(name))
         .output()
         .unwrap();
     check(&o, "sbpf2rv (halt-words twin)");
@@ -276,12 +290,23 @@ fn run(image: &Path, call: &SbpfCall) -> ([u32; 8], usize) {
     (out, cycles)
 }
 
+/// The public tape `image` takes for `call`: the interpreter guest reads the ELF, a translated
+/// image only the program's read-only data (`SbpfCall::translated_public_words`) — each followed
+/// by the call's sysvar block.
+fn tape(image: &Path, call: &SbpfCall) -> Vec<u32> {
+    if image == interpreter_guest() {
+        call.public_words()
+    } else {
+        call.translated_public_words()
+    }
+}
+
 /// `rand-guest run`: the eight words, the cycle count, and the tier it reports (`Tier::for_workload`
 /// over the cycles plus the digest rows; `None` if none fits).
 fn run_tiered(image: &Path, call: &SbpfCall) -> ([u32; 8], usize, Option<usize>) {
     let mut c = Command::new(rand_guest());
     c.arg("run").arg(image).arg("--public");
-    for w in call.public_words() {
+    for w in tape(image, call) {
         c.arg(w.to_string());
     }
     c.arg("--input");
@@ -572,8 +597,8 @@ fn spl_burn(amount: u64) -> SbpfCall {
 
 /// `hc` of the translated SPL Token image (Homebrew clang 23.1.1, rustc 1.98.1), and its program
 /// words (the loader's count, against the 65 535-word cap).
-const SPL_TOKEN_HC: &str = "bae423b49d0c762e403f0331663321dc59209b6192caf3f93d2cc8b2118b755a";
-const SPL_TOKEN_WORDS: usize = 64_465;
+const SPL_TOKEN_HC: &str = "d542bd6f272a33102199324bf0269c1c2ef6471fd41bfed0bedc1b85dbf44627";
+const SPL_TOKEN_WORDS: usize = 63_968;
 
 /// The SPL Token translation, built once per test binary: several tests use it, and two builds of
 /// the same crate directory at once would race.
@@ -765,127 +790,47 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
     );
 }
 
-/// `name`'s file range in an ELF64 file: `(sh_offset, sh_size)`, found through the section header
-/// string table.
-fn section(elf: &[u8], name: &str) -> (usize, usize) {
-    let u16_at = |o: usize| u16::from_le_bytes(elf[o..o + 2].try_into().unwrap()) as usize;
-    let u32_at = |o: usize| u32::from_le_bytes(elf[o..o + 4].try_into().unwrap()) as usize;
-    let u64_at = |o: usize| u64::from_le_bytes(elf[o..o + 8].try_into().unwrap()) as usize;
-    let (shoff, shentsize, shnum, shstrndx) =
-        (u64_at(0x28), u16_at(0x3a), u16_at(0x3c), u16_at(0x3e));
-    let hdr = |i: usize| shoff + i * shentsize;
-    let strtab = u64_at(hdr(shstrndx) + 0x18);
-    (0..shnum)
-        .find_map(|i| {
-            let at = strtab + u32_at(hdr(i));
-            let end = at + elf[at..].iter().position(|&b| b == 0).unwrap();
-            (&elf[at..end] == name.as_bytes())
-                .then(|| (u64_at(hdr(i) + 0x18), u64_at(hdr(i) + 0x20)))
-        })
-        .unwrap_or_else(|| panic!("no {name} section"))
-}
-
-/// Accepted divergence #3, the ELF guard: the image carries a digest of the loaded program (text,
-/// rodata, addresses, entry) it was translated from and refuses an ELF that loads to any other with
-/// `BadElf` (status 2 over the pre-state), where the interpreter runs whatever ELF it is given. Here
-/// the other ELF is SPL Token with one `.rodata` byte changed — a byte the transfer never reads, so
-/// the interpreter runs it to the very same eight words — and the translation refuses it.
+/// ZKVM-117: a translated image takes no ELF. Its public tape is the sysvar block alone — one word
+/// for a call with no sysvars, sixteen with them — where the interpreter guest's carries the
+/// 108 600-byte ELF first; and it publishes the interpreter's eight words. The program is the
+/// image: there is nothing on the tape for a caller to swap.
 #[test]
-fn an_elf_one_rodata_byte_away_is_refused_where_the_interpreter_runs_it() {
+fn the_translated_image_takes_no_elf_on_the_public_tape() {
     let t = spl_token();
-    let good = spl_transfer(250);
-    let mut elf = good.elf.clone();
-    let (off, len) = section(&elf, ".rodata");
-    assert!(len > 2, ".rodata is {len} bytes");
-    elf[off + len - 2] ^= 0x01; // inside the last string, before its NUL
-    let other = SbpfCall {
-        elf,
-        input: good.input.clone(),
-        sysvars: None,
-    };
+    let call = spl_transfer(250);
+    assert_eq!(call.translated_public_words(), vec![0]);
+    assert_eq!(call.public_words().len(), 27_152);
+    let (want, result, _) = call.expected();
+    assert_eq!(result, Ok(0));
+    assert_eq!(run(&t.image, &call).0, want, "translated, over [0]");
+    assert_eq!(run(&interpreter_guest(), &call).0, want, "sbpf.bin, over the ELF");
 
-    // The interpreter runs it, to the same outcome as the untouched ELF.
-    let (good_want, good_result, _) = good.expected();
-    let (want, result, _) = other.expected();
-    assert_eq!(good_result, Ok(0));
-    assert_eq!(
-        (want, result),
-        (good_want, good_result),
-        "the changed byte is never read"
+    let block = sbpf::sysvar_block(&sbpf::FIXTURE_CLOCK, &sbpf::DEFAULT_RENT);
+    let with = sbpf::spl_initialize_account3(
+        sbpf::DEFAULT_RENT.minimum_balance(sbpf::TOKEN_ACCOUNT_LEN),
+        Some(block),
     );
-    assert_eq!(
-        run(&interpreter_guest(), &other).0,
-        want,
-        "sbpf.bin runs it too"
-    );
+    assert_eq!(with.translated_public_words().len(), 16);
+    assert_eq!(with.translated_public_words(), with.sysvar_words());
+    assert_eq!(with.public_words().len(), 27_151 + 16);
+    assert_eq!(run(&t.image, &with).0, with.expected().0);
 
-    // The translation refuses it: status 2, the halt `BadElf`, and the digest over the pre-state —
-    // the same words any status-2 run over this instruction publishes. The formula is checked on
-    // the untouched run first.
-    let digest = |status: u32, post: &[u8]| {
-        abi::public_output(
-            &mut sbpf::HostRef,
-            status,
-            &sbpf::canonical_input_hash_of(&good.input),
-            &sbpf::output_hash_of(post),
-            &sbpf::return_hash_of(&[]),
-        )
-    };
-    assert_eq!(
-        digest(1, &good.input_post_state()),
-        good_want,
-        "public_output over the post-state"
-    );
-    let (out, _) = run(&t.image, &other);
-    assert_eq!(out, digest(2, &good.input), "status 2 over the pre-state");
-    let (halt, _) = run(&t.halt_image, &other);
-    assert_eq!(
-        &halt[..4],
-        &[2, 7, 0, 0],
-        "status 2, Halt::BadElf (code 7), no payload"
-    );
-    // And the ELF it was translated from runs.
-    assert_eq!(run(&t.image, &good).0, good_want);
-}
-
-/// The guard binds the loaded program, not the file: two different ELFs that `elf::load` turns into
-/// the same program (the same text, rodata, addresses and entry) both run on the translation, to
-/// the interpreter's words — they are the same program to every part of a run. Here the second ELF
-/// differs from SPL Token in the file header's `e_ident` padding, which nothing reads.
-#[test]
-fn two_elfs_that_load_to_the_same_program_both_run() {
-    let t = spl_token();
-    let good = spl_transfer(250);
-    let mut elf = good.elf.clone();
-    elf[12] ^= 0x5a; // EI_PAD
-    assert_ne!(elf, good.elf);
-    let other = SbpfCall {
-        elf,
-        input: good.input.clone(),
-        sysvars: None,
-    };
-    // Same view, same digest, on the host.
-    let (mut a, mut b) = (good.elf.clone(), other.elf.clone());
-    let (pa, pb) = (
-        sbpf_core::elf::load(&mut a).unwrap(),
-        sbpf_core::elf::load(&mut b).unwrap(),
-    );
-    assert_eq!(
-        sbpf2rv::shim::view_words(&pa),
-        sbpf2rv::shim::view_words(&pb),
-        "the two ELFs load to the same program"
-    );
-    // Different public tapes (so different H_PUB), the same run on both sides.
-    assert_ne!(good.public_words(), other.public_words());
-    let (want, result, _) = other.expected();
-    assert_eq!((want, result), {
-        let (w, r, _) = good.expected();
-        (w, r)
-    });
-    for call in [&good, &other] {
-        assert_eq!(run(&t.image, call).0, want, "translated");
-        assert_eq!(run(&interpreter_guest(), call).0, want, "sbpf.bin");
-        assert_eq!(&run(&t.halt_image, call).0[..2], &[1, 0], "returned 0");
+    // A sysvar block of a length that is neither 0 nor 57 is not a call, on both sides: the
+    // canonical malformed output.
+    let malformed = abi::malformed_output(&mut sbpf::HostRef);
+    let bad_tape = [40u32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut c = Command::new(rand_guest());
+    c.arg("run").arg(&t.image).arg("--public");
+    for w in bad_tape {
+        c.arg(w.to_string());
+    }
+    c.arg("--input");
+    for w in call.input_words() {
+        c.arg(w.to_string());
+    }
+    let out = check(&c.output().unwrap(), "rand-guest run (a 40-byte sysvar block)");
+    for (i, w) in malformed.iter().enumerate() {
+        assert!(out.contains(&format!("out[{i}] = {w}\n")), "out[{i}]: {out}");
     }
 }
 
@@ -919,6 +864,84 @@ fn an_access_violation_halts_exactly_as_the_interpreter_does() {
             2
         ),
         Err(Halt::AccessViolation(0))
+    );
+}
+
+/// Accepted divergence #3 (ZKVM-117): a translated image has no copy of the program's own
+/// instructions unless it is built with `--text-in-image` — its code is RV32, and it carries the
+/// read-only data without the text — so a program that *loads* from its text faults (`AccessViolation` at that address) where
+/// the interpreter, which holds the ELF, returns the instruction's bytes. A load from the read-only
+/// data just past the text is served on both sides.
+#[test]
+fn a_load_from_the_programs_own_text_faults_where_the_interpreter_reads_it() {
+    use sbpf_core::memory::REGION_PROGRAM;
+    // The builder puts `.text` at `TEXT_ADDR` in the program region and `.rodata` after it. Two
+    // programs: one returns 0 after reading eight bytes of `.rodata` and comparing them with what
+    // it expects (1 on a mismatch); one first reads its own first instruction.
+    let rodata: Vec<u8> = (1..=16u8).collect();
+    let want = u64::from_le_bytes(rodata[..8].try_into().unwrap());
+    let program = |read_text: bool| -> Vec<u8> {
+        let mut p: Vec<[u8; 8]> = Vec::new();
+        if read_text {
+            p.extend_from_slice(&lddw(1, REGION_PROGRAM + builder::TEXT_ADDR));
+            p.push(insn(opc::LD_DW_REG, 4, 1, 0, 0));
+        }
+        // The rodata's address is `.text`'s end, rounded up to 8 (the builder's layout): the
+        // program is `n` slots, all 8 bytes.
+        let n_slots = p.len() + 2 + 2 + 1 + 1 + 1 + 1 + 1;
+        p.extend_from_slice(&lddw(1, REGION_PROGRAM + builder::TEXT_ADDR + 8 * n_slots as u64));
+        p.extend_from_slice(&lddw(2, want));
+        p.push(insn(opc::LD_DW_REG, 3, 1, 0, 0));
+        p.push(insn(opc::MOV64_IMM, 0, 0, 0, 0));
+        p.push(insn(opc::JEQ_REG, 3, 2, 1, 0));
+        p.push(insn(opc::MOV64_IMM, 0, 0, 0, 1));
+        p.push(insn(opc::EXIT, 0, 0, 0, 0));
+        assert_eq!(p.len(), n_slots);
+        builder::build_elf(&asm(&p), &rodata, &[], &[], 0)
+    };
+    let input = sbpf::serialize_aligned(&[], &[], &[7u8; 32]);
+
+    // Reading the read-only data: the same on both sides, status 1.
+    let elf = program(false);
+    let path = work().join("reads-rodata.so");
+    std::fs::write(&path, &elf).unwrap();
+    let t = translate(&path, "reads-rodata");
+    let call = SbpfCall { elf, input: input.clone(), sysvars: None };
+    // The translated image's tape is the (empty) sysvar block alone; the 16 bytes are in the image.
+    assert_eq!(call.translated_public_words(), vec![0]);
+    assert_eq!(
+        parity(&t, Some(&interpreter_guest()), "a load from .rodata", &call, 1),
+        Ok(0)
+    );
+
+    // Reading its own text: the interpreter returns 0, the translation faults at that address.
+    let elf = program(true);
+    let path = work().join("reads-text.so");
+    std::fs::write(&path, &elf).unwrap();
+    let t = translate(&path, "reads-text");
+    let call = SbpfCall { elf, input, sysvars: None };
+    let (want, result, _) = call.expected();
+    assert_eq!((want[0], result), (1, Ok(0)), "the interpreter reads its own text");
+    assert_eq!(run(&interpreter_guest(), &call).0, want, "and so does sbpf.bin");
+    let (out, _) = run(&t.image, &call);
+    assert_eq!(out[0], 2, "the translation halts");
+    let (halt, _) = run(&t.halt_image, &call);
+    let addr = REGION_PROGRAM + builder::TEXT_ADDR;
+    assert_eq!(
+        &halt[..4],
+        &[2, 1, addr as u32, (addr >> 32) as u32],
+        "AccessViolation at the text's first byte"
+    );
+    // Status 2 over the pre-state and no return data: what any exceptional halt publishes.
+    assert_eq!(
+        out,
+        abi::public_output(
+            &mut sbpf::HostRef,
+            2,
+            &sbpf::canonical_input_hash_of(&call.input),
+            &sbpf::output_hash_of(&call.input),
+            &sbpf::return_hash_of(&[]),
+        )
     );
 }
 
@@ -1630,7 +1653,7 @@ fn a_sample_of_the_fuzz_corpus_matches_through_the_real_pipeline() {
                 let exec = rand_zkvm::emulator::execute(
                     &program,
                     &call.input_words(),
-                    &call.public_words(),
+                    &call.translated_public_words(),
                     1 << 21,
                 )
                 .unwrap();
@@ -1934,7 +1957,7 @@ fn the_translated_spl_token_transfer_proves_and_verifies() {
     let call = spl_transfer(250);
     let (want, result, _) = call.expected();
     assert_eq!(result, Ok(0));
-    let (inputs, public) = (call.input_words(), call.public_words());
+    let (inputs, public) = (call.input_words(), call.translated_public_words());
     let m = Machine::new(FriProfile::Test);
     eprintln!(
         "proving: {} program words, {} private words, {} public words",
@@ -2173,7 +2196,7 @@ fn cycle_split(image: &Path, elf: &Path, call: &SbpfCall) -> Vec<(String, usize)
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     let program = rand_zkvm::isa::Program::from_flat_image(&std::fs::read(image).unwrap()).unwrap();
     let exec =
-        rand_zkvm::emulator::execute(&program, &call.input_words(), &call.public_words(), 1 << 21)
+        rand_zkvm::emulator::execute(&program, &call.input_words(), &tape(image, call), 1 << 21)
             .unwrap();
     // Function entry points: a jump to one that does not fall through from the previous pc is a
     // call (the caller's pc is pushed); a jump to 4 past a pushed call site returns to it.

@@ -1,10 +1,7 @@
-//! The ELF guard (`shim::view_words`/`view_digest`) and the translation's determinism. The guard
-//! binds the *loaded program* — text, read-only run, addresses, entry — so any ELF that loads to a
-//! different program (one text or rodata byte, a different entry, a different program of the same
-//! length) has a different digest, and any ELF that loads to the same program (header padding the
-//! loader never reads) has the same one. `tests/parity.rs` checks the refusal end to end on the
-//! real image; this file pins the digest itself, cheaply, on hand-built files and the committed
-//! SPL Token ELF, and that `sbpf2rv` is byte-for-byte deterministic.
+//! What a translated image carries of its program (`shim::baked_c`: the addresses and the read-only
+//! data, appended to the emitted code), and the translation's determinism. There is no ELF at run
+//! time and no guard: `program.c` is the whole program, so `hc` binds it. Host-only: nothing here
+//! needs a RISC-V toolchain (`tests/parity.rs` runs the images).
 
 #[path = "../../research/tests/common/sbpf_elf_builder.rs"]
 #[rustfmt::skip] // research's file, formatted (or not) by research
@@ -15,9 +12,9 @@ use builder::{build_elf, TEXT_ADDR};
 use sbpf2rv::emit::emit_program;
 use sbpf2rv::scan::scan;
 use sbpf2rv::shim::{
-    chained_digest, crate_name, view_digest, view_digest_c, view_words, write_crate, DIGEST_CHUNK,
-    TEXT_NOT_IN_RODATA,
+    baked_c, crate_name, write_crate,
 };
+use sbpf_core::baked::baked_rodata;
 use sbpf_core::elf::Program;
 use sbpf_core::isa::{self, opc, Insn};
 use sbpf_core::memory::REGION_PROGRAM;
@@ -51,17 +48,14 @@ fn small(imm: i32, rodata: &[u8], entry: usize) -> Vec<u8> {
     )
 }
 
-fn digest_of(elf: &[u8]) -> [u32; 8] {
+/// The read-only data a translated image of `elf` carries, and its address.
+fn baked_of(elf: &[u8]) -> (u64, Vec<u8>) {
     let mut e = elf.to_vec();
-    view_digest(&sbpf_core::elf::load(&mut e).unwrap())
+    let p = sbpf_core::elf::load(&mut e).unwrap();
+    let (va, bytes) = baked_rodata(&p);
+    (va, bytes.to_vec())
 }
 
-fn words_of(elf: &[u8]) -> Vec<u32> {
-    let mut e = elf.to_vec();
-    view_words(&sbpf_core::elf::load(&mut e).unwrap())
-}
-
-/// `name`'s `(sh_offset, sh_size)` in an ELF64 file.
 fn section(elf: &[u8], name: &str) -> (usize, usize) {
     let u16_at = |o: usize| u16::from_le_bytes(elf[o..o + 2].try_into().unwrap()) as usize;
     let u32_at = |o: usize| u32::from_le_bytes(elf[o..o + 4].try_into().unwrap()) as usize;
@@ -98,40 +92,53 @@ fn work(name: &str) -> PathBuf {
 
 // ---- the view ---------------------------------------------------------------------------------------
 
-#[test]
-fn the_view_is_the_header_then_the_read_only_run_packed_once() {
-    let rodata = [1u8, 2, 3, 4, 5, 6, 7, 8, 9];
-    let w = words_of(&small(7, &rodata, 1));
-    let t = text(&[i(opc::MOV64_IMM, 0, 0, 0, 7), i(opc::EXIT, 0, 0, 0, 0)]);
-    // The run: the 16-byte text, then the 9 data bytes at the next 8-aligned address (no gap
-    // here), 25 bytes: 7 words, the last zero-padded.
-    let va = REGION_PROGRAM + TEXT_ADDR;
-    assert_eq!(
-        &w[..8],
-        &[
-            va as u32,
-            (va >> 32) as u32,
-            16,
-            va as u32,
-            (va >> 32) as u32,
-            25,
-            1,
-            0
-        ]
-    );
-    assert_eq!(w.len(), 8 + 7);
-    let mut run = t.clone();
-    run.extend_from_slice(&rodata);
-    run.resize(28, 0);
-    let packed: Vec<u32> = run
-        .chunks(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-    assert_eq!(&w[8..], &packed[..]);
+/// The whole of `program.c` for an ELF: the emitted code, then `baked_c` — the addresses and the
+/// read-only data. Everything a run can observe of the program, and so everything `hc` must bind.
+fn c_of(elf: &[u8]) -> String {
+    let mut e = elf.to_vec();
+    let p = sbpf_core::elf::load(&mut e).unwrap();
+    format!("{}{}", emit_program(&p, &scan(&p)).c, baked_c(&p, false))
 }
 
 #[test]
-fn a_text_that_is_not_a_span_of_the_run_is_hashed_after_it() {
+fn the_image_carries_the_read_only_data_without_the_text() {
+    let rodata = [1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+    let elf = small(7, &rodata, 1);
+    // The loaded run is the 16-byte text and then the 9 data bytes; the image takes the 9, at the
+    // address the text ends.
+    assert_eq!(baked_of(&elf), (REGION_PROGRAM + TEXT_ADDR + 16, rodata.to_vec()));
+    let mut e = elf.clone();
+    let p = sbpf_core::elf::load(&mut e).unwrap();
+    assert_eq!(
+        baked_c(&p, false),
+        format!(
+            "\n/* sbpf_core::baked::Baked: text_va, then the virtual address of the read-only data below. */\n\
+             const uint64_t sbpf_baked[2] = {{{:#018x}ull, {:#018x}ull}};\n\
+             /* The program's read-only data (sbpf_core::baked::baked_rodata): 9 byte(s). 4-aligned, so the\n   \
+             loader writes it a word at a time. */\n\
+             const uint32_t sbpf_rodata_len = 9;\n\
+             __attribute__((aligned(4))) const uint8_t sbpf_rodata[9] = {{\n    1, 2, 3, 4, 5, 6, 7, 8, 9,\n}};\n",
+            REGION_PROGRAM + TEXT_ADDR,
+            REGION_PROGRAM + TEXT_ADDR + 16
+        )
+    );
+    // With the text kept: the whole run, at the run's own address.
+    let c = baked_c(&p, true);
+    assert!(c.contains("const uint32_t sbpf_rodata_len = 25;\n"), "{c}");
+    assert!(
+        c.contains(&format!("{:#018x}ull, {:#018x}ull}};", REGION_PROGRAM + TEXT_ADDR, REGION_PROGRAM + TEXT_ADDR)),
+        "{c}"
+    );
+    // No read-only data: an empty array is not C, so one zero byte and a length of 0.
+    let mut e = small(7, &[], 0);
+    let p = sbpf_core::elf::load(&mut e).unwrap();
+    let c = baked_c(&p, false);
+    assert!(c.contains("const uint32_t sbpf_rodata_len = 0;\n"), "{c}");
+    assert!(c.ends_with("const uint8_t sbpf_rodata[1] = {0\n};\n"), "{c}");
+}
+
+#[test]
+fn a_text_that_does_not_lead_the_run_leaves_the_whole_run_in_the_image() {
     let t = text(&[i(opc::EXIT, 0, 0, 0, 0)]);
     let data = [0xABu8; 12];
     let p = Program {
@@ -142,165 +149,87 @@ fn a_text_that_is_not_a_span_of_the_run_is_hashed_after_it() {
         entry_pc: 0,
         relocs_applied: false,
     };
-    let w = view_words(&p);
-    assert_eq!(w[7], TEXT_NOT_IN_RODATA);
-    assert_eq!(w.len(), 8 + 3 + 2);
-    assert_eq!(&w[8..11], &[0xABAB_ABAB; 3]);
-    assert_eq!(&w[11..], &[0x95, 0]);
-    // `Program::from_text`: the text is the run, at offset 0, hashed once.
+    assert_eq!(baked_rodata(&p), (REGION_PROGRAM + 0x1000, &data[..]));
+    // `Program::from_text`: the text is the whole run, so nothing is left to carry.
     let p = Program::from_text(&t).unwrap();
-    let w = view_words(&p);
-    assert_eq!(w[7], 0);
-    assert_eq!(w.len(), 8 + 2);
+    assert_eq!(baked_rodata(&p), (REGION_PROGRAM + t.len() as u64, &[][..]));
 }
 
-// ---- what changes the digest -----------------------------------------------------------------------
+// ---- what binds what -------------------------------------------------------------------------------
+//
+// There is no ELF at run time and no guard: `program.c` is the whole program, so any change a run
+// could observe is a change to `program.c`, and so to `hc`.
 
 #[test]
-fn one_text_byte_anywhere_changes_the_digest() {
+fn any_byte_a_run_can_observe_changes_program_c() {
     let base = small(7, &[9; 8], 0);
-    let d0 = digest_of(&base);
+    let c0 = c_of(&base);
+    // A text byte: the opcode, the register nibbles and the immediate of `mov r0, 7` each change
+    // what the program does (its `off` field, bytes 2-3, means nothing to a `mov`, and the
+    // interpreter ignores it too).
     let (off, len) = section(&base, ".text");
     assert_eq!(len, 16);
-    let mut seen = vec![d0];
-    for k in 0..len {
+    for k in [0usize, 1, 4, 5, 6, 7] {
         let mut elf = base.clone();
         elf[off + k] ^= 0x01;
-        // Not every flip loads (the opcode byte of a slot may become unassigned — still loads,
-        // the loader checks no semantics — but a `call` nibble above 1 would not); these all do.
-        let d = digest_of(&elf);
-        assert!(!seen.contains(&d), "byte {k}");
-        seen.push(d);
+        assert_ne!(c_of(&elf), c0, "text byte {k}");
     }
+    // A read-only byte, every one of them.
+    let (off, len) = section(&base, ".rodata");
+    for k in 0..len {
+        let mut elf = base.clone();
+        elf[off + k] ^= 0x80;
+        assert_ne!(c_of(&elf), c0, "rodata byte {k}");
+    }
+    // The entry alone, and the amount of read-only data alone.
+    assert_ne!(c_of(&small(7, &[9; 8], 1)), c0);
+    assert_ne!(c_of(&small(7, &[9; 4], 0)), c0);
+    assert_ne!(c_of(&small(7, &[0; 4], 0)), c_of(&small(7, &[0; 8], 0)));
 }
 
 #[test]
-fn one_rodata_byte_changes_the_digest_and_the_entry_alone_does_too() {
-    let a = small(7, &[9; 8], 0);
-    let mut b = small(7, &[9; 8], 0);
-    let (off, _) = section(&b, ".rodata");
-    b[off + 3] ^= 0x80;
-    assert_ne!(digest_of(&a), digest_of(&b));
-    let c = small(7, &[9; 8], 1);
-    let (wa, wc) = (words_of(&a), words_of(&c));
-    assert_eq!(wa.len(), wc.len());
-    let differing: Vec<usize> = (0..wa.len()).filter(|&k| wa[k] != wc[k]).collect();
-    assert_eq!(differing, vec![6], "only the entry word");
-    assert_ne!(digest_of(&a), digest_of(&c));
-}
-
-#[test]
-fn a_different_program_of_the_same_length_is_a_different_digest() {
-    let a = digest_of(&small(7, &[], 0));
-    let b = digest_of(&small(8, &[], 0));
-    let c = {
-        let mut e = build_elf(
-            &text(&[i(opc::MOV64_IMM, 1, 0, 0, 7), i(opc::EXIT, 0, 0, 0, 0)]),
-            &[],
-            &[],
-            &[],
-            0,
-        );
-        view_digest(&sbpf_core::elf::load(&mut e).unwrap())
-    };
-    assert_ne!(a, b);
-    assert_ne!(a, c);
-    assert_ne!(b, c);
-    assert_eq!(
-        a,
-        digest_of(&small(7, &[], 0)),
-        "and the same program is the same digest"
-    );
-}
-
-#[test]
-fn bytes_the_loader_never_reads_do_not_change_the_digest() {
+fn bytes_the_loader_never_reads_do_not_change_program_c() {
     let base = small(7, &[9; 8], 0);
-    let d0 = digest_of(&base);
     for (what, at) in [("EI_PAD", 12usize), ("EI_PAD last", 15), ("e_version", 20)] {
         let mut elf = base.clone();
         elf[at] ^= 0x5a;
-        assert_eq!(words_of(&elf), words_of(&base), "{what}");
-        assert_eq!(digest_of(&elf), d0, "{what}");
+        assert_eq!(c_of(&elf), c_of(&base), "{what}");
     }
     // The section header string table's own name is read by nobody either.
     let mut elf = base.clone();
     let at = elf.windows(10).position(|w| w == b".shstrtab\0").unwrap();
     elf[at + 1] = b'S';
-    assert_eq!(digest_of(&elf), d0);
+    assert_eq!(c_of(&elf), c_of(&base));
 }
 
 #[test]
-fn the_spl_token_digest_changes_with_one_text_byte_the_transfer_never_runs() {
+fn the_spl_token_image_carries_2848_bytes_of_a_108600_byte_elf() {
     let base = spl_token();
-    let d0 = digest_of(&base);
+    assert_eq!(base.len(), 108_600);
+    let (va, bytes) = baked_of(&base);
+    // The ELF loads to a read-only run that begins with the text; what follows it is all the
+    // translated code can load.
+    let mut e = base.clone();
+    let p = sbpf_core::elf::load(&mut e).unwrap();
+    assert_eq!(bytes.len(), p.rodata.len() - p.text.len());
+    assert_eq!(bytes.len(), 2_848);
+    assert_eq!(va, p.text_va + p.text.len() as u64);
+    // A read-only byte the transfer never reads is a different program.c; a byte the loader never
+    // reads is not — and neither is a text byte in code nothing reaches (here the last slot's
+    // immediate): it is not translated, and with no text bytes in the image no run can read it.
+    let c0 = c_of(&base);
     let (off, len) = section(&base, ".text");
     let mut elf = base.clone();
-    // The high byte of the last slot's immediate — well past the transfer's code.
     elf[off + len - 1] ^= 0x01;
-    assert_ne!(digest_of(&elf), d0);
+    assert_eq!(c_of(&elf), c0, "unreachable code is not part of the program a run can observe");
+    let (off, len) = section(&base, ".rodata");
+    let mut elf = base.clone();
+    elf[off + len - 2] ^= 0x01;
+    assert_ne!(c_of(&elf), c0);
     let mut elf = base.clone();
     elf[12] ^= 0x5a;
-    assert_eq!(digest_of(&elf), d0, "the parity test's padding twin");
-    // The README's figures: an 8-word header and the run's 26 364 words, more than one chunk.
-    let w = words_of(&base);
-    assert_eq!(w.len(), 8 + 26_364);
-    assert!(w.len() > DIGEST_CHUNK);
-    assert_ne!(
-        d0,
-        rand_zkvm::hash::sponge_hash(&w),
-        "chained, not one call"
-    );
+    assert_eq!(c_of(&elf), c0);
 }
-
-// ---- the chain -------------------------------------------------------------------------------------
-
-#[test]
-fn the_chained_digest_is_one_sponge_call_up_to_a_chunk_and_a_manual_chain_past_it() {
-    let words =
-        |n: usize| -> Vec<u32> { (0..n as u32).map(|k| k.wrapping_mul(0x9e37_79b9)).collect() };
-    for n in [1, 8, DIGEST_CHUNK - 1, DIGEST_CHUNK] {
-        let w = words(n);
-        assert_eq!(chained_digest(&w), rand_zkvm::hash::sponge_hash(&w), "{n}");
-    }
-    // Two calls: the second over the first digest and the remaining words.
-    for n in [DIGEST_CHUNK + 1, DIGEST_CHUNK + 100, 2 * DIGEST_CHUNK - 8] {
-        let w = words(n);
-        let d1 = rand_zkvm::hash::sponge_hash(&w[..DIGEST_CHUNK]);
-        let mut msg = d1.to_vec();
-        msg.extend_from_slice(&w[DIGEST_CHUNK..]);
-        assert_eq!(
-            chained_digest(&w),
-            rand_zkvm::hash::sponge_hash(&msg),
-            "{n}"
-        );
-        assert_ne!(chained_digest(&w), rand_zkvm::hash::sponge_hash(&w), "{n}");
-    }
-    // Three calls: 4096, then 4088, then the rest.
-    let n = 2 * DIGEST_CHUNK - 7;
-    let w = words(n);
-    let d1 = rand_zkvm::hash::sponge_hash(&w[..DIGEST_CHUNK]);
-    let mut m2 = d1.to_vec();
-    m2.extend_from_slice(&w[DIGEST_CHUNK..2 * DIGEST_CHUNK - 8]);
-    let d2 = rand_zkvm::hash::sponge_hash(&m2);
-    let mut m3 = d2.to_vec();
-    m3.extend_from_slice(&w[2 * DIGEST_CHUNK - 8..]);
-    assert_eq!(chained_digest(&w), rand_zkvm::hash::sponge_hash(&m3));
-}
-
-#[test]
-fn the_c_constant_is_the_eight_words_as_hex() {
-    let c = view_digest_c(&[0, 1, 0xdead_beef, u32::MAX, 4, 5, 6, 7]);
-    assert!(c.ends_with(
-        "const uint32_t sbpf_view_digest[8] = {0x00000000u, 0x00000001u, 0xdeadbeefu, 0xffffffffu, 0x00000004u, 0x00000005u, 0x00000006u, 0x00000007u};\n"
-    ), "{c}");
-    assert!(
-        c.starts_with("\n/* The ELF guard (sbpf2rv::shim::view_digest)"),
-        "{c}"
-    );
-}
-
-// ---- determinism --------------------------------------------------------------------------------------
 
 #[test]
 fn emitting_the_same_program_twice_is_byte_identical() {
@@ -318,14 +247,13 @@ fn emitting_the_same_program_twice_is_byte_identical() {
 }
 
 #[test]
-fn write_crate_is_deterministic_and_ends_program_c_with_the_guard() {
+fn write_crate_is_deterministic_and_ends_program_c_with_the_baked_program() {
     let mut e = small(7, &[], 0);
     let p = sbpf_core::elf::load(&mut e).unwrap();
     let c = emit_program(&p, &scan(&p)).c;
-    let d = view_digest(&p);
     let (a, b) = (work("crate-a"), work("crate-b"));
-    write_crate(&a, "guard-test", &c, &d).unwrap();
-    write_crate(&b, "guard-test", &c, &d).unwrap();
+    write_crate(&a, "guard-test", &c, &p, false).unwrap();
+    write_crate(&b, "guard-test", &c, &p, false).unwrap();
     for f in [
         "program.c",
         "Cargo.toml",
@@ -342,7 +270,7 @@ fn write_crate_is_deterministic_and_ends_program_c_with_the_guard() {
     }
     let pc = std::fs::read_to_string(a.join("program.c")).unwrap();
     assert!(pc.starts_with(&c));
-    assert!(pc.ends_with(&view_digest_c(&d)));
+    assert!(pc.ends_with(&baked_c(&p, false)));
     let toml = std::fs::read_to_string(a.join("Cargo.toml")).unwrap();
     assert!(toml.contains("name = \"guard-test\""));
     // Both crates sit four levels below the checkout root (sbpf2rv/target/guard/crate-a): the
@@ -384,9 +312,11 @@ fn the_cli_translates_the_same_elf_to_the_same_bytes_twice() {
         );
     }
     let pc = std::fs::read_to_string(a.join("program.c")).unwrap();
+    let mut e = elf.clone();
+    let p = sbpf_core::elf::load(&mut e).unwrap();
     assert!(
-        pc.ends_with(&view_digest_c(&digest_of(&elf))),
-        "the guard is the ELF's digest"
+        pc.ends_with(&baked_c(&p, false)),
+        "program.c ends with the baked addresses and read-only data"
     );
 }
 

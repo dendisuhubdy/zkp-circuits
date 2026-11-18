@@ -2,10 +2,12 @@
 
 Translates an sBPF ELF into C that runs natively in the Rand zkVM: a shim crate that
 `rand-guest build` turns into an image whose eight public output words equal the sBPF
-interpreter's (`guests-compiled/bin/sbpf.bin`) for the same ELF and instruction.
+interpreter's (`guests-compiled/bin/sbpf.bin`) for the same ELF and instruction. The image
+carries the whole program — code, addresses and read-only data — so it takes no ELF at run time
+(ZKVM-117): its public tape is the sysvar block alone.
 
 ```text
-sbpf2rv <program.so> --out <dir inside a circuits checkout> [--name <crate>]
+sbpf2rv <program.so> --out <dir inside a circuits checkout> [--name <crate>] [--text-in-image]
 rand-guest build <dir> --max-words 65535 --allow-panic
 ```
 
@@ -71,30 +73,30 @@ $ rand-guest build <dir> --max-words 65535 --allow-panic
    Compiling cc v1.4.6
    Compiling spl-token v0.1.0 (<dir>)
 warning: spl-token@0.1.0: sbpf2rv: clang clang version 23.1.1 (https://github.com/llvm/llvm-project 6dfe1677ab8dffbc6ec13d53a1e0215d75147689)
-    Finished `release` profile [optimized] target(s) in 5.53s
-64465 words against a cap of 65535 (fits); 2 ecall(s) with a non-static a7
+    Finished `release` profile [optimized] target(s) in 13.78s
+63968 words against a cap of 65535 (fits); 1 ecall(s) with a non-static a7
 OK
-wrote <dir>/image.bin and its .sha256 (64465 words, hc bae423b49d0c762e403f0331663321dc59209b6192caf3f93d2cc8b2118b755a, program id b9af92f6884207c86c70acf866577fb65a08b810b1d82644bf85d9a3b392c3df)
+wrote <dir>/image.bin and its .sha256 (63968 words, hc d542bd6f272a33102199324bf0269c1c2ef6471fd41bfed0bedc1b85dbf44627, program id cc8ea5bf883014015d1c845dfaee0342362ec39fd45bd4bad2bea142b7a9f5d1)
 ```
 
 `hc` is the image's own digest; `program id` is the id `rand-guest` derives for the deployed
-program. `program.c` ends with the ELF guard's constant, the digest of the loaded program (text,
-rodata, addresses, entry) it was translated from, so `hc` binds that program (see "Trust and
-verification" below).
+program. `program.c` ends with the program's two addresses and its read-only data
+(`shim::baked_c`: for this ELF 2 848 bytes, which the loader's prologue writes into memory before
+`main`; the image's whole prologue is 2 124 of its 63 968 words), so `hc` binds the whole program
+(see "Trust and verification" below).
 
 ### 3. Run, and compare with the interpreter
 
-The `Transfer` 250 vector's inputs are two word lists, exactly as `tests/parity.rs` builds them
-from `SbpfCall::public_words()` / `input_words()`: **27 152 public words** (the ELF itself,
-word-encoded — this is why the image still carries the whole ELF, not just its hash — and then the
-sysvar block, here its length word alone: 0, this call carries no sysvars; a call that does
-carries 57 bytes after it, Clock then Rent) and **10 458 private words** (the serialized instruction: the accounts `spl_transfer` builds, then
-the `Transfer` discriminant and the amount). `rand-guest run` takes them as `--public w0 w1 …`
-and `--input w0 w1 …`. Abbreviated to the first handful of words of each list:
+The `Transfer` 250 vector's inputs are two word lists, as `tests/parity.rs` builds them from
+`SbpfCall::translated_public_words()` / `input_words()`: **one public word** — the sysvar block's
+length, 0: this call carries no sysvars (a call that does carries 57 bytes after it, Clock then
+Rent, 16 words in all) — and **10 458 private words** (the serialized instruction: the accounts
+`spl_transfer` builds, then the `Transfer` discriminant and the amount). `rand-guest run` takes
+them as `--public w0 w1 …` and `--input w0 w1 …`. Abbreviated to the first handful of words:
 
 ```text
 $ rand-guest run <dir>/image.bin \
-    --public 108600 1179403647 65794 0 0 17235971 1 2088 … 0 (27 152 words)
+    --public 0 \
     --input  41825 4 0 65791 0 50529027 50529027 50529027 …  (10 458 words)
 out[0] = 1
 out[1] = 3392882403
@@ -104,11 +106,12 @@ out[4] = 1651185809
 out[5] = 567649743
 out[6] = 4049030460
 out[7] = 1478577172
-cycles 753424
+cycles 249422
 tier 20
 ```
 
-The same two word lists, unchanged, against the interpreter's own committed guest:
+The interpreter's own committed guest takes the same instruction, and the ELF on its public tape
+(`SbpfCall::public_words()`: 27 152 words, the ELF and then the same sysvar block):
 
 ```text
 $ rand-guest run guests-compiled/bin/sbpf.bin \
@@ -126,11 +129,11 @@ cycles 685749
 tier 20
 ```
 
-All eight words are identical, word for word. The interpreter costs 685 749 cycles against the
-translated program's 753 424: the translated image is 67 675 cycles dearer, because the ELF guard
-costs about 73 k (copying the loaded program's 26 364 words into its hash buffer and hashing
-them) against the program's own 13 k saving. Both land in tier 20; "Does translation pay off for
-SPL Token?" below has the split.
+All eight words are identical, word for word. The interpreter costs 685 749 cycles and the
+translated program 249 422: 436 327 fewer, nearly all of it the ELF the image no longer reads,
+loads or hashes. `rand-guest run` still reports tier 20 for this vector — the tier is sized on the
+cycles *plus* the digest rows, which takes the transfer just past tier 18's 262 143 — while
+thirteen of the fifteen measured vectors now land in tier 18 (below).
 
 ### 4. Deploy
 
@@ -138,7 +141,7 @@ SPL Token?" below has the split.
 rand program deploy <dir>/image.bin
 ```
 
-deploys the image, on a chain whose genesis sets `max_program_words >= 64 465` — this image's own
+deploys the image, on a chain whose genesis sets `max_program_words >= 63 968` — this image's own
 word count. **Today's chain 12 caps a deploy at 4 096 words**
 (`docs/superpowers/specs/2026-09-18-rand-guest-toolchain-design.md` §8's
 `MAX_PROGRAM_WORDS`), about 16× too small for this image, so the command above is not runnable
@@ -148,50 +151,35 @@ on the live chain today: it needs a chain cut with the raised cap. **Not run her
 
 What each part of a proof binds:
 
-* **The ELF arrives on the public tape** (step 3 above), so the proof's public-input digest
-  `H_PUB` binds it word for word — and nothing else in the published output does.
-  `public_output` has no ELF in its preimage (it is `status` and the digest of
-  `input_hash ‖ output_hash ‖ return_hash`), and `program_id` is read from the *instruction
-  region* on the private tape, not derived from the ELF.
-* **The sysvars arrive on the public tape too**, after the ELF: Clock and Rent are the chain's
-  facts, so `H_PUB` is what binds them and the chain checks them against its own. Nothing a
-  sysvar getter returns is ever read from the private tape (`sbpf_core::abi`).
-* **The return data is in the output digest.** `return_hash` is `sha256` of what
-  `sol_set_return_data` last set, for a run that returns success (of nothing, otherwise).
-* **The image bakes the translated text, and the ELF guard.** The harness hands the translated
-  code the text, `.rodata` and their addresses loaded from the tape's ELF, and the interpreter
-  would start at its entry, so without a guard one image could be run over a different,
-  caller-chosen ELF and behave differently under the same `hc`. So `program.c` carries the
-  **digest of the loaded program (text, rodata, addresses, entry)** it was translated from, and
-  before running anything the executor hashes the program `elf::load` made of the tape's ELF the
-  same way and compares: any other halts `BadElf`, status 2, over the pre-state (accepted
-  divergence #3 below). **`hc` therefore binds the loaded program**: a proof that verifies
-  against this `hc` is a run of that program.
-  * The view (`shim::view_words`) is every field of `sbpf_core::elf::Program` read at run time:
-    `text_va`, `text.len()`, `rodata_va`, `rodata.len()`, `entry_pc`, the read-only run's bytes,
-    and the text's bytes (in every v1 file the text is a span of the run, so they are hashed once,
-    with the span's offset in the header). `execute` and `sbpf-rt` read the text, the run and both
-    addresses (the program region's loads, `callx`'s `(addr - text_va) / 8`); the interpreter also
-    reads `entry_pc`, which the translation bakes. Nothing reads `relocs_applied`.
-  * The digest is the `POSEIDON2` sponge over those words, chained in 4 096-word calls
-    (`shim::view_digest`). The coprocessor writes its digest over the words it hashed, so the
-    borrowed program bytes are copied into a 16 KiB buffer a chunk at a time.
-  * **Why the loaded program and not the file is the property that matters.** Everything a run can
-    observe of the ELF — on the interpreter as on the translation — is the loaded program: its
-    code, its read-only data, where they sit, where execution starts. The rest of the file (headers,
-    symbol and string tables, relocation entries, padding) only shapes what `elf::load` produces.
-    Two ELFs that load to the same program run identically on both sides, so the translation
-    accepts both (`tests/parity.rs` runs one whose header padding differs); one that loads to any
-    other program is refused. The ELF's own bytes remain bound by `H_PUB`.
-* **Whether `hc` is the faithful translation of that ELF** is checked by rebuilding: run the pinned
-  `sbpf2rv` on the ELF and `rand-guest build` with the pinned toolchain (Rust 1.98.1, clang
-  23.1.1, `cc` 1.4.6), and compare `hc` — the same rule the EVM translator uses (design spec §6).
-  The build is reproducible for exactly this (`rand-guest`'s environment scrub and config
-  refusal, the clang pin, the relative paths and prefix maps, the complete `Cargo.lock`).
+* **`hc` binds the program, all of it.** The image is the translated code, the entry it starts
+  at, the two addresses the runtime needs (`text_va`, for `callx`'s `(addr - text_va) / 8`, and
+  where the read-only data sits) and the read-only data itself — everything a run can observe of
+  the program. Nothing of the program is read at run time, so there is no ELF for the tape to
+  carry and no guard to tie tape bytes to the image: a proof that verifies against this `hc` is a
+  run of this program. (Until ZKVM-117 the ELF rode the public tape and the image checked a
+  digest of what it loaded from it; that guard, and the 27 151 words, are gone.)
+* **`H_PUB` binds the sysvars.** The public tape is the sysvar block alone — `[0]`, or `[57]` and
+  Clock's and Rent's account data. They are the chain's facts, so the chain checks `H_PUB`
+  against its own (`Machine::verify_public` over 1 or 16 words). Nothing a sysvar getter returns
+  is ever read from the private tape (`sbpf_core::abi`).
+* **The public output binds the instruction, the post-state and the return data**: `status`, and
+  the digest of `input_hash ‖ output_hash ‖ return_hash`, exactly the interpreter's
+  (`sbpf_core::baked` runs `sbpf_core::abi`'s harness). `program_id` is read from the
+  *instruction region* on the private tape and is in `input_hash`.
+* **Whether `hc` is the faithful translation of an ELF** is checked by rebuilding: run the pinned
+  `sbpf2rv` on the ELF (with the same `--text-in-image` choice) and `rand-guest build` with the
+  pinned toolchain (Rust 1.98.1, clang 23.1.1, `cc` 1.4.6), and compare `hc` — the same rule the
+  EVM translator uses (design spec §6). The build is reproducible for exactly this
+  (`rand-guest`'s environment scrub and config refusal, the clang pin, the relative paths and
+  prefix maps, the complete `Cargo.lock`).
 
 The chain does not record the source ELF's hash: fullnode stores the image and its program id
-only. A deployer who wants the ELF known publishes it beside the program, and anyone can rebuild
-it to the deployed `hc`.
+only, and needs nothing else to check a proof. A deployer who wants the ELF known publishes it
+beside the program, and anyone can rebuild it to the deployed `hc`.
+
+One consequence for whoever calls the harness directly: `sbpf_core::baked::run_call_baked` does
+not zero the sBPF stack and heap, because a guest's memory starts zero and the image makes one
+call. That is 49 000 cycles saved, and a `Workspace` that is single-use.
 
 ## What is refused, and what traps
 
@@ -247,13 +235,20 @@ Each errs on the safe side: the translation never completes a run the interprete
    `emit.rs`: with a check at every block next to an unchecked one (the rule before ZKVM-116,
    2 041 checks) the whole SPL Token, with the code behind `sol_get_sysvar` and
    `sol_set_return_data` now live, is 69 178 words, 3 643 over the machine's cap.
-3. **Only the source program runs.** An image refuses, with `BadElf` (status 2 over the pre-state),
-   any ELF on the public tape that loads to a program other than the one it was translated from
-   (text, rodata, addresses, entry), where the interpreter runs whatever ELF it is given.
-   `tests/parity.rs` changes one `.rodata` byte of SPL Token that the transfer never reads: the
-   interpreter (host and `sbpf.bin`) runs it to the same eight words, and the translation refuses
-   it. An ELF that differs only where `elf::load` does not look (the header's padding, in the
-   test) loads to the same program and runs on both. The price is the guard's cycles (below).
+3. **A load from the program's own instructions faults.** The image holds the program's code as
+   RV32 and its read-only data, not the sBPF instruction bytes, so a program that *reads* its own
+   text (a load, or a syscall given a pointer into it) halts with `AccessViolation` at that
+   address, where the interpreter — which holds the ELF — returns the bytes. SPL Token's measured
+   vectors make no such read; the fuzzer's generated programs do, constantly.
+   `--text-in-image` removes the divergence by keeping the whole read-only run, text included, in
+   the image, at about 2.8 program words per word of text — which a small program can afford and
+   SPL Token (its 96 488 bytes of text would be about 68 000 words) cannot. `tests/parity.rs`
+   shows both: a program that reads its first instruction returns 0 on the interpreter and
+   faults in an image built without the flag, and every other hand-built and fuzzed test program
+   is built with it.
+
+(Before ZKVM-117 the third divergence was the ELF guard — an image refused any ELF on its tape
+that loaded to another program. There is no ELF on the tape now, so there is nothing to refuse.)
 
 ## Measured: SPL Token, translated against interpreted
 
@@ -266,51 +261,61 @@ instruction counts are `sbpf_core`'s meter natively. Regenerate the table with
 cd sbpf2rv && cargo +1.98.1 test --test parity the_spl_token -- --nocapture
 ```
 
-**Images.** Translated SPL Token: **64 465** program words against the 65 535-word cap (1 070
-spare), `hc bae423b4…755a`. Interpreter `sbpf.bin`: **10 227** program words. Both need the same
-inputs: the ELF and the sysvar block on the public tape (27 152 words with no sysvars, 27 167
-with them), the serialized instruction on the private one.
+**Images.** Translated SPL Token: **63 968** program words against the 65 535-word cap (1 567
+spare; 61 844 of text and a 2 124-word prologue for 790 words of data, 712 of them the program's
+read-only data), `hc d542bd6f…4627`. Interpreter `sbpf.bin`: **10 227** program words. The
+private tape is the same for both; the public tape is the ELF and the sysvar block for
+`sbpf.bin` (27 152 words, 27 167 with sysvars) and the sysvar block alone for the translated
+image (1 word, 16 with sysvars).
 
-How the image got smaller while gaining six syscalls and about 5 000 words of SPL code that had
-been dead behind two trapping ones (words of RV32, measured on this ELF at each step): the call
-depth pushed and popped by the callee instead of at each call site, and the handed-over budget a
-32-bit word (−1 239); the 1-, 2- and 4-byte load and store entries of `sbpf-rt` returning and
-taking 32 bits, so a narrow load's zero high word is known to the compiler (−1 080); budget
-checks only at entries, loop heads and exits (−4 554).
+Three steps brought the translated transfer from 765 851 cycles to 249 422, each measured on this
+vector:
+
+| the translated image | words | `Transfer` 250 cycles | tier |
+|---|---|---|---|
+| before ZKVM-116 (`hc 8ca905ae…`) | 65 096 | 765 851 | 20 |
+| ZKVM-116: six syscalls, compute units, the smaller emitter (`hc bae423b4…`) | 64 465 | 753 424 | 20 |
+| ZKVM-117: the program in the image, no ELF on the tape | 63 973 | 298 598 | 20 |
+| ZKVM-117: and no zeroing of the stack and heap (`hc d542bd6f…`) | 63 968 | 249 422 | 20 |
 
 | vector | result | status | sBPF insns | compute units | translated cycles | tier | `sbpf.bin` cycles | tier | translated saves |
 |---|---|---|---|---|---|---|---|---|---|
-| `Transfer` 250 | `Ok(0)` | 1 | 143 | 143 | 753 424 | 20 | 685 749 | 20 | −67 675 |
-| `Transfer` more than the balance | `Ok(1)` `InsufficientFunds` | 0 | 133 | | 736 340 | 20 | 670 931 | 20 | −65 409 |
-| `MintTo` 250 | `Ok(0)` | 1 | 120 | | 696 234 | 20 | 625 347 | 20 | −70 887 |
-| `MintTo` 250 signed by someone other than the mint authority | `Ok(4)` `OwnerMismatch` | 0 | 134 | | 684 212 | 20 | 618 371 | 20 | −65 841 |
-| `Burn` 250 | `Ok(0)` | 1 | 131 | | 697 850 | 20 | 628 119 | 20 | −69 731 |
-| `Burn` 1 000 001 of a 1 000 000 balance | `Ok(1)` `InsufficientFunds` | 0 | 121 | | 682 969 | 20 | 615 729 | 20 | −67 240 |
-| `Transfer` with two accounts | `Ok(0xb_0000_0000)` `NotEnoughAccountKeys` | 0 | 69 | | 632 511 | 20 | 559 873 | 20 | −72 638 |
-| an account count above `MAX_ACCOUNTS` (refused by the harness) | `Err(BadElf)` | 2 | 0 | | 304 306 | 20 | 304 792 | 20 | 486 |
-| `InitializeAccount` (rent from its fourth account) | `Ok(0)` | 1 | 153 | 153 | 750 444 | 20 | 683 394 | 20 | −67 050 |
-| `InitializeAccount`, one lamport short of rent-exempt | `Ok(1 << 32)` `NotRentExempt` | 0 | 158 | | 735 518 | 20 | 672 435 | 20 | −63 083 |
-| `InitializeAccount3` (rent through `sol_get_sysvar`, from the public tape) | `Ok(0)` | 1 | 127 | 237 | 649 946 | 20 | 579 611 | 20 | −70 335 |
-| `InitializeAccount3` under a rent twice as dear on the public tape | `Ok(1 << 32)` `NotRentExempt` | 0 | 133 | | 636 735 | 20 | 570 549 | 20 | −66 186 |
-| `InitializeAccount3` with no sysvars on the tape | `Err(Trap("sysvar unavailable"))` | 2 | 49 | | 632 401 | 20 | 557 130 | 20 | −75 271 |
-| `GetAccountDataSize` (returns 165 as return data) | `Ok(0)` | 1 | 79 | 179 | 589 610 | 20 | 513 448 | 20 | −76 162 |
-| `AmountToUiAmount` 1 234 567 (returns `"1.234567"`) | `Ok(0)` | 1 | 292 | 412 | 594 082 | 20 | 540 866 | 20 | −53 216 |
+| `Transfer` 250 | `Ok(0)` | 1 | 143 | 143 | 249 422 | 20 | 685 749 | 20 | 436 327 |
+| `Transfer` more than the balance | `Ok(1)` `InsufficientFunds` | 0 | 133 | | 232 338 | 18 | 670 931 | 20 | 438 593 |
+| `MintTo` 250 | `Ok(0)` | 1 | 120 | | 192 228 | 18 | 625 347 | 20 | 433 119 |
+| `MintTo` 250 signed by someone other than the mint authority | `Ok(4)` `OwnerMismatch` | 0 | 134 | | 180 206 | 18 | 618 371 | 20 | 438 165 |
+| `Burn` 250 | `Ok(0)` | 1 | 131 | | 193 844 | 18 | 628 119 | 20 | 434 275 |
+| `Burn` 1 000 001 of a 1 000 000 balance | `Ok(1)` `InsufficientFunds` | 0 | 121 | | 178 963 | 18 | 615 729 | 20 | 436 766 |
+| `Transfer` with two accounts | `Ok(0xb_0000_0000)` `NotEnoughAccountKeys` | 0 | 69 | | 128 501 | 18 | 559 873 | 20 | 431 372 |
+| an account count above `MAX_ACCOUNTS` (refused by the harness) | `Err(BadElf)` | 2 | 0 | | 88 718 | 18 | 304 792 | 20 | 216 074 |
+| `InitializeAccount` (rent from its fourth account) | `Ok(0)` | 1 | 153 | 153 | 246 442 | 20 | 683 394 | 20 | 436 952 |
+| `InitializeAccount`, one lamport short of rent-exempt | `Ok(1 << 32)` `NotRentExempt` | 0 | 158 | | 231 516 | 18 | 672 435 | 20 | 440 919 |
+| `InitializeAccount3` (rent through `sol_get_sysvar`, from the public tape) | `Ok(0)` | 1 | 127 | 237 | 145 936 | 18 | 579 611 | 20 | 433 675 |
+| `InitializeAccount3` under a rent twice as dear on the public tape | `Ok(1 << 32)` `NotRentExempt` | 0 | 133 | | 132 725 | 18 | 570 549 | 20 | 437 824 |
+| `InitializeAccount3` with no sysvars on the tape | `Err(Trap("sysvar unavailable"))` | 2 | 49 | | 128 366 | 18 | 557 130 | 20 | 428 764 |
+| `GetAccountDataSize` (returns 165 as return data) | `Ok(0)` | 1 | 79 | 179 | 85 596 | 18 | 513 448 | 20 | 427 852 |
+| `AmountToUiAmount` 1 234 567 (returns `"1.234567"`) | `Ok(0)` | 1 | 292 | 412 | 90 068 | 18 | 540 866 | 20 | 450 798 |
+
+`tier` is what `rand-guest run` prints: `Tier::for_workload` over the executed cycles plus the
+digest rows, which is what `prove` picks; it prints 16, 18 or 20. Thirteen of the fifteen
+translated vectors land in tier 18 (262 143 cycles); the transfer and the successful
+`InitializeAccount`, at 249 422 and 246 442 cycles, are under that count and are still sized
+tier 20 once the digest rows are added. On `sbpf.bin` every vector is tier 20. **No proof was
+made of any of these**: tier 18 needs more memory than this machine has (below).
 
 (The compute-unit column is `research/tests/sbpf_syscalls.rs`'s pin, where it has one.)
 
-Before the ELF guard (at `16580bf`) the translated column was about 73 k lower on every row that
-runs the program; the row the harness refuses never reaches the guard.
-
-`tier` is `Tier::for_workload` over the executed cycles plus the digest rows, which is what
-`prove` picks. Every vector lands in tier 20 on both sides (tier 18 is 262 143 cycles).
-
 ### Where the cycles go
 
-About 98 % of every run is the harness, the same `sbpf-core` code on both sides (plus, in the
-translated image, the ELF guard). The program's own execution is 1–3 %. **This split is the
-2026-09-18 one, of the images before ZKVM-116** (translated `hc 8ca905ae…`, 765 851 cycles for
-the transfer; `sbpf.bin` `d49f10…b759`, 694 498): the totals moved by about 1 % since (table
-above) and the stages were not re-profiled. Split by stage, for the three successful vectors
+**This split is the 2026-09-18 one, of the images before ZKVM-116 and ZKVM-117** (translated
+`hc 8ca905ae…`, 765 851 cycles for the transfer; `sbpf.bin` `d49f10…b759`, 694 498), and it was
+not re-profiled. For `sbpf.bin` it still describes the run to within about 1 %. For the
+translated image it describes what ZKVM-117 removed: of its column, the ELF's share of
+`decode_input` (27 151 words at a re-measured 8.00 cycles a word, `research/docs/07-harness-cost.md`),
+all of `elf::load`, the ELF guard and the stack-and-heap zeroing are gone — 765 851 minus those
+is within a few thousand cycles of the 249 422 measured now. Then, about 98 % of every run was the
+harness, the same `sbpf-core` code on both sides (plus, in the translated image, the ELF guard),
+and the program's own execution 1–3 %. Split by stage, for the three successful vectors
 (`cargo +1.98.1 test --test parity where_the_cycles_go -- --ignored --nocapture`):
 
 | stage | `Transfer` translated | `Transfer` `sbpf.bin` | `MintTo` translated | `MintTo` `sbpf.bin` | `Burn` translated | `Burn` `sbpf.bin` |
@@ -358,28 +363,18 @@ What the stages are:
 
 ### Does translation pay off for SPL Token?
 
-**Not today.** Translated execution is about 2.4–2.5× cheaper per sBPF instruction: about 62
-cycles against about 154 on the transfer, most of the 62 in `sbpf_load`'s bounds and region
-checks. That saves 11.0–13.1 k cycles on these vectors' 120–143 instructions. But the shim's
-harness costs 11.5–12.3 k more than `sbpf.bin`'s (`output_hash` +5.6 k, `elf::load` +3.0 k,
-`input_hash` +2.4 k on the transfer), because the shim crate itself is built at `opt-level = "s"`
-(its dependencies at 3) to fit the 65 535-word cap, and those generic functions are instantiated in
-it; and the ELF guard costs 73 k. Net: the translated image is 69–75 k cycles dearer a vector, and
-every vector stays in tier 20.
+**Since ZKVM-117, yes: about 2.7× fewer cycles on the transfer (249 422 against 685 749) and a
+tier lower on thirteen of fifteen vectors.** Not because the program runs faster — translated
+execution is about 2.4–2.5× cheaper per sBPF instruction (about 62 cycles against about 154 on
+the transfer, in the 2026-09-18 split), which on 120–292 instructions is 11–13 k cycles — but
+because an image that carries its program has no ELF to read, load or guard, and the
+interpreter has all three: 217 k to read it and 174 k to load it, every call.
 
-Translation starts to matter only where the program's own execution is a real share of the run,
-at thousands of sBPF instructions a call and up. At the measured ~90 cycles saved an instruction, a
-program executing 10 000 instructions saves about 0.9 M cycles, and one near the 200 000-instruction
-limit about 18 M. For SPL Token the levers are on the harness side:
-
-* A bulk public-read syscall (`research/docs/04-guests.md`, spec §9.5's open item) for the tape.
-* For a translated image specifically, not reading or loading the ELF at run time at all. With the
-  ELF guard, `hc` already binds the one loaded program the image accepts, so the image could carry
-  that program's read-only data itself and take no ELF on the tape. On the measured split that
-  removes about 219 k (reading the ELF) + 177 k (`elf::load`) + 73 k (the guard) of the transfer's
-  766 k, leaving about 297 k: still above tier 18's 262 143 without the region scan's cost coming
-  down too. This is an estimate from the split, not a measurement, and it changes the public-input
-  layout the interpreter's guest defines, which is why it is not done here.
+What is left of a translated call is the instruction: reading its words off the private tape (8
+cycles each: 84 k for the transfer's 10 458), `check_region`'s zero scan of the realloc headroom,
+and the three digests. The levers from here are in `research/docs/07-harness-cost.md`: a bulk
+read syscall (a constraint-set change) for the tape, and nothing guest-side for the 10 240 bytes
+of zero padding per account that the aligned serialization format requires.
 
 ## Coprocessor backlog: software Ed25519 and secp256k1
 
@@ -430,7 +425,10 @@ cd sbpf2rv && cargo +1.98.1 test --release --test parity \
     the_translated_spl_token_transfer_proves_and_verifies -- --ignored --nocapture
 ```
 
-**No proof was produced here.** The run was made once, on 2026-09-18, under
+**No proof was produced here**, and the attempt below predates ZKVM-116 and ZKVM-117: it is the
+image that still took the ELF on its tape. Today's image is 63 968 words and the transfer
+249 422 cycles with one public word; the test now feeds it that tape
+(`translated_public_words`), and has not been re-run. The run was made once, on 2026-09-18, under
 `/usr/bin/time -l`, with a watchdog set to stop it at 24 GB or 45 minutes:
 
 | | |
