@@ -7,6 +7,8 @@ pub mod tables;
 pub mod machine;
 pub mod key_derivation_v2;
 pub mod poseidon2_constants;
+pub mod poseidon2_constants_next;
+pub mod poseidon2_grain;
 pub mod hash;
 pub mod keccak;
 pub mod sha256;

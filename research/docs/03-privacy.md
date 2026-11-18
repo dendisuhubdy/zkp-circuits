@@ -19,7 +19,10 @@ this crate; closing it is upstream's work, not this milestone's. Poseidon2's
 round constants are likewise derived from a fixed development seed
 (`PERM_SEED` in `machine.rs`) rather than the published Goldilocks constants
 — a placeholder for the same reason: correct math, wrong constants for
-production.
+production. The production table is chosen and committed, not yet in use:
+`src/poseidon2_constants_next.rs` (the Poseidon paper's Grain derivation,
+equal to the table Plonky3 ships); `05-roadmap.md`, "ZKVM-107", has the
+switch-over.
 
 `Machine::new` takes a `FriProfile`: `Production` (80 FRI queries, 20
 proof-of-work bits, `max_log_arity: 3` — folding arity 8) or `Test` (16

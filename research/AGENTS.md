@@ -426,7 +426,10 @@ it (`rand-guest/src/build.rs`'s `flags`), not written in the guest.
 
 - `PERM_SEED` Poseidon2 round constants (a fixed development seed, not the
   published `GOLDILOCKS_POSEIDON2_RC_8_*` constants — swapping them is a
-  config change, not a rewrite); `machine::KEY_SEED` similarly (M3.4: the
+  config change, not a rewrite; the replacement table is committed and
+  tested but unused, `src/poseidon2_constants_next.rs`, and
+  `docs/05-roadmap.md` "ZKVM-107" lists the cut — do not point live code
+  at it outside that cut); `machine::KEY_SEED` similarly (M3.4: the
   verifier-key config's fixed seed, replacing the old program-derived one
   now that the preprocessed trace no longer depends on the program —
   constraint set 7 replaced the seed itself with `key_derivation_v2`'s

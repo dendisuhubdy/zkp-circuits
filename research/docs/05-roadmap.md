@@ -309,6 +309,64 @@ and passes when the rule lands.
    derives a call's program height from `program_log_height` (floored), and a deploy's pc window
    has to cover the floored table (PCW-FLOOR).
 
+## ZKVM-107: the round-constant switch-over
+
+The Poseidon2 round constants every hash here uses are still the development draw
+(`src/poseidon2_constants.rs`, "RandZK"). Their replacement is chosen and committed, and **not in
+use**: `src/poseidon2_constants_next.rs` holds the 86 constants the Poseidon paper's Grain LFSR
+gives for this permutation's own parameters (prime field, `x^7`, `n = 64`, `t = 8`, `R_F = 8`,
+`R_P = 22`). `src/poseidon2_grain.rs` is the generator, `tools/poseidon2_grain/grain.py` a second
+implementation in standard-library Python, and the table equals the one `p3-goldilocks 0.7.0`
+ships as `GOLDILOCKS_POSEIDON2_RC_8_*` (tests in `poseidon2_constants_next.rs` check all three).
+The round numbers, the S-box and both linear layers are the ones the `poseidon2` chip's AIR
+already implements, so the switch changes preprocessed constants and no constraint.
+
+Why it is not behind a switch today: this crate has one `CONSTRAINT_SET` number and one table,
+and the table is read by value in places a cargo feature in this crate cannot reach — the
+`#[path]` copy in `rand-zkvm-cuda`, the rVM's verifier program and its Poseidon2 precompile
+(`../recursion`), the published guest digests, the wallet and the full node. Carrying two live
+tables would mean a second set of every pin below for a configuration nothing runs. So the
+candidate is data plus tests, and the cut is the list below, done in one change with the other
+changes waiting on a new set (ZKVM-108, ZKVM-111, ZKVM-112, ZKVM-113).
+
+What the switch moves — every Poseidon2 output, so: every program digest `hc`, every input and
+public digest, every Merkle root and FRI commitment, every verifier key (the preprocessed
+commitment and the `key_derivation_v2` salts, which are a Poseidon2 stream), note commitments,
+nullifiers, viewing-key derivations, storage roots, and the genesis hash. It can only ship as a
+new genesis.
+
+The cut, in order:
+
+1. `src/poseidon2_constants.rs`: replace `INITIAL`, `INTERNAL`, `TERMINAL` with
+   `poseidon2_constants_next`'s tables (or make that file the table and delete the old one);
+   delete `the_table_is_the_seeded_draw`, move the Grain and Plonky3 tests over, replace the
+   three known vectors with the candidate's (`KNOWN_VECTORS` there). `PERM_SEED` then names
+   nothing: rename the key `rand-zkvm-cuda`'s engines take (`constants::permutation(seed)`,
+   `CpuHashEngine::new`, `GpuProver::probe`, `gpu/ntt.rs::DEFAULT_PERM_SEED`,
+   `recursion/src/machine/backend.rs::PERM_SEED`) or keep it as an opaque tag, and say which.
+2. `machine::CONSTRAINT_SET`: bump, in the same commit.
+3. `rand-zkvm-cuda`: it compiles the table in by `#[path]`, so it follows step 1 with no edit;
+   re-run `tests/poseidon2.rs` (host twin and mock driver) and, on a device, `gpu_hw.rs`.
+   `gpu-kernels` takes the constants as an uploaded buffer and has none of its own.
+4. `../recursion`: rebuild the verifier program (its transcript and Merkle code hash with the
+   same permutation through the POSEIDON2 opcode and precompile), then re-record
+   `tests/fixtures/pins.json` and regenerate the proof fixtures (ZKVM-102's script).
+5. Re-pin in this crate: `tests/verifier_key.rs` (every key), `tests/key_derivation_v2.rs`,
+   `tests/hash_domains.rs`, `tests/key_blob.rs`, the `hc` values in `tests/` and
+   `../guests-compiled/bin/*.sha256` consumers, `../evm2rv` and `../sbpf2rv`'s published `hc`s.
+6. Guests: no guest binary changes (a guest hashes through the syscall, not in software) but
+   every published `hc` of one does. Check with `rand-guest check`.
+7. Downstream, at the same genesis: the full node's vendored copy and its pins
+   (`CIRCUITS_PIN`, admitted keys, genesis), the wallet's WASM and its pinned digests, randscan's
+   WASM, the bridge's note commitments, durian's program pins.
+8. Docs: remove the placeholder entries (`AGENTS.md` "Known development placeholders",
+   `03-privacy.md` on the constants, `06-viewing-keys.md`), and update
+   `02-tables-and-buses.md`'s description of where the constants come from.
+
+Not decided here: whether to keep the internal diagonal `MATRIX_DIAG_8_GOLDILOCKS` (Plonky3's)
+— it is not a round constant, it is unchanged by this switch, and it is what upstream's
+permutation uses with these constants, so keeping it keeps the two identical.
+
 ## Constraint set 8: the gas meter
 
 Not a finding from the 2026-09-27 reviews above — a separate driver, the fullnode's gas design
