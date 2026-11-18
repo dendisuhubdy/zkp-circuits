@@ -507,6 +507,14 @@ pub fn chips(tier: Tier, keccak_log_height: u8, sha256_log_height: u8) -> Vec<Ch
 /// modq table and is exactly `chips`; any other value pushes `Chip::Modq` after `Sha256` and
 /// before the mandatory `Public`, so no earlier index moves.
 pub fn chips_with_modq(tier: Tier, keccak_log_height: u8, sha256_log_height: u8, modq_log_height: u8) -> Vec<Chip> {
+    chips_at(tier, keccak_log_height, sha256_log_height, modq_log_height, tier.poseidon2_height())
+}
+
+/// [`chips_with_modq`] with the poseidon2 table's height as an argument. Every caller in the
+/// current constraint set passes `tier.poseidon2_height()` (through `chips_with_modq`); the
+/// `next-set` feature's `next_set` module is the only one that passes anything else (ZKVM-112).
+pub(crate) fn chips_at(tier: Tier, keccak_log_height: u8, sha256_log_height: u8, modq_log_height: u8, poseidon2_height: usize) -> Vec<Chip> {
+    let _ = tier;
     let mut v = vec![
         Chip::Program(ProgramAir),
         Chip::Cpu(CpuAir),
@@ -514,7 +522,7 @@ pub fn chips_with_modq(tier: Tier, keccak_log_height: u8, sha256_log_height: u8,
         Chip::Alu(AluAir),
         Chip::Range(RangeAir),
         Chip::Nibble(NibbleAir),
-        Chip::Poseidon2(Poseidon2Air, tier.poseidon2_height()),
+        Chip::Poseidon2(Poseidon2Air, poseidon2_height),
         Chip::Input(crate::tables::input::InputAir),
     ];
     if keccak_log_height != 0 {
@@ -1445,7 +1453,7 @@ impl Proof {
 /// Never used for the actual `prove_batch` call, whose main-trace/quotient/permutation
 /// commitments must keep fresh entropy (see `make_config`) or two proofs of the same run
 /// would be distinguishable, breaking zero-knowledge.
-fn key_config(profile: FriProfile) -> Config {
+pub(crate) fn key_config(profile: FriProfile) -> Config {
     let (mmcs_rng, pcs_rng) = key_rngs();
     build_config(profile, mmcs_rng, pcs_rng)
 }
@@ -1787,6 +1795,13 @@ impl Machine {
     /// `chips_with_modq`.
     #[allow(clippy::too_many_arguments)]
     pub fn log_ext_degrees_with_modq(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, modq_log_height: u8, public_log_height: u8, mem_log_height: u8) -> Vec<usize> {
+        self.log_ext_degrees_at(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height, modq_log_height, public_log_height, mem_log_height, tier.poseidon2_height())
+    }
+
+    /// [`Self::log_ext_degrees_with_modq`] with the poseidon2 table's height as an argument —
+    /// `tier.poseidon2_height()` on every current-set path; see [`chips_at`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn log_ext_degrees_at(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, modq_log_height: u8, public_log_height: u8, mem_log_height: u8, poseidon2_height: usize) -> Vec<usize> {
         let zk = self.config.is_zk();
         // Order matches `chips()`: program, cpu, memory, alu, range, nibble, poseidon2, input,
         // then — only when this proof declares them — keccak and sha256, and finally the
@@ -1799,7 +1814,7 @@ impl Machine {
         v.push(tier.cpu_height().trailing_zeros() as usize + zk);
         v.push(mem_log_height as usize + zk);
         v.extend(
-            [tier.alu_height(), crate::tables::range::HEIGHT, crate::tables::nibble::HEIGHT, tier.poseidon2_height()]
+            [tier.alu_height(), crate::tables::range::HEIGHT, crate::tables::nibble::HEIGHT, poseidon2_height]
                 .iter().map(|h| h.trailing_zeros() as usize + zk),
         );
         v.push(input_log_height as usize + zk);
@@ -2082,7 +2097,20 @@ impl Machine {
         blinds: &[crate::tables::blind::Blind],
         prove: impl for<'a> FnOnce(&'a Config, &'a [StarkInstance<'a, Config, Chip>], &'a ProverData<Config>) -> BatchProof<Config>,
     ) -> Proof {
-        let airs = chips_with_modq(tier, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height);
+        self.prove_traces_at(traces, tier, blinds, tier.poseidon2_height(), prove)
+    }
+
+    /// [`Self::prove_traces_via`] with the poseidon2 table's height as an argument —
+    /// `tier.poseidon2_height()` on every current-set path; see [`chips_at`].
+    pub(crate) fn prove_traces_at(
+        &self,
+        traces: &Traces,
+        tier: Tier,
+        blinds: &[crate::tables::blind::Blind],
+        poseidon2_height: usize,
+        prove: impl for<'a> FnOnce(&'a Config, &'a [StarkInstance<'a, Config, Chip>], &'a ProverData<Config>) -> BatchProof<Config>,
+    ) -> Proof {
+        let airs = chips_at(tier, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height, poseidon2_height);
         // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
         // traces, so the two must agree — a mismatch would `zip` short and silently prove a
         // different batch than the degree bits describe.
@@ -2111,7 +2139,7 @@ impl Machine {
         // parameters, which `key_config` and `make_config` share via `build_config`); their
         // RNG state can differ freely.
         let key_cfg = key_config(self.profile);
-        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees_with_modq(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height, traces.public_log_height, traces.mem_log_height));
+        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees_at(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height, traces.public_log_height, traces.mem_log_height, poseidon2_height));
         let batch = prove(&self.config, &instances, &prover_data);
         Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, keccak_log_height: traces.keccak_log_height, sha256_log_height: traces.sha256_log_height, modq_log_height: traces.modq_log_height, public_log_height: traces.public_log_height, mem_log_height: traces.mem_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }
     }

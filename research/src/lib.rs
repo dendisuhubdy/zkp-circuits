@@ -5,6 +5,8 @@ pub mod emulator;
 pub mod gas;
 pub mod tables;
 pub mod machine;
+#[cfg(feature = "next-set")]
+pub mod next_set;
 pub mod key_derivation_v2;
 pub mod poseidon2_constants;
 pub mod poseidon2_constants_next;

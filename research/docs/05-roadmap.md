@@ -441,6 +441,62 @@ table) — `tests/verifier_key.rs` re-pinned, in the same shape as constraint se
 widening. **Every verifier key changed; ships only with a chain cut** — chain 18 in the fullnode's
 plan, alongside Phase 1's per-instruction fee schedule.
 
+## ZKVM-112: a proof-declared poseidon2 table height (opt-in, `next-set`)
+
+The poseidon2 table is `2^(t+2)` rows at every tier whether or not the guest hashes. The next
+constraint set lets the proof declare its height, as it already declares the program, input,
+keccak, sha256, modq and memory tables'. That is built, behind the cargo feature `next-set`
+(`src/next_set.rs`, `tests/next_set.rs`), and **not part of the live machine**: without the
+feature nothing is compiled, and with it `machine::Machine`, its proofs and its keys are the
+same. The only edits to `machine.rs` are three functions that take the poseidon2 height as an
+argument (`chips_at`, `log_ext_degrees_at`, `prove_traces_at`); every current-set caller passes
+`tier.poseidon2_height()`, and `tests/verifier_key.rs` / `tests/key_blob.rs` pass unchanged.
+
+What the opt-in set does:
+
+- `next_set::Proof` is the current proof plus one header byte, `poseidon2_log_height`.
+- Admitted heights are `t + 2, t, t − 2, …` down to the private-data floor: `8, 10, …, t + 2`
+  at the even tiers in `TIERS`, `(t − 4) / 2` shapes per tier (8 at tier 20) where every height
+  from 7 would be `t − 4`. A coarser set means fewer verifier keys, at the price of a table up
+  to four times taller than the run needs.
+- `next_set::Machine::verify` range-checks the declared height with the other declared
+  heights, before the degree-bits comparison and before any key build
+  (`a_height_outside_the_admitted_set_is_refused_before_any_key_is_built` counts zero builds
+  over every non-admitted `u8`).
+- The height is the eighth component of the key tuple. At `t + 2` the key is the current key
+  and a proof made there verifies on the live machine, so the chip is the same chip.
+- The poseidon2 AIR is untouched; only the table's height and its preprocessed trace's height
+  change.
+
+Measured (committed main-trace cells; no blind, LogUp or preprocessed columns):
+
+| guest | tier | permutations | poseidon2 table | main cells | change |
+|---|---|---|---|---|---|
+| `fib(10)` | 10 | 3 | 2^12 → 2^8 | 626 432 → 495 872 | −20.8 % |
+| `poseidon2_demo`, 64 words (tier forced) | 12 | 62 | 2^14 → 2^12 | 2 468 096 → 2 050 304 | −16.9 % |
+| ERC-20 transfer (compiled EVM guest) | 18 | 5 814 | 2^20 → 2^18 | 162 199 808 → 135 461 120 | −16.5 % |
+
+The first two were proved and verified at `FriProfile::Test`; the ERC-20 row is a trace build
+only (a tier-18 proof does not fit this machine). The poseidon2 table is 22.0 % of the ERC-20
+run's main cells today, not the 30 to 40 % the review estimated, and the run cannot go below
+2^18 because 4 910 of its 5 814 permutations are the program digest of the roughly 19 600-word EVM
+guest: a large program pays for its own `hc` on every call. Peak heap and prove time were not
+measured, and msauth was not measured at all.
+
+Left for the cut:
+
+1. Move `poseidon2_log_height` into `machine::Proof`, `Traces` and `VerifierKeyShape`, with the
+   range check inside `check_declared_heights_with_modq`; bump `CONSTRAINT_SET`.
+2. `gas::gas_max`: the permutation term can follow the declared height, as the keccak term does.
+3. `../recursion`: `shape.rs` reads a seven-component tuple from an RV32 proof and
+   `programs/constraints.rs` builds `chips(tier, …)`; both need the eighth component, and the
+   rVM's verifier program then moves.
+4. The key blob (`VerifierKeyBlob`), `Machine::has_cached_key` and the GPU / reference backends
+   (`prove_on`).
+5. Forgery tests in `tests/cheating.rs` for the new header field on the live path (the opt-in
+   tests cover the header and the degree bits; nothing forges a trace at a short height).
+6. Decide the step. 2 keeps keys few; 1 halves the worst-case over-allocation.
+
 ## Constraint set 9: the MODQ chip
 
 Not a finding from any review: the private multisig's phase 3 (`docs/superpowers/specs/2026-10-11-private-multisig-design.md`
