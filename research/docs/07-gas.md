@@ -2,13 +2,17 @@
 
 Gas is meant to track what a proof costs its prover, and that cost is the committed trace: rows
 times columns, over every table a row touches. This document fixes how that is counted, gives the
-count for every priced row kind, says where the weights in `gas.rs` are off, and proposes the
-weights for the next constraint set (ZKVM-202, fullnode #167).
+count for every priced row kind, and records the weights constraint set 11 adopted from it
+(ZKVM-202, fullnode #167).
 
-**Nothing here changes a weight.** The weights are enforced by the cpu AIR (`tables/cpu.rs`,
-`w_next`), so moving one changes every verifier key: a constraint-set bump and a chain cut. The
-owner's October ruling was not to cut a chain for this, and it stands. What changes now is that the
-count is a test (`tests/gas_cells.rs`) instead of a comment, so the next set starts from numbers.
+**The weights are the count.** Through constraint set 10 they were not: `DOT4` and `MSUB4` bought
+1.57 and 1.81 times a plain cycle's cells per gas, `KECCAK` and `SHA256` 0.70 and 0.77. The
+weights are enforced by the cpu AIR (`tables/cpu.rs`, `w_next`), so moving one changes every
+verifier key — a constraint-set bump and a chain cut — and the owner's October ruling was not to
+cut a chain for that alone. The ruling of November 2026 is to adopt the counted weights at the
+next constraint set, the two hash weights lowered with the rest. Constraint set 11 is that set:
+every priced row is now within 7 % of a plain cycle, every one but the absorb row within 0.3 %,
+and `tests/gas_cells.rs` fails on any that leaves ±15 % or whose weight is not the rounded count.
 
 ## The method
 
@@ -50,7 +54,7 @@ tables declared — a chip's columns and its packing do not depend on the tier o
 
 | table | main | blind | preprocessed | LogUp (contexts) | **trace** | quotient |
 |---|---:|---:|---:|---:|---:|---:|
-| cpu | 283 | 5 | 0 | 74 (36) | **362** | 16 |
+| cpu | 284 | 5 | 0 | 74 (36) | **363** | 16 |
 | alu | 64 | 5 | 0 | 36 (17) | **105** | 16 |
 | memory | 12 | 5 | 0 | 10 (4) | **27** | 8 |
 | poseidon2 | 34 | 5 | 13 | 6 (2) | **58** | 8 |
@@ -58,7 +62,9 @@ tables declared — a chip's columns and its packing do not depend on the tier o
 | sha256 | 466 | 5 | 10 | 18 (8) | **499** | 8 |
 | modq | 59 | 5 | 16 | 34 (16) | **114** | 8 |
 
-The slot is `362 + 2·105 + 4·27 = 680` cells.
+The slot is `363 + 2·105 + 4·27 = 681` cells. (Through constraint set 10 the cpu table was one
+column narrower and the slot 680: set 11's `MODQ_W`, the column that carries a `MODQ` row's per-op
+weight, is itself in the count.)
 
 **Rows per operation** are measured, not restated: the test runs a probe guest that makes one call
 of every priced syscall on the emulator and reads each event's chip traffic
@@ -71,33 +77,37 @@ poly (2 304); `MSUB4` reads two spans and the broadcast poly and writes four (3 
 
 ## The count
 
-| operation | chip rows | chip memory rows | cells | gas | cells / gas | ratio |
-|---|---:|---:|---:|---:|---:|---:|
-| plain cycle | — | — | 680 | 1 | 680.0 | 1.000 |
-| `POSEIDON2` absorb row | 32 poseidon2 | 0 | 2 536 | 3 | 845.3 | **1.243** |
-| digest-prefix row | 32 poseidon2 | 0 | 2 536 | 3 | 845.3 | **1.243** |
-| `KECCAK` | 32 keccak | 100 | 91 060 | 192 | 474.3 | **0.697** |
-| `SHA256` | 64 sha256 | 32 | 33 480 | 64 | 523.1 | **0.769** |
-| `MODQ` `NTT` | 1 024 modq | 512 | 131 240 | 168 | 781.2 | 1.149 |
-| `MODQ` `INTT` | 1 024 modq | 512 | 131 240 | 168 | 781.2 | 1.149 |
-| `MODQ` `DOT4` | 1 024 modq | 2 304 | 179 624 | 168 | 1 069.2 | **1.572** |
-| `MODQ` `MSUB4` | 1 024 modq | 3 328 | 207 272 | 168 | 1 233.8 | **1.814** |
+| operation | chip rows | chip memory rows | cells | gas | cells / gas | ratio | gas, sets ≤ 10 | ratio then |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| plain cycle | — | — | 681 | 1 | 681.0 | 1.000 | 1 | 1.000 |
+| `POSEIDON2` absorb row | 32 poseidon2 | 0 | 2 537 | 4 | 634.2 | 0.931 | 3 | 1.243 |
+| digest-prefix row | 32 poseidon2 | 0 | 2 537 | 4 | 634.2 | 0.931 | 3 | 1.243 |
+| `KECCAK` | 32 keccak | 100 | 91 061 | 134 | 679.6 | 0.998 | 192 | 0.697 |
+| `SHA256` | 64 sha256 | 32 | 33 481 | 49 | 683.3 | 1.003 | 64 | 0.769 |
+| `MODQ` `NTT` | 1 024 modq | 512 | 131 241 | 193 | 680.0 | 0.999 | 168 | 1.149 |
+| `MODQ` `INTT` | 1 024 modq | 512 | 131 241 | 193 | 680.0 | 0.999 | 168 | 1.149 |
+| `MODQ` `DOT4` | 1 024 modq | 2 304 | 179 625 | 264 | 680.4 | 0.999 | 168 | 1.572 |
+| `MODQ` `MSUB4` | 1 024 modq | 3 328 | 207 273 | 304 | 681.8 | 1.001 | 168 | 1.814 |
 
-Every row also carries its slot (1 cpu, 2 alu, 4 memory rows). The band the test enforces is
-±15 % of a plain cycle; the bold ratios are outside it and sit on the test's `KNOWN_MISPRICED`
-list. `DOT4` and `MSUB4` are under-priced because the flat `MODQ_GAS` was derived from the chip's
-block alone and their memory traffic is as large again as the block (`MSUB4`: 89 856 memory cells
-against the block's 116 736). `KECCAK` and `SHA256` are over-priced because their weights were set
-at about 460 cells per gas, a slot counted without blind or LogUp columns; those columns add 48 %
-to the slot and only 1–5 % to a 2 612- or 466-column hash row. The absorb row's 3 is the nearest
-integer below its fair 3.73. `NTT`/`INTT` are inside the band by one part in a thousand.
+Every row also carries its slot (1 cpu, 2 alu, 4 memory rows). Each weight is
+`round(cells / 681)`, and the band the test enforces is ±15 % of a plain cycle. The absorb row is
+the one that cannot sit at 1.0: its fair weight is 3.73, and 4 is the nearest integer (0.931; at 3
+it was 1.243, outside the band).
 
-Under-pricing is the direction that matters for safety: a guest made of `MSUB4` calls buys 1.8
-times the prover work its gas pays for. Over-pricing only overcharges.
+The last two columns are the weights of constraint sets ≤ 10 and the ratios set 10's count gave
+them (on its 680-cell slot; the test reproduces them). `DOT4` and `MSUB4` were under-priced because the flat `MODQ_GAS = 168` was
+derived from the chip's block alone and their memory traffic is as large again as the block
+(`MSUB4`: 89 856 memory cells against the block's 116 736). `KECCAK` and `SHA256` were over-priced
+because their weights were set at about 460 cells per gas, a slot counted without blind or LogUp
+columns; those columns add 48 % to the slot and only 1–5 % to a 2 612- or 466-column hash row.
+
+Under-pricing was the direction that mattered for safety: a guest made of `MSUB4` calls bought 1.8
+times the prover work its gas paid for. Over-pricing only overcharged.
 
 ## Why the two earlier counts differ
 
-Both are reproduced by `the_earlier_counts_are_reproduced` from the same widths and rows.
+This section is the record of constraint set 10: its weights, its 283-column cpu table, and the
+two reviews that counted them differently. Both are reproduced by `the_earlier_counts_are_reproduced` from the same widths and rows.
 
 **The 17 November review** counted main and preprocessed columns only, and an operation's cells
 were its chip block plus the chip's memory rows, without the cpu row's own slot. Its slot is
@@ -111,12 +121,12 @@ quotient chunks, and no preprocessed columns, with the slot in the numerator. It
 `(288 + 74 + 16) + 2·(69 + 36 + 16) + 4·(17 + 10 + 8) = 760`; it gives `DOT4` 1.49×, `MSUB4`
 1.77×, Keccak 0.61 and SHA-256 0.69.
 
-So the two differ in three choices — blind and LogUp columns, preprocessed columns, quotient
+So the two differed in three choices — blind and LogUp columns, preprocessed columns, quotient
 chunks — and in whether the syscall's own cpu row is counted. The method of record here takes
 every committed *trace* cell and the cpu row; it agrees with October on which operations are off
 and in which direction, and differs from it by a few percent in size.
 
-| ratio | **trace (record)** | 17 Nov (main + pre) | trace − preprocessed | trace + quotient | October (per proof) |
+| ratio, set 10 | **trace (record)** | 17 Nov (main + pre) | trace − preprocessed | trace + quotient | October (per proof) |
 |---|---:|---:|---:|---:|---:|
 | `POSEIDON2` absorb, digest prefix | **1.243** | 1.092 | 1.039 | 1.260 | 1.077 |
 | `KECCAK` | **0.697** | 0.998 | 0.673 | 0.632 | 0.610 |
@@ -125,10 +135,24 @@ and in which direction, and differs from it by a few percent in size.
 | `DOT4` | **1.572** | 1.354 | 1.429 | 1.616 | 1.488 |
 | `MSUB4` | **1.814** | 1.514 | 1.671 | 1.897 | 1.768 |
 
-`DOT4` and `MSUB4` are under-priced under every method, and `KECCAK` and `SHA256` over-priced
-under every method that counts blind and LogUp columns. The absorb row is the one verdict that
-depends on the method: outside the band under the method of record and with quotient chunks
-added, inside under the other three (13 of a poseidon2 row's 58 cells are preprocessed).
+`DOT4` and `MSUB4` were under-priced under every method, and `KECCAK` and `SHA256` over-priced
+under every method that counts blind and LogUp columns. The absorb row was the one verdict that
+depended on the method (13 of a poseidon2 row's 58 cells are preprocessed).
+
+The same sensitivities at constraint set 11's weights, which were fitted to the method of record:
+
+| ratio, set 11 | **trace (record)** | trace − preprocessed | trace + quotient | October (per proof) |
+|---|---:|---:|---:|---:|
+| `POSEIDON2` absorb, digest prefix | **0.931** | 0.779 | 0.944 | 0.807 |
+| `KECCAK` | **0.998** | 0.963 | 0.904 | 0.873 |
+| `SHA256` | **1.003** | 0.984 | 0.921 | 0.903 |
+| `NTT`, `INTT` | **0.999** | 0.874 | 0.978 | 0.866 |
+| `DOT4` | **0.999** | 0.908 | 1.027 | 0.945 |
+| `MSUB4` | **1.001** | 0.922 | 1.047 | 0.976 |
+
+No operation is under-priced by more than 5 % under any of them. A method that leaves the
+preprocessed columns out finds the narrow chips (poseidon2 13 of 58 cells, modq 16 of 114)
+over-priced by up to 22 %, which is the direction that only overcharges.
 
 ## What the count leaves out
 
@@ -149,80 +173,123 @@ added, inside under the other three (13 of a poseidon2 row's 58 cells are prepro
   `2^7` floor belong to no row and are not in the count.
 - **The hiding PCS** doubles every committed column alike and changes no ratio.
 
-## Proposed weights for the next constraint set
+## The weights of constraint set 11
 
-The weight that brings each operation to ratio 1.0 is `round(cells / 680)`:
+Each is `round(cells / slot)` on the count above, taken after the meter's own column was added
+(the proposal made on set 10's 680-cell slot gave `MSUB4` 305; with `MODQ_W` in the cpu table the
+slot is 681 and the count gives 304 — every other weight came out as proposed).
 
-| operation | today | proposed | ratio at the proposed weight |
-|---|---:|---:|---:|
-| `POSEIDON2` absorb row, digest-prefix row | 3 | 4 | 0.932 |
-| `KECCAK` | 192 | 134 | 0.999 |
-| `SHA256` | 64 | 49 | 1.005 |
-| `MODQ` `NTT`, `INTT` | 168 | 193 | 1.000 |
-| `MODQ` `DOT4` | 168 | 264 | 1.001 |
-| `MODQ` `MSUB4` | 168 | 305 | 0.999 |
+| operation | sets ≤ 10 | set 11 | fee per call | ratio |
+|---|---:|---:|---:|---:|
+| plain cycle | 1 | 1 | — | 1.000 |
+| `POSEIDON2` absorb row, digest-prefix row | 3 | 4 | +33 % | 0.931 |
+| `KECCAK` | 192 | 134 | −30 % | 0.998 |
+| `SHA256` | 64 | 49 | −23 % | 1.003 |
+| `MODQ` `NTT`, `INTT` | 168 | 193 | +15 % | 0.999 |
+| `MODQ` `DOT4` | 168 | 264 | +57 % | 0.999 |
+| `MODQ` `MSUB4` | 168 | 304 | +81 % | 1.001 |
 
-The `MODQ` split is the part that closes an under-pricing and is the minimum to carry; the three
-hash weights are corrections in the user's favour (Keccak, SHA-256) or a rounding step (absorb)
-and can ride the same cut. `NTT`/`INTT` are inside the band today and move only because the split
-gives them their own weight anyway.
+### How the meter prices a `MODQ` call by op
 
-What has to change, described and not implemented:
+- **`gas.rs`**: `MODQ_GAS` is four constants (`MODQ_NTT_GAS`, `MODQ_INTT_GAS`, `MODQ_DOT4_GAS`,
+  `MODQ_MSUB4_GAS`) behind `modq_gas(op)`; `row_gas` reads the op from the call's `a1`
+  (`modq_op`: its low two bits, as the chip's `A1` identity reads them). `gas_max_with_modq`'s
+  modq term takes the heaviest op, `(MODQ_MAX_GAS − 1) · 2^mlh / 1024 = 303 · 2^mlh / 1024`, since
+  a ceiling must cover a table full of `MSUB4`; the absorb term is `(4 − 1) · 2^(t−3)`.
+- **The cpu row does not know the op.** It holds `a1` whole in `MEM_VAL`, and only the modq chip
+  decomposes it: its one-hot `IS_NTT`/`IS_INTT`/`IS_DOT`/`IS_MSUB`, boolean, summing to `IS_REAL`
+  and tied to `A1`'s low bits by the chip's rule 1. So the chip prices the call. Its `MODQ` table
+  entry gained a fourth field, the linear form
 
-- **`gas.rs`**: `MODQ_GAS` becomes four constants; `row_gas` reads the op from the call's `a1`
-  (`modq::Args::decode`); `gas_max_with_modq`'s modq term takes the heaviest op,
-  `(MODQ_MSUB4_GAS − 1) · 2^mlh / 1024`, since a ceiling must cover a table full of `MSUB4`. If the
-  absorb weight moves, `gas_max`'s `2^(t−2)` term becomes `(W − 1) · 2^(t−3)`.
-- **`tables/cpu.rs`, `w_next`**: today the modq term is one selector at one constant,
-  `(MODQ_GAS − 1) · n(SYS_MODQ)`. The cpu row does not know the op: it holds `a1` whole in
-  `MEM_VAL`, and only the modq chip decomposes it (its one-hot `IS_NTT`/`IS_INTT`/`IS_DOT`/
-  `IS_MSUB`, already tied to `A1`). The cheapest per-op meter keeps the decomposition there: the
-  chip adds a fourth field to its `MODQ` table entry, the linear form
-  `Σ (W_op − 1) · IS_op` on the block's first row, and the cpu row looks up
-  `(CLK, HASH_PTR, MEM_VAL, MODQ_W)` with `MODQ_W` a new cpu column pinned to zero off
-  `SYS_MODQ` rows. The meter's term becomes `n(MODQ_W)`, and the transition stays degree 2. One cpu
-  column, one bus field, no new range check. The alternative — two op-bit columns on the cpu row
-  and four selector products in `w_next` — needs `a1`'s low bits split off in the cpu table, which
-  costs a range check the chip already pays for.
+  ```
+  192·IS_NTT + 192·IS_INTT + 263·IS_DOT + 303·IS_MSUB        (each weight less the row's own 1)
+  ```
+
+  on the block's first row, and the cpu row looks up `(CLK, HASH_PTR, MEM_VAL, MODQ_W)` with
+  `MODQ_W` a new cpu column (the 284th). `w_next`'s modq term is `n(MODQ_W)`: linear, so the
+  transition stays degree 2. One cpu column, one bus field, no new range check.
+- **Why a prover cannot pay one op's price for another's work.** (1) A `SYS_MODQ` row's lookup has
+  count 1, so `(CLK, HASH_PTR, a1, MODQ_W)` must be an entry of the modq table; `CLK` is unique
+  per cpu row and one real block answers it, and that block's fourth field is fixed by its op
+  flags, which the chip ties to the same `a1` — the `a1` the cpu read from the register file. So
+  `MODQ_W` is the weight of the op the chip performs, or the bus does not balance. (2) The gas
+  chain adds `MODQ_W` as it stands, so the row is charged exactly that. (3) Off a `SYS_MODQ` row
+  nothing looks `MODQ_W` up, so `(1 − SYS_MODQ) · MODQ_W = 0` pins it to zero there: a free value
+  would be a free credit on the chain. `tests/gas.rs` (`modq::a_modq_op_claimed_at_another_weight_
+  is_refused`) forges each of the three against a real proof, per op, with the chain and the
+  public gas word made consistent with the lie; `tests/modq.rs` asks the chip standalone at every
+  wrong price.
 - **The hash weights** are constants in the same expression; the absorb weight also appears in the
   first-row rule `GAS = POSEIDON2_ABSORB_GAS`.
-- **Outside this crate**: the fullnode's fee schedule mirrors these constants, and `msauth`'s
-  admission pins the gas word (below).
 
-## `msauth` under the proposed weights
+## What the re-weighting does to a fee (for governance)
+
+The fee is charged per gas, and the price of a gas is governance's. At an unchanged price:
+
+- **a plain cycle costs what it did**, so a guest that only computes pays the same;
+- **hashing through the chips is cheaper**: a `KECCAK` permutation −30 % (192 → 134), a `SHA256`
+  compression −23 % (64 → 49);
+- **`MODQ` is dearer**: `NTT`/`INTT` +15 % (168 → 193), `DOT4` +57 % (168 → 264), `MSUB4` +81 %
+  (168 → 304);
+- **a Poseidon2 permutation is dearer**: an absorb row and a digest-prefix row +33 % (3 → 4). Every
+  proof pays the digest prefix once — one row per four program words, per four private inputs
+  (plus the salt row) and per four public words — so every call's floor rises by its prefix rows:
+  `msauth`'s 1 620 prefix rows are 1 620 gas more;
+- **header ceilings move** (what a proof with `gas_limit = None` declares, and what a fee keyed on
+  the public gas word charges): `gas_max` at tier `t` with no hash table rises from
+  `2^t − 1 + 2^(t−2)` to `2^t − 1 + 3·2^(t−3)` (+10 %); a declared keccak block adds 133 instead
+  of 191, a sha256 block 48 instead of 63, a modq block 303 instead of 167.
+
+What a deployed guest pays therefore moves with its mix. A Keccak-heavy guest (the EVM
+interpreter's `KECCAK256`, Solidity mappings; `msauth`'s SHAKE) pays less; a guest dominated by
+`MODQ` or by Poseidon2 absorbs pays more. If governance wants the *revenue* per unit of prover
+work unchanged, no price change is needed: that is what the re-weighting restores. If it wants a
+particular guest's fee unchanged, the price of gas is the only lever and moves every guest.
+
+## `msauth` at the weights
 
 `msauth` (Dilithium2 verification, the private-multisig guest) is the one deployed caller of
 `MODQ`. Per signature it makes 9 `NTT`, 4 `INTT`, 4 `DOT4` and 1 `MSUB4` calls and 99 Keccak
-permutations — counted on the emulator by `msauth_under_the_proposed_weights`, on the seeded
-fixture of `tests/msauth.rs`; no proof is made.
+permutations — counted on the emulator by `msauth_at_the_weights`, on the seeded fixture of
+`tests/msauth.rs`; no proof is made.
 
-| `M` | cycles (with prefix) | Keccak | `NTT` / `INTT` / `DOT4` / `MSUB4` | gas today | `MODQ` re-weighted | every op re-weighted |
-|---:|---:|---:|---|---:|---:|---:|
-| 1 | 85 830 | 99 | 9 / 4 / 4 / 1 | 111 217 | 112 063 (+0.8 %) | 108 057 (−2.8 %) |
-| 2 | 169 068 | 198 | 18 / 8 / 8 / 2 | 216 576 | 218 268 (+0.8 %) | 208 623 (−3.7 %) |
-| 3 | 251 946 | 297 | 27 / 12 / 12 / 3 | 321 575 | 324 113 (+0.8 %) | 308 829 (−4.0 %) |
+| `M` | cycles (with prefix) | Keccak | `NTT` / `INTT` / `DOT4` / `MSUB4` | gas, sets ≤ 10 | gas, set 11 |
+|---:|---:|---:|---|---:|---:|
+| 1 | 85 830 | 99 | 9 / 4 / 4 / 1 | 111 217 | 108 056 (−2.8 %) |
+| 2 | 169 068 | 198 | 18 / 8 / 8 / 2 | 216 576 | 208 621 (−3.7 %) |
+| 3 | 251 946 | 297 | 27 / 12 / 12 / 3 | 321 575 | 308 826 (−4.0 %) |
 
-A re-weighting adds 846 gas per signature for `MODQ` alone, and the Keccak correction more than
-pays it back. **It still fits, and nothing about its shape moves**: a tier is chosen by cycles and
-Poseidon2 permutations and a table's height by its rows, and a weight touches neither, so tier 18
-and the pinned heights (keccak 14, modq 16, memory 20) are unchanged.
+Per signature the `MODQ` re-weighting adds 845 gas (9 + 4 transforms at +25, 4 `DOT4` at +96, one
+`MSUB4` at +136) and the Keccak correction takes 5 742 back (99 at −58); the prefix rows and the
+absorb rows add one each (1 633 once, then 103 per signature). **Its shape does not move**: a tier is
+chosen by cycles and Poseidon2 permutations and a table's height by its rows, and a weight touches
+neither, so tier 18 and the pinned heights (keccak 14, modq 16, memory 20) are as they were — the
+test asserts the run fits them at every `M`.
 
 What does move is the pinned gas word. `msauth` proves with `gas_limit = None`, so its public gas
 word is the header ceiling `gas_max_with_modq(18, 14, 0, 16)`, and admission pins it exactly:
-**436 159 today, 444 927 with `MODQ` re-weighted, 447 999 with every op re-weighted** (the modq
-term at `MSUB4`'s weight over 64 blocks, the Keccak term over 512). The admission constant and the
-fee charged on that word have to move in the same cut. The fullnode's own gas tiers and fee
-arithmetic were not read for this document.
+
+```
+2^18 − 1  +  3 · 2^15  +  133 · 2^14/32  +  303 · 2^16/1024
+ 262 143  +   98 304   +     68 096      +      19 392        =  447 935        (436 159 through set 10)
+```
+
+The admission constant and the fee charged on that word move in the same cut: a fee keyed on the
+word rises 2.7 % at an unchanged price, though the work `msauth` meters fell. (The proposal's
+hand-derived 447 999 was at `MSUB4` = 305.) The fullnode's own gas tiers and fee arithmetic were
+not read for this document.
 
 ## The test
 
 `cargo test --release --test gas_cells -- --nocapture` prints the tables above.
 
 - `cells_per_gas_is_within_the_band_or_on_the_list` fails if an operation's ratio is outside
-  ±15 % and it is not on `KNOWN_MISPRICED`; if a listed operation is inside the band; or if a
-  listed ratio or fair weight has drifted from its pin (±0.005). A column added to any table moves
-  these numbers, which is the point: the list is re-read whenever a width changes, and emptied in
-  the commit that re-weights.
+  ±15 %, if its weight is not `round(cells / slot)`, or if `KNOWN_MISPRICED` — the list of
+  exceptions sets ≤ 10 needed, now empty — has an entry; it pins the slot (681), every operation's
+  cells and every weight. A column added to any table moves these numbers, which is the point: the
+  weights are re-read whenever a width changes.
 - `the_row_counts_are_what_the_trace_generator_lays_down` checks the row model against real traces.
-- `the_earlier_counts_are_reproduced` pins the 459- and 760-cell methods.
-- `msauth_under_the_proposed_weights` pins the table of the last section.
+- `the_earlier_counts_are_reproduced` pins set 10's record: the 680-, 459- and 760-cell methods at
+  that set's weights and cpu width.
+- `msauth_at_the_weights` pins the table of the last section, and that the run fits the pinned
+  tier and heights.
