@@ -264,12 +264,10 @@ its only two patches (everything else rides along in the wholesale rsync —
   independent, so a guest pays for the hash it actually calls.
 - `cargo +1.98.1 test --features reference-backend --test backend` — the CPU-twin
   backend suite, feature-gated and so invisible to the default `cargo test`.
-  `backend_proof_has_the_same_shape_as_a_cpu_proof` has been unpassable since
-  H_IN was salted per proving call in M4.1: it asserts `a.public_values ==
-  b.public_values` across two independently-salted proving calls (`prove_with`
-  and `prove` on the same guest), and each draws its own salt, so the equality
-  fails by construction. This is a pre-existing failure, not a regression, and
-  not this milestone's to fix.
+  `backend_proof_has_the_same_shape_as_a_cpu_proof` was unpassable from M4.1 (when
+  `H_IN` was salted per proving call) until ZKVM-118: it compared all of
+  `public_values` across two independently salted proofs. It now compares every
+  public value but the eight salted `H_IN` words, and asserts those differ.
 - `cargo test --features parallel` (add `--release` for the timings below) — the same suite with
   Plonky3's rayon on. Opt-in; see "The `parallel` feature" below for what it guarantees, what it
   does not, and the measured times. The serial figures above stay the reference for plain
