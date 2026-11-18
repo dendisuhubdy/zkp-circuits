@@ -308,6 +308,18 @@ and passes when the rule lands.
    columns. `docs/03-privacy.md`, "LogUp terminals are blinded", has the argument; the chain side
    derives a call's program height from `program_log_height` (floored), and a deploy's pc window
    has to cover the floored table (PCW-FLOOR).
+7. **ZKVM-202 — gas weights that track committed cells** (fullnode #167). *Open; not a finding
+   that breaks soundness, so it rides the next cut and does not force one* (the owner's October
+   ruling). `MODQ_GAS = 168` was derived from the chip's block alone; counted with the memory rows
+   the chip sends and with blind and LogUp columns, `DOT4` buys 1.57 and `MSUB4` 1.81 times a
+   plain cycle's cells per gas, `KECCAK` 0.70 and `SHA256` 0.77, an absorb row 1.24. The rule:
+   per-op `MODQ` weights 193 / 193 / 264 / 305 (`NTT` / `INTT` / `DOT4` / `MSUB4`), carried from
+   the modq chip to the cpu row as a fourth field of the `MODQ` lookup so `w_next` stays degree 2;
+   `KECCAK_GAS` 134, `SHA256_GAS` 49, `POSEIDON2_ABSORB_GAS` 4; `gas_max_with_modq`'s modq term at
+   the heaviest op. `msauth`'s pinned gas word moves from 436 159 to 447 999 and its shape does
+   not move. `docs/07-gas.md` has the method, the count and the proposal; `tests/gas_cells.rs`
+   pins the count and carries the out-of-band operations on `KNOWN_MISPRICED`, a list that must be
+   empty after the re-weighting (the test fails on an entry that is inside the band).
 
 ## Constraint set 8: the gas meter
 

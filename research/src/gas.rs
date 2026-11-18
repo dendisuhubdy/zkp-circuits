@@ -4,6 +4,12 @@
 //! `KECCAK` row pulls 32 rows of 2 612 columns and 100 memory rows (+191); a `SHA256` row 64 rows
 //! of 466 columns (+63); a `MODQ` row one 1 024-row block of 59 + 16 columns (+167, private multisig
 //! phase 3). The cpu AIR accumulates exactly these weights in its `GAS` column.
+//!
+//! That list is how the weights were derived, not everything a row causes: the sha256 chip also
+//! sends 32 memory rows, the modq chip 512 (`NTT`, `INTT`), 2 304 (`DOT4`) or 3 328 (`MSUB4`), and
+//! every table carries blind and LogUp columns the derivation did not count. `docs/07-gas.md` has
+//! the full count per operation and `tests/gas_cells.rs` pins it (ZKVM-202): the weights stay as
+//! they are until the next constraint set.
 use crate::emulator::{CycleEvent, Syscall};
 use crate::isa::Program;
 use crate::machine::Tier;
@@ -15,6 +21,10 @@ pub const POSEIDON2_ABSORB_GAS: u64 = 3;
 /// preprocessed columns, 76 800 committed cells, into the modq table. At the ≈ 460 cells per gas
 /// that `KECCAK_GAS` (32 × (2 612 + 99) ≈ 86.8 k cells / 192) and `SHA256_GAS` (64 × (466 + 10)
 /// ≈ 30.5 k cells / 64) imply, that is 76 800 / 460 ≈ 167, plus the cpu row's own 1: 168.
+///
+/// The 76 800 is the block's main and preprocessed columns only. It leaves out the memory rows the
+/// chip sends for the call, which differ by op (512 for a transform, 2 304 for `DOT4`, 3 328 for
+/// `MSUB4`), so one flat weight under-prices `DOT4` and `MSUB4`: `docs/07-gas.md` (ZKVM-202).
 pub const MODQ_GAS: u64 = 168;
 
 /// The gas the cpu AIR's `GAS` column accumulates for this execution (spec §3.1): the digest
