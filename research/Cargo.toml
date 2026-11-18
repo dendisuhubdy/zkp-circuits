@@ -169,3 +169,8 @@ opt-level = 3
 
 [profile.test]
 opt-level = 1
+
+[[test]]
+name = "mulmod256"
+path = "tests/mulmod256.rs"
+required-features = ["next-set"]

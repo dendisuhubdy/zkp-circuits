@@ -903,6 +903,83 @@ which links the same `evm-core` harness and `evm-rt`'s `evm_log` (the ERC-20's t
 in `evm2rv/README.md`). A chain that admits `evm.bin` or a translated contract by hc admits the
 new one only at a cut.
 
+## ZKVM-115: a 256-bit modular multiply-add chip (prototype, `next-set`)
+
+Signature and pairing work is out of reach in software: `ecrecover` is 14.5 M cycles against a
+2^20 ceiling. The MODQ chip took Dilithium2 verification to 80 572 cycles and is the template.
+This section records how far that template carries to 256-bit fields, and the prototype that
+was built: `src/tables/mulmod256.rs`, compiled only under the cargo feature `next-set`.
+
+**Status: an AIR proved standalone, not a coprocessor.** One row proves
+`r = (a·b + c) mod p` for 256-bit operands and a caller-supplied 256-bit modulus, with the
+quotient as a witness. It is proved in a two-table batch with the range table
+(`tests/mulmod256.rs`) and attacked there. It has **no syscall, no cpu handshake, no memory
+traffic and no gas weight**, `machine::chips` does not include it, and no guest can call it —
+so the constraint set, the keys and the proof format are untouched, and the issue's acceptance
+line ("ecrecover and Ed25519 verify each fit inside one tier-20 proof") is **not met or
+tested**.
+
+**What carries over from MODQ, and what does not.**
+
+- Carries over: a dedicated table off the cpu; one cpu cycle per call; the chip owning its own
+  memory traffic; byte limbs checked on the existing `RANGE8` bus (no new range table); a
+  canonical-result rule (`D = p − 1 − r`); a forgery suite; one constraint-set bump.
+- Does not: the arithmetic. MODQ proves `O + q·K = α·U + β·V` as one field identity because
+  `q < 2^23` keeps every term under Goldilocks' `2^64`. A 256-bit product fits no field
+  element, so the identity is proved limb by limb with explicit carries (64 limb equations, 63
+  two-byte carries). And the block geometry: MODQ's 1 024-row block is a whole NTT; here one
+  row is one operation.
+
+**The row** (`tables::mulmod256`'s module comment has the rules): 384 main columns — `A`, `B`,
+`C`, `P`, `R`, `D` (32 byte limbs each), `Q` (33), 32 boolean carries of the canonical chain,
+63 product carries of two limbs. 130 constraints, every one of degree 3. 351 `RANGE8` lookups
+per real row. Measured in the standalone batch: 236 committed LogUp auxiliary columns and 8
+quotient chunks, so **620 committed base cells per operation**. For scale, one cpu row is 283
+main columns before its own auxiliary columns, and one such operation costs thousands of cycles
+in software.
+
+**Tested** (12 tests, release, about 4 s):
+
+- the host arithmetic equals big-integer arithmetic for secp256k1's field and group order,
+  ed25519's field and bn254's field, on random and extreme operands;
+- honest rows satisfy every constraint; 100 operations prove and verify (Test profile, 0.3 to
+  0.5 s, a proof of about 158 kB);
+- the forgery suite, each a real proof refused by the verifier, with a control showing the
+  harness accepts the honest row: a wrong result; a **non-canonical result** (`r + p` with
+  `q − 1` — a true integer identity with every limb a byte, refused only by the canonical
+  chain); a wrong quotient; **out-of-range limbs** in each of `a`, `b`, `c`, `q` (the integer
+  re-encoded with one limb ± 256: every arithmetic constraint still holds and only the range
+  lookup refuses it) and in `p`, `r`; an out-of-range carry limb; another operation's result.
+
+**Limits of the row as built.** The quotient has 33 limbs, so the modulus must be at least
+`2^248` or the operands reduced; all four target moduli are above `2^253`, and a smaller
+modulus has no row rather than a wrong one. `a`, `b`, `c` are not required to be below `p`.
+
+**An estimate, not a measurement.** `ecrecover` is one square root, one double-scalar
+multiplication and two inversions: on the order of 5 000 field multiplications and as many
+additions and subtractions, each one chip row (an addition is `a·1 + c`). At roughly 20 cycles
+of guest glue per call that is some 10 000 rows and 200 000 cycles — tier 18 — against
+14 510 525 today. No guest was written, so this is arithmetic on textbook operation counts; the
+real count needs the guest.
+
+**Left, in order.**
+
+1. Integration, MODQ's way: a syscall number and `SYS_MULMOD` cpu row; a `(clk, ptr)` handshake
+   bus; the chip's `MEMORY` sends (32 words read, 8 written per call — each word is a linear
+   form of four limbs, so no new columns, but 40 sends a row where MODQ has five); a declared
+   table height in the proof header and the key tuple; `Tier::max_mulmod_log_height`.
+2. A gas weight from the measured cells per call (620 against the cpu's row), by the method of
+   the MODQ gas issue.
+3. The forgery suite again on the integrated chip, behind `cheating`: the handshake, the memory
+   traffic, a real block the cpu never asked for, padding.
+4. A guest: field arithmetic for secp256k1 over the syscall, `ecrecover` against known
+   vectors, and the measured cycle count. Then ed25519 — `verify_strict`-equivalent, against
+   dalek's vectors — and the EVM precompiles 1, 5, 6, 7 and the Solana syscalls.
+5. Only then decide on curve-level syscalls (point add / double), from the measured counts.
+6. Narrower rows: 16-bit limbs with a 2^16-row range table would cut the columns and lookups
+   by about half; not priced.
+7. Pairing (a 1 768× gap) stays out of scope.
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency

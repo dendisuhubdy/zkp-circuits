@@ -12,6 +12,8 @@ pub mod keccak;
 pub mod sha256;
 pub mod blind;
 pub mod modq;
+#[cfg(feature = "next-set")]
+pub mod mulmod256;
 
 pub type F = p3_goldilocks::Goldilocks;
 
