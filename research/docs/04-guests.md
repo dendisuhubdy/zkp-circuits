@@ -291,8 +291,10 @@ keccak table's), under 1 048 576.
 `min_mem_log_height = 20`, `gas_limit = None` (the header ceiling, so the public gas word does not
 leak `M`). Every `M <= 3` then declares program 12, input 12, keccak 14, sha256 0, modq 16,
 public 7, memory 20 and the same gas word (`proof_shape_is_the_same_for_every_m`; without the
-floors the heights and the gas word differ per `M`, e.g. gas 357 471 / 387 263 / 436 159 at
-`M = 1 / 2 / 3`).
+floors the heights and the gas word differ per `M`, e.g. gas 387 167 / 413 887 / 447 935 at
+`M = 1 / 2 / 3`). The pinned word is `gas_max_with_modq(18, 14, 0, 16)` = **447 935** since
+constraint set 11 (436 159 through set 10; `07-gas.md`), and the run itself meters 108 056 /
+208 621 / 308 826 gas at `M = 1 / 2 / 3` (111 217 / 216 576 / 321 575 before).
 
 Production prove at `M = 3` (peak RSS, proof bytes, wall time): **pending.** Three attempts on the 48 GB laptop were SIGKILLed at about 1300 s wall (true peak RSS 24 to 31 GB; 8 GB resident at death; no kernel memory kill logged; a detached CPU burner survived 1400 s). These were not memory kills (no kernel kill logged); re-run on a host with at least 64 GB or once the cause is found.
 
