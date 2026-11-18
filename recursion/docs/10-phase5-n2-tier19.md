@@ -385,3 +385,62 @@ moved by +7 cpu rows per inner proof; no tier moved, and the RV32 verifier keys 
 Row counts quoted in `#[ignore]` strings and doc comments as "since phase 5" are the left column.
 The tree test pins (`tests/pins.json` `tree_test`, `tests/tree-test-genesis.json`) still wait on the
 fixture regeneration.
+
+## Constraint set 11 (ZKVM-202, 2026-11-18)
+
+The inner machine re-weighted its gas meter and prices a `MODQ` call by op
+(`research/docs/05-roadmap.md`, "Constraint set 11"; `research/docs/07-gas.md`). Unlike constraint
+set 10 this is an inner *shape and key* change as well as a constraint change: the inner cpu has
+one more column (`MODQ_W`, 284) and its `MODQ` lookup a fourth field. So every program that
+compiles the inner AIR moved, every opened main-trace row is one word wider, and the inner key
+digest moved. No rVM tier, no reduce height and no N ceiling moved; `rv32t`, `rv32r` and the rVM's
+own AIR are untouched.
+
+| | constraint set 10 | constraint set 11 |
+|---|---|---|
+| production single-proof rows | 235 425 | 236 021 (tier 18, 26 122 under `2^18 − 1`) |
+| — permutations / memory accesses / REG accesses / witness words / program instrs | 54 598 / 1 679 146 / 493 843 / 209 175 / 243 398 | 54 679 / 1 681 362 / 494 909 / 209 259 / 243 994 |
+| — reloads / spills | 14 424 / 5 682 | 14 515 / 5 763 |
+| production N=1 / N=2 / N=3 rows | 235 751 / 471 119 / 706 487 | 236 347 / 472 311 / 708 275 (tiers 18 / 19 / 20, unchanged) |
+| production reduce rows per inner proof | 196 960 | 197 120 (heights `2^18` / `2^19` / `2^20`, N ≤ 5: unchanged) |
+| test N=1 / N=2 / N=3 rows | 88 493 / 176 603 / 264 713 | 88 641 / 176 899 / 265 157 |
+| test single-proof permutations | 11 894 | 11 911 |
+| test reduce rows per inner proof | 39 392 | 39 424 (N ≤ 26: unchanged) |
+| production aggregate digest | `a3d5c38b…83d3` | `df04d61027203a94054415c96e71fd7dcd06441f03662f9c0fd972d216111bf2` |
+| test-shape aggregate digest | `560784df…760c` | `7656ec76d7a053ebeef9c0943c801c0164edd13e74763c6646f2a99cd9c52253` |
+| Off replay | `f351f639…2fd9` | `dac80eafa41db78eada180d45968ea22740b3bf0affeeacfc4754ef0f117a711` |
+| `verify_rv32.digest` | `ef62f60c…1792` | `abe8dea90ddc07168e3553897f694871d553fb06e6f0fe8be34ff21a30edf5d8` |
+| `inner_vk_digest`, test fixture shape | `1b0c4b00…ddc7` | `dbf83e0a450a7532def9c33931489649e8b59b0d93c50a69997b973582b6a749` |
+| `inner_vk_digest`, production bundle shape | not recorded here | `2b6d360b4634f9a92c6a2b942fdd60c19062990563eea83b3935cf3ce129fb05` |
+
+`pins.json` `tree_measure`: the emulated production leaf (L = 2) is 472 311 rows, tier 19, with the
+same heights (reg 20, ram 22, poseidon2 17, reduce 19), so the child shape is unchanged and
+`rv32r` (254 493 rows, child 254 177) and the emulated `rv32t_leaf` step (508 735 rows, tier 19) did
+not move (`production_rv32r_rows_at_the_emulated_leaf_shape` and `production_rv32t_rows_…`,
+`--ignored`, 3.24 GB peak live).
+
+The per-call-site rows of `pins.json` `phase3_attribution` (`reduce`, `select`, `fold_round`,
+`bit_selected_power`, `commit_root`, `sample_bits`) did not move; the +596 production rows are in
+phase 5 (the new constraints), the phase-6 preamble and the tape reads (one more opened column).
+
+**How it was measured.** All by emulation, on the 48 GB laptop, against a fixture cache
+regenerated under constraint set 11 (five Test and three Production bundle proofs; peak RSS
+5.5 GB and 4.6 GB): `tests/profile.rs` (`where_the_rows_go`), `the_cycle_budget_per_inner_proof_is_pinned`,
+`the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead`,
+`production_n2_aggregate_emulates_within_bounds` and `production_n3_…` (all `--ignored`), and the
+in-suite `the_per_n_cycle_budget_is_pinned`, `the_admission_stub_vectors` (its printed list and
+digest are `docs/02-aggregate.md`'s test vectors) and the two reduce-height tests. Nothing was
+proved.
+
+**Pending operator runs for constraint set 11.** The leaf program (`rv32n`) changed, so every
+rVM proof of it and every rVM key that commits it is stale. These were not run from the agent
+(each proves at tier 18 or above, far past the session's 8 GB limit) and their pins are left at
+the old values:
+
+| what | command, from `recursion/` | where the result goes |
+|---|---|---|
+| the test tree's fixtures: two `rv32n` leaves, the steps and the root (tier 18, ≈ 34 GB) | `cargo test --release --test tree generate_test_tree_fixtures -- --ignored --nocapture`, then copy `tree/` into `$RECURSION_FIXTURES` | un-reds the fixture-gated tests of `tests/tree.rs` (they fail "rvmproof is missing or stale" until then); re-record from its output `tests/pins.json` `tree_test` (`vk_leaf_0..3`, and `vk_t_leaf_*`, `vk_int_*`, the row counts and `T_INT_TEST` if they moved) and `tests/tree-test-genesis.json` |
+| the test twins: one Test inner proof (88 315 rows), N=2 (176 899 rows), N=3 (265 157 rows; ≈ 45 GB live at its last measurement) | `cargo test --release --test exit twin -- --ignored --nocapture`; `cargo test --release --test aggregate two_test_profile -- --ignored --nocapture`; `cargo test --release --test aggregate twin -- --ignored --nocapture` | pass/fail only; the row counts quoted in their `#[ignore]` strings are constraint set 10's and earlier |
+| the production exit and aggregates (tier 18 / 19 / 20; ≥ 64 GB, 128 GB and 256 GB hosts, `docs/07` §4) | `cargo +1.98.1 test --release --test exit exit_the_verifier_program -- --ignored --nocapture`; `cargo test --release --test aggregate production_n1_aggregate_proves_and_verifies -- --ignored --nocapture` (and `n2`, `n3`) | pass/fail and the proof sizes of `docs/02`; the exit asserts 236 021 rows |
+| the production tree (`tests/tree_measure.rs`, the 256 GB droplet) | the `TREE_LEAF` / `TREE_STEP` commands of `docs/08` §5 | `pins.json` `tree_measure` proved figures and the production `aggregation_tree` genesis values |
+| the in-suite provers the session's memory limit excluded | `cargo test --release --test aggregate a_one_proof_aggregate_round_trips a_tampered_inner_proof a_tampered_tape_fails thirteen_tampered -- --test-threads=1`; `cargo test --release --test exit thirteen_tampered`; `--test cheating --test machine --test memprofile --test quotient_layout --test self_verify --test device_model --test security --test fold_identity --test sample_bits` | pass/fail (the last group does not read the inner machine; listed because it was not run) |
