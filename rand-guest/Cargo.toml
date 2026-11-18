@@ -20,6 +20,8 @@ sha2 = "0.10"
 hex = "0.4"
 # The chain's program id (`src/chain.rs`): fullnode's `program_id` is blake3, the same major.
 blake3 = "1.8"
+# Symbol names in `run`'s trap report and in `profile` (`src/profile.rs`).
+rustc-demangle = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

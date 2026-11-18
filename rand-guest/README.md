@@ -10,7 +10,7 @@ committed guests' side of this; this file is the tool's.
 Run from this directory (`cd rand-guest`) with the pinned toolchain: `cargo +1.98.1 run -- <cmd>
 …`, or build once and use the binary directly.
 
-## The five subcommands
+## The six subcommands
 
 ### `build` — compile a guest directory to a packed image, checking it on the way
 
@@ -50,10 +50,40 @@ Prints each output word, the cycle count, and the smallest tier the run fits (mi
 `Machine::prove_salted`'s tier pick, not cycles alone — the Poseidon2 table is a second,
 independent constraint); with `--tier t`, also whether the run fits tier `t`, with both budgets
 (`tier 10: fits (cycles 146 of 1023, Poseidon2 permutations 10 of 128)` for `fib(20)`). A run that fits no tier
-says so with both counts. A trap prints `trap: <the emulator's error>` (it carries no pc) and
-exits 2; a trap that is the guest's own `refuse()` is first named as one (`refused: …`). A run
+says so with both counts. It also prints the stack the run used (`stack: 560 bytes used (sp from
+0x11740 down to 0x11510)`), and warns when that is more than `--stack-bytes` (default 65 536, what
+`guest.ld` reserves): the machine has no stack limit, so an overflow silently overwrites `.bss`
+and `.data` and the run still proves. This is a host-side check of the register writes.
+
+A trap prints `trap: <the emulator's error>`, then where: the pc, the cycle count, the address at
+fault when the error carries one, and with `--elf <the linked ELF>` the function and offset
+(`at pc 0x1094 (main+0x7c) after 200 cycles`); `--trace` adds the last 32 instructions that led
+there. The ELF is the one `build` linked (`<guest>/target/riscv32im-unknown-none-elf/release/<bin>`
+for Rust, `<guest>/target/rand-guest/guest.elf` for C); an image carries no symbols. It exits 2; a trap that is the guest's own `refuse()` is first named as one (`refused: …`). A run
 that halts with `out[7] = 0xdeadbeef` gets a warning: that is the SDK panic handler's sentinel,
 and the run is provable.
+
+### `profile` — where a run's cycles go
+
+    cargo +1.98.1 run -- profile image.bin --elf path/to/guest-elf --input 20 --folded out.folded
+
+Runs the image as `run` does and prints the cycles per function (self time, by the function each
+row's pc is in), the syscalls (calls and cpu rows — more rows than calls only for the Poseidon2
+pair, whose absorb and write-back rows are counted with the call) and the stack depth. `--folded`
+writes `frame;frame;frame count` lines, the input `flamegraph.pl` and `inferno-flamegraph` take.
+`--top N` limits the function list (30; 0 for all).
+
+What it is and is not:
+
+- It reads the emulator's own record of the run, so the cycle total is exactly `run`'s.
+- Function names come from the ELF's symbol table, so a function the compiler inlined is counted
+  in its caller. The published guests build with LTO and inline heavily; a breakdown by source
+  stage (the one quoted for the ERC-20 in `research/docs/04-guests.md`) needs line tables, which
+  this does not read.
+- Call stacks follow the calling convention (a linking `jal`/`jalr` is a call, a `jalr` through
+  `ra`/`t0` a return, a jump to another function's first instruction a tail call). Per-function
+  totals are exact whatever the code does; stacks are as good as the code's adherence to it.
+- Like `run`, it stops at the largest tier's cycle budget.
 
 ### `info` — words, hc, the cap
 

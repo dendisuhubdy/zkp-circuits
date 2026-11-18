@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use rand_guest::{build, chain, check, pack};
+use rand_guest::{build, chain, check, pack, profile};
 use rand_zkvm::isa::{LoadError, Program, IMAGE_MAGIC};
 use rand_zkvm::machine::{Tier, TIERS};
 use std::path::PathBuf;
@@ -66,6 +66,33 @@ enum Cmd {
         /// Also say whether the run fits this tier (one of the machine's tiers: 10, 12, …, 20).
         #[arg(long)]
         tier: Option<usize>,
+        /// The linked ELF the image was packed from, for symbol names in a trap report.
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        /// On a trap, also print the last instructions that led to it.
+        #[arg(long)]
+        trace: bool,
+        /// The stack the linker script reserves, in bytes (`guest.ld`: 64 KiB). A run whose stack
+        /// pointer goes further below its starting value than this gets a warning.
+        #[arg(long, default_value_t = 65536)]
+        stack_bytes: u32,
+    },
+    /// Where a run's cycles go: per function, per syscall, and as folded stacks for a flamegraph.
+    Profile {
+        image: PathBuf,
+        /// The linked ELF the image was packed from: without it there are no function names.
+        #[arg(long)]
+        elf: Option<PathBuf>,
+        #[arg(long = "input", num_args = 0..)]
+        inputs: Vec<u32>,
+        #[arg(long = "public", num_args = 0..)]
+        public: Vec<u32>,
+        /// How many functions to list (0: all).
+        #[arg(long, default_value_t = 30)]
+        top: usize,
+        /// Write `stack;frames count` lines here (the input of `flamegraph.pl` / `inferno`).
+        #[arg(long)]
+        folded: Option<PathBuf>,
     },
     /// Words, hc, the cap.
     Info {
@@ -80,6 +107,14 @@ enum Cmd {
 const REFUSE_INDEX: u32 = u32::MAX;
 /// What the SDK's panic handler writes to output slot 7 before it halts (`guest-sdk/src/lib.rs`).
 const PANIC_SENTINEL: u32 = 0xdead_beef;
+
+/// The symbols of `--elf`, or none.
+fn load_symbols(elf: Option<&std::path::Path>) -> Result<profile::Symbols> {
+    match elf {
+        Some(p) => profile::Symbols::from_elf(&std::fs::read(p).with_context(|| format!("reading {}", p.display()))?).with_context(|| format!("reading {}'s symbols", p.display())),
+        None => Ok(profile::Symbols::default()),
+    }
+}
 
 fn hex8(w: &[u32; 8]) -> String {
     w.iter().map(|x| format!("{x:08x}")).collect()
@@ -242,7 +277,7 @@ fn main() -> Result<()> {
             pack::write_image(&out, &image)?;
             println!("wrote {} ({} bytes) and {}.sha256", out.display(), image.len(), out.display());
         }
-        Cmd::Run { image, inputs, public, tier } => {
+        Cmd::Run { image, inputs, public, tier, elf, trace, stack_bytes } => {
             if let Some(t) = tier {
                 if !TIERS.contains(&t) {
                     bail!("--tier {t} is not one of the machine's tiers {TIERS:?}");
@@ -251,7 +286,8 @@ fn main() -> Result<()> {
             let bytes = std::fs::read(&image).with_context(|| format!("reading {}", image.display()))?;
             let (program, _form) = load(&bytes).map_err(|e| anyhow::anyhow!("{e:?}")).with_context(|| format!("loading {}", image.display()))?;
             let max = Tier(*TIERS.last().unwrap()).max_cycles();
-            match rand_zkvm::emulator::execute(&program, &inputs, &public, max) {
+            let symbols = load_symbols(elf.as_deref())?;
+            match rand_zkvm::emulator::execute_traced(&program, &inputs, &public, max) {
                 Ok(exec) => {
                     for (i, w) in exec.outputs.iter().enumerate() { println!("out[{i}] = {w}"); }
                     if exec.outputs[7] == PANIC_SENTINEL {
@@ -259,6 +295,12 @@ fn main() -> Result<()> {
                     }
                     let cycles = exec.cycles();
                     println!("cycles {cycles}");
+                    if let Some(u) = profile::stack_use(&exec) {
+                        println!("stack: {} bytes used (sp from {:#x} down to {:#x})", u.depth(), u.top, u.lowest);
+                        if u.depth() > stack_bytes {
+                            println!("warning: the stack went {} bytes deep, past the {stack_bytes} the linker script reserves: it has overwritten whatever lies below it (.bss, .data). The machine does not check this, so the run still proves", u.depth());
+                        }
+                    }
                     // Mirrors `Machine::prove_salted`'s `None =>` arm term by term (`research/src/machine.rs`
                     // ~1226-1235): the cycle budget alone is not enough to pick a tier — the Poseidon2 table
                     // holds only `2^(t-3)` blocks against up to ~`2^t` permutation-emitting rows (digest,
@@ -287,14 +329,55 @@ fn main() -> Result<()> {
                         );
                     }
                 }
-                Err(e) => {
-                    // The emulator's error carries no pc to print; the error itself says what trapped.
+                Err(t) => {
+                    let e = t.error;
                     if e == rand_zkvm::emulator::ExecError::InputIndex(REFUSE_INDEX) {
                         println!("refused: the guest called refuse() (a READ_INPUT of index {REFUSE_INDEX:#x}); this run has no proof");
                     }
                     println!("trap: {e:?}");
+                    print!("{}", profile::describe_trap(&t, &program, &symbols, trace));
                     std::process::exit(2);
                 }
+            }
+        }
+        Cmd::Profile { image, elf, inputs, public, top, folded } => {
+            let bytes = std::fs::read(&image).with_context(|| format!("reading {}", image.display()))?;
+            let (program, _form) = load(&bytes).map_err(|e| anyhow::anyhow!("{e:?}")).with_context(|| format!("loading {}", image.display()))?;
+            let symbols = load_symbols(elf.as_deref())?;
+            let max = Tier(*TIERS.last().unwrap()).max_cycles();
+            let exec = match rand_zkvm::emulator::execute_traced(&program, &inputs, &public, max) {
+                Ok(exec) => exec,
+                Err(t) => {
+                    println!("trap: {:?}", t.error);
+                    print!("{}", profile::describe_trap(&t, &program, &symbols, false));
+                    std::process::exit(2);
+                }
+            };
+            let p = profile::profile(&exec, &symbols);
+            println!("cycles {}", p.cycles);
+            if symbols.is_empty() {
+                println!("(no symbols: pass --elf <the linked ELF> for function names)");
+            }
+            println!("by function (self cycles):");
+            let shown = if top == 0 { p.functions.len() } else { top.min(p.functions.len()) };
+            for (name, n) in &p.functions[..shown] {
+                println!("  {n:>10}  {:>5.1}%  {}", 100.0 * *n as f64 / p.cycles.max(1) as f64, name.as_deref().unwrap_or("[unknown]"));
+            }
+            if shown < p.functions.len() {
+                let rest: u64 = p.functions[shown..].iter().map(|f| f.1).sum();
+                println!("  {rest:>10}  {:>5.1}%  ({} more functions; --top 0 lists all)", 100.0 * rest as f64 / p.cycles.max(1) as f64, p.functions.len() - shown);
+            }
+            println!("by syscall (calls, cpu rows):");
+            for (name, calls, rows) in &p.syscalls {
+                println!("  {name:<14} {calls:>8} {rows:>10}");
+            }
+            if let Some(u) = profile::stack_use(&exec) {
+                println!("stack: {} bytes used (sp from {:#x} down to {:#x})", u.depth(), u.top, u.lowest);
+            }
+            if let Some(path) = folded {
+                let text: String = p.folded.iter().map(|(s, n)| format!("{s} {n}\n")).collect();
+                std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+                println!("wrote {} ({} stacks)", path.display(), p.folded.len());
             }
         }
         Cmd::Info { image, max_words } => {

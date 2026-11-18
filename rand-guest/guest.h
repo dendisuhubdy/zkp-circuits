@@ -19,6 +19,7 @@
 #define RAND_SYS_SHA256 5
 #define RAND_SYS_READ_PUBLIC 6
 #define RAND_SYS_POSEIDON2_LEN 7
+#define RAND_SYS_MODQ 8
 
 /* Private input word `idx`, bound to the proof's `H_IN` commitment. `idx >= n_in` can never be
  * satisfied. (`guest_sdk::read_input`.) */
@@ -57,6 +58,42 @@ static inline void rand_poseidon2(uint32_t *ptr, uint32_t n) {
     register uint32_t a1 __asm__("a1") = n;
     register uint32_t a7 __asm__("a7") = RAND_SYS_POSEIDON2;
     __asm__ volatile("ecall" : : "r"(a0), "r"(a1), "r"(a7) : "memory");
+}
+
+/* `rand_poseidon2` with the message length bound (the `POSEIDON2_LEN` syscall): the sponge starts
+ * with `n` in its capacity, so `[a]` and `[a, 0]` hash differently and the empty message is not the
+ * zero digest. Use it for anything whose length can vary. `ptr` must be 4-byte aligned and hold
+ * at least `n` words and at least 8 (the digest is written over `ptr..ptr+8`); `n <= 4096`.
+ * (`guest_sdk::poseidon2_len`.) */
+static inline void rand_poseidon2_len(uint32_t *ptr, uint32_t n) {
+    register uint32_t a0 __asm__("a0") = (uint32_t)(uintptr_t)ptr / 4;
+    register uint32_t a1 __asm__("a1") = n;
+    register uint32_t a7 __asm__("a7") = RAND_SYS_POSEIDON2_LEN;
+    __asm__ volatile("ecall" : : "r"(a0), "r"(a1), "r"(a7) : "memory");
+}
+
+/* The `MODQ` coprocessor: Dilithium2's ring arithmetic over q = 8 380 417 on an arena of 256-word
+ * polynomials (`research/docs/01-isa.md`, syscall 8). `base` is the arena, 4-byte aligned; poly
+ * `i` is words `256*i ..`. `a1` packs the operation and three poly indices, each below 32:
+ * `RAND_MODQ_NTT` / `RAND_MODQ_INTT` transform poly `out` in place (`a = b = 0`);
+ * `RAND_MODQ_DOT4` writes `out = sum_{k<4} poly(a+k) * poly(b+k)`; `RAND_MODQ_MSUB4` computes
+ * `poly(out+k) -= poly(a) * poly(b+k)` for `k < 4`. Every coefficient read must be below 2^24;
+ * a reserved bit, an index out of range or overlapping operands make the run unprovable.
+ * (`guest_sdk::SyscallRing`.) */
+#define RAND_MODQ_NTT 0u
+#define RAND_MODQ_INTT 1u
+#define RAND_MODQ_DOT4 2u
+#define RAND_MODQ_MSUB4 3u
+
+static inline uint32_t rand_modq_a1(uint32_t op, uint32_t out, uint32_t a, uint32_t b) {
+    return op | (out << 8) | (a << 16) | (b << 24);
+}
+
+static inline void rand_modq(uint32_t *base, uint32_t a1) {
+    register uint32_t r0 __asm__("a0") = (uint32_t)(uintptr_t)base / 4;
+    register uint32_t r1 __asm__("a1") = a1;
+    register uint32_t a7 __asm__("a7") = RAND_SYS_MODQ;
+    __asm__ volatile("ecall" : : "r"(r0), "r"(r1), "r"(a7) : "memory");
 }
 
 /* `ptr`: a 4-byte-aligned pointer to 50 words holding a Keccak-f[1600] state, permuted in place.
