@@ -247,8 +247,9 @@ both were dominated by costs the query count and fold width don't touch:
 trace commitment and, for that first verify, the uncached `verifier_key`
 recomputation. M2.3 (splitting the 2^16-row byte table into the 256-row
 range and nibble tables) is what actually moves those two rows: every
-`prove` rebuilds the preprocessed trace's Merkle commitment from scratch,
-and every *first* `verify` on a fresh `Machine` does too — shrinking that
+`prove` rebuilds the preprocessed trace's Merkle commitment from scratch
+(true until ZKVM-110's prover cache, 2026-11-17: now the first prove of a
+shape does), and every *first* `verify` on a fresh `Machine` does too — shrinking that
 commitment by two orders of magnitude cuts prove time by roughly 3-7x and
 first-verify time by roughly 100-130x, independent of `FriProfile` (see the
 caching paragraph below). Proof size drops a little further too: fewer
@@ -577,6 +578,27 @@ actually applies to cleanly: they are fixed, program-independent data, so
 the old program-derived one; since constraint set 7 `key_derivation_v2`'s
 labelled Poseidon2 stream, HCS-1) hides nothing because there is nothing
 program-specific left in what it salts.
+
+The same fact is what makes the prover's cache of that commitment safe
+(ZKVM-110, `Machine::prover_key`). Until then every `prove` rebuilt the
+preprocessed tree; since then a `Machine` keeps one per shape, within a byte
+budget (`machine::PROVER_KEY_BUDGET`), and hands the same tree to every proof
+of that shape. That shares no blinding between proofs, because the tree holds
+none: its leaves are the fixed tables, extended; `HidingFriPcs::
+commit_preprocessing` interleaves them with *zero* rows rather than random
+ones and adds no random codeword (`../vendor/p3-fri/src/hiding_pcs.rs`); and
+its only salts are the hiding MMCS's per-row ones, drawn from `key_config`'s
+public, deterministic stream — the stream a verifier replays to get the same
+cap. Rebuilding it per proof produced the same bytes each time
+(`machine.rs`, `two_builds_of_one_key_are_the_same_bytes`, compares the whole
+tree), so every proof of a shape already opened the same preprocessed leaves
+under the same salts. Everything that must be fresh per proof — the random
+rows, codewords and salts of the main, permutation and quotient commitments,
+the randomisation polynomial, the LogUp blinds, `H_IN`'s salt — is drawn from
+OS entropy inside the prove and is never stored
+(`tests/prover_cache.rs` proves one program twice with one `H_IN` salt from one
+cached entry and checks that all four of those commitments and the terminals
+differ).
 
 ## A hiding program commitment (ZKVM-108) — design, not built
 

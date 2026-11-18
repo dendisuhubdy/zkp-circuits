@@ -343,6 +343,55 @@ smaller, and at tier 16 it is larger**: the EVM call peaked at 18.1 GB resident 
 under the feature (`/usr/bin/time -l`), so the feature does not by itself fit a proving suite onto a
 smaller host.
 
+## The prover's preprocessed cache and the in-place widen (ZKVM-110)
+
+Two host-only prover costs, removed 2026-11-17; no proof format, key, digest or constraint moved
+(`tests/verifier_key.rs` passes unchanged).
+
+**The cache.** Every prove used to rebuild `ProverData::from_airs_and_degrees(key_config, ..)` —
+the fixed tables' low-degree extension and Merkle tree, a function of the shape alone. A `Machine`
+now keeps it per shape (`Machine::prover_key`, private) in an LRU bounded by **bytes**:
+`machine::PROVER_KEY_BUDGET`, 1 GiB, changed with `Machine::set_prover_key_budget` (`0` is off —
+a build per prove, as before). The key is (constraint set, profile, the verifier key's seven-tuple);
+the program is not in it because no preprocessed column depends on the program. An entry larger
+than the budget is used for its one proof and not kept, so **the default keeps nothing from tier 18
+up** — raise the budget on a prover that serves one large shape and has the memory. The cache holds
+at most its budget between proofs; a prove of another shape runs with up to that much held beside
+it. Entry sizes (measured through tier 14, a batch with no hash chip; ×4 per two tiers above that):
+13.0 MiB at tier 10, 50.5 MiB at 12, 200.5 MiB at 14, so about 0.8 GiB at 16, 3.1 GiB at 18,
+12.5 GiB at 20.
+
+**Do not put anything drawn per proof into that data.** It is safe to share between proofs only
+because it holds none: `commit_preprocessing` pads with zero rows and no random codeword, and the
+tree's salts are `key_config`'s public, deterministic stream. `machine.rs`'
+`two_builds_of_one_key_are_the_same_bytes` compares two builds' whole trees and
+`tests/prover_cache.rs` checks that two proofs from one entry share no main, permutation, quotient
+or randomisation commitment; `docs/03-privacy.md` has the argument. `Backend::Reference`/`Cuda`
+(`prove_on`) still build per prove — their `ProverData` is another type.
+
+**The widen.** `prove` and its variants own their trace set and append the five blind columns in
+each matrix's own buffer (`tables::blind::widen_owned`). `prove_traces(&Traces)` only borrows, so it
+still copies (`widen`), and both copies live for the whole proof.
+
+Measured with `tests/memprofile.rs` (a counting allocator; `--release --features parallel`, 16
+threads, `FriProfile::Test`, the 48 GB MacBook; `fib(650)` at its own tier 12 and forced to 14,
+`fib(150)` at 10). Times are from runs with `MEMPROFILE_TIME_ONLY=1`, the mean of the proves after
+the first with the cache off (`MEMPROFILE_BUDGET=0`, the old prover) and on; peaks are live heap
+for a whole first prove, before both changes and after:
+
+| tier | preprocessed build alone | repeat prove, cache off | repeat prove, cache on | peak live heap before | after | trace set |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10 | 0.11 s | 1.390 s | 1.254 s (−9.8 %) | 354.1 MiB | 348.7 MiB | 4.8 MiB |
+| 12 | 0.38 s | 4.770 s | 4.383 s (−8.1 %) | 1 375.6 MiB | 1 354.6 MiB | 18.7 MiB |
+| 14 | 1.5 s | 18.26 s | 16.49 s (−9.7 %) | 5 436.7 MiB | 5 353.2 MiB | 74.5 MiB |
+
+The first prove of a shape costs what it did. The peak falls by the trace set plus a little
+(1.5 %): that is all the widen is worth, and it moves no tier under a memory limit. A repeat prove's
+peak is the same number — the cached tree is live during a prove whether it was just built or kept.
+Tier 16 and above were not measured (the tier-16 EVM call is 18 to 22 GB here). The verifier side
+was already cached (`KeyCache`): a first verify pays the same build (0.38 s at tier 12, 1.5 s at
+14) and a repeat verify is 8 ms.
+
 ## Invariants that have actually been broken here
 
 Check both on **every new table or row kind** — M2's sub-word loads/stores

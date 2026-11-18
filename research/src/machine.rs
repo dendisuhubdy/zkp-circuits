@@ -43,7 +43,7 @@ pub type Config = StarkConfig<Pcs, Challenge, Challenger>;
 #[cfg_attr(not(any(feature = "reference-backend", feature = "cuda", feature = "mock-cuda")), allow(dead_code))]
 pub(crate) const PERM_SEED: u64 = crate::poseidon2_constants::PERM_SEED; // "RandZK"
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FriProfile {
     /// 16 queries, 4 PoW bits — for `cargo test`. 3·16+4 = 52 conjectured bits; not a
     /// production target, only fast enough for the suite.
@@ -194,6 +194,11 @@ fn build_config(profile: FriProfile, mmcs_rng: SaltRng, pcs_rng: SaltRng) -> Con
 pub fn seeded_config_for_tests(profile: FriProfile, mmcs_label: &[u8], pcs_label: &[u8]) -> Config {
     build_config(profile, SaltRng::key(mmcs_label), SaltRng::key(pcs_label))
 }
+
+/// FRI's rate, as a base-2 log: every committed matrix is extended to `2^LOG_BLOWUP` times its
+/// (zero-knowledge-doubled) height. One name for `generic_config`'s parameter and for
+/// `prover_data_bytes`, which sizes a cached preprocessed tree from it.
+const LOG_BLOWUP: usize = 3;
 
 /// The FRI/PCS setup, written once over any value-MMCS and DFT. Every backend goes through
 /// here, so "the reference backend uses the same FRI parameters as the CPU one" is not a
@@ -644,6 +649,33 @@ impl Traces {
         v
     }
     pub fn heights(&self) -> Vec<usize> { self.as_slice().iter().map(|m| m.height()).collect() }
+    /// Everything a `Proof` takes from a trace set besides the matrices themselves.
+    fn head(&self) -> TraceHead {
+        TraceHead { public_values: self.public_values.clone(), program_log_height: self.program_log_height, input_log_height: self.input_log_height, keccak_log_height: self.keccak_log_height, sha256_log_height: self.sha256_log_height, modq_log_height: self.modq_log_height, public_log_height: self.public_log_height, mem_log_height: self.mem_log_height }
+    }
+    /// [`Self::as_slice`], owned: the matrices in `chips()` order, for a prover that is done with
+    /// the trace set and wants to widen each in place (`tables::blind::widen_owned`).
+    fn into_matrices(self) -> Vec<RowMajorMatrix<Val>> {
+        let mut v = vec![self.program, self.cpu, self.memory, self.alu, self.range, self.nibble, self.poseidon2, self.input];
+        v.extend(self.keccak);
+        v.extend(self.sha256);
+        v.extend(self.modq);
+        v.push(self.public);
+        v
+    }
+}
+
+/// A trace set's public values and declared heights without its matrices — what the prover still
+/// needs once the matrices have been handed to the batch (`Traces::head`).
+struct TraceHead {
+    public_values: Vec<Val>,
+    program_log_height: u8,
+    input_log_height: u8,
+    keccak_log_height: u8,
+    sha256_log_height: u8,
+    modq_log_height: u8,
+    public_log_height: u8,
+    mem_log_height: u8,
 }
 
 #[derive(Debug)]
@@ -1615,6 +1647,121 @@ impl KeyCache {
     fn built(&self) -> usize { self.map.values().filter(|(slot, _, _)| slot.get().is_some()).count() }
 }
 
+/// Default byte budget of the prover-side preprocessed cache ([`Machine::set_prover_key_budget`]):
+/// 1 GiB. An entry is one shape's committed preprocessed tree — measured (`tests/memprofile.rs`,
+/// 2026-11-17, a batch with no hash chip) at 13.0 MiB at tier 10, 50.5 MiB at tier 12 and 200.5 MiB
+/// at tier 14, four times as much per two tiers (the Poseidon2 round-constant table is nearly all
+/// of it), so about 0.8 GiB at tier 16, 3.1 GiB at tier 18 and 12.5 GiB at tier 20 — those three
+/// are the scaling, not measurements. The default therefore keeps the shapes through tier 14
+/// several at a time, one tier-16 shape, and **nothing from tier 18 up**: those are the tiers where
+/// the host's memory is the binding constraint, and an entry larger than the budget is built, used
+/// for its one proof and dropped, exactly as before the cache existed. A prover that serves one
+/// large shape all day raises the budget; one that wants the old behaviour sets it to 0.
+pub const PROVER_KEY_BUDGET: usize = 1 << 30;
+
+/// What a cached [`ProverData`] is a function of, and so the prover cache's key: the constraint
+/// set, the FRI profile and the seven-component shape the verifier key is keyed on. The first two
+/// are constants of a build and of a `Machine`, and the cache lives in the `Machine`, so they could
+/// not differ between two lookups even without being here; they are in the key so that it says
+/// everything the data depends on by itself, and no later change (a cache shared between machines,
+/// say) can make it serve another constraint set's or profile's tree. **The program is not a
+/// component, deliberately**: since M3.4 no preprocessed column depends on it (`key_config`'s doc
+/// comment), which is the same fact that lets `verify` take `hc` and no program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ProverKey {
+    constraint_set: u32,
+    profile: FriProfile,
+    shape: KeyShape,
+}
+
+type ByteSlot<V> = Arc<std::sync::OnceLock<Arc<V>>>;
+
+/// A least-recently-used cache bounded by **bytes**, with single-flight builds — `KeyCache`'s
+/// shape (one `OnceLock` slot per key, built outside the lock) with a byte budget where that one
+/// counts entries, because a prover's preprocessed data is megabytes to gigabytes where a
+/// verifier's `CommonData` is kilobytes. An entry's size is known only once it is built, so a slot
+/// is inserted unsized, and its builder reports the size afterwards ([`Self::settle`]), which is
+/// when eviction runs: least recently used first, until what is held fits the budget. An entry that
+/// is alone larger than the budget is not kept at all, and evicts nothing. An evicted or
+/// over-budget entry is only dropped from the map: whoever holds its `Arc` keeps using it, and it
+/// is freed when they finish.
+///
+/// So the cache holds at most `budget` bytes between proofs, and a prove can run with at most
+/// `budget` bytes of other shapes' entries held beside its own working set.
+struct ByteLru<K, V> {
+    /// Each key's slot, the tick of its last use, and its size once settled.
+    map: HashMap<K, (ByteSlot<V>, u64, Option<usize>)>,
+    tick: u64,
+    budget: usize,
+    held: usize,
+}
+impl<K: Copy + Eq + std::hash::Hash, V> ByteLru<K, V> {
+    fn new(budget: usize) -> Self { Self { map: HashMap::new(), tick: 0, budget, held: 0 } }
+    /// The slot for `key`, marked used now: the existing one (built, or being built by another
+    /// caller) or a fresh, empty one. Only ever `key`'s own — the map is the one place a slot is
+    /// found, and it is found by the whole key.
+    fn slot(&mut self, key: K) -> ByteSlot<V> {
+        self.tick += 1;
+        let now = self.tick;
+        let e = self.map.entry(key).or_insert_with(|| (ByteSlot::<V>::default(), now, None));
+        e.1 = now;
+        e.0.clone()
+    }
+    /// Records that `slot` — the one [`Self::slot`] returned for `key` — is built and `bytes` big,
+    /// then evicts down to the budget. A no-op on the accounting when the entry is already sized
+    /// (a second caller of the same build) or is no longer `key`'s entry (evicted meanwhile).
+    fn settle(&mut self, key: K, slot: &ByteSlot<V>, bytes: usize) {
+        if let Some(e) = self.map.get_mut(&key) {
+            if Arc::ptr_eq(&e.0, slot) && e.2.is_none() {
+                if bytes > self.budget {
+                    // Larger than the whole budget: not kept, and nothing else is evicted for it.
+                    self.map.remove(&key);
+                } else {
+                    e.2 = Some(bytes);
+                    self.held += bytes;
+                }
+            }
+        }
+        self.evict();
+    }
+    fn set_budget(&mut self, budget: usize) {
+        self.budget = budget;
+        self.evict();
+    }
+    /// Drops least-recently-used sized entries until the held bytes fit the budget. An unsized
+    /// entry (still being built) holds nothing yet and is left for its builder to settle.
+    fn evict(&mut self) {
+        while self.held > self.budget {
+            let Some((lru, bytes)) = self.map.iter().filter_map(|(k, (_, used, bytes))| bytes.map(|b| (*used, *k, b))).min_by_key(|(used, _, _)| *used).map(|(_, k, b)| (k, b)) else { break };
+            self.map.remove(&lru);
+            self.held -= bytes;
+        }
+    }
+    /// Whether `key`'s entry is present and built (a lookup, not a use).
+    fn is_built(&self, key: &K) -> bool { self.map.get(key).is_some_and(|(slot, _, _)| slot.get().is_some()) }
+}
+
+/// The bytes one cached [`ProverData`] keeps alive — the committed preprocessed tree: per
+/// preprocessed matrix its low-degree extension (`2^(degree_bits + LOG_BLOWUP)` rows of the
+/// matrix's width plus the hiding MMCS's four salt elements), and the digest layers above the
+/// tallest (under two four-element digests per leaf row). Computed from the data's own metadata
+/// rather than counted, because Plonky3 does not expose the tree; `tests/memprofile.rs` prints it
+/// beside what the allocator says the cache holds, and the two agree to within a percent. The
+/// packed lookups and the cap are kilobytes and are not counted.
+fn prover_data_bytes(data: &ProverData<Config>) -> usize {
+    const SALT_ELEMS: usize = 4;
+    const DIGEST_ELEMS: usize = 4;
+    let word = std::mem::size_of::<Val>();
+    let Some(pre) = data.common.preprocessed.as_ref() else { return 0 };
+    let (mut bytes, mut tallest) = (0usize, 0usize);
+    for meta in pre.instances.iter().flatten() {
+        let height = 1usize << (meta.degree_bits + LOG_BLOWUP);
+        bytes += height * (meta.width + SALT_ELEMS) * word;
+        tallest = tallest.max(height);
+    }
+    bytes + 2 * tallest * DIGEST_ELEMS * word
+}
+
 /// The constraint set this crate's AIRs implement: 11 re-weights the gas meter to the committed-cell
 /// count and prices a `MODQ` call by op, through the cpu's new `MODQ_W` column and a fourth field
 /// on the `MODQ` bus (ZKVM-202, `docs/07-gas.md`; `docs/05-roadmap.md`, "Constraint set 11"), after
@@ -1790,7 +1937,7 @@ fn common_from_bytes(bytes: &[u8]) -> Result<CommonData<Config>, InstallKeyError
     Ok(CommonData { preprocessed, lookups: wire.lookups })
 }
 
-pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<KeyCache>, key_builds: std::sync::atomic::AtomicUsize }
+pub struct Machine { pub config: Config, pub profile: FriProfile, keys: Mutex<KeyCache>, key_builds: std::sync::atomic::AtomicUsize, prover_keys: Mutex<ByteLru<ProverKey, ProverData<Config>>>, prover_key_builds: std::sync::atomic::AtomicUsize }
 
 impl Machine {
     pub fn new(profile: FriProfile) -> Self { Self::with_key_cache_capacity(profile, KEY_CACHE_CAPACITY) }
@@ -1805,7 +1952,72 @@ impl Machine {
             profile,
             keys: Mutex::new(KeyCache { capacity, ..KeyCache::default() }),
             key_builds: std::sync::atomic::AtomicUsize::new(0),
+            prover_keys: Mutex::new(ByteLru::new(PROVER_KEY_BUDGET)),
+            prover_key_builds: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Sets the byte budget of the prover-side preprocessed cache ([`PROVER_KEY_BUDGET`] by
+    /// default) and evicts down to it at once. `0` turns the cache off: every prove then builds its
+    /// preprocessed data and drops it, as every prove did before ZKVM-110. Raise it on a prover
+    /// that serves one large shape repeatedly and has the memory (the constant's doc comment has
+    /// the per-tier sizes); the cache never holds more than this between proofs.
+    pub fn set_prover_key_budget(&self, bytes: usize) { self.prover_keys.lock().unwrap().set_budget(bytes); }
+
+    /// A test instrument: how many times this machine has built a prover's preprocessed data (a
+    /// prove that missed the prover cache), since construction.
+    #[doc(hidden)]
+    pub fn prover_key_builds(&self) -> usize { self.prover_key_builds.load(std::sync::atomic::Ordering::SeqCst) }
+
+    /// A test instrument: the bytes the prover cache holds right now, by its own accounting.
+    #[doc(hidden)]
+    pub fn prover_key_bytes(&self) -> usize { self.prover_keys.lock().unwrap().held }
+
+    /// A test instrument: whether the prover's preprocessed data for `shape` is cached right now (a
+    /// lookup that does not count as a use).
+    #[doc(hidden)]
+    pub fn has_cached_prover_key(&self, shape: VerifierKeyShape) -> bool {
+        self.prover_keys.lock().unwrap().is_built(&ProverKey { constraint_set: CONSTRAINT_SET, profile: self.profile, shape: shape.key() })
+    }
+
+    /// The prover's half of [`Self::verifier_key_with_modq`]: the same
+    /// `ProverData::from_airs_and_degrees(key_config, chips, degrees)` call, kept whole — the
+    /// committed preprocessed tree a prove opens, not only the `CommonData` a verifier needs — and
+    /// cached by bytes (ZKVM-110: every prove rebuilt it, about 8 % of a prove's wall time under
+    /// `--features parallel`).
+    ///
+    /// **Reusing it across proofs is exactly as hiding as rebuilding it, because it holds nothing
+    /// drawn per proof.** Everything in it is a function of the key: the preprocessed traces are the
+    /// chips' fixed tables; `HidingFriPcs::commit_preprocessing` pads them with *zero* rows, not
+    /// random ones, and adds no random codeword (`../vendor/p3-fri/src/hiding_pcs.rs`); the one
+    /// thing "random" in the tree is the hiding MMCS's per-row salts
+    /// (`../vendor/p3-merkle-tree/src/hiding_mmcs.rs`, `commit`), and those come from `key_config`'s
+    /// stream — a fixed, public derivation (`key_derivation_v2`), restarted from its label at every
+    /// call, which is what lets any verifier recompute the same cap. So two builds for one key are
+    /// the same bytes, the prover before this cache already used identical preprocessed salts in
+    /// every proof of a shape, and the tree commits only public data. A proof's own blinding — the
+    /// main, permutation and quotient commitments' random rows, codewords and salts, the
+    /// randomisation polynomial, the LogUp blinds, `H_IN`'s salt — is drawn from `self.config`'s OS
+    /// entropy inside `prove_batch` and by `tables::blind::fresh`, per proof, and none of it is
+    /// stored here. `prove_batch` only reads this data (`&ProverData`).
+    ///
+    /// Built at the tier's memory floor, as the verifier key is and for its reason: the memory table
+    /// has no preprocessed columns and its packed lookups do not depend on its height
+    /// (`Self::verifier_key`'s doc comment), so every valid `mem_log_height` gives this same data,
+    /// and the floor makes the entry independent of which proof missed first
+    /// (`prover_data_is_the_same_at_every_memory_height` pins it).
+    #[allow(clippy::too_many_arguments)]
+    fn prover_key(&self, tier: Tier, program_log_height: u8, input_log_height: u8, keccak_log_height: u8, sha256_log_height: u8, modq_log_height: u8, public_log_height: u8) -> Arc<ProverData<Config>> {
+        let key = ProverKey { constraint_set: CONSTRAINT_SET, profile: self.profile, shape: (tier.0, program_log_height, input_log_height, keccak_log_height, sha256_log_height, modq_log_height, public_log_height) };
+        // As `verifier_key_with_modq`: the lock is held only to find or make the slot, the build
+        // runs outside it, and concurrent first callers of one key share one build.
+        let slot = self.prover_keys.lock().unwrap().slot(key);
+        let data = slot.get_or_init(|| {
+            self.prover_key_builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &chips_with_modq(tier, keccak_log_height, sha256_log_height, modq_log_height), &self.log_ext_degrees_with_modq(tier, program_log_height, input_log_height, keccak_log_height, sha256_log_height, modq_log_height, public_log_height, tier.min_mem_log_height())))
+        }).clone();
+        self.prover_keys.lock().unwrap().settle(key, &slot, prover_data_bytes(&data));
+        data
     }
 
     /// A test instrument: how many verifier keys this machine has built (cache misses that ran
@@ -2076,7 +2288,13 @@ impl Machine {
             }
         };
         let traces = build_traces_salted_with(program, inputs, public, salt, &exec, tier, opts)?;
-        Ok((self.prove_traces(program, &traces, tier), exec))
+        // ZKVM-110: the trace set is this function's own, so it is widened in place rather than
+        // copied (`prove_traces`, which only borrows one, has to copy).
+        let head = traces.head();
+        let narrow = traces.into_matrices();
+        let blinds = crate::tables::blind::fresh(narrow.len());
+        let wide = narrow.into_iter().zip(&blinds).map(|(m, b)| crate::tables::blind::widen_owned(m, b)).collect();
+        Ok((self.prove_wide(&head, wide, tier, tier.poseidon2_height(), |cfg, instances, prover_data| prove_batch(cfg, instances, prover_data)), exec))
     }
 
     /// NOTE: the body below is duplicated, deliberately, by `prove_on` (the generic-over-config
@@ -2092,9 +2310,11 @@ impl Machine {
     ///
     /// Constraint set 7: draws fresh LogUp blinds (`tables::blind::fresh`) and appends them to the
     /// traces — `Traces` holds each table at its own width, the committed trace is five columns
-    /// wider (`Chip`'s `BaseAir::width`). The widening copies each trace once; that is a sixteenth
-    /// of the low-degree extension `prove_batch` then builds from it, so it is not worth an owning
-    /// variant.
+    /// wider (`Chip`'s `BaseAir::width`). The trace set is only borrowed here, so the widening
+    /// copies each trace once and both copies live until the proof is done — one trace set more,
+    /// 1.4 % of the proof's peak live heap (ZKVM-110, measured). `prove` and its variants own their
+    /// trace set and widen it in place instead (`tables::blind::widen_owned`); a caller of this
+    /// function that builds its own `Traces` pays the copy.
     pub fn prove_traces(&self, program: &Program, traces: &Traces, tier: Tier) -> Proof {
         let blinds = crate::tables::blind::fresh(traces.as_slice().len());
         self.prove_traces_with_blinds(program, traces, tier, &blinds)
@@ -2152,13 +2372,28 @@ impl Machine {
         poseidon2_height: usize,
         prove: impl for<'a> FnOnce(&'a Config, &'a [StarkInstance<'a, Config, Chip>], &'a ProverData<Config>) -> BatchProof<Config>,
     ) -> Proof {
+        assert_eq!(traces.as_slice().len(), blinds.len(), "one blind per instance");
+        let wide: Vec<RowMajorMatrix<Val>> = traces.as_slice().iter().zip(blinds).map(|(m, b)| crate::tables::blind::widen(m, b)).collect();
+        self.prove_wide(&traces.head(), wide, tier, poseidon2_height, prove)
+    }
+
+    /// The batch proof of a trace set already at its committed width — `wide`, one matrix per chip
+    /// in `chips()` order, each with its blind columns — and `traces`' public values and heights.
+    /// The body of [`Self::prove_traces_at`] (which copies a borrowed trace set to get `wide`) and
+    /// of `prove_salted_with` (which widens its own in place).
+    fn prove_wide(
+        &self,
+        traces: &TraceHead,
+        wide: Vec<RowMajorMatrix<Val>>,
+        tier: Tier,
+        poseidon2_height: usize,
+        prove: impl for<'a> FnOnce(&'a Config, &'a [StarkInstance<'a, Config, Chip>], &'a ProverData<Config>) -> BatchProof<Config>,
+    ) -> Proof {
         let airs = chips_at(tier, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height, poseidon2_height);
         // M4.2 (Task 6): `keccak_log_height` picks the chip set and `keccak` supplies the
         // traces, so the two must agree — a mismatch would `zip` short and silently prove a
         // different batch than the degree bits describe.
-        assert_eq!(airs.len(), traces.as_slice().len(), "one trace per chip: the declared keccak/sha256/modq heights and Traces::keccak/sha256 disagree");
-        assert_eq!(airs.len(), blinds.len(), "one blind per instance");
-        let wide: Vec<RowMajorMatrix<Val>> = traces.as_slice().iter().zip(blinds).map(|(m, b)| crate::tables::blind::widen(m, b)).collect();
+        assert_eq!(airs.len(), wide.len(), "one trace per chip: the declared keccak/sha256/modq heights and Traces::keccak/sha256 disagree");
         let mats: Vec<&RowMajorMatrix<Val>> = wide.iter().collect();
         let instances: Vec<StarkInstance<'_, Config, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
@@ -2180,8 +2415,18 @@ impl Machine {
         // `prover_data` only need to be *structurally* compatible (same hash/compress/Dft/FRI
         // parameters, which `key_config` and `make_config` share via `build_config`); their
         // RNG state can differ freely.
-        let key_cfg = key_config(self.profile);
-        let prover_data = ProverData::from_airs_and_degrees(&key_cfg, &airs, &self.log_ext_degrees_at(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height, traces.public_log_height, traces.mem_log_height, poseidon2_height));
+        //
+        // ZKVM-110: that data is now taken from the prover cache (`prover_key`, whose doc comment
+        // has why reusing it across proofs changes nothing a proof hides) instead of being rebuilt
+        // here on every prove.
+        // The cache is keyed on the current set's shape, whose poseidon2 table is the tier's full
+        // height; a `next-set` proof with a declared, shorter poseidon2 table (ZKVM-112) builds
+        // its own, uncached, exactly as before the cache.
+        let prover_data = if poseidon2_height == tier.poseidon2_height() {
+            self.prover_key(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height, traces.public_log_height)
+        } else {
+            Arc::new(ProverData::from_airs_and_degrees(&key_config(self.profile), &airs, &self.log_ext_degrees_at(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height, traces.public_log_height, traces.mem_log_height, poseidon2_height)))
+        };
         let batch = prove(&self.config, &instances, &prover_data);
         Proof { tier, program_log_height: traces.program_log_height, input_log_height: traces.input_log_height, keccak_log_height: traces.keccak_log_height, sha256_log_height: traces.sha256_log_height, modq_log_height: traces.modq_log_height, public_log_height: traces.public_log_height, mem_log_height: traces.mem_log_height, public_values: traces.public_values.iter().map(|x| x.as_canonical_u64()).collect(), batch }
     }
@@ -2268,9 +2513,11 @@ impl Machine {
         // traces, so the two must agree — a mismatch would `zip` short and silently prove a
         // different batch than the degree bits describe.
         assert_eq!(airs.len(), traces.as_slice().len(), "one trace per chip: the declared keccak/sha256/modq heights and Traces::keccak/sha256 disagree");
-        // Constraint set 7: fresh blinds, appended — `prove_traces`' step, duplicated with it.
+        // Constraint set 7: fresh blinds, appended — `prove_salted_with`'s step, duplicated with it,
+        // in place for the same reason (ZKVM-110: this function owns its trace set).
         let blinds = crate::tables::blind::fresh(airs.len());
-        let wide: Vec<RowMajorMatrix<Val>> = traces.as_slice().iter().zip(&blinds).map(|(m, b)| crate::tables::blind::widen(m, b)).collect();
+        let (traces, narrow) = (traces.head(), traces.into_matrices());
+        let wide: Vec<RowMajorMatrix<Val>> = narrow.into_iter().zip(&blinds).map(|(m, b)| crate::tables::blind::widen_owned(m, b)).collect();
         let mats: Vec<&RowMajorMatrix<Val>> = wide.iter().collect();
         let instances: Vec<StarkInstance<'_, SC, Chip>> = airs.iter().zip(mats.iter()).enumerate().map(|(i, (air, trace))| StarkInstance {
             air, trace, public_values: if i == 1 { traces.public_values.clone() } else { vec![] },
@@ -2279,6 +2526,9 @@ impl Machine {
         // That is invariant, not a leak: every backend config (`reference_cfg`, `cuda_cfg`) is
         // built on `HidingFriPcs` just as `make_config` is, so `is_zk()` is `true` for all of
         // them and the degree bits agree with what `verify` recomputes.
+        // ZKVM-110: this path still builds its preprocessed data on every prove. `Machine`'s prover
+        // cache holds the CPU `Config`'s `ProverData`; a backend's is a different type (its own
+        // Merkle tree and, on CUDA, device handles), so caching it is that backend's own work.
         let prover_data = ProverData::from_airs_and_degrees(key_cfg, &airs, &self.log_ext_degrees_with_modq(tier, traces.program_log_height, traces.input_log_height, traces.keccak_log_height, traces.sha256_log_height, traces.modq_log_height, traces.public_log_height, traces.mem_log_height));
         // The engines panic (rather than return) on a device failure — `CudaHashEngine::ok`
         // and friends — so a backend fault must not take the caller's process down with it.
@@ -2472,17 +2722,196 @@ mod key_cache_tests {
 }
 
 #[cfg(test)]
+mod prover_cache_tests {
+    use super::*;
+
+    fn built(c: &mut ByteLru<u8, u32>, key: u8, value: u32, bytes: usize) {
+        let slot = c.slot(key);
+        slot.get_or_init(|| Arc::new(value));
+        c.settle(key, &slot, bytes);
+    }
+
+    #[test]
+    fn the_byte_budget_evicts_the_least_recently_used_entry() {
+        let mut c = ByteLru::<u8, u32>::new(100);
+        built(&mut c, 1, 10, 40);
+        built(&mut c, 2, 20, 40);
+        assert_eq!(c.held, 80);
+        c.slot(1); // a hit: 1 is now the most recently used
+        built(&mut c, 3, 30, 40); // 120 > 100: the least recently used, 2, goes
+        assert_eq!(c.held, 80);
+        assert!(c.is_built(&1) && !c.is_built(&2) && c.is_built(&3));
+        // Settling an entry twice (a second caller of the same build) charges it once.
+        let slot = c.slot(3);
+        c.settle(3, &slot, 40);
+        assert_eq!(c.held, 80);
+        // The budget is never exceeded, whatever is asked of it.
+        for k in 10..60 {
+            built(&mut c, k, k as u32, 7 + (k as usize % 5) * 11);
+            assert!(c.held <= 100, "held {} after key {k}", c.held);
+        }
+        assert_eq!(c.held, c.map.values().map(|e| e.2.unwrap()).sum::<usize>(), "the count is the sum of what is held");
+    }
+
+    #[test]
+    fn an_entry_larger_than_the_budget_is_not_kept_and_evicts_nothing() {
+        let mut c = ByteLru::<u8, u32>::new(100);
+        built(&mut c, 1, 10, 60);
+        built(&mut c, 2, 20, 101);
+        assert!(c.is_built(&1) && !c.is_built(&2));
+        assert_eq!(c.held, 60);
+        // Budget 0 is "off": nothing is ever kept.
+        let mut off = ByteLru::<u8, u32>::new(0);
+        built(&mut off, 1, 10, 1);
+        assert!(off.map.is_empty() && off.held == 0);
+        // And lowering the budget evicts at once.
+        built(&mut c, 3, 30, 40);
+        c.set_budget(50);
+        assert!(!c.is_built(&1) && c.is_built(&3) && c.held == 40);
+        c.set_budget(0);
+        assert!(c.map.is_empty() && c.held == 0);
+    }
+
+    /// An entry that was evicted while its builder was still using it is not charged when that
+    /// builder settles, and a new caller of the key gets a new, empty slot.
+    #[test]
+    fn a_slot_evicted_before_it_settles_is_not_charged() {
+        let mut c = ByteLru::<u8, u32>::new(100);
+        let old = c.slot(1);
+        c.map.remove(&1);
+        let new = c.slot(1);
+        assert!(!Arc::ptr_eq(&old, &new));
+        old.get_or_init(|| Arc::new(1));
+        c.settle(1, &old, 40);
+        assert_eq!(c.held, 0, "the stale slot is not this key's entry any more");
+        assert!(new.get().is_none(), "and the key's own slot is still to be built");
+    }
+
+    /// The key is the whole of what the data depends on: change any one component — the constraint
+    /// set, the profile, or any of the seven shape components — and the cache hands out a different
+    /// slot, never the first key's data; the same key gets its own back.
+    #[test]
+    fn a_key_differing_in_any_component_never_gets_another_keys_data() {
+        let base = ProverKey { constraint_set: CONSTRAINT_SET, profile: FriProfile::Test, shape: (10, 7, 7, 0, 0, 0, 7) };
+        let mut others = vec![
+            ProverKey { constraint_set: CONSTRAINT_SET + 1, ..base },
+            ProverKey { profile: FriProfile::Production, ..base },
+        ];
+        let s = base.shape;
+        others.extend([
+            (12, s.1, s.2, s.3, s.4, s.5, s.6),
+            (s.0, 8, s.2, s.3, s.4, s.5, s.6),
+            (s.0, s.1, 8, s.3, s.4, s.5, s.6),
+            (s.0, s.1, s.2, 7, s.4, s.5, s.6),
+            (s.0, s.1, s.2, s.3, 7, s.5, s.6),
+            (s.0, s.1, s.2, s.3, s.4, 10, s.6),
+            (s.0, s.1, s.2, s.3, s.4, s.5, 8),
+        ].map(|shape| ProverKey { shape, ..base }));
+        let mut c = ByteLru::<ProverKey, usize>::new(1 << 20);
+        let first = c.slot(base);
+        first.get_or_init(|| Arc::new(usize::MAX));
+        c.settle(base, &first, 1);
+        for (i, k) in others.iter().enumerate() {
+            let slot = c.slot(*k);
+            assert!(!Arc::ptr_eq(&slot, &first), "{k:?} shares the base key's slot");
+            assert!(slot.get().is_none(), "{k:?} was served data before it built any");
+            slot.get_or_init(|| Arc::new(i));
+            c.settle(*k, &slot, 1);
+        }
+        assert_eq!(**c.slot(base).get().unwrap(), usize::MAX);
+        for (i, k) in others.iter().enumerate() {
+            assert_eq!(**c.slot(*k).get().unwrap(), i, "{k:?}");
+        }
+        assert_eq!(c.map.len(), others.len() + 1);
+    }
+
+    /// The whole committed preprocessed tree, as the SHA-256 of its opening at every leaf index:
+    /// each opening is that row of every matrix, the row's salts and its sibling digests up to the
+    /// cap, so all of them together are every leaf, every salt and every digest layer. (Plonky3
+    /// keeps the tree's fields private; the openings are what a proof reads from it anyway.)
+    fn tree_bytes(data: &ProverData<Config>) -> Vec<u8> {
+        use p3_commit::Mmcs;
+        let tree = data.prover_only.preprocessed_prover_data.as_ref().expect("a preprocessed tree");
+        let mmcs = val_mmcs_for_tests();
+        (0..mmcs.get_max_height(tree))
+            .flat_map(|i| crate::sha256::sha256(&postcard::to_allocvec(&mmcs.open_batch(i, tree)).expect("an opening serialises")))
+            .collect()
+    }
+    fn build(m: &Machine, s: KeyShape, mem_log_height: u8) -> ProverData<Config> {
+        ProverData::from_airs_and_degrees(&key_config(m.profile), &chips_with_modq(Tier(s.0), s.3, s.4, s.5), &m.log_ext_degrees_with_modq(Tier(s.0), s.1, s.2, s.3, s.4, s.5, s.6, mem_log_height))
+    }
+
+    /// What makes the cache safe to have at all: the prover's preprocessed data is a function of
+    /// the key and nothing else. Two builds for one key are the same bytes — the whole committed
+    /// tree, leaves, salts and digests, not only its cap — so it holds nothing drawn per proof, and
+    /// handing one build to many proofs is what rebuilding it for each already did.
+    #[test]
+    fn two_builds_of_one_key_are_the_same_bytes() {
+        let m = Machine::new(FriProfile::Test);
+        for shape in [(10usize, 7u8, 7u8, 0u8, 0u8, 0u8, 7u8), (10, 7, 7, 7, 7, 0, 7)] {
+            let (a, b) = (build(&m, shape, Tier(shape.0).min_mem_log_height()), build(&m, shape, Tier(shape.0).min_mem_log_height()));
+            assert_eq!(common_to_bytes(&a.common), common_to_bytes(&b.common));
+            assert!(tree_bytes(&a) == tree_bytes(&b), "the preprocessed tree differs between two builds of {shape:?}");
+        }
+    }
+
+    /// The cache builds at the tier's memory floor whatever the proof's own memory height is; the
+    /// data is the same at every one of them (no preprocessed column and no packed lookup depends
+    /// on the memory table's height).
+    #[test]
+    fn prover_data_is_the_same_at_every_memory_height() {
+        let m = Machine::new(FriProfile::Test);
+        let shape = (10usize, 7u8, 7u8, 0u8, 0u8, 0u8, 7u8);
+        let floor = Tier(10).min_mem_log_height();
+        let at_floor = build(&m, shape, floor);
+        for mem in [floor + 1, floor + 3] {
+            let higher = build(&m, shape, mem);
+            assert_eq!(common_to_bytes(&higher.common), common_to_bytes(&at_floor.common), "mem 2^{mem}");
+            assert!(tree_bytes(&higher) == tree_bytes(&at_floor), "mem 2^{mem}");
+            assert_eq!(prover_data_bytes(&higher), prover_data_bytes(&at_floor));
+        }
+    }
+
+    /// Through the machine, with a budget that holds one of these shapes at a time so every lookup
+    /// after the first evicts: each shape is always served the data a fresh build of *that* shape
+    /// gives, and its `CommonData` is the verifier key's for that shape.
+    #[test]
+    fn the_machine_serves_each_shape_its_own_data_across_evictions() {
+        let m = Machine::new(FriProfile::Test);
+        let shapes = [(10usize, 7u8, 7u8, 0u8, 0u8, 0u8, 7u8), (10, 7, 7, 7, 0, 0, 7), (10, 7, 7, 0, 7, 0, 7), (10, 8, 7, 0, 0, 0, 7)];
+        let fresh: Vec<_> = shapes.iter().map(|s| build(&m, *s, Tier(s.0).min_mem_log_height())).collect();
+        assert!(tree_bytes(&fresh[0]) != tree_bytes(&fresh[1]) && tree_bytes(&fresh[0]) != tree_bytes(&fresh[2]) && tree_bytes(&fresh[1]) != tree_bytes(&fresh[2]), "the plain, keccak and sha256 shapes commit different trees, so serving one for another would show");
+        let largest = fresh.iter().map(prover_data_bytes).max().unwrap();
+        m.set_prover_key_budget(largest);
+        for round in 0..3 {
+            for (s, want) in shapes.iter().zip(&fresh) {
+                let got = m.prover_key(Tier(s.0), s.1, s.2, s.3, s.4, s.5, s.6);
+                assert!(tree_bytes(&got) == tree_bytes(want), "round {round}: {s:?} was served another tree");
+                assert_eq!(common_to_bytes(&got.common), common_to_bytes(&want.common), "round {round}: {s:?}");
+                assert_eq!(common_to_bytes(&got.common), common_to_bytes(&m.verifier_key_with_modq(Tier(s.0), s.1, s.2, s.3, s.4, s.5, s.6)), "round {round}: {s:?} against the verifier key");
+                assert!(m.prover_key_bytes() <= largest, "the budget holds");
+            }
+        }
+        // A hit is a hit: the same shape twice in a row builds once.
+        let before = m.prover_key_builds();
+        let s = shapes[0];
+        m.prover_key(Tier(s.0), s.1, s.2, s.3, s.4, s.5, s.6);
+        m.prover_key(Tier(s.0), s.1, s.2, s.3, s.4, s.5, s.6);
+        assert_eq!(m.prover_key_builds(), before + 1);
+    }
+}
+
+#[cfg(test)]
 mod fri_soundness_tests {
     use super::*;
     use p3_fri::FriParameters;
 
-    /// `log_blowup` here mirrors the literal in `generic_config` — if that literal ever
-    /// changes, this test's own `log_blowup` must change with it. `mmcs: ()` is valid
+    /// `log_blowup` is `generic_config`'s own (`LOG_BLOWUP`). `mmcs: ()` is valid
     /// because `conjectured_soundness_bits` has no bound on `M`.
     #[test]
     fn production_profile_meets_the_100_bit_conjectured_target() {
         let fri: FriParameters<()> = FriParameters {
-            log_blowup: 3,
+            log_blowup: LOG_BLOWUP,
             log_final_poly_len: 0,
             max_log_arity: 3,
             num_queries: FriProfile::Production.num_queries(),
