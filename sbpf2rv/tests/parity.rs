@@ -1608,6 +1608,69 @@ fn a_sample_of_the_fuzz_corpus_matches_through_the_real_pipeline() {
     }
 }
 
+/// ZKVM-101: seed 1 000 004 of the sample above, minimised. A function reached through `callx`
+/// returns `r0..r5` (the call site copies all of them back that any `callx` target may write or
+/// pass through), so `r5` — which the callee here never touches — comes back as the callee's last
+/// argument word, loaded from the stack and stored into the returned `sbpf_ret`.
+///
+/// That store is where clang 21.1.6 (what `ubuntu-latest` has installed since the run of
+/// 2026-10-27, the first where this crate's coverage job failed) miscompiles the translation: its
+/// RISC-V machine outliner — on, because every translated function is `minsize` — moves the stores
+/// into an `OUTLINED_FUNCTION_n` that two functions share and reaches it with `tail`, i.e.
+/// `auipc t1 ; jalr zero, t1`, while `t1` still holds `r5`'s low word. The image then returns the
+/// `auipc`'s own address in `r5`: the fuzz case stored that `r5` to its stack and hashed the stack
+/// into `r0`, which is why its eight public words matched and only `r0` differed, and differently
+/// for every layout. The sample passes on clang 18.1.8 (no tail call to an outlined function in
+/// the one program inspected) and on 23.1.1 and 23.1.4 (such tail calls only where `t1` is dead);
+/// the emitted C is the same under all of them and has no undefined behaviour here.
+///
+/// So this is two functions with the same tail (the outliner needs a second copy to share), one
+/// of them called through `callx` with a recognisable `r5`. With the pinned clang it passes; with
+/// clang 21.1.6 under `RAND_GUEST_CLANG_UNPINNED=1` the build itself is refused, by `rand-guest
+/// check`'s `TailScratch` rule (before that rule existed the image built and returned a code
+/// address — `0x13db4` on the day — where the interpreter returns `0x5555_5555`).
+#[test]
+fn a_callx_returns_r5_as_the_callee_left_it_not_the_address_of_a_tail_call() {
+    use It::*;
+    const R5: i32 = 0x5555_5555;
+    let exit = || I(ins(opc::EXIT, 0, 0, 0, 0));
+    let p = vec![
+        Addr(6, "f_a".into()),
+        // Never called: its address makes `f_b` a function, and so a second copy of `f_a`'s tail.
+        Addr(7, "f_b".into()),
+        I(ins(opc::MOV64_IMM, 5, 0, 0, R5)),
+        I(ins(opc::CALL_REG, 0, 0, 0, 6)),
+        I(ins(opc::MOV64_REG, 0, 5, 0, 0)),
+        exit(),
+        L("f_a".into()),
+        Lddw(0, 0x40_0000_007f),
+        exit(),
+        L("f_b".into()),
+        Lddw(0, 0x30_0000_0011),
+        exit(),
+    ];
+    let text_va = {
+        let mut e = builder::build_elf(&assemble(&p, 0), &[], &[], &[], 0);
+        sbpf_core::elf::load(&mut e).unwrap().text_va
+    };
+    let elf = builder::build_elf(&assemble(&p, text_va), &[], &[], &[], 0);
+    let path = work().join("callx-r5.so");
+    std::fs::write(&path, &elf).unwrap();
+    let t = translate(&path, "callx-r5");
+    // The path under test is still the one translated: the callx copies r5 back from the callee.
+    let c = std::fs::read_to_string(work().join("callx-r5/program.c")).unwrap();
+    assert!(
+        c.contains("SBPF_CALLX(r6,") && c.contains("r5 = x_.r5;"),
+        "the callx no longer copies r5 back; this test needs a new shape:\n{c}"
+    );
+    let call = SbpfCall {
+        elf: elf.clone(),
+        input: sbpf::serialize_aligned(&[], &[], &[7u8; 32]),
+    };
+    let r = parity(&t, None, "r5 across a callx", &call, 0);
+    assert_eq!(r, Ok(R5 as u64));
+}
+
 /// What the real-pipeline sample must contain, as `(tag, cases)`; see [`sample_tags`].
 const SAMPLE_QUOTAS: &[(&str, usize)] = &[
     ("halt DivByZero", 2),

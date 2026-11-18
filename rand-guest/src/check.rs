@@ -1,12 +1,14 @@
 //! The ISA report: every text word decoded with the machine's own decoder, syscall numbers
 //! resolved where they are static, the layout and the cap. A guest that passes cannot fail
-//! in-circuit for an encoding, syscall-number or layout reason.
+//! in-circuit for an encoding, syscall-number or layout reason. One rule is about the compiler
+//! rather than the machine: `TailScratch` names a tail call whose scratch register is live into
+//! its target, a known miscompile ([`tail_scratch`]).
 
 use rand_zkvm::isa::{AluOp, DecodeError, Instr};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Rule { Compressed, Undecodable, Fence, Csr, Ebreak, Syscall, Cap, Layout }
+pub enum Rule { Compressed, Undecodable, Fence, Csr, Ebreak, Syscall, Cap, Layout, TailScratch }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finding { pub addr: u32, pub word: u32, pub rule: Rule, pub what: String }
@@ -74,11 +76,75 @@ pub fn check_text(base_pc: u32, text: &[u32], program_words: usize, max_words: u
             }
         }
     }
+    tail_scratch(base_pc, text, &mut r.findings);
     r.words = program_words;
     if r.words > max_words {
         r.findings.push(Finding { addr: base_pc, word: 0, rule: Rule::Cap, what: format!("{} words (text {} + prologue {}) exceed the cap of {max_words}", r.words, text.len(), r.words.saturating_sub(text.len())) });
     }
     r
+}
+
+/// Whether `i` reads register `x`, and whether it writes it.
+fn uses(i: Instr, x: u32) -> (bool, bool) {
+    match i {
+        Instr::Lui { rd, .. } | Instr::Auipc { rd, .. } | Instr::Jal { rd, .. } => (false, rd == x),
+        Instr::Jalr { rd, rs1, .. } | Instr::Load { rd, rs1, .. } | Instr::AluImm { rd, rs1, .. } => (rs1 == x, rd == x),
+        Instr::AluReg { rd, rs1, rs2, .. } => (rs1 == x || rs2 == x, rd == x),
+        Instr::Branch { rs1, rs2, .. } | Instr::Store { rs1, rs2, .. } => (rs1 == x || rs2 == x, false),
+        Instr::Ecall => (false, false),
+    }
+}
+
+const ABI: [&str; 32] = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"];
+
+/// The `TailScratch` rule: a far tail call — `auipc x, hi` then `jalr zero, lo(x)`, what the
+/// assembler's `tail` expands to with `x = t1` — leaves a code address in `x`, so `x` must be dead
+/// at the target. A compiler bug can break that: clang 21's RISC-V machine outliner (which runs
+/// over `minsize` functions, as every `sbpf2rv`-translated function is) ends a function with
+/// `tail OUTLINED_FUNCTION_n` while the outlined body still stores `t1` as data, and the image
+/// then computes with the jump's address (ZKVM-101: a translated sBPF program returned a wrong
+/// `r5`). Such an image decodes and runs, so nothing else here would name it.
+///
+/// For each such pair whose target is inside the text, the target's straight-line code is read
+/// up to its first control transfer: reading `x` before writing it is the finding. This cannot
+/// misjudge correct code (no calling convention passes a value in the jump's own scratch
+/// register), and it is not a liveness analysis: a read of `x` that lies past a branch or a call
+/// in the target is not seen.
+fn tail_scratch(base_pc: u32, text: &[u32], findings: &mut Vec<Finding>) {
+    let at = |i: usize| text.get(i).and_then(|&w| Instr::decode(w).ok());
+    for i in 0..text.len() {
+        let (Some(Instr::Auipc { rd: x, imm: hi }), Some(Instr::Jalr { rd: 0, rs1, imm: lo })) = (at(i), at(i + 1)) else { continue };
+        if x == 0 || rs1 != x {
+            continue;
+        }
+        let site = base_pc.wrapping_add(4 * i as u32);
+        let target = site.wrapping_add(hi).wrapping_add(lo);
+        let off = target.wrapping_sub(base_pc);
+        if off % 4 != 0 {
+            continue;
+        }
+        let mut k = (off / 4) as usize;
+        while let Some(ins) = at(k) {
+            let (reads, writes) = uses(ins, x);
+            if reads {
+                findings.push(Finding {
+                    addr: site.wrapping_add(4),
+                    word: text[i + 1],
+                    rule: Rule::TailScratch,
+                    what: format!(
+                        "tail call through {r} to {target:#x}, which reads {r} at {:#x} before writing it: the jump itself overwrites {r}, so the target computes with a code address (a miscompile; clang 21's RISC-V outliner emits this — build with the pinned clang)",
+                        base_pc.wrapping_add(4 * k as u32),
+                        r = ABI[x as usize]
+                    ),
+                });
+                break;
+            }
+            if writes || matches!(ins, Instr::Jal { .. } | Instr::Jalr { .. } | Instr::Branch { .. } | Instr::Ecall) {
+                break;
+            }
+            k += 1;
+        }
+    }
 }
 
 impl fmt::Display for Report {

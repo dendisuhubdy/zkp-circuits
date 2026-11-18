@@ -21,6 +21,16 @@ generated `Cargo.toml` and `Cargo.lock`). `rand-guest build` scrubs the builder'
 refuses a `.cargo/config.toml` anywhere cargo would read one (`rand-guest/README.md`), so the same
 ELF gives the same `hc` on any machine with that toolchain.
 
+The clang pin is not only about `hc`. Every translated function is `minsize`, which turns on
+LLVM's machine outliner, and clang 21.1.6's outliner miscompiles this target: it reaches a shared
+`OUTLINED_FUNCTION_n` with `tail` (`auipc t1 ; jalr zero, t1`) while `t1` still holds a value the
+outlined code stores, so a function reached through `callx` can hand back the address of that
+`auipc` as the low word of `r5` (ZKVM-101; `tests/parity.rs`,
+`a_callx_returns_r5_as_the_callee_left_it_not_the_address_of_a_tail_call`). The C is the same
+under every clang and has no undefined behaviour there; clang 18.1.8 and the pinned 23.1.1 compile
+it correctly. `rand-guest check` refuses an image with that shape (`TailScratch`), so
+`RAND_GUEST_CLANG_UNPINNED=1` with an affected clang fails the build rather than the parity.
+
 ## Usage: a real SPL Token walkthrough
 
 Every command below was run on this machine, 2026-09-18, against the committed ELF

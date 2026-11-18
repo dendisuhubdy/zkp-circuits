@@ -78,3 +78,87 @@ fn poseidon2_len_is_a_syscall_the_checker_accepts() {
     assert!(r.is_ok(), "{r}");
     assert_eq!(r.unresolved_ecalls, 0);
 }
+
+// ---- TailScratch (ZKVM-101) -------------------------------------------------------------------
+
+use rand_zkvm::isa::{AluOp, Width};
+
+const T0: u32 = 5;
+const T1: u32 = 6;
+const RA: u32 = 1;
+const A0: u32 = 10;
+
+/// `auipc x, 0 ; jalr rd, 8(x)`: a far jump to the word after the pair, linking in `rd`.
+fn far(x: u32, rd: u32) -> [u32; 2] {
+    [enc(Instr::Auipc { rd: x, imm: 0 }), enc(Instr::Jalr { rd, rs1: x, imm: 8 })]
+}
+
+fn store(rs2: u32) -> u32 {
+    enc(Instr::Store { rs1: A0, rs2, imm: 40, width: Width::Word })
+}
+
+fn tail_findings(p: &[u32]) -> Vec<rand_guest::check::Finding> {
+    let r = check_text(0x1000, p, p.len(), 4096);
+    r.findings.into_iter().filter(|f| f.rule == Rule::TailScratch).collect()
+}
+
+/// The shape clang 21.1.6 emits for a `minsize` function ending in an outlined store sequence:
+/// `tail OUTLINED_FUNCTION_n` (`auipc t1 ; jalr zero, t1`) into a body that stores `t1` — which by
+/// then holds the `auipc`'s address, not the value the function loaded into it.
+#[test]
+fn a_tail_call_whose_target_reads_the_jumps_own_scratch_register_is_named() {
+    let mut p = far(T1, 0).to_vec();
+    // The outlined body: unrelated stores first, then the one that reads t1.
+    p.extend([store(A0 + 1), store(T1)]);
+    p.extend(ok_program());
+    let f = tail_findings(&p);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!((f[0].addr, f[0].word), (0x1004, p[1]), "the finding is at the jalr");
+    for part in ["through t1", "to 0x1008", "reads t1 at 0x100c"] {
+        assert!(f[0].what.contains(part), "{part}: {}", f[0].what);
+    }
+    assert!(!check_text(0x1000, &p, p.len(), 4096).is_ok(), "the image is rejected");
+}
+
+/// Correct code is not named: a target that writes the scratch register before reading it (what a
+/// fixed outliner and every ordinary callee do), and the two linking forms — `call` (the target's
+/// `ret` reads `ra`) and the outliner's own `call t0, …` (the body returns through `t0`) — where
+/// the register holds the return address the target is meant to read.
+#[test]
+fn a_tail_call_into_code_that_does_not_read_the_scratch_register_first_is_not() {
+    // t1 written, then read.
+    let mut p = far(T1, 0).to_vec();
+    p.extend([enc(Instr::AluImm { op: AluOp::Add, rd: T1, rs1: 0, imm: 5 }), store(T1)]);
+    p.extend(ok_program());
+    assert!(tail_findings(&p).is_empty());
+    assert!(check_text(0x1000, &p, p.len(), 4096).is_ok());
+
+    // t1 never touched.
+    let mut p = far(T1, 0).to_vec();
+    p.push(store(A0 + 1));
+    p.extend(ok_program());
+    assert!(tail_findings(&p).is_empty());
+
+    // `call`: the target returns through ra.
+    let mut p = far(RA, RA).to_vec();
+    p.push(enc(Instr::Jalr { rd: 0, rs1: RA, imm: 0 }));
+    assert!(tail_findings(&p).is_empty());
+
+    // `call t0, OUTLINED_FUNCTION_n`: the body returns through t0.
+    let mut p = far(T0, T0).to_vec();
+    p.extend([store(T1), enc(Instr::Jalr { rd: 0, rs1: T0, imm: 0 })]);
+    assert!(tail_findings(&p).is_empty());
+}
+
+/// The rule reads the target's straight-line code only: a read behind a control transfer is not
+/// seen (README, "What `check` does not check"), and a target outside the text is left alone.
+#[test]
+fn the_tail_rule_stops_at_the_targets_first_control_transfer() {
+    let mut p = far(T1, 0).to_vec();
+    p.extend([enc(Instr::Jal { rd: 0, imm: 4 }), store(T1)]);
+    p.extend(ok_program());
+    assert!(tail_findings(&p).is_empty());
+
+    let p = [enc(Instr::Auipc { rd: T1, imm: 0x10000 }), enc(Instr::Jalr { rd: 0, rs1: T1, imm: 0 }), store(T1)];
+    assert!(tail_findings(&p).is_empty());
+}

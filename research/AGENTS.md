@@ -81,7 +81,15 @@ prologue it synthesises), never estimated from the data word count, since an
 with a data segment needs its own `.ld` with `ORIGIN` raised past that
 prologue (`evm.ld`, `sbpf.ld`: `guest.ld` with the origin moved), and
 `rand-guest` picks the one `.ld` file it finds in the guest's own directory —
-more than one, and it refuses to guess rather than picking wrong.
+more than one, and it refuses to guess rather than picking wrong. **The second
+trap is the compiler** (ZKVM-101, 2026-11-17): `check` has one rule that is not
+about the machine, `TailScratch` — a far tail call (`auipc t1 ; jalr zero, t1`)
+into code that reads `t1` first. clang 21.1.6's RISC-V outliner emits that for
+`minsize` functions and the image then computes with a code address; the pinned
+23.1.1 and 18.1.8 did not, in anything checked. `RAND_GUEST_CLANG_UNPINNED=1` is therefore a way to get
+a *refused* build on such a clang, never a way to get a trusted image, and CI
+(`.github/workflows/coverage.yml`) installs the pinned clang from LLVM's release
+by digest rather than taking the runner's.
 
 **`sbpf2rv`, piece 2 of the two translator specs above, is done through Task 7
 (2026-09-18)**: an ahead-of-time sBPF → RV32 translator, emitting one

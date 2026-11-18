@@ -110,7 +110,9 @@ the guest's source and that toolchain alone:
 - **clang is pinned.** `find_clang` refuses any clang whose `--version` is not 23.1.1
   (`build::CLANG_VERSION`). `RAND_GUEST_CLANG_UNPINNED=1` builds with another one anyway, with a
   warning that `hc` will not match published images. `--no-default-config` keeps clang's own
-  configuration files (Homebrew ships one per host triple) out of every compile.
+  configuration files (Homebrew ships one per host triple) out of every compile. The pin is about
+  correctness as well as `hc`: clang 21.1.6 miscompiles `minsize` functions for this target
+  ("What `check` rejects", `TailScratch`), so an unpinned build is checked for that, not trusted.
 
 - **Rust** — `cargo +1.98.1 build --release --target riscv32im-unknown-none-elf --target-dir
   <guest>/target --config 'target.riscv32im-unknown-none-elf.rustflags=[…]'` with:
@@ -142,6 +144,17 @@ cannot fail in-circuit for an encoding, syscall-number, or layout reason. It ref
   data prologue it synthesises, never estimated from the data word count, since an `li` is one
   word or two depending on the constant and the base register resets periodically (`Cap`)
 - a text base that is not word-aligned (`Layout`)
+- a far tail call — `auipc x, hi` then `jalr zero, lo(x)`, the assembler's `tail` with `x = t1` —
+  whose target reads `x` before writing it (`TailScratch`). The jump leaves a code address in
+  `x`, so a target that reads it is computing with that address. This is the one rule about the
+  compiler rather than the machine: clang 21.1.6's RISC-V machine outliner emits exactly this for
+  `minsize` functions (every `sbpf2rv`-translated function is one), ending a function with
+  `tail OUTLINED_FUNCTION_n` while the outlined body still stores `t1` as data. Such an image
+  decodes, runs and proves — and returns a wrong value (ZKVM-101: a translated sBPF program's `r5`
+  came back as the address of the `auipc`). In every program checked, clang 18.1.8 emitted no
+  tail call to an outlined function at all, and the pinned 23.1.1 only ones where `t1` is dead;
+  the rule exists so a build under `RAND_GUEST_CLANG_UNPINNED=1` with an affected clang is
+  refused instead of silently wrong
 
 ## What `check` does not check
 
@@ -164,6 +177,11 @@ says why); in practice the linker, the packer and the loader cover them:
   immediately before each `ecall`, so this does not arise in practice, but a hand-written or
   translated text could hide an unimplemented syscall number from the check this way (the machine
   still traps on it at run time).
+- **A scratch register read past a branch.** `TailScratch` reads the tail call's target only up
+  to its first control transfer, and only for targets inside the text. That finds the outliner's
+  bodies, which are straight-line; it is not a liveness analysis, and it says nothing about the
+  linking forms (`call`, and the outliner's own `call t0, OUTLINED_FUNCTION_n`), where the target
+  is meant to read the register it was reached through.
 - **What a syscall does with its arguments** — pointers, lengths, input indices. Those are run-time
   values; `run` reports the trap.
 

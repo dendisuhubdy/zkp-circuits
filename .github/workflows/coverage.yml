@@ -1,16 +1,18 @@
 # Line coverage of the Rust test suite, measured with cargo-llvm-cov (LLVM source-based coverage)
 # and uploaded to Codecov, which draws the badge in README.md.
 #
-# What is measured: one job per crate with a test suite, each uploaded under its own Codecov flag.
-# `research` (the reference zkVM) runs every test file but `bundle`, `viewing` and `e2e` — the
+# What is measured: one job per crate with a test suite, each uploaded under its own Codecov flag;
+# a crate split over several jobs uploads every part under the crate's one flag, and Codecov merges
+# them. `research` (the reference zkVM) runs every test file but `bundle`, `viewing` and `e2e` — the
 # three that prove at tier 14 and 16 and together want more memory than a hosted runner has
-# (research/AGENTS.md's figures). `recursion` runs only the test files that prove nothing (or a
-# tier-12 precompile): a hosted runner is killed by its proving suites, as fullnode's nightly-rvm
-# job is. `evm2rv` and `sbpf2rv` build their shims with the runner's clang under
-# `RAND_GUEST_CLANG_UNPINNED=1` (the pin is Homebrew's 23.1.1; hc is not compared to published
-# images here), and skip the one test that is about that pin. `rand-guest` and `zkp1`–`zkp6` run
-# whole. Not measured: `gpu-kernels` (nightly Rust), `rand-zkvm-cuda` (needs CUDA), `guest-sdk`
-# and the C runtimes (no cargo tests).
+# (research/AGENTS.md's figures) — in three jobs, because the MODQ files outgrew one (see the
+# matrix). `recursion` runs only the test files that prove nothing (or a tier-12 precompile): a
+# hosted runner is killed by its proving suites, as fullnode's nightly-rvm job is. `evm2rv`,
+# `sbpf2rv` and `rand-guest` build guests with the clang `rand-guest` pins, installed from LLVM's
+# own release by digest — not the runner's: `ubuntu-latest` has installed clang 21.1.6 since the run
+# of 2026-10-27, and its RISC-V outliner miscompiles translated programs (ZKVM-101;
+# rand-guest/README.md, `TailScratch`). `rand-guest` and `zkp1`–`zkp6` run whole. Not measured: `gpu-kernels` (nightly
+# Rust), `rand-zkvm-cuda` (needs CUDA), `guest-sdk` and the C runtimes (no cargo tests).
 #
 # The upload needs `CODECOV_TOKEN` (an organisation secret on randprotocol, or this repository's):
 # Codecov refuses a push upload without it. The job runs only on randprotocol/zkp-circuits: Codecov
@@ -36,14 +38,38 @@ concurrency:
 jobs:
   coverage:
     if: github.repository == 'randprotocol/zkp-circuits'
+    # A name that does not carry the arguments, so a job can be named as a required check.
+    name: coverage (${{ matrix.part || matrix.crate }})
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: ${{ matrix.timeout || 120 }}
+    # Only the two `*-pinned-hc` jobs (see the matrix): red there is a finding, not a broken build.
+    continue-on-error: ${{ matrix.unverified || false }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # `research` in three jobs since ZKVM-101. One job ran every file until `modq.rs` and
+          # `modq_cheating.rs` arrived (2026-10-12), and then died two ways on the 4-core, 16 GB
+          # runner. Memory: `modq.rs`'s three tier-14 machine proofs peak at 5.4, 9.6 and 5.9 GB
+          # (`/usr/bin/time -l`, each alone) and libtest ran them together — 20.9 GB — so four runs
+          # ended "The runner has received a shutdown signal" three to six minutes into that file.
+          # Time: `modq_cheating.rs` alone is 53 minutes on a fast runner and over 79 on a slow one,
+          # after 40 minutes of the other files, so the run of 2026-11-07 hit the 120-minute limit
+          # with 42 of its 43 tests done. Nothing is dropped: the first job runs what it ran before
+          # those two files existed, and each of them has its own job below.
           - crate: research
-            args: --release --lib $(for f in tests/*.rs; do n=$(basename "$f" .rs); case "$n" in bundle|viewing|e2e) ;; *) printf -- '--test %s ' "$n";; esac; done)
+            args: --release --lib $(for f in tests/*.rs; do n=$(basename "$f" .rs); case "$n" in bundle|viewing|e2e|modq|modq_cheating) ;; *) printf -- '--test %s ' "$n";; esac; done)
+          # One test at a time: the peak is then the largest single proof, 9.6 GB.
+          - crate: research
+            part: research-modq
+            args: --release --test modq -- --test-threads=1
+          # Two at a time: each forgery proof peaks at 5.9 GB, and the file's own limit of three
+          # (`MODQ_SLOTS`, sized for a 48 GB laptop) is 17.7 GB. The proofs are single-threaded, so
+          # two abreast is about 80 minutes on a fast runner and 120 on a slow one: its own limit.
+          - crate: research
+            part: research-modq-cheating
+            timeout: 180
+            args: --release --test modq_cheating -- --test-threads=2
           # The hosted runner is killed by the rVM's proving suites (fullnode's nightly-rvm dies the
           # same way), so only the files that prove nothing, or a tier-12 precompile at most, are
           # measured: aggregate, cheating, device_model, exit, fixtures, machine, memprofile,
@@ -55,16 +81,34 @@ jobs:
           # x86-64 small code model's PC32 relocations on the runner (crtbeginS.o: "relocation
           # truncated to fit") and take over an hour under instrumentation; the directed parity
           # files cover the same opcodes one by one, so the corpus stays out here. The two
-          # `hc_is_pinned` tests compare the ERC-20 image's hc with the published one, which only
-          # the pinned clang reproduces.
+          # `hc_is_pinned` tests compare the ERC-20 image's hc with the published one: they are the
+          # `evm2rv-pinned-hc` job's.
           - crate: evm2rv
-            args: --release -- --skip the_shim_refuses_a_clang_other_than_the_pin --skip _corpus --skip hc_is_pinned
-          # The three SPL Token pipeline tests need the pinned clang: the runner's clang compiles
-          # the translated program to 66 394 words, over the loader's 65 536-word cap (TooLong), so
-          # they are skipped here along with the test about the pin itself.
+            guest_clang: true
+            args: --release -- --skip _corpus --skip hc_is_pinned
+          # The three SPL Token pipeline tests compare the translated image's hc and word count
+          # with the published ones: they are the `sbpf2rv-pinned-hc` job's.
           - crate: sbpf2rv
-            args: --release -- --skip the_shim_refuses_a_clang_other_than_the_pinned_one --skip spl_token_transfer_translates --skip two_elfs_that_load_to_the_same_program --skip one_rodata_byte_away
+            guest_clang: true
+            args: --release -- --skip spl_token_transfer_translates --skip two_elfs_that_load_to_the_same_program --skip one_rodata_byte_away
+          # The tests that need the published hc reproduced, on their own and not yet blocking. The
+          # images were published from Homebrew's clang 23.1.1 on macOS; LLVM's own macOS build of
+          # 23.1.1 reproduces the SPL Token hc (checked for ZKVM-101), but whether its Linux build
+          # does had never been run when these jobs were written. Green here answers it: then drop
+          # `unverified` (or fold the tests back into the two jobs above). Red is that answer too,
+          # and belongs in the README's "Trust and verification", not in a skip.
+          - crate: evm2rv
+            part: evm2rv-pinned-hc
+            guest_clang: true
+            unverified: true
+            args: --release --test parity -- hc_is_pinned
+          - crate: sbpf2rv
+            part: sbpf2rv-pinned-hc
+            guest_clang: true
+            unverified: true
+            args: --release --test parity -- spl_token_transfer_translates two_elfs_that_load_to_the_same_program one_rodata_byte_away
           - crate: rand-guest
+            guest_clang: true
             args: --release
           - crate: zkp1
             args: --release
@@ -78,9 +122,6 @@ jobs:
             args: --release
           - crate: zkp6
             args: --release
-    env:
-      RAND_GUEST_CLANG_UNPINNED: "1"
-      CLANG: /usr/bin/clang
     defaults:
       run:
         working-directory: ${{ matrix.crate }}
@@ -93,6 +134,46 @@ jobs:
         run: |
           rustup toolchain install 1.98.1 --profile minimal --target riscv32im-unknown-none-elf --component llvm-tools
           rm -f "${CARGO_HOME:-$HOME/.cargo}/config" "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      # The clang `rand-guest` pins (`build::CLANG_VERSION`), for the jobs that build guests: the
+      # release archive llvm/llvm-project publishes, checked against the sha256 the release lists
+      # for it, and only the compiler, its headers and the four tools the builds and tests look
+      # for beside it. `$CLANG` is what `rand-guest`, the generated `build.rs` and the tests read;
+      # `RAND_GUEST_CLANG_UNPINNED` is not set, so any other clang is refused.
+      - name: The clang rand-guest pins
+        if: matrix.guest_clang
+        working-directory: ${{ github.workspace }}
+        env:
+          LLVM_VERSION: "23.1.1"
+          LLVM_SHA256: b7ddbabd70fa1d206948bc83f59e59aa84eaf4cd09b6b89cc3ece28177710a6f
+        run: |
+          set -euo pipefail
+          if ! grep -q "pub const CLANG_VERSION: &str = \"$LLVM_VERSION\";" rand-guest/src/build.rs; then
+            echo "::error::coverage.yml installs clang $LLVM_VERSION but rand-guest/src/build.rs pins another: move LLVM_VERSION and LLVM_SHA256 with the pin"
+            exit 1
+          fi
+          name="LLVM-$LLVM_VERSION-Linux-X64"
+          archive="$RUNNER_TEMP/llvm.tar.zst"
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/$name.tar.zst"
+          echo "$LLVM_SHA256  $archive" | sha256sum --check --strict
+          tar --zstd -xf "$archive" -C "$RUNNER_TEMP" \
+            "$name/bin/clang" "$name/bin/clang-${LLVM_VERSION%%.*}" \
+            "$name/bin/llvm-ar" "$name/bin/llvm-ranlib" "$name/bin/llvm-nm" "$name/bin/llvm-symbolizer" \
+            "$name/lib/clang"
+          rm "$archive"
+          clang="$RUNNER_TEMP/$name/bin/clang"
+          banner="$("$clang" --version)"
+          echo "$banner"
+          case "$banner" in
+            *"clang version $LLVM_VERSION"*) ;;
+            *) echo "::error::$clang is not clang $LLVM_VERSION"; exit 1 ;;
+          esac
+          targets="$("$clang" --print-targets)"
+          case "$targets" in
+            *riscv32*) ;;
+            *) echo "::error::$clang has no riscv32 target"; exit 1 ;;
+          esac
+          echo "CLANG=$clang" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable (branch head, 2026-10-05)
       # llvm-tools for the toolchain the checkout pins (rust-toolchain.toml, where there is one),
       # not for the action's: rustup resolves the toolchain from the working directory.
@@ -105,8 +186,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ${{ matrix.crate }}
+          # A crate's parts build different test binaries: one cache each.
+          key: ${{ matrix.part || matrix.crate }}
       - name: System dependencies
-        # `llvm` for `llvm-ar`: cc-rs archives the C shims with it on the riscv32 target.
+        # As before ZKVM-101, for every job. No guest is built with this clang any more: the three
+        # guest jobs set `$CLANG` above, and take `llvm-ar` from beside it.
         run: sudo apt-get update && sudo apt-get install -y clang lld llvm
       - name: Coverage
         run: cargo llvm-cov --lcov --output-path lcov.info ${{ matrix.args }}

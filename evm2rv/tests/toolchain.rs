@@ -20,18 +20,34 @@ fn the_shim_refuses_a_clang_other_than_the_pin() {
     std::fs::write(&code, "60015f5260205ff3").unwrap();
     let (_, pinned_hc) = build_shim(&code, &dir.join("pinned"), "pin-test", false, Stage::Two);
 
-    let real = "/opt/homebrew/opt/llvm/bin/clang";
+    // The real compiler behind the wrapper is the one the pinned build above used — `$CLANG`, else
+    // Homebrew's, the build's own rule (`rand-guest`'s `find_clang`) — so that "the same image"
+    // below compares one compiler with itself. (Until ZKVM-101 this was Homebrew's path spelled
+    // out, which does not exist on a Linux runner: the wrapper could not `exec` it, and build.rs
+    // reported the wrapper as a clang that "does not run or has no riscv32 target".)
+    let real = std::env::var_os("CLANG").map_or_else(
+        || std::path::PathBuf::from("/opt/homebrew/opt/llvm/bin/clang"),
+        std::path::PathBuf::from,
+    );
+    let real = real.canonicalize().unwrap_or_else(|e| panic!("no clang at {}: {e}", real.display()));
+    let quoted = real.to_str().expect("a UTF-8 clang path");
+    assert!(!quoted.contains('\''), "a clang path with a single quote: {quoted}");
     let fake = dir.join("clang-22");
     std::fs::write(
         &fake,
-        format!("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"Homebrew clang version 22.1.0\"\n  exit 0\nfi\nexec {real} \"$@\"\n"),
+        format!("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"Homebrew clang version 22.1.0\"\n  exit 0\nfi\nexec '{quoted}' \"$@\"\n"),
     )
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    // build.rs takes the `llvm-ar` beside the clang.
-    let ar = dir.join("llvm-ar");
-    let _ = std::fs::remove_file(&ar);
-    std::os::unix::fs::symlink("/opt/homebrew/opt/llvm/bin/llvm-ar", &ar).unwrap();
+    // build.rs takes the `llvm-ar` and `llvm-ranlib` beside the clang (else the ones on PATH).
+    for tool in ["llvm-ar", "llvm-ranlib"] {
+        let link = dir.join(tool);
+        let _ = std::fs::remove_file(&link);
+        let beside = real.with_file_name(tool);
+        if beside.exists() {
+            std::os::unix::fs::symlink(&beside, &link).unwrap();
+        }
+    }
 
     let crate_dir = dir.join("other");
     let o = std::process::Command::new(env!("CARGO_BIN_EXE_evm2rv"))
