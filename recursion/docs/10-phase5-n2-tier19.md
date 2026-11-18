@@ -256,7 +256,11 @@ The fullnode follow-through (`deploy/sync-zkvm.sh`, `CIRCUITS_PIN`) applies thes
   tier 18 (235 744), N=2 tier 19 (471 105), N=3 tier 20 (706 466). From the projections in §6: N=4
   tier 20 and N=5 tier 21. The N ≤ 5 ceiling is unchanged (§6), so no valid production aggregate
   is tier 22, and tier 18 is now one.
-- **The test-profile tree section waits on the fixture regeneration.** The 12 fixture-gated tests
+- **The test-profile tree section waits on the fixture regeneration.** *Since ZKVM-102
+  (2026-11-18) the 12 fixture-gated tests skip, with the reason printed, on a box without
+  current fixtures, and fail only when `RECURSION_REQUIRE_TREE_FIXTURES` is set; the one command
+  is `scripts/regen-tree-fixtures.sh` and the declared state is `tests/tree-fixtures.status`
+  (docs/08 §5, "Regenerating the fixtures"). The original record follows.* The 12 fixture-gated tests
   in `tests/tree.rs` are red until the operator regenerates the test-tree fixtures
   (`cargo test --release --test tree generate_test_tree_fixtures -- --ignored --nocapture`,
   ≈ 34 GB, then copy `tree/` into `$RECURSION_FIXTURES`). After that, these pins are still stale
@@ -337,7 +341,11 @@ host.
   (`2026-10-12-phase5-prod-n2-emulate.log`); `production_n3_aggregate_emulates_within_bounds` —
   706 466 rows, tier 20 (`-prod-n3-emulate.log`); the profile — 235 418 production rows
   (`-profile-final.log`). All three equal their pins.
-- **Pending operator run.** The proved and heap-profiled runs can exceed 20 GB and were not run
+- **Pending operator run — never recorded (checked 2026-11-18, ZKVM-102).** None of the three
+  logs named below exists in this repository or in the working trees: the runs were not made.
+  The table stays as the list of what is still owed, at the current tree and not at phase 5's
+  (constraint set 10 moved the rows again: the test N=2 aggregate is 176 603 rows).
+  The proved and heap-profiled runs can exceed 20 GB and were not run
   from the agent. Their numbers are **pending operator run**:
 
   | run | log | figures |

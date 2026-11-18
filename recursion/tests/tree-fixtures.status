@@ -1,0 +1,20 @@
+# The declared state of the test-profile tree fixtures (`$RECURSION_FIXTURES/tree/Test-*.rvmproof`)
+# and of the pins recorded from them. Read by `tests/tree_status.rs` (cheap, in CI) and quoted by
+# the skip lines in `tests/tree.rs`. `key = value`; `#` starts a comment.
+#
+# state = current  The fixtures were regenerated at this tree and the pins re-recorded from that
+#                  run. `recorded_leaf_cpu_rows` must then equal pins.json's
+#                  `aggregate_test_n1_cpu_rows` (the leaf is the N = 1 test aggregate), so a later
+#                  change to the leaf program that re-pins the aggregate without regenerating the
+#                  tree turns `tests/tree_status.rs` red.
+# state = stale    The fixtures or pins are known to predate the tree. `stale_since` and
+#                  `stale_pins` must say since when and what. The fixture-gated tests in
+#                  `tests/tree.rs` then skip on a box without fresh fixtures instead of failing.
+#
+# Regenerate with `scripts/regen-tree-fixtures.sh` (about 34 GB, about 30 minutes on 16 threads);
+# it prints the values to re-record. Then set `state = current` and update the two `recorded_*`.
+state = stale
+recorded_leaf_cpu_rows = 104556
+recorded_at = circuits 1ed3d69, 2026-10-11 (after the MODQ cpu column)
+stale_since = circuits 7fc3a82, 2026-10-12 (phase 5 moved the leaf program: 104 556 -> 88 486 rows), and again 2620ace, 2026-10-31 (constraint set 10: 88 493 rows)
+stale_pins = tree.rs T_INT_TEST; pins.json tree_test.step_int_cpu_rows, step_int_tier, step_leaf_reduce_rows_per_child, step_int_reduce_rows_per_child, step_proof_bytes_max, vk_leaf_0..3, vk_t_leaf_0..3, vk_int_0..3; tests/tree-test-genesis.json

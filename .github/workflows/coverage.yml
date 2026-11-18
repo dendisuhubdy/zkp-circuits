@@ -84,9 +84,11 @@ jobs:
           # same way), so only the files that prove nothing, or a tier-12 precompile at most, are
           # measured: aggregate, cheating, device_model, exit, fixtures, machine, memprofile,
           # profile, quotient_layout, self_verify, tape_n and verifier prove at tier 16-23 or need
-          # the fixture cache, and stay out.
+          # the fixture cache, and stay out. `tree_status` is the tree suite's stand-in here: it
+          # proves nothing and refuses a `tests/tree-fixtures.status` that calls the test-tree
+          # fixtures current after the leaf they were recorded against has moved (ZKVM-102).
           - crate: recursion
-            args: --release --lib --test allocator --test backend --test binding --test cpu --test dsl --test emulator --test isa --test poseidon2 --test precompiles --test program --test shape --test tables --test transcript --test verifier_key
+            args: --release --lib --test allocator --test backend --test binding --test cpu --test dsl --test emulator --test isa --test poseidon2 --test precompiles --test program --test shape --test tables --test transcript --test tree_status --test verifier_key
           # The four fuzz-corpus tests link a 10 000-contract shared library that overflows the
           # x86-64 small code model's PC32 relocations on the runner (crtbeginS.o: "relocation
           # truncated to fit") and take over an hour under instrumentation; the directed parity

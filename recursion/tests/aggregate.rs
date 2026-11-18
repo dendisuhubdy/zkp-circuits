@@ -891,7 +891,7 @@ fn prove_production_aggregate(n: usize, expected_tier: RvmTier) {
 /// the GB projection above is the tier-20 one, not re-taken.
 /// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: tier 19 → tier 18 (235 744 rows = 235 418 + 326, emulated and measured by `the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead`; the projection is not re-taken).
 #[test]
-#[ignore = "issue45 A6: production N=1 aggregate proof, tier 18 since phase 5 (235 744 rows; 315 718 since the MODQ chip, tier 19 since phase 4, 316 279 after it; tier 20 before), ~64-75 GB projected at tier 20 at rate 1/4 (docs/07 §4), >=96 GB host. Run: \
+#[ignore = "issue45 A6: production N=1 aggregate proof. NOW (constraint set 10): 235 751 rows, tier 18, never proved at this tier — memory, time and proof bytes unmeasured (ZKVM-102); the last proved production aggregate was tier 21 at constraint set 8, 376.9 GB peak RSS, and the last projection (64-75 GB at rate 1/4) was for tier 20. History: tier 18 since phase 5 (235 744 rows; 315 718 since the MODQ chip, tier 19 since phase 4, 316 279 after it; tier 20 before), ~64-75 GB projected at tier 20 at rate 1/4 (docs/07 §4), >=96 GB host. Run: \
             cargo test --release -p recursion --test aggregate production_n1_aggregate_proves_and_verifies -- --ignored --nocapture"]
 fn production_n1_aggregate_proves_and_verifies() {
     prove_production_aggregate(1, RvmTier(18));
@@ -904,7 +904,7 @@ fn production_n1_aggregate_proves_and_verifies() {
 /// projection above is the tier-21 one, not re-taken.
 /// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: tier 20 → tier 19 (471 105 rows, emulated; the projection is not re-taken).
 #[test]
-#[ignore = "issue45 A6: production N=2 aggregate proof, tier 19 since phase 5 (471 105 rows; tier 20 since phase 4 at 631 053 rows since the MODQ chip, 632 175 after phase 4; tier 21 before), ~122-142 GB projected at tier 21 at rate 1/4 (docs/07 §4), >=192 GB host. Run: \
+#[ignore = "issue45 A6: production N=2 aggregate proof. NOW (constraint set 10): 471 119 rows, tier 19, never proved at this tier — memory, time and proof bytes unmeasured (ZKVM-102); the last projection (122-142 GB at rate 1/4) was for tier 21. History: tier 19 since phase 5 (471 105 rows; tier 20 since phase 4 at 631 053 rows since the MODQ chip, 632 175 after phase 4; tier 21 before), ~122-142 GB projected at tier 21 at rate 1/4 (docs/07 §4), >=192 GB host. Run: \
             cargo test --release -p recursion --test aggregate production_n2_aggregate_proves_and_verifies -- --ignored --nocapture"]
 fn production_n2_aggregate_proves_and_verifies() {
     prove_production_aggregate(2, RvmTier(19));

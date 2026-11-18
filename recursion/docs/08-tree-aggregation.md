@@ -162,6 +162,49 @@ held by `the_test_tree_genesis_section_prints_as_the_nodes_tree_config`. Then th
 
 ## 5. The test-profile tree (Tasks 1a, 1b)
 
+### Regenerating the fixtures (ZKVM-102, 2026-11-18)
+
+The test tree's proofs are cached under `$RECURSION_FIXTURES/tree/` and go stale whenever the
+leaf or step programs, the rVM or the proof format move. **They are stale now**: recorded at
+`1ed3d69` (2026-10-11) against a leaf of 104 556 rows; phase 5 and constraint set 10 moved the
+leaf to 88 493. `tests/tree-fixtures.status` is the declared state and lists the pins that are
+stale with them.
+
+- **On a box without current fixtures** the twelve fixture-gated tests in `tests/tree.rs` skip
+  and print `TREE-FIXTURES SKIPPED <test>: <file> is missing|stale: …`; before ZKVM-102 they
+  panicked, so the suite was red everywhere and its exit status said nothing. A skip is not a
+  pass. `the_fixture_gated_tests_report_their_state` prints one line per run saying which way it
+  went, and the check for the step fixtures' existence runs before anything is proved, so a
+  box without them no longer proves four leaves first.
+- **`RECURSION_REQUIRE_TREE_FIXTURES=1`** turns every skip into a failure: for the host that is
+  supposed to hold the fixtures.
+- **In CI** (`tests/tree_status.rs`, no proofs): `state = current` with a leaf that has since
+  moved is red, and `state = stale` must say since when and which pins. CI cannot run the tree
+  tests themselves — a hosted runner cannot make the proofs under them.
+- **One command, on a host with the memory** (about 34 GB by the last measurement below, which
+  was at tier 19; the steps are tier 18 since phase 4 and the figure has not been re-taken —
+  the script records it):
+
+  ```sh
+  recursion/scripts/regen-tree-fixtures.sh            # generate (step 1), then check (step 2)
+  recursion/scripts/regen-tree-fixtures.sh --check    # only step 2
+  recursion/scripts/regen-tree-fixtures.sh --dry-run
+  ```
+
+  Step 1 is `generate_test_tree_fixtures` under `caffeinate` and `/usr/bin/time`, logged to
+  `docs/measurements/<date>-tree-test-fixtures-regen.log`. Step 2 is the tree suite with the
+  fixtures required. After a clean step 1, step 2 is expected to fail **once**, on the stale
+  pins (`T_INT_TEST`, the `tree_test` step and key pins, `tests/tree-test-genesis.json`): the
+  script prints the `TREE_TEST_*` lines to re-record them from. Re-run with `--check`; when it
+  passes, set `state = current` in the status file. The script was dry-run and its refusal
+  path exercised on the 48 GB development machine; **the generation itself was not run there**
+  (it is past what an agent session may use), so its first real run is also its first test.
+
+The production tree (§3, §4) is a different matter: 256 GB was priced at tier 21, the leaf and
+step are tier 19 now and the child verifier tier 18 (`tests/pins.json`, `tree_measure`), and
+nothing has been re-priced or proved. The `#[ignore]` strings in `tests/tree_measure.rs` and
+`tests/aggregate.rs` now lead with the current rows and tiers and say that memory is unmeasured.
+
 > Superseded by phase 4: fixed point at level 2, see docs/09. The tables below are the historical record.
 
 **Task 1a (laptop, 2026-10-09): the step by emulation over real leaves.** Four test-profile
