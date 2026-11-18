@@ -29,12 +29,13 @@ slower than the RISC-V native path:
 **The translator, `evm2rv`, is done (2026-09-18, `circuits/evm2rv`).** It compiles the bytecode to
 C over `evm-rt/` ahead of time, in a shim crate `rand-guest build` turns into an image. The shim
 reuses the interpreter's ABI harness, so the input vector and the eight public output words do not
-change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 70 295 cycles
-against the interpreter's 128 872, at 12 162 program words against 20 077 (the committed
-`evm.bin`, program id `f056f928…`, hc `08740025…`; 66 235 against 124 606 at 11 686 against
-19 637 before ZKVM-103/104 put the call, the log data and the gas into the output, and 121 638 and
-18 009 for the interpreter before MCOPY/TLOAD/TSTORE/CLZ). The harness it shares
-with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 63%
+change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 95 971 cycles
+against the interpreter's 154 517, at 8 665 program words against 16 588 (the committed
+`evm.bin`, storage layout 2, program id `4d94028f…`, hc `cd700e35…`; 70 295 against 128 872 under
+layout 1's depth-32 tree, 66 235 against 124 606 before ZKVM-103/104 put the call, the log data
+and the gas into the output, and 121 638 and 18 009 for the interpreter before
+MCOPY/TLOAD/TSTORE/CLZ). The harness it shares
+with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 73%
 of those cycles, so further gains must come from the harness or the coprocessors above. One `hc`
 per contract: the image carries a digest of its source bytecode and refuses any other code
 (status 2), because `CODECOPY` reads the input code. All nine precompiles run in software;
@@ -336,8 +337,8 @@ the same code the committed `.bin` contains.
 
 **The call, in and out.** One `READ_INPUT` vector carries the whole call —
 `[n_code, code…, n_calldata, calldata…, address(8), caller(8), callvalue(8),
-gas_limit(1), context(8), pre_root(8), n_witnesses(1), witness…]`, each witness 272 words
-(`slot(8) ‖ value(8) ‖ 32 siblings × 8`), 256-bit values as their own
+gas_limit(1), context(8), pre_root(8), n_witnesses(1), witness…]`, each witness 528 words
+(`slot(8) ‖ value(8) ‖ 64 siblings × 8`; 272 and 32 under storage layout 1), 256-bit values as their own
 little-endian limbs. It is private and hiding (`H_IN`), and a read past it is
 unsatisfiable in-circuit, which is what lets the guest pass `u32::MAX` as its
 cursor bound: a truncated vector produces no proof rather than a short read.
@@ -345,13 +346,14 @@ The eight public outputs are `out0 = status` (1 success, 0 `REVERT`, 2
 exceptional halt) and `out1..out7` = words 0..6 of
 
 ```text
-hash(EVM_OUT, [codehash(8) ‖ pre_root(8) ‖ post_root(8) ‖ return_hash(8) ‖ logs_hash(8)
-               ‖ address(8) ‖ caller(8) ‖ callvalue(8) ‖ calldata_hash(8) ‖ context(8)
-               ‖ gas_limit(1) ‖ gas_used(1)])
+hash(EVM_OUT, [layout(1) ‖ codehash(8) ‖ pre_root(8) ‖ post_root(8) ‖ return_hash(8)
+               ‖ logs_hash(8) ‖ address(8) ‖ caller(8) ‖ callvalue(8) ‖ calldata_hash(8)
+               ‖ context(8) ‖ gas_limit(1) ‖ gas_used(1)])
 ```
 
-— 82 words through the domain-tagged sponge (40 before ZKVM-103/104): a 224-bit
-binding of the contract, **both** state roots, the return data, the logs, the
+— 83 words through the domain-tagged sponge (40 before ZKVM-103/104, 82 before
+ZKVM-105 put the storage layout first): a 224-bit
+binding of the storage layout, the contract, **both** state roots, the return data, the logs, the
 call itself (which contract address, which caller, what value, which calldata,
 under which gas limit and which `context`) and the gas it used.
 `logs_hash = keccak256(be32(n_logs) ‖ per log: be32(n_topics) ‖ topics ‖
@@ -364,85 +366,105 @@ than 1 binds `post_root = pre_root` and an empty log set (a status of 2 binds
 empty return data as well, and `gas_used = gas_limit`), so a failed call can never publish a state change;
 `abi::public_output` is the single place that rule lives.
 
-**Storage.** A depth-32 sparse Merkle tree over 256-bit slots, hashed with the
+**Storage.** A depth-64 sparse Merkle tree over 256-bit slots (storage layout
+2; depth 32 under layout 1, below), hashed with the
 note layer's own domain-tagged Poseidon2 sponge rather than Keccak: leaf
-position is the top 32 bits, big-endian, of `keccak256(slot)` (bit `i`
+position is the top 64 bits, big-endian, of `keccak256(slot)` (bit `i`
 choosing left/right at level `i` — `emit_merkle_verify`'s convention), the leaf
 is `hash(STORAGE_LEAF, [slot ‖ value])` and a node `hash(NODE, [left ‖ right])`,
 the note tree's own. The leaf is **canonical in the value**: a zero value
 hashes to one fixed leaf whatever the slot, so an absent slot, a never-written
 slot and a slot written back to zero are the same and the root is
 history-independent. The guest never holds the tree — it holds the pre-state
-root and one witness per slot the run touches, verifies each the first time it
-is used, and on a store refreshes exactly the sibling every *other* witness
-holds at the level where its path diverges (independent witnesses against the
-pre-root otherwise go stale the moment one leaf changes). A slot the bytecode
-touches with no witness is an exceptional halt, so the witness list is the
-call's access list. `MAX_WITNESSES = 16`.
+root and one witness per slot the run touches (528 words: slot, value, 64
+siblings), verifies each the first time it is used, and on a store refreshes
+exactly the sibling every *other* witness holds at the level where its path
+diverges (independent witnesses against the pre-root otherwise go stale the
+moment one leaf changes). A slot the bytecode touches with no witness is an
+exceptional halt, so the witness list is the call's access list.
+`MAX_WITNESSES = 32` (16 before ZKVM-105).
 
-**Known limitation (storage index).** The leaf position is only the top 32
-bits of `keccak256(slot)`, so two slots can be ground into one position at
-about 2^32 work. A colliding pair is **refused at the input**: `push` rejects a
-witness whose leaf position a previous witness already claimed, which
-`decode_input` turns into a parse error and so into the canonical malformed
-output (status 2, `post_root = pre_root`). One position therefore carries one
-witness per call, and a call that needs both slots of a ground pair cannot be
-proved at all. That is a griefing vector — an attacker who grinds a collision
-against a known contract can make one pair of slots unusable together — and it
-is fail-closed.
+**Storage layouts and program versions (ZKVM-105).** The storage layout is a
+property of the *image*, and there is now more than one image of the EVM guest:
 
-The refusal is what makes it fail-closed, and it is not belt-and-braces. The
-leaf is canonical in the value, so both witnesses of a ground pair verify
-while the position is empty (the same `H(STORAGE_LEAF, [0; 16])` leaf under the
-same siblings). Accepting them would let a contract that reads both slots
-before writing both bind a `post_root` carrying only the *second* store — the
-sibling refresh never touches a witness at the updated witness's own index, and
-the second store folds its original siblings — while the interpreter carried on
-for the rest of the call believing both writes had landed. That is a divergence
-between the bound root and the executed call, i.e. a forgery, not griefing;
-refusing the pair where it enters is the five-line fix, and it is why the
-witness set's positions are checked for distinctness rather than assumed
-distinct. The remedy for the collision itself, when it matters, is a deeper
-index (the full 256-bit slot hash over a depth-256 tree, or a sparse index with
-64+ bits), which is a tree-shape change, not a protocol one.
+| layout | tree | image | built from |
+|---|---|---|---|
+| 1 | depth 32, position = top 32 bits of `keccak256(slot)`, 272-word witnesses | `guests-compiled/bin/evm-v1.bin` | `guests-compiled/evm-v1` (`evm-core` with its `storage-v1` feature) |
+| 2 | depth 64, position = top 64 bits, 528-word witnesses | `guests-compiled/bin/evm.bin` | `guests-compiled/evm` |
 
-**Verdict on the collision itself (the 2026-09-27 zkVM review's evm-core lead).**
-The cost is lower than "about 2^32" for the useless case and exactly that for
-the useful one: *some* colliding pair is a birthday search, ~2^16 slots
-(`tests/evm_storage.rs` finds one among slots `0, 1, 2, …` in milliseconds); a
-slot colliding with one *chosen* victim slot — a known holder's balance entry, a
-claim flag — is a 32-bit second preimage, ~2^32 Keccaks, seconds on a GPU. The
-attacker needs control of a slot key, which for a mapping keyed by address is
-free (any caller can make a call). What it buys is more than the
-per-call refusal above: **while one slot of a pair holds a non-zero value, its
-partner cannot be touched at all, by any call** — the position's leaf is
-`H(STORAGE_LEAF, [holder ‖ value])`, and no witness for the partner, whatever
-value it claims, folds to it, so every read or write of the partner halts
-(`a_ground_colliding_slot_freezes_its_partner_while_it_holds_a_value`). So an
-attacker who grinds a key against a victim's still-zero slot and gets any value
-into its own first can freeze that slot for as long as it keeps the value: the
-victim cannot receive into it, and a contract path that must write it (a
-`claimed[user] = true` before a payout) stops. What it cannot do: forge a
-transition (every successful call's pre- and post-roots are consistent), move or
-destroy value (a call that touches the frozen slot halts before any state
-changes, and a non-zero victim slot freezes the *attacker's* slot instead), or
-touch any slot but the one it ground against. Severity: a targeted, persistent,
-fail-closed denial of one slot — Low for a token, higher for a contract whose
-liveness hangs on one flag.
+Both are one source (`guests-compiled/evm/src/guest.rs` over `evm-core`), both
+are rebuilt and compared byte for byte by `rand-guest/tests/build.rs`, and
+`rand_zkvm::guests::compiled::evm_images()` is the table: `(layout, depth,
+program)` per version. The mechanism has three parts, and it is what the first
+cut of this section said did not exist ("one pinned image per guest … no way to
+publish a second storage version beside the first"):
 
-**Why it is not fixed here.** The remedy is the tree-shape change above (a
-depth-64 index doubles every `SLOAD`/`SSTORE`'s Merkle work; a depth-256 one is
-eight times it), and it changes `evm-core`, so the committed `bin/evm.bin` —
-pinned byte for byte by `rand-guest/tests/build.rs` — and every `evm2rv`
-translation that links `evm-core`'s storage (`evm_sload`/`evm_sstore`) would get
-new digests. The `guests-compiled` provenance process has one pinned image per
-guest, rebuilt and compared, and no way to publish a second storage version
-beside the first, so a fix here would replace the pinned interpreter rather than
-add a version, and every contract deployed against it would move with it. It is
-also moot on chain 15 today: the EVM interpreter (19 637 words) cannot be called
-at the node's tier-14 cap (the review's CPU-1). It belongs with the next
-interpreter version, alongside a deploy-time program version so existing
-contracts keep theirs.
+1. **The layout is the first word of the `EVM_OUT` preimage**
+   (`evm_core::storage::LAYOUT_VERSION`), so a proof says which layout its two
+   roots are under. A proof by the layout-1 image never passes for a statement
+   about layout-2 roots, or the reverse, whatever the roots are
+   (`tests/emulated_guests.rs::two_evm_storage_layouts_are_admitted_side_by_side`).
+2. **One `hc` per layout.** A chain admits each row of the table by its `hc`;
+   admitting a new layout is adding a row, and it retires none.
+3. **The contract's record carries its layout** beside its storage root. For a
+   call to a contract the chain accepts only the image of that contract's
+   layout, and checks the output against `evm::EvmStatement` with that `layout`.
+
+Adding a third layout is a `cfg` in `evm-core/src/storage.rs`, a guest crate, an
+image and a row. **Migration** of a contract from layout 1 to layout 2 is a
+re-rooting: the same slots and values inserted into a depth-64 tree
+(`evm::SparseTree::migrate`; `tests/evm_storage.rs` checks it is
+history-independent and reversible). Whoever holds the contract's slots can
+compute the new root; **nothing proves it** — a chain does it at a cut, or
+accepts it from the contract's owner, and a proved migration (a guest that walks
+both trees) is not built. Translated contracts (`evm2rv`) link the default
+layout, 2; there is no switch to translate against layout 1.
+
+What is in this repository is the guest side and the table. **The fullnode's
+admission of two images for one guest, and a layout field in its contract
+record, are not** — they are the chain's half of items 2 and 3.
+
+**The storage index (ZKVM-105): what the wider index buys.** Under layout 1 the
+leaf position was 32 bits of `keccak256(slot)`. *Some* colliding pair is a
+birthday search, ~2^16 slots; a slot colliding with one *chosen* victim slot — a
+known holder's balance entry, a claim flag — is a 32-bit second preimage, ~2^32
+Keccaks, minutes on a GPU, and the attacker needs only control of a slot key,
+which for a mapping keyed by address is free. What that bought was a **freeze**:
+while one slot of a pair holds a non-zero value, its partner cannot be touched
+at all, by any call — the position's leaf is `H(STORAGE_LEAF, [holder ‖
+value])`, and no witness for the partner, whatever value it claims, folds to it.
+An attacker who ground a key against a victim's still-zero slot and got a value
+into its own first froze that slot for as long as it kept the value. It could
+not forge a transition, move or destroy value, or touch any other slot.
+
+Under layout 2 the position is 64 bits, so:
+
+- a partner for a **chosen** slot is a 64-bit second preimage: **about 2^64
+  Keccak evaluations**. That is the bound for the freeze, and it is a work
+  bound, not an impossibility: the leaf still does not carry a proof of
+  non-collision, so an attacker who does that work freezes one slot as before.
+  A keyed leaf that proves non-collision (the issue's other option) is not
+  built;
+- *some* colliding pair of the attacker's own choosing is still a birthday
+  search, now ~2^32. It freezes only the attacker's own two slots against each
+  other, and a call that names both is still refused at the input (`push`
+  rejects a second witness at a position already claimed —
+  `ParseError::DuplicateWitnessIndex`, the canonical malformed output). That
+  refusal is not belt-and-braces: the leaf is canonical in the value, so both
+  witnesses of a colliding pair verify while the position is empty, and
+  accepting them would let a contract that reads both before writing both bind
+  a `post_root` carrying only the second store.
+
+`tests/evm_storage.rs::a_pair_that_collides_on_32_bits_does_not_freeze_under_the_64_bit_index`
+finds a 32-bit pair and shows it is two independent slots under layout 2;
+`tests/emulated_guests.rs::a_ground_slot_pair_freezes_under_layout_1_and_not_under_layout_2`
+runs the same pair through both committed images.
+
+**What it costs.** Every Merkle walk is twice as long: the ERC-20 `transfer`
+goes from 128 872 to 154 517 executed cycles under the interpreter (still tier
+18), and each witness is 256 words longer on the input tape. The walk itself is
+software around a `POSEIDON2` call per level; a looped Merkle-verify syscall
+(ZKVM-117) would take most of that back and needs a constraint-set change.
 
 **Authorisation: the output binds the call (ZKVM-103).** `caller`, `address`,
 `callvalue`, the calldata, `gas_limit` and `context` are private inputs a prover
@@ -520,10 +542,10 @@ slots touched, one `Transfer` log.
 | | |
 |---|---|
 | contract | `guests-compiled/evm/contracts/ERC20.sol`, `solc 0.8.37`, `--optimize --optimize-runs 200 --evm-version shanghai`, 1 296 bytes of runtime bytecode (committed as hex; `contracts/SOLC.md` records the binary's sha256 and the exact command) |
-| guest program | **20 077 words** (`evm.bin` program id `f056f928…`, hc `08740025…`) — 17 985 of text plus a 2 092-instruction data prologue (19 637 = 17 598 + 2 039 before ZKVM-103/104); the rows below this one, and the digest-row count, were measured on the pre-MCOPY/TLOAD/TSTORE/CLZ image of 18 009 words: 16 370 of text plus a 1 639-instruction data prologue for 2 444 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations), and 4 503 program-digest rows |
-| input vector | 929 words (the bytecode, 68 bytes of calldata, the env, the eight context words, two 272-word witnesses) → 234 input-digest rows (921 and 232 before the context) |
-| cycles | **128 872 executed** on the committed image, 134 126 with both digest prefixes (124 606 executed before ZKVM-103/104 added the calldata hash, the log-data hash and the 82-word digest; 121 638 executed, 126 373 total, on the pre-MCOPY/TLOAD/TSTORE/CLZ image) |
-| Poseidon2 | 1 070 absorb rows (132 sponge calls: four 32-level Merkle walks, plus the leaves and the output digest), 5 805 permutations in all with the digest prefixes |
+| guest program | **16 588 words** (`evm.bin`, storage layout 2, program id `4d94028f…`, hc `cd700e35…`) — 14 478 of text plus a 2 110-instruction data prologue (20 077 = 17 985 + 2 092 under layout 1, where the 32-level loops were unrolled; 19 637 = 17 598 + 2 039 before ZKVM-103/104); the rows below this one, and the digest-row count, were measured on the pre-MCOPY/TLOAD/TSTORE/CLZ image of 18 009 words: 16 370 of text plus a 1 639-instruction data prologue for 2 444 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations), and 4 503 program-digest rows |
+| input vector | 1 441 words (the bytecode, 68 bytes of calldata, the env, the eight context words, two 528-word witnesses) → 362 input-digest rows (929 and 234 with layout 1's 272-word witnesses; 921 and 232 before the context) |
+| cycles | **154 517 executed** on the committed image, 159 026 with both digest prefixes (128 872 and 134 126 under layout 1's depth-32 tree; 124 606 executed before ZKVM-103/104 added the calldata hash, the log-data hash and the 82-word digest; 121 638 executed, 126 373 total, on the pre-MCOPY/TLOAD/TSTORE/CLZ image) |
+| Poseidon2 | 1 070 absorb rows (132 sponge calls: four 32-level Merkle walks, plus the leaves and the output digest), 5 805 permutations in all with the digest prefixes — on the pre-MCOPY image under layout 1. Under layout 2 the four walks are 64 levels each (260 sponge calls with the leaves) and `rand-guest run --tier 18` reports 5 831 permutations all in |
 | Keccak | 20 permutations on the committed image (`codehash` over 1 296 bytes is ten of them; two mapping-slot hashes; the return-data and logs hashes; since ZKVM-103/104 the calldata hash, the `Transfer`'s data hash and a second block of the longer logs preimage); 17 before |
 | tier | **`Tier(18)`** — `keccak_log_height` would be 10 (17 permutations = 544 rows, padded to 1 024) |
 | the proof | **not produced on the development machine (48 GB): three attempts, ≥ 28.5 GB resident at SIGKILL.** A tier-18 batch is 2^18 cpu rows, 2^20 memory and poseidon2 rows and a 2 612-column keccak table; the OS killed every attempt while the resident set was still growing, so the requirement is *above* 28.5 GB and a **≥ 64 GB machine** is the safe figure. `compiled_evm_erc20_transfer_proves_at_tier_18` is therefore `#[ignore]`d. Everything that does not need that memory — the guest's outputs against a native run, the digest binding, the tier arithmetic — is asserted by `compiled_evm_erc20_transfer_binds_the_state_root_transition`, which always runs |

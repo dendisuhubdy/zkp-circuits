@@ -45,7 +45,7 @@ fn run_with(code: &[u8], calldata: &[u8], tree: &SparseTree, slots: &[U256]) -> 
             evm_core::storage::Witness {
                 slot: w.slot,
                 value: w.value,
-                siblings: w.siblings,
+                siblings: w.siblings.try_into().unwrap(),
                 verified: false,
             },
         )

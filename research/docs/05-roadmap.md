@@ -980,6 +980,19 @@ real count needs the guest.
    by about half; not priced.
 7. Pairing (a 1 768× gap) stays out of scope.
 
+**Re-vendor note: the EVM guest has two storage layouts and two images** (ZKVM-105; no
+constraint-set change). `evm-core`'s storage tree is depth 64 by default (layout 2: the leaf
+position is the top 64 bits of `keccak256(slot)`, a witness is 528 words, `MAX_WITNESSES` is 32)
+and depth 32 under its new `storage-v1` feature (layout 1); the `EVM_OUT` preimage is 83 words,
+the layout first. `guests-compiled/bin/evm.bin` is now the layout-2 image and a new
+`guests-compiled/bin/evm-v1.bin` the layout-1 one (hcs and program ids in the PR and in
+`rand-guest info`); `rand_zkvm::guests::compiled::evm_images()` lists both. A storage root built
+under the depth-32 tree is **not** a root under layout 2: a contract either stays on `evm-v1.bin`
+or is re-rooted (`evm::SparseTree::migrate`) at a cut. The fullnode needs, and does not have:
+admission of more than one `hc` for the EVM guest, a layout field in a contract's record, and
+`EvmStatement.layout` set from it. `deploy/sync-zkvm.sh` rsyncs `research/src`, which now
+`include_bytes!`s both images.
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency

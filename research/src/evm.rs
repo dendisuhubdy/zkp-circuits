@@ -8,8 +8,9 @@
 //! syscalls compute (`keccak::keccak_f`, `hash::sponge_hash`) — `tests/evm_storage.rs` asserts
 //! host and guest agree on every index, leaf and root.
 //!
-//! The tree is `notes::DEPTH = 32` levels of the commitment tree's own node hash over storage
-//! leaves: position is the top 32 bits, big-endian, of `keccak256(slot as 32 big-endian bytes)`,
+//! The tree is [`DEPTH`] = 64 levels (storage layout 2; 32 under layout 1, [`layout_depth`]) of the
+//! commitment tree's own node hash over storage leaves: position is the top `DEPTH` bits,
+//! big-endian, of `keccak256(slot as 32 big-endian bytes)`,
 //! whose bit `i` (LSB first) chooses left/right at level `i` — `asm::emit_merkle_verify`'s
 //! convention. The leaf is canonical in the value, so the empty tree has a well-defined root and
 //! writing a slot back to zero restores it ([`leaf_hash`]).
@@ -23,7 +24,7 @@ use evm_core::u256::U256;
 
 use crate::hash::sponge_hash;
 use crate::keccak;
-use crate::notes::{self, domain, Word8, DEPTH};
+use crate::notes::{self, domain, Word8};
 
 /// [`evm_core::Host`] over this crate's reference primitives: the Keccak-f[1600] permutation the
 /// `KECCAK` syscall computes and the Poseidon2 sponge the `POSEIDON2` syscall computes. Every
@@ -43,17 +44,38 @@ impl evm_core::Host for HostRef {
     }
 }
 
-/// The leaf position of `slot`: the top 32 bits, big-endian, of `keccak256(slot)`, read as a `u32`
-/// whose bit `i` chooses left (0) or right (1) at level `i`.
-pub fn slot_index(slot: &U256) -> u32 {
+/// The storage layouts (ZKVM-105): the tree's depth, which is also the width in bits of a leaf
+/// position. Layout 1 is depth 32, layout 2 depth 64; `evm_core::storage::LAYOUT_VERSION` is the
+/// one this build of `evm-core` runs natively (2), and `evm-v1.bin` is layout 1's image.
+pub const fn layout_depth(layout: u32) -> usize {
+    match layout {
+        1 => 32,
+        2 => 64,
+        _ => panic!("no such storage layout"),
+    }
+}
+
+/// The current layout's depth: `evm_core::storage::DEPTH`, 64.
+pub const DEPTH: usize = evm_core::storage::DEPTH;
+
+/// The leaf position of `slot` in the current layout: the top 64 bits, big-endian, of
+/// `keccak256(slot)`, read as an integer whose bit `i` chooses left (0) or right (1) at level `i`.
+pub fn slot_index(slot: &U256) -> u64 {
+    slot_index_at(slot, DEPTH)
+}
+
+/// The leaf position of `slot` in a tree of the given depth: the top `depth` bits of
+/// `keccak256(slot)`. `depth = 32` is layout 1's position.
+pub fn slot_index_at(slot: &U256, depth: usize) -> u64 {
+    assert!((1..=64).contains(&depth));
     let k = keccak::keccak256(&slot.to_be_bytes());
-    u32::from_be_bytes([k[0], k[1], k[2], k[3]])
+    u64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]]) >> (64 - depth)
 }
 
 /// `H(STORAGE_LEAF, [slot(8), value(8)])`, **canonical in the value**: a zero value gives the one
 /// `H(STORAGE_LEAF, [0; 16])` whatever the slot is. So an absent slot, a never-written slot and a
 /// slot written back to zero are the same leaf; the storage root is history-independent and the
-/// empty tree's root is just this leaf lifted 32 levels ([`empty_root`]). Every leaf on both sides
+/// empty tree's root is just this leaf lifted `DEPTH` levels ([`empty_root`]). Every leaf on both sides
 /// — witnesses, verification, loads, stores and the default subtrees — goes through this function
 /// or its `evm_core::storage::leaf_hash` twin.
 pub fn leaf_hash(slot: &U256, value: &U256) -> Word8 {
@@ -74,62 +96,107 @@ fn node_hash(l: &Word8, r: &Word8) -> Word8 {
 }
 
 /// `defaults()[l]` is the root of an empty subtree of depth `l`: `defaults()[0]` is the zero-value
-/// leaf and `defaults()[l] = H(NODE, defaults()[l-1], defaults()[l-1])`. Computed once — the 32
-/// sponge hashes are the same for every tree, and `SparseTree` consults the table at every level
-/// where a subtree holds nothing.
-fn defaults() -> &'static [Word8; DEPTH + 1] {
-    static TABLE: OnceLock<[Word8; DEPTH + 1]> = OnceLock::new();
+/// leaf and `defaults()[l] = H(NODE, defaults()[l-1], defaults()[l-1])`. Computed once, to depth
+/// 64 — the sponge hashes are the same for every tree of every layout, and `SparseTree` consults
+/// the table at every level where a subtree holds nothing.
+fn defaults() -> &'static [Word8; 65] {
+    static TABLE: OnceLock<[Word8; 65]> = OnceLock::new();
     TABLE.get_or_init(|| {
-        let mut d = [[0u32; 8]; DEPTH + 1];
+        let mut d = [[0u32; 8]; 65];
         d[0] = leaf_hash(&U256::ZERO, &U256::ZERO);
-        for l in 1..=DEPTH {
+        for l in 1..=64 {
             d[l] = node_hash(&d[l - 1], &d[l - 1]);
         }
         d
     })
 }
 
-/// The root of the tree with no slot written: `defaults()[DEPTH]`.
+/// The root of the current layout's tree with no slot written: `defaults()[DEPTH]`.
 pub fn empty_root() -> Word8 {
     defaults()[DEPTH]
 }
 
 /// The host's contract storage: the written slots, keyed by leaf position, with empty subtrees
 /// standing in for everything else. Builds the roots and the witnesses the guest verifies.
-#[derive(Clone, Debug, Default)]
+///
+/// A tree has a depth: [`new`](SparseTree::new) is the current layout's (64),
+/// [`with_depth`](SparseTree::with_depth) any other — 32 for layout 1's image, and for
+/// [`migrate`](SparseTree::migrate).
+#[derive(Clone, Debug)]
 pub struct SparseTree {
+    depth: usize,
     /// Leaf position → (slot, value). Only non-zero values are held: a zero value is the default
     /// leaf, so storing one is removing the entry (and both hash the same).
-    entries: BTreeMap<u32, (U256, U256)>,
+    entries: BTreeMap<u64, (U256, U256)>,
+}
+
+impl Default for SparseTree {
+    fn default() -> Self {
+        SparseTree::new()
+    }
 }
 
 impl SparseTree {
     pub fn new() -> Self {
-        SparseTree::default()
+        SparseTree::with_depth(DEPTH)
+    }
+
+    /// An empty tree of the given depth (1..=64): 32 is storage layout 1, 64 layout 2.
+    pub fn with_depth(depth: usize) -> Self {
+        assert!((1..=64).contains(&depth));
+        SparseTree { depth, entries: BTreeMap::new() }
+    }
+
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// The same slots and values in a tree of another depth: the one-time re-rooting a contract's
+    /// storage needs to move from layout 1 to layout 2 (`docs/04-guests.md`). The host does it
+    /// from the slots it holds; nothing is proved.
+    pub fn migrate(&self, depth: usize) -> SparseTree {
+        let mut t = SparseTree::with_depth(depth);
+        for (slot, value) in self.entries.values() {
+            t.insert(*slot, *value);
+        }
+        t
     }
 
     /// Write `value` at `slot`. A zero value removes the entry, which is the same tree either way
     /// because the leaf is canonical in the value.
     ///
-    /// Panics if two distinct slots collide on one leaf position — a 2^-32-per-pair event that
+    /// Panics if two distinct slots collide on one leaf position — a 2^-depth-per-pair event that
     /// would otherwise silently drop a slot, and the tests would rather see it than debug a root.
+    /// [`try_insert`](Self::try_insert) reports it instead.
     pub fn insert(&mut self, slot: U256, value: U256) {
-        let idx = slot_index(&slot);
+        if let Err(held) = self.try_insert(slot, value) {
+            panic!("the leaf position of slot {slot:?} is already held by a different slot, {held:?}");
+        }
+    }
+
+    /// [`insert`](Self::insert), returning the slot that already holds the position instead of
+    /// panicking — how a depth-32 tree shows a ground collision.
+    pub fn try_insert(&mut self, slot: U256, value: U256) -> Result<(), U256> {
+        let idx = slot_index_at(&slot, self.depth);
+        if let Some((held, _)) = self.entries.get(&idx) {
+            if *held != slot {
+                return Err(*held);
+            }
+        }
         if value.is_zero() {
             self.entries.remove(&idx);
-            return;
+        } else {
+            self.entries.insert(idx, (slot, value));
         }
-        if let Some((held, _)) = self.entries.get(&idx) {
-            assert_eq!(*held, slot, "leaf position {idx} is already held by a different slot");
-        }
-        self.entries.insert(idx, (slot, value));
+        Ok(())
     }
 
     /// The hash of the subtree at level `level` whose nodes all share the leaf-position prefix
     /// `prefix = index >> level`. Empty subtrees short-circuit to the default table, so the walk
-    /// costs `O(entries × DEPTH)` hashes rather than `O(2^DEPTH)`.
-    fn node_at(&self, level: usize, prefix: u64) -> Word8 {
-        let Some((_, (slot, value))) = self.entries.iter().find(|(i, _)| (**i as u64) >> level == prefix) else {
+    /// costs `O(entries × depth)` hashes rather than `O(2^depth)`. (`u128` so that `level = 64`,
+    /// the root of a depth-64 tree, is a shift like any other.)
+    fn node_at(&self, level: usize, prefix: u128) -> Word8 {
+        let Some((_, (slot, value))) = self.entries.iter().find(|(i, _)| (**i as u128) >> level == prefix) else {
             return defaults()[level];
         };
         if level == 0 {
@@ -141,11 +208,11 @@ impl SparseTree {
     }
 
     pub fn root(&self) -> Word8 {
-        self.node_at(DEPTH, 0)
+        self.node_at(self.depth, 0)
     }
 
     /// The witness for `slot`: its value (zero if the slot was never written) and, for each level
-    /// `l = 0..DEPTH`, the hash of the sibling subtree of the path's node at that level, bottom-up.
+    /// `l = 0..depth`, the hash of the sibling subtree of the path's node at that level, bottom-up.
     ///
     /// Panics, like [`insert`](Self::insert), if a *different* slot holds this leaf position:
     /// `entries` is keyed by position, so without the check the colliding slot's value and leaf
@@ -153,30 +220,32 @@ impl SparseTree {
     /// could. `insert` already makes that state unreachable through this type; the assert is here
     /// so it stays unreachable rather than being unreachable by argument.
     pub fn witness(&self, slot: &U256) -> Witness {
-        let idx = slot_index(slot);
+        let idx = slot_index_at(slot, self.depth);
         if let Some((held, _)) = self.entries.get(&idx) {
             assert_eq!(held, slot, "leaf position {idx} is held by a different slot");
         }
         let value = self.entries.get(&idx).map(|(_, v)| *v).unwrap_or(U256::ZERO);
-        let siblings = std::array::from_fn(|l| self.node_at(l, ((idx as u64) >> l) ^ 1));
+        let siblings = (0..self.depth).map(|l| self.node_at(l, ((idx as u128) >> l) ^ 1)).collect();
         Witness { slot: *slot, value, siblings }
     }
 }
 
-/// One slot's Merkle witness against a `SparseTree`'s root: the value and `DEPTH` siblings from
-/// the leaf up. `evm_core::storage::Witness` is the guest's copy, plus its own `verified` flag.
+/// One slot's Merkle witness against a `SparseTree`'s root: the value and one sibling per level
+/// from the leaf up (the tree's depth of them). `evm_core::storage::Witness` is the guest's copy,
+/// plus its own `verified` flag.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Witness {
     pub slot: U256,
     pub value: U256,
-    pub siblings: [Word8; DEPTH],
+    pub siblings: Vec<Word8>,
 }
 
 impl Witness {
-    /// The input-vector encoding: `slot(8) ‖ value(8) ‖ sibling_0(8) ‖ … ‖ sibling_31(8)`, 272
-    /// words. 256-bit values are their own little-endian limbs, so nothing is byte-swapped.
+    /// The input-vector encoding: `slot(8) ‖ value(8) ‖ sibling_0(8) ‖ … `, 528 words in the
+    /// current layout (272 in layout 1). 256-bit values are their own little-endian limbs, so
+    /// nothing is byte-swapped.
     pub fn words(&self) -> Vec<u32> {
-        let mut w = Vec::with_capacity(WITNESS_WORDS);
+        let mut w = Vec::with_capacity(16 + 8 * self.siblings.len());
         w.extend_from_slice(&self.slot.0);
         w.extend_from_slice(&self.value.0);
         for sib in &self.siblings {
@@ -186,7 +255,8 @@ impl Witness {
     }
 }
 
-/// Words per witness in the input vector: slot 8 + value 8 + `DEPTH` × 8 siblings.
+/// Words per witness in the current layout's input vector: slot 8 + value 8 + `DEPTH` × 8
+/// siblings.
 pub const WITNESS_WORDS: usize = 16 + DEPTH * 8;
 
 /// One call to the EVM guest, host side: everything the input vector holds, plus the storage tree
@@ -227,7 +297,8 @@ impl EvmCall {
     /// testing the malformed path while looking like a real call. A test that *means* to exercise
     /// the rejection splices the duplicate into the word vector itself.
     pub fn input_words(&self) -> Vec<u32> {
-        let mut idxs: Vec<u32> = self.touched.iter().map(slot_index).collect();
+        let depth = self.tree.depth();
+        let mut idxs: Vec<u64> = self.touched.iter().map(|s| slot_index_at(s, depth)).collect();
         let n = idxs.len();
         idxs.sort_unstable();
         idxs.dedup();
@@ -258,6 +329,7 @@ impl EvmCall {
     /// root and the guest's witness-updated root are asserted equal, which is the one check that
     /// `StorageTree::store`'s sibling refresh and `SparseTree`'s rebuild agree.
     pub fn expected(&self) -> ([u32; 8], Outcome, SparseTree) {
+        assert_eq!(self.tree.depth(), DEPTH, "evm-core runs the current layout natively; a layout-1 call goes through evm-v1.bin");
         let words = self.input_words();
         // The guest keeps this in `.bss`; a host test boxes it (146 KiB is not for a frame).
         let mut ws = Box::new(Workspace::ZERO);
@@ -329,6 +401,10 @@ pub struct EvmLog {
 /// hashes the fields exactly as given and applies no rule of its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvmStatement {
+    /// The storage layout both roots are under (`evm_core::storage::LAYOUT_VERSION`): 1 for
+    /// `evm-v1.bin`'s depth-32 tree, 2 for `evm.bin`'s depth-64 one. A chain keeps it in the
+    /// contract's record beside the root, and admits the image of that layout for the contract.
+    pub layout: u32,
     /// `keccak256` of the contract's runtime bytecode.
     pub codehash: [u8; 32],
     pub pre_root: Word8,
@@ -358,12 +434,13 @@ impl EvmStatement {
         keccak::keccak256(&msg)
     }
 
-    /// The 82-word `EVM_OUT` preimage.
+    /// The 83-word `EVM_OUT` preimage.
     pub fn preimage(&self) -> Vec<u32> {
         let pack = |h: [u8; 32]| -> Word8 {
             std::array::from_fn(|i| u32::from_le_bytes([h[4 * i], h[4 * i + 1], h[4 * i + 2], h[4 * i + 3]]))
         };
-        let mut msg = Vec::with_capacity(82);
+        let mut msg = Vec::with_capacity(83);
+        msg.push(self.layout);
         msg.extend_from_slice(&pack(self.codehash));
         msg.extend_from_slice(&self.pre_root);
         msg.extend_from_slice(&self.post_root);

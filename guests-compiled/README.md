@@ -9,6 +9,15 @@ That writes `bin/evm.bin` and `bin/evm.bin.sha256` together. `--max-words 65535`
 (`rand-guest/README.md`'s "The cap"), which is a genesis parameter on the v0.4 chain, not yet
 raised for either of them.
 
+**`evm.bin` and `evm-v1.bin` are one source.** `guests-compiled/evm` and `guests-compiled/evm-v1`
+both include `evm/src/guest.rs`; the second builds `evm-core` with its `storage-v1` feature
+(storage layout 1, a depth-32 tree) and the first without (layout 2, depth 64). After an
+`evm-core` change both are rebuilt:
+
+    cd rand-guest && cargo run -- build ../guests-compiled/evm-v1 --out ../guests-compiled/bin/evm-v1.bin --max-words 65535
+
+`research/docs/04-guests.md`'s "Storage layouts and program versions" says what the two are for.
+
 **`fib.bin` and `keccak256.bin` are never rebuilt over.** They are legacy flat pins (below) and
 `build` only writes the image container, so a rebuild into `bin/` would replace a file two repos
 load with `from_flat_binary` by one they cannot; `rand-guest build` refuses to write over them.

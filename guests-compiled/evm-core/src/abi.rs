@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! [n_code, code…, n_calldata, calldata…, address(8), caller(8), callvalue(8), gas_limit(1),
-//!  context(8), pre_root(8), n_witnesses(1), witness…]   witness = [slot(8), value(8), sibling_0(8), …, sibling_31(8)]   (272 words)
+//!  context(8), pre_root(8), n_witnesses(1), witness…]   witness = [slot(8), value(8), sibling_0(8), …, sibling_63(8)]   (528 words; 272, 32 siblings, in storage layout 1)
 //! ```
 //!
 //! `context` is eight words the guest never interprets: it carries them from the input into the
@@ -23,12 +23,15 @@
 //! `out0 = status` (1 success, 0 revert, 2 exceptional halt) and `out1..out7` = words 0..6 of
 //!
 //! ```text
-//! hash(EVM_OUT, [codehash(8) ‖ pre_root(8) ‖ post_root(8) ‖ return_hash(8) ‖ logs_hash(8)
-//!                ‖ address(8) ‖ caller(8) ‖ callvalue(8) ‖ calldata_hash(8) ‖ context(8)
-//!                ‖ gas_limit(1) ‖ gas_used(1)])
+//! hash(EVM_OUT, [layout(1) ‖ codehash(8) ‖ pre_root(8) ‖ post_root(8) ‖ return_hash(8)
+//!                ‖ logs_hash(8) ‖ address(8) ‖ caller(8) ‖ callvalue(8) ‖ calldata_hash(8)
+//!                ‖ context(8) ‖ gas_limit(1) ‖ gas_used(1)])
 //! ```
 //!
-//! — 82 words through the domain-tagged Poseidon2 sponge, a 224-bit binding of the contract, both
+//! — 83 words through the domain-tagged Poseidon2 sponge. `layout` is
+//! [`LAYOUT_VERSION`](crate::storage::LAYOUT_VERSION), the storage layout both roots are under
+//! (ZKVM-105): two images that differ in layout can be admitted side by side and neither's proof
+//! passes for the other's roots. The rest is a 224-bit binding of the contract, both
 //! state roots, the return data, the logs, **who called what with which arguments** (ZKVM-103)
 //! and what it cost (ZKVM-104). `codehash = keccak256(runtime bytecode)`,
 //! `return_hash = keccak256(return data)`, `calldata_hash = keccak256(calldata)`,
@@ -80,13 +83,15 @@ use crate::interp::{
     Buffers, Env, Halt, Interpreter, Log, Outcome, MAX_CALLDATA_BYTES, MAX_CODE_BYTES, MAX_LOGS,
     MAX_RETURN_BYTES, MAX_TOPICS,
 };
-use crate::storage::{StorageError, StorageTree, Witness, EVM_OUT_DOMAIN, MAX_WITNESSES};
+use crate::storage::{
+    StorageError, StorageTree, Witness, EVM_OUT_DOMAIN, LAYOUT_VERSION, MAX_WITNESSES,
+};
 use crate::u256::U256;
 use crate::{dhash, keccak256, Host};
 
-/// Words in the public-output digest's preimage: ten 8-word hashes, roots and call fields, then
-/// `gas_limit` and `gas_used`.
-pub const OUT_WORDS: usize = 82;
+/// Words in the public-output digest's preimage: the layout version, ten 8-word hashes, roots and
+/// call fields, then `gas_limit` and `gas_used`.
+pub const OUT_WORDS: usize = 83;
 
 /// The most bytes [`logs_hash`] hashes: `be32(n_logs)` plus, per log, `be32(n_topics)`, four
 /// 32-byte topics and the 32-byte data hash.
@@ -106,7 +111,7 @@ pub enum ParseError {
     /// `n_witnesses` above [`MAX_WITNESSES`].
     TooManyWitnesses,
     /// Two witnesses claim one leaf position (`StorageError::DuplicateIndex`): the same slot
-    /// twice, or two slots ground into one 32-bit index. `storage`'s module doc says why this has
+    /// twice, or two slots ground into one index. `storage`'s module doc says why this has
     /// to be refused here rather than tolerated.
     DuplicateWitnessIndex,
 }
@@ -357,8 +362,8 @@ pub struct Statement<'a> {
 }
 
 /// The eight public output words: `out[0] = status`, `out[1..8]` = words 0..6 of
-/// `hash(EVM_OUT, [codehash ‖ pre_root ‖ post_root ‖ return_hash ‖ logs_hash ‖ address ‖ caller ‖
-/// callvalue ‖ calldata_hash ‖ context ‖ gas_limit ‖ gas_used])`.
+/// `hash(EVM_OUT, [layout ‖ codehash ‖ pre_root ‖ post_root ‖ return_hash ‖ logs_hash ‖ address ‖
+/// caller ‖ callvalue ‖ calldata_hash ‖ context ‖ gas_limit ‖ gas_used])`.
 ///
 /// The **one** place the status rules are applied, so no caller can publish a digest that claims a
 /// state change a failed call did not make: a status other than 1 binds `post_root = pre_root` (the
@@ -370,19 +375,20 @@ pub fn public_output<H: Host>(h: &mut H, s: &Statement<'_>, o: &Outcome) -> [u32
     let post = if status == 1 { s.post_root } else { s.pre_root };
     let ret: &[u8] = if status == 2 { &[] } else { &o.ret[..o.ret_len] };
     let mut msg = [0u32; OUT_WORDS];
-    msg[0..8].copy_from_slice(&hash_words(&keccak256(h, s.code)));
-    msg[8..16].copy_from_slice(s.pre_root);
-    msg[16..24].copy_from_slice(post);
-    msg[24..32].copy_from_slice(&hash_words(&keccak256(h, ret)));
-    msg[32..40].copy_from_slice(&hash_words(&logs_hash(h, o)));
-    msg[40..48].copy_from_slice(&s.env.address.0);
-    msg[48..56].copy_from_slice(&s.env.caller.0);
-    msg[56..64].copy_from_slice(&s.env.callvalue.0);
-    msg[64..72].copy_from_slice(&hash_words(&keccak256(h, s.calldata)));
-    msg[72..80].copy_from_slice(s.context);
+    msg[0] = LAYOUT_VERSION;
+    msg[1..9].copy_from_slice(&hash_words(&keccak256(h, s.code)));
+    msg[9..17].copy_from_slice(s.pre_root);
+    msg[17..25].copy_from_slice(post);
+    msg[25..33].copy_from_slice(&hash_words(&keccak256(h, ret)));
+    msg[33..41].copy_from_slice(&hash_words(&logs_hash(h, o)));
+    msg[41..49].copy_from_slice(&s.env.address.0);
+    msg[49..57].copy_from_slice(&s.env.caller.0);
+    msg[57..65].copy_from_slice(&s.env.callvalue.0);
+    msg[65..73].copy_from_slice(&hash_words(&keccak256(h, s.calldata)));
+    msg[73..81].copy_from_slice(s.context);
     // One word each: the input's `gas_limit` is one word, and `gas_used` never exceeds it.
-    msg[80] = s.env.gas_limit as u32;
-    msg[81] = o.gas_used as u32;
+    msg[81] = s.env.gas_limit as u32;
+    msg[82] = o.gas_used as u32;
     let d = dhash(h, EVM_OUT_DOMAIN, &msg);
     let mut out = [0u32; 8];
     out[0] = status;

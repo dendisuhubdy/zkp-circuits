@@ -100,9 +100,9 @@ $ rand-guest/target/release/rand-guest build evm2rv/target/erc20 --max-words 655
 ...
 warning: erc20-runtime@0.1.0: evm2rv: clang Homebrew clang version 23.1.1 (/opt/homebrew/opt/llvm/bin/clang)
     Finished `release` profile [optimized] target(s) in 3.50s
-12162 words against a cap of 65535 (fits); 0 ecall(s) with a non-static a7
+8665 words against a cap of 65535 (fits); 0 ecall(s) with a non-static a7
 OK
-wrote evm2rv/target/erc20/image.bin and its .sha256 (12162 words, hc 7c6912081035664f82e3be28107eda54d24d82ba73ac4f777a37a63cc0ec8389, program id 0a80ec3ff914b70d460e17be9ab314f3caf931c708ae8c89699cc1898072bfdb)
+wrote evm2rv/target/erc20/image.bin and its .sha256 (8665 words, hc fa6d5ca096c6c8989bf074f1d2d3918ede17e06a80e36ef0ba8534d660de493d, program id 255f7e1466d03202b0fe4db82421d2eabb8d087dd2f0d6ef7795b24bace51b99)
 ```
 
 `--max-words 65535` is needed: the default cap is 4 096 words. `--allow-panic` is needed too: the shim links
@@ -121,40 +121,41 @@ also has `approve` and `transferFrom`.
 
 ```
 $ (cd evm2rv && cargo +1.98.1 run -q --release --example erc20_vector -- transfer > target/transfer.words)
-929 input words
+1441 input words
 $ rand-guest/target/release/rand-guest run evm2rv/target/erc20/image.bin --input $(cat evm2rv/target/transfer.words)
 out[0] = 1
-out[1] = 1313615200
-out[2] = 102291884
-out[3] = 3965880165
-out[4] = 3265034460
-out[5] = 496043277
-out[6] = 476458078
-out[7] = 3226954255
-cycles 70295
+out[1] = 2053220150
+out[2] = 2668629896
+out[3] = 4244819158
+out[4] = 80492969
+out[5] = 1294998629
+out[6] = 476639945
+out[7] = 2694991971
+cycles 95971
 tier 18
 ```
 
 `out[0]` is the status: 1 success, 0 revert, 2 exceptional halt. `out[1..8]` is the `EVM_OUT`
-digest over the code hash, both state roots, the return data, the logs (topics and data), the
+digest over the storage layout, the code hash, both state roots, the return data, the logs (topics and data), the
 call (address, caller, value, calldata, gas limit, context) and the gas used
 (`research/docs/04-guests.md`).
 
 ### 5. The same eight words as the interpreter
 
-The interpreter guest (`evm.bin`, program id `f056f928…`, hc `08740025…`), on the same input:
+The interpreter guest (`evm.bin`, storage layout 2, program id `4d94028f…`, hc `cd700e35…`), on the
+same input:
 
 ```
 $ rand-guest/target/release/rand-guest run guests-compiled/bin/evm.bin --input $(cat evm2rv/target/transfer.words)
 out[0] = 1
-out[1] = 1313615200
-out[2] = 102291884
-out[3] = 3965880165
-out[4] = 3265034460
-out[5] = 496043277
-out[6] = 476458078
-out[7] = 3226954255
-cycles 128872
+out[1] = 2053220150
+out[2] = 2668629896
+out[3] = 4244819158
+out[4] = 80492969
+out[5] = 1294998629
+out[6] = 476639945
+out[7] = 2694991971
+cycles 154517
 tier 18
 ```
 
@@ -163,9 +164,9 @@ The interpreter run natively on the host (the tests' oracle):
 ```
 $ (cd evm2rv && cargo +1.98.1 run -q --release --example erc20_vector -- transfer --expected)
 out[0] = 1
-out[1] = 1313615200
+out[1] = 2053220150
 ...
-out[7] = 3226954255
+out[7] = 2694991971
 interpreter (native): status 1, Return, gas_used 29956
 ```
 
@@ -181,9 +182,9 @@ the eight words are identical
 | | translated (stage two) | interpreter (`evm.bin`) |
 |---|---:|---:|
 | eight output words | identical | identical |
-| cycles | 70 295 | 128 872 |
+| cycles | 95 971 | 154 517 |
 | tier | 18 | 18 |
-| program words | 12 162 | 20 077 |
+| program words | 8 665 | 16 588 |
 
 `tests/parity.rs` runs this and seven more vectors under both stages, and also checks `gas_used`
 and the halt through a second build that reports them.
@@ -193,10 +194,10 @@ and the halt through a second build that reports them.
 ```
 $ rand-guest/target/release/rand-guest info evm2rv/target/erc20/image.bin
 form: image container
-text 11579 words at 0x10000; data 457 words (224 non-zero) at 0x1b4f0; prologue 583 words; program 12162 words from base_pc 0xf6e4
-hc 7c6912081035664f82e3be28107eda54d24d82ba73ac4f777a37a63cc0ec8389
-program id 0a80ec3ff914b70d460e17be9ab314f3caf931c708ae8c89699cc1898072bfdb
-12162 words against a cap of 4096: does not fit
+text 8064 words at 0x10000; data 465 words (232 non-zero) at 0x17e00; prologue 601 words; program 8665 words from base_pc 0xf69c
+hc fa6d5ca096c6c8989bf074f1d2d3918ede17e06a80e36ef0ba8534d660de493d
+program id 255f7e1466d03202b0fe4db82421d2eabb8d087dd2f0d6ef7795b24bace51b99
+8665 words against a cap of 4096: does not fit
 ```
 
 The fullnode wallet deploys an image with:
@@ -206,7 +207,7 @@ rand program deploy evm2rv/target/erc20/image.bin
 ```
 
 It prints the program id, the word count and `hc`, then checks the chain's program cap before it
-proves anything. The image is 12 162 words. Chain 12 runs the default cap of 4 096 words, so this
+proves anything. The image is 8 665 words. Chain 12 runs the default cap of 4 096 words, so this
 deploy is refused there. It needs a chain whose genesis sets `max_program_words` high enough, for
 example `rand-node genesis ... --max-program-words 65535` (fullnode `docs/cli.md`). The cap is part
 of the genesis hash, so it cannot be raised on an existing chain.
@@ -316,42 +317,48 @@ backlog: ecrecover, bn256 mul, the pairing, modexp past small operands, and blak
 ## Cycles against the interpreter
 
 Measured with `rand-guest run` on the vectors `tests/parity.rs` and `tests/precompiles.rs` pin,
-with the code guard in, on the images since ZKVM-103/104 (the call, the log data and the gas in
-the public output: about 4 000 cycles more per call than before, for the calldata hash, the
-log-data hash and the 82-word digest). Tier in parentheses.
+with the code guard in, under storage layout 2 (ZKVM-105: a depth-64 storage tree, so every Merkle
+walk is twice as long and every witness 256 words longer) and with the call, the log data and the
+gas in the public output (ZKVM-103/104). Tier in parentheses.
 
 | vector | interpreter | stage one | stage two |
 |---|---:|---:|---:|
-| `transfer(BOB, 250)` | 128 872 (18) | 84 271 (18) | **70 295** (18) |
-| `approve(BOB, 5)` | 92 065 (18) | 60 323 (16) | **52 181** (16) |
-| `transferFrom(ALICE, BOB, 100)` | 169 185 (18) | 114 172 (18) | **92 922** (18) |
-| transfer of 5 000 of 1 000 (reverts) | 92 068 (18) | 56 444 (16) | 49 018 (16) |
-| transfer, out of gas at 100 | 53 332 (16) | 35 012 (16) | 34 563 (16) |
-| transfer, out of gas at 20 000 | 108 617 (18) | 69 996 (18) | 59 608 (16) |
-| transfer, out of gas at 29 955 | 126 687 (18) | 81 812 (18) | 68 297 (18) |
-| sha256 + ecrecover, underfunded | traps | 24 777 (16) | 23 715 (16) |
+| `transfer(BOB, 250)` | 154 517 (18) | 109 947 (18) | **95 971** (18) |
+| `approve(BOB, 5)` | 102 267 (18) | 70 594 (18) | **62 452** (16) |
+| `transferFrom(ALICE, BOB, 100)` | 210 023 (18) | 155 137 (18) | **133 887** (18) |
+| transfer of 5 000 of 1 000 (reverts) | 106 239 (18) | 70 554 (18) | 63 128 (18) |
+| transfer, out of gas at 100 | 64 332 (18) | 46 107 (16) | 45 658 (16) |
+| transfer, out of gas at 20 000 | 129 876 (18) | 91 393 (18) | 81 005 (18) |
+| transfer, out of gas at 29 955 | 152 321 (18) | 107 488 (18) | 93 973 (18) |
+| sha256 + ecrecover, underfunded | traps | 21 813 (16) | 20 751 (16) |
 
-Before ZKVM-103/104 the same rows read 124 606 / 80 211 / 66 235 for the transfer, and the
-interpreter's other rows were last measured before `MCOPY`, `TLOAD`/`TSTORE` and `CLZ`.
+The transfer's row over time: 124 606 / 80 211 / 66 235 before ZKVM-103/104; 128 872 / 84 271 /
+70 295 with the wider public output, still under layout 1's depth-32 tree; the figures above with
+the depth-64 tree.
 
 | program | words | hc |
 |---|---:|---|
-| interpreter (`evm.bin`) | 20 077 | `08740025…c4dc0f23` |
-| ERC-20, stage one | 16 280 | `69052c427ec5842fefc4f4d788a798a2101f00f2f1d92a5f386a89685991e932` |
-| ERC-20, stage two | 12 162 | `7c6912081035664f82e3be28107eda54d24d82ba73ac4f777a37a63cc0ec8389` |
-| sha256 + ecrecover contract, stage one | 16 326 | `0b5bf110…4dc5a5` |
-| sha256 + ecrecover contract, stage two | 16 100 | `9f9fe816…d12bc9` |
+| interpreter (`evm.bin`, layout 2) | 16 588 | `cd700e35…993fa9e3` |
+| interpreter (`evm-v1.bin`, layout 1) | 20 153 | `fb537193…a9d75818` |
+| ERC-20, stage one | 12 783 | `c889e15cbed7222e22a11460295bbd3c02f8ea79e69feb056f9678b2ab86cb9e` |
+| ERC-20, stage two | 8 665 | `fa6d5ca096c6c8989bf074f1d2d3918ede17e06a80e36ef0ba8534d660de493d` |
+| sha256 + ecrecover contract, stage one | 12 953 | `d8d21437…3c72e0d` |
+| sha256 + ecrecover contract, stage two | 12 727 | `030fc0b0…18649ae` |
 
-Before ZKVM-103/104: 19 637 (`31e682ec…6c289c3`), 15 804 (`9cdb79e7…48c8`), 11 686
-(`a0feae92…8ff6`), 15 858 (`c8f00a09…f946fd`) and 15 630 (`011120cf…058c33`).
+Every image is about 3 500 words smaller than under layout 1: the compiler unrolled the 32-level
+Merkle loops and leaves the 64-level ones as loops. Before ZKVM-105: 20 077 (`08740025…c4dc0f23`),
+16 280 (`69052c42…e932`), 12 162 (`7c691208…8389`), 16 326 (`0b5bf110…4dc5a5`) and 16 100
+(`9f9fe816…d12bc9`). Before ZKVM-103/104: 19 637 (`31e682ec…6c289c3`), 15 804 (`9cdb79e7…48c8`),
+11 686 (`a0feae92…8ff6`), 15 858 (`c8f00a09…f946fd`) and 15 630 (`011120cf…058c33`).
 
-Stage two runs the three ERC-20 calls in 54.5% (`transfer`), 56.7% (`approve`) and 54.9%
-(`transferFrom`) of the interpreter's cycles. Stage one takes 65.4 to 67.5%.
+Stage two runs the three ERC-20 calls in 62.1% (`transfer`), 61.1% (`approve`) and 63.7%
+(`transferFrom`) of the interpreter's cycles. Stage one takes 69.0 to 73.9%. The ratios rose with
+the tree's depth because the storage walks are harness, the same code in both.
 
 **The transfer stays at tier 18.** The tier bound is total rows (cycles plus digest rows: one per
 four program words, one per four input words, and the public-input digest) at or under 65 535,
-plus a separate Poseidon2 budget (`rand-guest/src/main.rs:244-248`). The transfer's 70 295 cycles
-plus 3 276 digest rows are 73 571 total, 8 036 over tier 16's 65 535; its 4 039 Poseidon2
+plus a separate Poseidon2 budget (`rand-guest/src/main.rs:244-248`). The transfer's 95 971 cycles
+plus 2 530 digest rows are 98 501 total, 32 966 over tier 16's 65 535; its 3 933 Poseidon2
 permutations are well under tier 16's 8 192, so cycles, not Poseidon2, keep it at tier 18.
 
 ### Where the cycles go
@@ -370,7 +377,8 @@ before the code guard.
 Stage two cuts the contract's own execution by 35%. The guard adds 1 008 cycles to the harness,
 so the harness was about 39 928 of stage two's 66 235 cycles: about 60% of a transfer. ZKVM-103/104
 added about 4 060 more to the harness (the calldata hash, the log-data hash, the longer digest), so
-it is now about 44 000 of 70 295: **about 63% of a transfer**, taking the contract's own 25 789 as
+it was about 44 000 of 70 295, and the depth-64 storage tree (ZKVM-105) added about 25 700 more:
+about 69 700 of 95 971, **about 73% of a transfer**, taking the contract's own 25 789 as
 unchanged (the split was not re-measured). No translation work can go below that floor.
 
 ## Proving

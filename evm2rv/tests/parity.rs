@@ -87,13 +87,14 @@ fn images(stage: Stage) -> &'static Images {
 /// Re-derived in Task 9 for the code guard (the digest of the source bytecode in `contract.c`, and
 /// the check in `main.rs`); it was `3307bfc4…579d`. `--no-default-config` alone does not move it.
 /// Re-derived for ZKVM-103/104 (the 82-word `EVM_OUT` preimage in `evm-core`, the log's data hash
-/// in `evm-rt` and the shim); it was `9cdb79e7…48c8`.
-const ERC20_HC: &str = "69052c427ec5842fefc4f4d788a798a2101f00f2f1d92a5f386a89685991e932";
+/// in `evm-rt` and the shim); it was `9cdb79e7…48c8`. Re-derived for ZKVM-105 (storage layout 2:
+/// `evm-core`'s depth-64 tree and the layout word in the preimage); it was `69052c42…e932`.
+const ERC20_HC: &str = "c889e15cbed7222e22a11460295bbd3c02f8ea79e69feb056f9678b2ab86cb9e";
 
 /// The same for the stage-two translation (Task 8): a different program, so a different digest.
 /// Re-derived in Task 9 for the code guard; it was `87aba574…0ccad`. Re-derived for ZKVM-103/104;
-/// it was `a0feae92…8ff6`.
-const ERC20_HC_STAGE2: &str = "7c6912081035664f82e3be28107eda54d24d82ba73ac4f777a37a63cc0ec8389";
+/// it was `a0feae92…8ff6`. Re-derived for ZKVM-105; it was `7c691208…8389`.
+const ERC20_HC_STAGE2: &str = "fa6d5ca096c6c8989bf074f1d2d3918ede17e06a80e36ef0ba8534d660de493d";
 
 /// `hc` of the stage-one ERC-20 translation (`--stage 1`), pinned (fix round 1, item 7). Uses
 /// the parity build.

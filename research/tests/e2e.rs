@@ -804,6 +804,7 @@ fn compiled_evm_proof_for_an_unauthorised_caller_is_refused() {
     let out: [u32; 8] = std::array::from_fn(|i| proof.public_values[pv::OUT0 + i] as u32);
     assert_eq!(out, want);
     let statement = |caller: U256, context: [u32; 8]| EvmStatement {
+        layout: 2,
         codehash: rand_zkvm::keccak::keccak256(&forged.code),
         pre_root: forged.tree.root(),
         post_root: post.root(),

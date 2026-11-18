@@ -1,0 +1,20 @@
+[package]
+name = "evm-v1-guest"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "The EVM interpreter guest under storage layout 1 (a depth-32 tree): the image for contracts whose storage is still rooted under it. guests-compiled/evm is layout 2."
+
+[dependencies]
+guest-sdk = { path = "../../guest-sdk" }
+# The one difference from guests-compiled/evm: `storage-v1` (evm-core's Cargo.toml).
+evm-core = { path = "../evm-core", features = ["storage-v1"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
+codegen-units = 1
+
+# Its own workspace root, like guests-compiled/evm.
+[workspace]

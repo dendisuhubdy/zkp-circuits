@@ -60,11 +60,11 @@ fn store_and_log() -> Vec<u8> {
     ]
 }
 
-/// The 82-word preimage of the `EVM_OUT` digest, recomputed here from this crate's primitives:
-/// the five hashes and roots, then the call `c`'s address, caller, call value, calldata hash and
+/// The 83-word preimage of the `EVM_OUT` digest, recomputed here from this crate's primitives:
+/// the storage layout, the five hashes and roots, then the call `c`'s address, caller, call value, calldata hash and
 /// context, its gas limit, and `gas_used`.
 fn digest(c: &EvmCall, gas_used: u64, code: &[u8], pre: Word8, post: Word8, ret: &[u8], logs: &[u8]) -> Word8 {
-    let mut msg = Vec::new();
+    let mut msg = vec![2]; // the storage layout: evm-core's, natively
     for part in [
         words(&keccak256(code)),
         pre,
@@ -81,7 +81,7 @@ fn digest(c: &EvmCall, gas_used: u64, code: &[u8], pre: Word8, post: Word8, ret:
     }
     msg.push(c.gas_limit as u32);
     msg.push(gas_used as u32);
-    assert_eq!(msg.len(), 82);
+    assert_eq!(msg.len(), 83);
     hash(domain::EVM_OUT, &msg)
 }
 
@@ -157,14 +157,14 @@ fn the_input_layout_is_what_the_constraints_say() {
     let p = p + 8; // the context
     assert_eq!(&w[p + 25..p + 33], &c.tree.root());
     assert_eq!(w[p + 33], 1);
-    // Ruling 2: a witness is 272 words — slot 8 + value 8 + 32 siblings × 8.
-    assert_eq!(WITNESS_WORDS, 272);
-    assert_eq!(w.len(), p + 34 + 272);
+    // A witness is 528 words — slot 8 + value 8 + 64 siblings × 8 (272, 32 siblings, in layout 1).
+    assert_eq!(WITNESS_WORDS, 528);
+    assert_eq!(w.len(), p + 34 + 528);
     let wit = c.tree.witness(&U256::from_u32(1));
     assert_eq!(&w[p + 34..p + 42], &wit.slot.0);
     assert_eq!(&w[p + 42..p + 50], &wit.value.0);
     assert_eq!(&w[p + 50..p + 58], &wit.siblings[0]);
-    assert_eq!(&w[w.len() - 8..], &wit.siblings[31]);
+    assert_eq!(&w[w.len() - 8..], &wit.siblings[63]);
 
     // and the guest decodes exactly those fields back
     let ws = decoded(&w);
@@ -182,7 +182,7 @@ fn the_input_layout_is_what_the_constraints_say() {
     assert_eq!(inp.storage.len(), 1);
     assert_eq!(inp.storage.witness(0).slot, wit.slot);
     assert_eq!(inp.storage.witness(0).value, wit.value);
-    assert_eq!(inp.storage.witness(0).siblings, wit.siblings);
+    assert_eq!(inp.storage.witness(0).siblings.to_vec(), wit.siblings);
 }
 
 #[test]
@@ -632,6 +632,7 @@ fn the_storage_and_keccak_ffi_match_the_storage_tree() {
 fn statement_of(c: &EvmCall, o: &Outcome, post: &SparseTree, logs: Vec<EvmLog>) -> EvmStatement {
     let status = o.status();
     EvmStatement {
+        layout: 2,
         codehash: keccak256(&c.code),
         pre_root: c.tree.root(),
         post_root: if status == 1 { post.root() } else { c.tree.root() },
@@ -705,7 +706,8 @@ fn the_public_output_binds_address_callvalue_calldata_gas_limit_and_context() {
     assert_eq!(out[0], 1);
     let s = statement_of(&c, &o, &post, vec![transfer_log(ALICE, BOB, 250)]);
     assert!(s.accepts(1, &out));
-    assert_eq!(s.preimage().len(), 82);
+    assert_eq!(s.preimage().len(), 83);
+    assert_eq!(s.preimage()[0], evm_core::storage::LAYOUT_VERSION);
     // the guest's own function and the independent statement agree on the whole digest
     assert_eq!(c.output_for(&c.code, &c.tree.root(), &post.root(), &o), s.output_words(1));
 
@@ -714,6 +716,7 @@ fn the_public_output_binds_address_callvalue_calldata_gas_limit_and_context() {
         f(&mut t);
         !t.accepts(1, &out)
     };
+    assert!(refused(&|t| t.layout = 1), "the storage layout");
     assert!(refused(&|t| t.address = BOB), "address");
     assert!(refused(&|t| t.caller = BOB), "caller");
     assert!(refused(&|t| t.callvalue = U256::from_u32(1)), "callvalue");
