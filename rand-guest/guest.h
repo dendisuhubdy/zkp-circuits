@@ -86,4 +86,24 @@ __attribute__((noreturn)) static inline void rand_halt(void) {
     for (;;) {
     }
 }
+
+/* The private-input index `rand_refuse` reads: no run has this many private input words, so the
+ * read is out of range in every execution. (`guest_sdk::REFUSE_INDEX`.) */
+#define RAND_REFUSE_INDEX 0xffffffffu
+
+/* Ends the run in a trap, so that no proof of this execution exists: the one way a guest rejects.
+ * `rand_halt` after a failed check is a provable run; this is not. (`guest_sdk::refuse`.) */
+__attribute__((noreturn)) static inline void rand_refuse(void) {
+    (void)rand_read_input(RAND_REFUSE_INDEX);
+    for (;;) {
+    }
+}
+
+/* `if (!(cond)) rand_refuse();` — the guest's `assert`. (`guest_sdk::require!`.) */
+#define RAND_REQUIRE(cond) \
+    do { \
+        if (!(cond)) { \
+            rand_refuse(); \
+        } \
+    } while (0)
 #endif

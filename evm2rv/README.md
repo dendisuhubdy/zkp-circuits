@@ -96,7 +96,7 @@ const uint32_t *evm_code_digest(void) {
 ### 3. Build the image
 
 ```
-$ rand-guest/target/release/rand-guest build evm2rv/target/erc20 --max-words 65535
+$ rand-guest/target/release/rand-guest build evm2rv/target/erc20 --max-words 65535 --allow-panic
 ...
 warning: erc20-runtime@0.1.0: evm2rv: clang Homebrew clang version 23.1.1 (/opt/homebrew/opt/llvm/bin/clang)
     Finished `release` profile [optimized] target(s) in 3.50s
@@ -105,7 +105,10 @@ OK
 wrote evm2rv/target/erc20/image.bin and its .sha256 (11686 words, hc a0feae92a7311c9562495717100eb7aea71270a38ed435d06dc31387e0ea8ff6, program id f074c4eb834cf01886a8241b6a2e0caf6e1cee5327fee6cb1a1a37436607280d)
 ```
 
-`--max-words 65535` is needed: the default cap is 4 096 words. The build refuses any clang other
+`--max-words 65535` is needed: the default cap is 4 096 words. `--allow-panic` is needed too: the shim links
+`core`'s panic machinery through the ABI harness, which `rand-guest build` otherwise rejects (a panic
+halts, and a halted run proves — `rand-guest/README.md`, "Rejecting"; a consumer must treat
+`out[7] == 0xdeadbeef` as a rejection). The build refuses any clang other
 than 23.1.1. `RAND_GUEST_CLANG_UNPINNED=1` builds anyway, with a warning that `hc` will not match
 published images.
 

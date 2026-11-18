@@ -6,8 +6,11 @@ interpreter's (`guests-compiled/bin/sbpf.bin`) for the same ELF and instruction.
 
 ```text
 sbpf2rv <program.so> --out <dir inside a circuits checkout> [--name <crate>]
-rand-guest build <dir> --max-words 65535
+rand-guest build <dir> --max-words 65535 --allow-panic
 ```
+
+`--allow-panic`: the shim links `core`'s panic machinery through the ABI harness, which
+`rand-guest build` otherwise rejects (`rand-guest/README.md`, "Rejecting").
 
 The rules of the translation are `src/emit.rs`'s module docs and the design spec
 (`docs/superpowers/specs/2026-09-18-sbpf-to-rv32-translator-design.md`). The oracle tests are
@@ -62,7 +65,7 @@ is `sol_get_sysvar` (one).
 ### 2. Build
 
 ```text
-$ rand-guest build <dir> --max-words 65535
+$ rand-guest build <dir> --max-words 65535 --allow-panic
    Compiling sbpf-core v0.1.0 (…/guests-compiled/sbpf-core)
    Compiling guest-sdk v0.1.0 (…/guest-sdk)
    Compiling cc v1.4.6

@@ -2,13 +2,15 @@
 //! resolved where they are static, the layout and the cap. A guest that passes cannot fail
 //! in-circuit for an encoding, syscall-number or layout reason. One rule is about the compiler
 //! rather than the machine: `TailScratch` names a tail call whose scratch register is live into
-//! its target, a known miscompile ([`tail_scratch`]).
+//! its target, a known miscompile ([`tail_scratch`]). And one is about the guest's own logic:
+//! `Panic` names the panic machinery a linked ELF still carries ([`panic_findings`]), because a
+//! panic *halts* and a halted run is a provable run.
 
 use rand_zkvm::isa::{AluOp, DecodeError, Instr};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Rule { Compressed, Undecodable, Fence, Csr, Ebreak, Syscall, Cap, Layout, TailScratch }
+pub enum Rule { Compressed, Undecodable, Fence, Csr, Ebreak, Syscall, Cap, Layout, TailScratch, Panic }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finding { pub addr: u32, pub word: u32, pub rule: Rule, pub what: String }
@@ -145,6 +147,45 @@ fn tail_scratch(base_pc: u32, text: &[u32], findings: &mut Vec<Finding>) {
             k += 1;
         }
     }
+}
+
+/// Whether a linked symbol belongs to Rust's panic machinery: the `#[panic_handler]` itself (the
+/// compiler's `rust_begin_unwind`) or anything in `core::panicking` (`panic_fmt`,
+/// `panic_bounds_check`, `panic_const_*`, …), which every panicking path of `core` ends in. Matched
+/// on the mangled name, in which both manglings spell the module path out with length prefixes
+/// (`_ZN4core9panicking9panic_fmt17h…E`, `_RNvNtCs…_4core9panicking9panic_fmt`) — so a guest's own
+/// function that merely has `panic` in its name (the sBPF runtime's `sol_panic_`) is not matched.
+pub fn is_panic_symbol(name: &str) -> bool {
+    name.contains("rust_begin_unwind") || name.contains("4core9panicking")
+}
+
+/// The `Panic` rule (ZKVM-106), over a linked guest ELF: one finding per panic-machinery symbol the
+/// link kept. The guests link with `--gc-sections` (and the Rust ones with LTO), so a symbol that
+/// is still there is one some path of the guest can reach: a failed `assert!`, a slice index, an
+/// overflow check, an `unwrap`. Reaching it ends the run in the SDK's panic handler, which writes
+/// `out[7] = 0xdeadbeef` and **halts** — so the run proves, and a verifier that does not look at
+/// `out[7]` accepts a statement the guest meant to reject. `guest_sdk::refuse` and `require!` are
+/// the way to reject; a guest with no panicking path links none of these symbols.
+///
+/// It is a reachability over-approximation in one direction only: a symbol kept by the linker but
+/// never executed is still named. An ELF with no symbol table cannot be judged, and that is a
+/// finding too rather than a pass.
+pub fn panic_findings(elf: &[u8]) -> anyhow::Result<Vec<Finding>> {
+    let Some(symbols) = crate::elf::read_symbols(elf)? else {
+        return Ok(vec![Finding { addr: 0, word: 0, rule: Rule::Panic, what: "the ELF has no symbol table (stripped), so whether it links the panic machinery cannot be checked: build without `strip`, or pass --allow-panic".into() }]);
+    };
+    let mut hits: Vec<_> = symbols.into_iter().filter(|s| is_panic_symbol(&s.name)).collect();
+    hits.sort_by(|a, b| (a.value, &a.name).cmp(&(b.value, &b.name)));
+    hits.dedup();
+    Ok(hits
+        .into_iter()
+        .map(|s| Finding {
+            addr: s.value,
+            word: 0,
+            rule: Rule::Panic,
+            what: format!("`{}` is linked: the guest can panic, and a panic halts — a halted run proves (out[7] = 0xdeadbeef is the only sign). Reject with guest_sdk::refuse()/require! instead, or pass --allow-panic", s.name),
+        })
+        .collect())
 }
 
 impl fmt::Display for Report {

@@ -118,7 +118,8 @@ pub fn build_shim(
         .arg(dir)
         .arg("--out")
         .arg(&image)
-        .args(["--max-words", "65535"])
+        // The shim links `core`'s panic machinery through the harness (ZKVM-106's `Panic` rule).
+        .args(["--max-words", "65535", "--allow-panic"])
         .output()
         .unwrap();
     assert!(

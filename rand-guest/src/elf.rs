@@ -70,3 +70,66 @@ pub fn read_sections(elf: &[u8]) -> Result<Vec<Section>> {
     }
     Ok(out)
 }
+
+/// A defined symbol from the ELF's `.symtab`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    pub value: u32,
+    pub size: u32,
+    /// `STT_FUNC`
+    pub func: bool,
+}
+
+const SHT_SYMTAB: u32 = 2;
+const STT_FUNC: u8 = 2;
+
+/// Every defined, named symbol in the ELF's symbol table (`SHT_SYMTAB`, names from the string table
+/// its `sh_link` points at), or `None` when the file has no symbol table at all (it was stripped).
+/// Bounds-checked like [`read_sections`]: a corrupt table is an `Err`, never a panic.
+pub fn read_symbols(elf: &[u8]) -> Result<Option<Vec<Symbol>>> {
+    if elf.len() < 0x34 || &elf[..4] != b"\x7fELF" || elf[4] != 1 || elf[5] != 1 {
+        bail!("not an ELF32 little-endian file");
+    }
+    let e_shoff = u32_at(elf, 0x20)? as usize;
+    let e_shentsize = u16_at(elf, 0x2e)? as usize;
+    let e_shnum = u16_at(elf, 0x30)? as usize;
+    // (type, offset, size, link, entsize) of section `i`.
+    let header = |i: usize| -> Result<(u32, u32, u32, u32, u32)> {
+        let base = e_shoff.checked_add(i.checked_mul(e_shentsize).context("section header table overflows")?).context("section header table overflows")?;
+        Ok((u32_at(elf, base + 4)?, u32_at(elf, base + 16)?, u32_at(elf, base + 20)?, u32_at(elf, base + 24)?, u32_at(elf, base + 36)?))
+    };
+    let mut out = None;
+    for i in 0..e_shnum {
+        let (typ, off, size, link, entsize) = header(i)?;
+        if typ != SHT_SYMTAB {
+            continue;
+        }
+        if entsize != 16 {
+            bail!("symbol table entries are {entsize} bytes, not ELF32's 16");
+        }
+        if link as usize >= e_shnum {
+            bail!("the symbol table names string table {link}, but there are {e_shnum} sections");
+        }
+        let (_, str_off, str_size, _, _) = header(link as usize)?;
+        let strtab = span(elf, str_off, str_size)?;
+        let table = span(elf, off, size)?;
+        let syms = out.get_or_insert_with(Vec::new);
+        for e in table.chunks_exact(16) {
+            let st_name = u32::from_le_bytes(e[0..4].try_into()?) as usize;
+            let st_shndx = u16::from_le_bytes(e[14..16].try_into()?);
+            if st_name == 0 || st_shndx == 0 {
+                continue; // unnamed, or undefined
+            }
+            let rest = strtab.get(st_name..).context("symbol name offset is outside the string table")?;
+            let end = rest.iter().position(|&b| b == 0).context("unterminated symbol name")?;
+            syms.push(Symbol {
+                name: String::from_utf8_lossy(&rest[..end]).into_owned(),
+                value: u32::from_le_bytes(e[4..8].try_into()?),
+                size: u32::from_le_bytes(e[8..12].try_into()?),
+                func: e[12] & 0xf == STT_FUNC,
+            });
+        }
+    }
+    Ok(out)
+}

@@ -92,11 +92,17 @@ fn a_clean_hand_built_image_and_elf_still_pass() {
     for (form, bytes) in [("image", Program::to_flat_image(0x1000, &text, 0, &[])), ("elf", elf_with_text(&text))] {
         let path = tmp.path().join(format!("clean.{form}"));
         std::fs::write(&path, bytes).unwrap();
-        let (code, out) = check(&path);
+        // The hand-built ELF has no symbol table, which the `Panic` rule (ZKVM-106) reports rather
+        // than passes: it is waived for the ELF here and asserted on its own below.
+        let o = Command::new(bin()).arg("check").arg(&path).args(if form == "elf" { &["--allow-panic"][..] } else { &[] }).output().unwrap();
+        let (code, out) = (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned());
         assert_eq!(code, Some(0), "{form}: {out}");
         assert!(out.ends_with("OK\n"), "{form}: {out}");
         assert!(!out.contains("could not be counted"), "{form}: {out}");
     }
+    let (code, out) = check(&tmp.path().join("clean.elf"));
+    assert_eq!(code, Some(1), "{out}");
+    assert!(out.contains("Panic: the ELF has no symbol table"), "{out}");
 }
 
 /// Every io and load failure names the file and the step: no bare "No such file or directory",

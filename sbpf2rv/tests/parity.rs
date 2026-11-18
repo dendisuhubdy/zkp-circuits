@@ -210,7 +210,7 @@ fn translate(elf: &Path, name: &str) -> Translated {
                 .arg(d)
                 .arg("--out")
                 .arg(&image)
-                .args(["--max-words", "1000000"]),
+                .args(["--max-words", "1000000", "--allow-panic"]),
         )
         .output()
         .unwrap();
@@ -620,7 +620,7 @@ fn the_spl_token_transfer_translates_and_matches_the_interpreter_word_for_word()
             .arg(&dir)
             .arg("--out")
             .arg(&image)
-            .args(["--max-words", "65535"])
+            .args(["--max-words", "65535", "--allow-panic"])
             .env("CFLAGS", "-O0 -g")
             .env("TARGET_CFLAGS", "-DSBPF_USIZE_MAX=1")
             .env("CFLAGS_riscv32im_unknown_none_elf", "-O3")
@@ -908,6 +908,7 @@ fn the_shim_refuses_a_clang_other_than_the_pinned_one() {
             .arg(&dir)
             .arg("--out")
             .arg(dir.join("image.bin"))
+            .arg("--allow-panic")
             .env("CLANG", &fake);
         if unpinned {
             c.env("RAND_GUEST_CLANG_UNPINNED", "1");

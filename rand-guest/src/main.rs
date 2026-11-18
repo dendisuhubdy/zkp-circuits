@@ -35,12 +35,20 @@ enum Cmd {
         out: Option<PathBuf>,
         #[arg(long, default_value_t = 4096)]
         max_words: usize,
+        /// Accept a guest that links the panic machinery. By default such a guest is rejected: a
+        /// panic halts, and a halted run proves (the `Panic` rule).
+        #[arg(long)]
+        allow_panic: bool,
     },
-    /// The ISA report over an ELF or an image.
+    /// The ISA report over an ELF or an image. An ELF is also checked for the panic machinery
+    /// (the `Panic` rule); an image carries no symbols, so it cannot be.
     Check {
         file: PathBuf,
         #[arg(long, default_value_t = 4096)]
         max_words: usize,
+        /// Do not apply the `Panic` rule to an ELF.
+        #[arg(long)]
+        allow_panic: bool,
     },
     /// Pack an ELF into the image container.
     Pack {
@@ -66,6 +74,12 @@ enum Cmd {
         max_words: usize,
     },
 }
+
+/// `guest_sdk::REFUSE_INDEX` (`rand_refuse`'s `RAND_REFUSE_INDEX`): the private-input index
+/// `refuse()` reads, which no run can hold.
+const REFUSE_INDEX: u32 = u32::MAX;
+/// What the SDK's panic handler writes to output slot 7 before it halts (`guest-sdk/src/lib.rs`).
+const PANIC_SENTINEL: u32 = 0xdead_beef;
 
 fn hex8(w: &[u32; 8]) -> String {
     w.iter().map(|x| format!("{x:08x}")).collect()
@@ -177,14 +191,18 @@ impl std::fmt::Display for Checked {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::Build { dir, lang, ld, out, max_words } => {
+        Cmd::Build { dir, lang, ld, out, max_words, allow_panic } => {
             let out = out.unwrap_or_else(|| dir.join("image.bin"));
             let b = match lang {
                 Lang::Rust => build::build_rust(&dir, ld.as_deref(), &out)?,
                 Lang::C => build::build_c(&dir, ld.as_deref(), &out)?,
             };
             let image = std::fs::read(&b.image).with_context(|| format!("reading back {}", b.image.display()))?;
-            let c = report_image(&image, max_words).with_context(|| format!("checking {}", b.image.display()))?;
+            let mut c = report_image(&image, max_words).with_context(|| format!("checking {}", b.image.display()))?;
+            if !allow_panic {
+                let elf = std::fs::read(&b.elf).with_context(|| format!("reading the linked ELF {}", b.elf.display()))?;
+                c.report.findings.extend(check::panic_findings(&elf).with_context(|| format!("reading {}'s symbols", b.elf.display()))?);
+            }
             println!("{c}");
             match &c.program {
                 Some(p) => println!(
@@ -200,14 +218,18 @@ fn main() -> Result<()> {
                 bail!("the image is rejected by the checker (it was still written)");
             }
         }
-        Cmd::Check { file, max_words } => {
+        Cmd::Check { file, max_words, allow_panic } => {
             let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-            let image = if bytes.starts_with(b"\x7fELF") {
+            let is_elf = bytes.starts_with(b"\x7fELF");
+            let image = if is_elf {
                 pack::pack(&bytes).with_context(|| format!("packing the ELF {}", file.display()))?
             } else {
-                bytes
+                bytes.clone()
             };
-            let c = report_image(&image, max_words).with_context(|| format!("checking {}", file.display()))?;
+            let mut c = report_image(&image, max_words).with_context(|| format!("checking {}", file.display()))?;
+            if is_elf && !allow_panic {
+                c.report.findings.extend(check::panic_findings(&bytes).with_context(|| format!("reading {}'s symbols", file.display()))?);
+            }
             println!("{c}");
             if !c.report.is_ok() {
                 std::process::exit(1);
@@ -232,6 +254,9 @@ fn main() -> Result<()> {
             match rand_zkvm::emulator::execute(&program, &inputs, &public, max) {
                 Ok(exec) => {
                     for (i, w) in exec.outputs.iter().enumerate() { println!("out[{i}] = {w}"); }
+                    if exec.outputs[7] == PANIC_SENTINEL {
+                        println!("warning: out[7] is the SDK panic handler's sentinel {PANIC_SENTINEL:#x}: the guest most likely panicked. This run still halted, so it PROVES; reject with guest_sdk::refuse()/require! instead (rand-guest/README.md, \"Rejecting\")");
+                    }
                     let cycles = exec.cycles();
                     println!("cycles {cycles}");
                     // Mirrors `Machine::prove_salted`'s `None =>` arm term by term (`research/src/machine.rs`
@@ -264,6 +289,9 @@ fn main() -> Result<()> {
                 }
                 Err(e) => {
                     // The emulator's error carries no pc to print; the error itself says what trapped.
+                    if e == rand_zkvm::emulator::ExecError::InputIndex(REFUSE_INDEX) {
+                        println!("refused: the guest called refuse() (a READ_INPUT of index {REFUSE_INDEX:#x}); this run has no proof");
+                    }
                     println!("trap: {e:?}");
                     std::process::exit(2);
                 }

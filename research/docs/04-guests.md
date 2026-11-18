@@ -138,7 +138,10 @@ development machine. M4.1 adds one:
   (`_start`, a `global_asm!` block that sets `sp` from the linker-provided
   `__stack_top` and calls `main`, falling through to a `HALT` ecall as
   defense in depth if `main` ever returns), a panic handler (halts with
-  output slot 7 set to `0xdead_beef`), and `guest.ld`, the linker script
+  output slot 7 set to `0xdead_beef` — a halt, so **a panicking guest still
+  proves**; `refuse()` / `require!` are the way to reject, and `rand-guest
+  build` refuses a guest that links the panic machinery: ZKVM-106,
+  `rand-guest/README.md`, "Rejecting"), and `guest.ld`, the linker script
   placing RAM at `ORIGIN = 0x1000` with a 64 KiB stack region.
 - **`guests-compiled/<name>/`**: one crate per compiled guest, targeting
   `riscv32im-unknown-none-elf`, with a linker script placing RAM at
@@ -453,9 +456,10 @@ range past 64 KiB, return data past 1 KiB, more logs than `MAX_LOGS`, an
 over-long code or calldata, and every `ParseError` — including two witnesses at
 one leaf position). Everything but `Stop`/`Return`/`Revert` is status
 2 and burns the whole gas limit. None of them is a panic: every length
-involved is prover-supplied, and a panicking guest aborts *without* producing a
-proof, where an exceptional halt produces a proof that says the call was
-invalid.
+involved is prover-supplied, and a panic is the wrong answer either way — the
+SDK's handler halts with `out[7] = 0xdeadbeef`, which is a provable run whose
+outputs are not a call result (ZKVM-106) — where an exceptional halt produces
+a proof that says the call was invalid.
 
 **Out of scope, and why each one traps rather than being stubbed:**
 

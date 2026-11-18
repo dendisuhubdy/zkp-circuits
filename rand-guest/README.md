@@ -18,7 +18,9 @@ Run from this directory (`cd rand-guest`) with the pinned toolchain: `cargo +1.9
 
 Rust is the default language; `--lang c` drives clang instead (see "The C path" below). Writes
 the image and its `<out>.sha256` pin (the same form `pack` writes), then prints the checker's
-report. Exits non-zero — after still writing the image — if `check` rejects the result.
+report. Exits non-zero — after still writing the image — if `check` rejects the result. That
+includes the `Panic` rule, which `build` applies to the ELF it linked ("Rejecting" below);
+`--allow-panic` waives it.
 
 `fib.bin` and `keccak256.bin` are **never rebuilt over**: they are legacy flat pins (see "The two
 image forms"), `build` only writes the container form, and replacing either would break every
@@ -31,7 +33,8 @@ refuses outright to write over an existing `--out` that is not an image containe
     cargo +1.98.1 run -- check ../guests-compiled/bin/evm.bin --max-words 65535
 
 Takes either form (`pack`s an ELF on the way in); prints every finding, one per line, then a
-summary line and `OK` or `REJECTED`.
+summary line and `OK` or `REJECTED`. An ELF is also held to the `Panic` rule (`--allow-panic`
+waives it); an image carries no symbols, so the rule cannot be applied to one.
 
 ### `pack` — pack an ELF into the image container
 
@@ -48,7 +51,9 @@ Prints each output word, the cycle count, and the smallest tier the run fits (mi
 independent constraint); with `--tier t`, also whether the run fits tier `t`, with both budgets
 (`tier 10: fits (cycles 146 of 1023, Poseidon2 permutations 10 of 128)` for `fib(20)`). A run that fits no tier
 says so with both counts. A trap prints `trap: <the emulator's error>` (it carries no pc) and
-exits 2.
+exits 2; a trap that is the guest's own `refuse()` is first named as one (`refused: …`). A run
+that halts with `out[7] = 0xdeadbeef` gets a warning: that is the SDK panic handler's sentinel,
+and the run is provable.
 
 ### `info` — words, hc, the cap
 
@@ -125,11 +130,46 @@ the guest's source and that toolchain alone:
   -ffile-prefix-map=<checkout>=/rand-circuits -c`, per `.c` file plus `start.S` and `rt.c`, then
   `rust-lld -flavor gnu --gc-sections -T <ld>` from the pinned toolchain's sysroot.
 
+## Rejecting: `refuse()`, not a panic
+
+**A halt is a provable run.** The SDK's panic handler writes `out[7] = 0xdeadbeef` and halts, so
+a guest that panics — a failed `assert!`, an out-of-range index, an overflow check, an `unwrap`
+on `None` — still yields a valid proof, of whatever it had written plus that one marker word. A
+verifier that does not look at `out[7]` accepts it (ZKVM-106; the chain's side of this is PST-1).
+
+The way to reject is a trap, which has no proof:
+
+    use guest_sdk::{refuse, require};
+    require!(amount <= balance);     // if !(…) { refuse() }
+    if !signature_ok { refuse() }
+
+and in C, `RAND_REQUIRE(cond)` and `rand_refuse()` from `guest.h`. `refuse` reads private input
+index `0xffffffff`, which no run holds: the emulator returns `InputIndex(4294967295)`, `run`
+prints `refused: …` and exits 2, and `Machine::prove` returns that error instead of a proof
+(`tests/panic.rs`).
+
+`build` enforces it: after linking, it reads the ELF's symbol table and rejects the guest
+(`Panic`) if the panic machinery is still there — `rust_begin_unwind` (the handler) or anything
+in `core::panicking` — naming each symbol. The guests link with `--gc-sections`, so a symbol
+that survived is one some path can reach. `check <elf>` applies the same rule. Limits:
+
+- It over-approximates: a kept symbol that no execution reaches is still a finding.
+- It needs symbols. A stripped ELF is a finding ("no symbol table"); a packed image cannot be
+  judged at all, so `check <image>` says nothing about panics.
+- It is Rust's machinery only. A C guest has no panic; a C guest that calls `rand_halt()` after
+  a failed check has the same bug and nothing here sees it.
+- `--allow-panic` waives it. Five of the six published guests need the waiver today (`keccak256`,
+  `evm`, `sbpf`, `dilithium-verify`, `msauth`; `fib` is clean — `tests/panic.rs` pins the list),
+  as do the `evm2rv` and `sbpf2rv` shims. Their images are published, and the handler itself still
+  halts: changing either moves `hc`, so both wait for the next image rebuild. Until then a
+  consumer of their proofs must treat `out[7] == 0xdeadbeef` as a rejection.
+
 ## What `check` rejects
 
 Every text word goes through the machine's own decoder (`Instr::decode`), so a guest that passes
 cannot fail in-circuit for an encoding, syscall-number, or layout reason. It refuses:
 
+- in a linked ELF, the panic machinery (`Panic`; "Rejecting" above)
 - a 16-bit (RVC) encoding — the machine decodes only 32-bit RV32IM (`Compressed`)
 - an opcode, funct, or shift amount outside what the machine implements (`Undecodable`)
 - `FENCE`/`FENCE.I` — no memory-ordering instructions in this machine (`Fence`)

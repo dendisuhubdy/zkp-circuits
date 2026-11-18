@@ -64,7 +64,7 @@ fn the_shim_refuses_a_clang_other_than_the_pin() {
             .arg(&crate_dir)
             .arg("--out")
             .arg(crate_dir.join("image.bin"))
-            .args(["--max-words", "65535"])
+            .args(["--max-words", "65535", "--allow-panic"])
             .env("CLANG", &fake);
         if unpinned {
             c.env("RAND_GUEST_CLANG_UNPINNED", "1");

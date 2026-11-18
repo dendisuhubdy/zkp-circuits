@@ -913,7 +913,7 @@ fn pipeline(stage: Stage) {
             .arg(&dir)
             .arg("--out")
             .arg(dir.join("image.bin"))
-            .args(["--max-words", "65535"])
+            .args(["--max-words", "65535", "--allow-panic"])
             .output()
             .unwrap();
         assert!(

@@ -412,3 +412,7 @@ impl dilithium_core::ring::Ring for SyscallRing {
         modq_call(ar, dilithium_core::ring::modq_a1(3, out, c, t));
     }
 }
+
+// ZKVM-106. Appended, never inserted: see `refuse.rs`' module comment for why no line above moves.
+mod refuse;
+pub use refuse::{refuse, REFUSE_INDEX};

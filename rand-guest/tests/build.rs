@@ -48,6 +48,9 @@ fn build_reproduces_every_committed_image_and_reports_hc() {
             .arg("--out")
             .arg(&out)
             .args(["--max-words", "65535"])
+            // Five of the six link the panic machinery (`tests/panic.rs` pins which), and their
+            // images are published: the `Panic` rule is waived here, not fixed (ZKVM-106).
+            .arg("--allow-panic")
             .output()
             .unwrap();
         assert!(o.status.success(), "{name}: {}", String::from_utf8_lossy(&o.stderr));
@@ -119,10 +122,16 @@ fn pack_and_check_the_elf_build_left(tmp: &std::path::Path) {
     let sum = std::fs::read_to_string(tmp.join("packed.bin.sha256")).unwrap();
     assert_eq!(sum, format!("{}  packed.bin\n", pinned("evm")));
 
-    // `check` takes an ELF as happily as an image, packing it on the way.
-    let c = Command::new(bin()).arg("check").arg(&elf).args(["--max-words", "65535"]).output().unwrap();
+    // `check` takes an ELF as happily as an image, packing it on the way. The interpreter links
+    // the panic machinery, which only an ELF can show (ZKVM-106), so the `Panic` rule is waived.
+    let c = Command::new(bin()).arg("check").arg(&elf).args(["--max-words", "65535", "--allow-panic"]).output().unwrap();
     assert!(c.status.success(), "check on an ELF: {}", String::from_utf8_lossy(&c.stdout));
     assert!(String::from_utf8_lossy(&c.stdout).contains("OK"));
+    // Without the waiver it is rejected, with the handler named.
+    let c = Command::new(bin()).arg("check").arg(&elf).args(["--max-words", "65535"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&c.stdout);
+    assert!(!c.status.success(), "the interpreter links the panic handler: {stdout}");
+    assert!(stdout.contains("Panic: ") && stdout.contains("rust_begin_unwind") && stdout.contains("REJECTED"), "{stdout}");
 
     // The default cap rejects it, with the exit code that says so.
     let c = Command::new(bin()).arg("check").arg(&out).output().unwrap();
@@ -138,7 +147,7 @@ fn a_guest_named_by_a_relative_path_builds_the_same_image() {
     let out = tmp.path().join("evm.bin");
     let o = Command::new(bin())
         .current_dir(root())
-        .args(["build", "guests-compiled/evm", "--max-words", "65535"])
+        .args(["build", "guests-compiled/evm", "--max-words", "65535", "--allow-panic"])
         .arg("--out")
         .arg(&out)
         .output()
