@@ -12,7 +12,6 @@ mod common;
 use common::{build_shim, encoded_halt, root, run};
 use evm2rv::emit::Stage;
 use evm2rv::guard::{chained_digest, code_digest, code_words, DIGEST_CHUNK};
-use evm_core::abi::public_output;
 use evm_core::interp::{Halt, Log, Outcome, MAX_LOGS, MAX_RETURN_BYTES};
 use evm_core::u256::U256;
 use rand_zkvm::evm::{EvmCall, HostRef, SparseTree};
@@ -80,6 +79,7 @@ fn call_of(code: Vec<u8>) -> EvmCall {
         caller: U256::from_u32(0xca11),
         callvalue: U256::ZERO,
         gas_limit: 100_000,
+        context: [0; 8],
         tree: SparseTree::new(),
         touched: vec![],
     }
@@ -124,7 +124,7 @@ fn long_codes_pass_the_guard_and_one_changed_byte_is_refused() {
             n_logs: 0,
         };
         let r = other.tree.root();
-        let want = public_output(&mut HostRef, &other.code, &r, &r, &pre);
+        let want = other.output_for(&other.code, &r, &r, &pre);
         let (got, cycles) = run(&plain, &other.input_words());
         assert_eq!(
             got, want,
@@ -177,7 +177,7 @@ fn a_trailing_zero_byte_is_refused_by_the_guard() {
         n_logs: 0,
     };
     let r = call.tree.root();
-    let want = public_output(&mut HostRef, &extended, &r, &r, &pre);
+    let want = call.output_for(&extended, &r, &r, &pre);
     let (got, cycles) = run(&plain, &call.input_words());
     assert_eq!(
         got, want,

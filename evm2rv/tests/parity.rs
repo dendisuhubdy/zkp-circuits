@@ -37,7 +37,6 @@ use std::sync::OnceLock;
 
 use common::{build_shim, encoded_halt, root, run, run_tier, STAGES};
 use evm2rv::emit::Stage;
-use evm_core::abi::public_output;
 use evm_core::interp::{Halt, Log, Outcome, MAX_LOGS, MAX_RETURN_BYTES};
 use evm_core::u256::U256;
 use rand_zkvm::evm::{
@@ -87,11 +86,14 @@ fn images(stage: Stage) -> &'static Images {
 ///
 /// Re-derived in Task 9 for the code guard (the digest of the source bytecode in `contract.c`, and
 /// the check in `main.rs`); it was `3307bfc4…579d`. `--no-default-config` alone does not move it.
-const ERC20_HC: &str = "9cdb79e7f05d53f6503f0eb777bb0c2356d29cab516a0378864802e42fd048c8";
+/// Re-derived for ZKVM-103/104 (the 82-word `EVM_OUT` preimage in `evm-core`, the log's data hash
+/// in `evm-rt` and the shim); it was `9cdb79e7…48c8`.
+const ERC20_HC: &str = "69052c427ec5842fefc4f4d788a798a2101f00f2f1d92a5f386a89685991e932";
 
 /// The same for the stage-two translation (Task 8): a different program, so a different digest.
-/// Re-derived in Task 9 for the code guard; it was `87aba574…0ccad`.
-const ERC20_HC_STAGE2: &str = "a0feae92a7311c9562495717100eb7aea71270a38ed435d06dc31387e0ea8ff6";
+/// Re-derived in Task 9 for the code guard; it was `87aba574…0ccad`. Re-derived for ZKVM-103/104;
+/// it was `a0feae92…8ff6`.
+const ERC20_HC_STAGE2: &str = "7c6912081035664f82e3be28107eda54d24d82ba73ac4f777a37a63cc0ec8389";
 
 /// `hc` of the stage-one ERC-20 translation (`--stage 1`), pinned (fix round 1, item 7). Uses
 /// the parity build.
@@ -264,7 +266,7 @@ fn a_code_one_byte_different_is_refused_by_the_guard() {
         n_logs: 0,
     };
     let root_before = call.tree.root();
-    let want = public_output(&mut HostRef, &call.code, &root_before, &root_before, &pre);
+    let want = call.output_for(&call.code, &root_before, &root_before, &pre);
     for stage in STAGES {
         let Images { plain, outcome, .. } = images(stage);
         let (got, cycles, tier) = run_tier(plain, &words);

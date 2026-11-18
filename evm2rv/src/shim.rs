@@ -476,6 +476,7 @@ impl Host for Syscalls {
 struct CLog {
     n_topics: u32,
     topics: [[u32; 8]; MAX_TOPICS],
+    data_hash: [u8; 32],
 }
 
 // Every runtime global is `static mut`: C writes all of them (the result ones during the run),
@@ -645,6 +646,7 @@ fn translated(
             for (t, s) in dst.topics.iter_mut().zip(src.topics.iter()) {
                 *t = U256(*s);
             }
+            dst.data_hash = src.data_hash;
         }
         o.n_logs = n;
     }

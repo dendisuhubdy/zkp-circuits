@@ -127,12 +127,12 @@ own tier-20 proof. `sbpf2rv/README.md` has the full walkthrough
 (2026-09-18)**: an ahead-of-time EVM → RV32 translator. It turns Solidity runtime bytecode into C
 over `evm-rt/` in a shim crate `rand-guest build` compiles, reusing `evm-core::abi`'s harness, so
 the input vector and the eight output words are the interpreter's. Stage two (register lifting,
-the default) runs the ERC-20 transfer in 66 235 cycles against the interpreter's 124 606 (`evm.bin` 47df46b2…, hc 31e682ec…, 19 637 words), both
-tier 18, at 11 686 program words; the three ERC-20 calls and five more vectors (a revert, out of gas three ways, the exact limit) match the
+the default) runs the ERC-20 transfer in 70 295 cycles against the interpreter's 128 872 (`evm.bin` f056f928…, hc 08740025…, 20 077 words; 66 235 against 124 606 over 19 637 words before ZKVM-103/104 put the call, the log data and the gas into the output), both
+tier 18, at 12 162 program words; the three ERC-20 calls and five more vectors (a revert, out of gas three ways, the exact limit) match the
 interpreter word for word, and 10 000-case fuzz corpora (plain and opaque, both stages) show no
 divergence. The observable contract is the status, the eight words and `gas_used`, never the halt
-kind. `gas_used` is in the `Outcome` the shim returns, but `public_output` does not bind it — it
-matters on chain only through status. Three accepted divergences: block-head gas can change the halt kind; the translation runs
+kind. `gas_used` is in the `Outcome` the shim returns and, since ZKVM-104, in the `EVM_OUT` preimage,
+so a translation whose gas differs from the interpreter's has different output words. Three accepted divergences: block-head gas can change the halt kind; the translation runs
 `CHAINID` (a baked `--chain-id`), `ORIGIN` (= `CALLER`) and calls to precompiles 1–9, which the
 interpreter traps; and the code guard. The guard: the logic is baked into the image but `CODECOPY`
 reads the input code, so `contract.c` carries a `POSEIDON2` digest of the source bytecode and the

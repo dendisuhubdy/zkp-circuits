@@ -29,10 +29,12 @@ slower than the RISC-V native path:
 **The translator, `evm2rv`, is done (2026-09-18, `circuits/evm2rv`).** It compiles the bytecode to
 C over `evm-rt/` ahead of time, in a shim crate `rand-guest build` turns into an image. The shim
 reuses the interpreter's ABI harness, so the input vector and the eight public output words do not
-change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 66 235 cycles
-against the interpreter's 124 606, at 11 686 program words against 19 637 (the committed
-`evm.bin`, program id `47df46b2…`, hc `31e682ec…`; 121 638 and 18 009 before MCOPY/TLOAD/TSTORE/CLZ). The harness it shares
-with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 60%
+change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 70 295 cycles
+against the interpreter's 128 872, at 12 162 program words against 20 077 (the committed
+`evm.bin`, program id `f056f928…`, hc `08740025…`; 66 235 against 124 606 at 11 686 against
+19 637 before ZKVM-103/104 put the call, the log data and the gas into the output, and 121 638 and
+18 009 for the interpreter before MCOPY/TLOAD/TSTORE/CLZ). The harness it shares
+with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 63%
 of those cycles, so further gains must come from the harness or the coprocessors above. One `hc`
 per contract: the image carries a digest of its source bytecode and refuses any other code
 (status 2), because `CODECOPY` reads the input code. All nine precompiles run in software;
@@ -327,7 +329,7 @@ the same code the committed `.bin` contains.
 
 **The call, in and out.** One `READ_INPUT` vector carries the whole call —
 `[n_code, code…, n_calldata, calldata…, address(8), caller(8), callvalue(8),
-gas_limit(1), pre_root(8), n_witnesses(1), witness…]`, each witness 272 words
+gas_limit(1), context(8), pre_root(8), n_witnesses(1), witness…]`, each witness 272 words
 (`slot(8) ‖ value(8) ‖ 32 siblings × 8`), 256-bit values as their own
 little-endian limbs. It is private and hiding (`H_IN`), and a read past it is
 unsatisfiable in-circuit, which is what lets the guest pass `u32::MAX` as its
@@ -336,13 +338,23 @@ The eight public outputs are `out0 = status` (1 success, 0 `REVERT`, 2
 exceptional halt) and `out1..out7` = words 0..6 of
 
 ```text
-hash(EVM_OUT, [codehash(8) ‖ pre_root(8) ‖ post_root(8) ‖ return_hash(8) ‖ logs_hash(8)])
+hash(EVM_OUT, [codehash(8) ‖ pre_root(8) ‖ post_root(8) ‖ return_hash(8) ‖ logs_hash(8)
+               ‖ address(8) ‖ caller(8) ‖ callvalue(8) ‖ calldata_hash(8) ‖ context(8)
+               ‖ gas_limit(1) ‖ gas_used(1)])
 ```
 
-— 40 words through the domain-tagged sponge: a 224-bit binding of the
-contract, **both** state roots, the return data and the logs. A status other
+— 82 words through the domain-tagged sponge (40 before ZKVM-103/104): a 224-bit
+binding of the contract, **both** state roots, the return data, the logs, the
+call itself (which contract address, which caller, what value, which calldata,
+under which gas limit and which `context`) and the gas it used.
+`logs_hash = keccak256(be32(n_logs) ‖ per log: be32(n_topics) ‖ topics ‖
+keccak256(data))`: a log's data is hashed out of memory when the log is emitted
+and bound through that hash, so the amount of a `Transfer` is in the statement
+(the cap on one log's data is the 64 KiB memory). `context` is eight words the
+guest carries from its input to the digest and never reads: the consuming
+chain's replay protection (a transaction hash, a nonce and chain id). A status other
 than 1 binds `post_root = pre_root` and an empty log set (a status of 2 binds
-empty return data as well), so a failed call can never publish a state change;
+empty return data as well, and `gas_used = gas_limit`), so a failed call can never publish a state change;
 `abi::public_output` is the single place that rule lives.
 
 **Storage.** A depth-32 sparse Merkle tree over 256-bit slots, hashed with the
@@ -394,7 +406,7 @@ the useful one: *some* colliding pair is a birthday search, ~2^16 slots
 slot colliding with one *chosen* victim slot — a known holder's balance entry, a
 claim flag — is a 32-bit second preimage, ~2^32 Keccaks, seconds on a GPU. The
 attacker needs control of a slot key, which for a mapping keyed by address is
-free (the call's `caller` is unbound, above). What it buys is more than the
+free (any caller can make a call). What it buys is more than the
 per-call refusal above: **while one slot of a pair holds a non-zero value, its
 partner cannot be touched at all, by any call** — the position's leaf is
 `H(STORAGE_LEAF, [holder ‖ value])`, and no witness for the partner, whatever
@@ -425,29 +437,49 @@ at the node's tier-14 cap (the review's CPU-1). It belongs with the next
 interpreter version, alongside a deploy-time program version so existing
 contracts keep theirs.
 
-**Known limitation (the output binds no caller).** `caller`, `address` and
-`callvalue` are private inputs, and nothing in the eight public outputs commits
-to them: `out1..out7` digests `(codehash, pre_root, post_root, return_hash,
-logs_hash)` and no more, and `H_IN` is salted and hiding (M4.1), so it opens
-nothing to a verifier. What a verified proof therefore attests is *"there exists
-a `(caller, address, callvalue, calldata)` under which `codehash` maps
-`pre_root` to `post_root`, producing this return data and these log topics"* —
-and nothing about who was entitled to it. For the ERC-20 that is concrete: a
-prover who holds the witnesses can set `caller` to any holder and produce an
-accepted `transfer` out of that holder's balance. `logs_hash` binds the
-`Transfer` event's `from`/`to` topics, but a topic is only what the bytecode
-emitted; no signature is checked anywhere in the guest. The same applies to
-`ADDRESS` and `CALLVALUE`: a contract keying on `address(this)` or `msg.value`
-gets whatever the prover supplied.
+**Authorisation: the output binds the call (ZKVM-103).** `caller`, `address`,
+`callvalue`, the calldata, `gas_limit` and `context` are private inputs a prover
+chooses freely, and the guest checks no signature, so the guest alone cannot say
+who agreed to a call. Through the 40-word digest nothing committed to them
+either: a prover who held the storage witnesses could set `caller` to any holder
+and prove an accepted ERC-20 `transfer` out of that holder's balance. The
+decision taken is the issue's option 1, a **public caller**: all six are in the
+`EVM_OUT` preimage, and the chain that consumes the proof recomputes the digest
+from the transaction **it authenticated** — the spender its signature or spend
+authority names as `caller`, the contract address it dispatches to, the value it
+moves, the calldata that spender signed, the gas limit they agreed to, and its
+own replay protection in `context` — and accepts the proof only if the eight
+output words match (`evm::EvmStatement::accepts`, the verifier's side, computed
+from this crate's own Keccak and sponge and never from `evm-core`). A proof made
+for any other caller, address, value, calldata, gas limit or context is a proof
+of another statement and is refused:
+`tests/evm_abi.rs::a_transfer_proved_for_a_caller_who_did_not_authorise_it_is_refused`
+is that forgery, run and refused, and
+`tests/e2e.rs::compiled_evm_proof_for_an_unauthorised_caller_is_refused` is the
+same with a real proof.
 
-This is not a defect the guest can close on its own, and M4.3 does not claim to:
-**authorisation has to come from the chain that consumes the proof** — the spend
-authority on the bundle that carries it, an in-guest signature check, or the
-shielded pool's nullifier model — or from a later constraint set in which
-`EVM_OUT` gains a caller field. Until one of those exists, nothing downstream
-may treat this digest as authorisation for the transition it binds; it is
-evidence that the transition is a correct execution, not that it was allowed.
-The open item is recorded in the spec's §8.
+What this costs and what it leaves open:
+
+- **Privacy.** The verifier must know the caller, the address, the value and the
+  calldata to recompute the digest, so they are no longer hidden from it
+  (`docs/03-privacy.md`'s table). Options 2 and 3 of ZKVM-103 keep the caller
+  private — an in-guest signature check (Dilithium2 runs in the rVM at about
+  80 572 cycles a verify; secp256k1 needs a chip, ZKVM-115), or a caller derived
+  in-guest from a spend key the chain already authenticates — and either can be
+  added later as a second image without undoing this one.
+- **Replay.** The guest does not track nonces. A successful call that changes
+  storage cannot be replayed against the same `pre_root` once the chain has
+  moved to `post_root`; a call that leaves the root where it was (a view, a
+  revert, a no-op) can, unless the chain puts something single-use in `context`
+  and refuses a `context` it has seen. That rule is the chain's.
+- **The chain side is not in this repository.** `EvmStatement` is the function a
+  node calls; the fullnode's admission path for EVM invokes has to call it with
+  fields taken from the authenticated transaction, and no such path was traced
+  or changed here.
+- `ADDRESS` and `CALLVALUE` are bound the same way: a contract keying on
+  `address(this)` or `msg.value` sees what the chain's statement says. The
+  guest moves no balance for `callvalue`; a chain that admits a non-zero value
+  has to move it itself.
 
 **Traps.** `Halt` is `Stop`, `Return`, `Revert`, `OutOfGas`, `StackUnderflow`,
 `StackOverflow` (1024), `BadJump`, `Invalid` (`0xfe`), `Trap(op)` for anything
@@ -481,11 +513,11 @@ slots touched, one `Transfer` log.
 | | |
 |---|---|
 | contract | `guests-compiled/evm/contracts/ERC20.sol`, `solc 0.8.37`, `--optimize --optimize-runs 200 --evm-version shanghai`, 1 296 bytes of runtime bytecode (committed as hex; `contracts/SOLC.md` records the binary's sha256 and the exact command) |
-| guest program | **19 637 words** (`evm.bin` program id `47df46b2…`, hc `31e682ec…`) — 17 598 of text plus a 2 039-instruction data prologue; the rows below this one, and the digest-row count, were measured on the pre-MCOPY/TLOAD/TSTORE/CLZ image of 18 009 words: 16 370 of text plus a 1 639-instruction data prologue for 2 444 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations), and 4 503 program-digest rows |
-| input vector | 921 words (the bytecode, 68 bytes of calldata, the env, two 272-word witnesses) → 232 input-digest rows |
-| cycles | **124 606 executed** on the committed image (121 638 executed, 126 373 total with both digest prefixes, on the pre-MCOPY/TLOAD/TSTORE/CLZ image) |
+| guest program | **20 077 words** (`evm.bin` program id `f056f928…`, hc `08740025…`) — 17 985 of text plus a 2 092-instruction data prologue (19 637 = 17 598 + 2 039 before ZKVM-103/104); the rows below this one, and the digest-row count, were measured on the pre-MCOPY/TLOAD/TSTORE/CLZ image of 18 009 words: 16 370 of text plus a 1 639-instruction data prologue for 2 444 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations), and 4 503 program-digest rows |
+| input vector | 929 words (the bytecode, 68 bytes of calldata, the env, the eight context words, two 272-word witnesses) → 234 input-digest rows (921 and 232 before the context) |
+| cycles | **128 872 executed** on the committed image, 134 126 with both digest prefixes (124 606 executed before ZKVM-103/104 added the calldata hash, the log-data hash and the 82-word digest; 121 638 executed, 126 373 total, on the pre-MCOPY/TLOAD/TSTORE/CLZ image) |
 | Poseidon2 | 1 070 absorb rows (132 sponge calls: four 32-level Merkle walks, plus the leaves and the output digest), 5 805 permutations in all with the digest prefixes |
-| Keccak | 17 permutations (`codehash` over 1 296 bytes is ten of them; two mapping-slot hashes; the return-data and logs hashes) |
+| Keccak | 20 permutations on the committed image (`codehash` over 1 296 bytes is ten of them; two mapping-slot hashes; the return-data and logs hashes; since ZKVM-103/104 the calldata hash, the `Transfer`'s data hash and a second block of the longer logs preimage); 17 before |
 | tier | **`Tier(18)`** — `keccak_log_height` would be 10 (17 permutations = 544 rows, padded to 1 024) |
 | the proof | **not produced on the development machine (48 GB): three attempts, ≥ 28.5 GB resident at SIGKILL.** A tier-18 batch is 2^18 cpu rows, 2^20 memory and poseidon2 rows and a 2 612-column keccak table; the OS killed every attempt while the resident set was still growing, so the requirement is *above* 28.5 GB and a **≥ 64 GB machine** is the safe figure. `compiled_evm_erc20_transfer_proves_at_tier_18` is therefore `#[ignore]`d. Everything that does not need that memory — the guest's outputs against a native run, the digest binding, the tier arithmetic — is asserted by `compiled_evm_erc20_transfer_binds_the_state_root_transition`, which always runs |
 

@@ -168,11 +168,12 @@ void evm_exp(u256 *r, const u256 *base, const u256 *e) {
 void evm_log(uint32_t n_topics, uint32_t off, uint32_t len, const u256 *topics) {
     evm_charge(G_LOG + (uint64_t)G_LOG_TOPIC * n_topics);
     len_arg(len);
-    /* The data is dropped but still paid for and bounds-checked. */
+    /* The data is paid for and bounds-checked, then hashed where it lies. */
     evm_charge((uint64_t)G_LOG_DATA * len);
-    evm_mexpand(off, len);
+    uint32_t start = evm_mexpand(off, len);
     if (evm_n_logs == MAX_LOGS) evm_halt(EVM_HALT_OUT_OF_BOUNDS, 0);
     evm_log_t *log = &evm_logs[evm_n_logs];
+    evm_keccak256(evm_host, evm_memory + start, len, log->data_hash);
     log->n_topics = n_topics;
     for (uint32_t i = 0; i < MAX_TOPICS; i++) {
         if (i < n_topics) {

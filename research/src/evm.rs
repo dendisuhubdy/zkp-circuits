@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use evm_core::abi::{run_call_with, Workspace};
-use evm_core::interp::Outcome;
+use evm_core::abi::{run_call_with, Statement, Workspace};
+use evm_core::interp::{Env, Outcome};
 use evm_core::u256::U256;
 
 use crate::hash::sponge_hash;
@@ -201,6 +201,9 @@ pub struct EvmCall {
     pub caller: U256,
     pub callvalue: U256,
     pub gas_limit: u64,
+    /// The eight words the consuming chain binds its replay protection to (a transaction hash, a
+    /// nonce and chain id). The guest carries them into the public output and nothing else.
+    pub context: Word8,
     /// The pre-state storage. `witness(slot)` against this is what the guest verifies.
     pub tree: SparseTree,
     /// The slots a witness is supplied for, in the order they appear in the vector. A slot the
@@ -211,7 +214,7 @@ pub struct EvmCall {
 impl EvmCall {
     /// The input vector, exactly as the plan's Global Constraints lay it out:
     /// `[n_code, code…, n_calldata, calldata…, address(8), caller(8), callvalue(8), gas_limit(1),
-    /// pre_root(8), n_witnesses(1), witness…]`, byte strings packed 4 per word little-endian and
+    /// context(8), pre_root(8), n_witnesses(1), witness…]`, byte strings packed 4 per word little-endian and
     /// zero-padded, 256-bit values as their own little-endian limbs, each witness
     /// [`WITNESS_WORDS`] long.
     ///
@@ -237,6 +240,7 @@ impl EvmCall {
         w.extend_from_slice(&self.callvalue.0);
         assert!(self.gas_limit <= u32::MAX as u64, "the layout's gas_limit is one word");
         w.push(self.gas_limit as u32);
+        w.extend_from_slice(&self.context);
         w.extend_from_slice(&self.tree.root());
         w.push(self.touched.len() as u32);
         for slot in &self.touched {
@@ -272,6 +276,148 @@ impl EvmCall {
             );
         }
         (out, o, post)
+    }
+
+    /// The call's environment as `evm-core` takes it.
+    pub fn env(&self) -> Env {
+        Env {
+            address: self.address,
+            caller: self.caller,
+            callvalue: self.callvalue,
+            gas_limit: self.gas_limit,
+        }
+    }
+
+    /// `evm_core::abi::public_output` for this call's calldata, environment and context over the
+    /// given code, roots and outcome — the guest's own function, for tests that vary one of the
+    /// four. [`EvmStatement`] is the independent recomputation.
+    pub fn output_for(&self, code: &[u8], pre_root: &Word8, post_root: &Word8, o: &Outcome) -> [u32; 8] {
+        let env = self.env();
+        let s = Statement {
+            code,
+            calldata: &self.calldata,
+            env: &env,
+            context: &self.context,
+            pre_root,
+            post_root,
+        };
+        evm_core::abi::public_output(&mut HostRef, &s, o)
+    }
+}
+
+/// One log as a verifier holds it: the topics and the data, in full.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvmLog {
+    pub topics: Vec<U256>,
+    pub data: Vec<u8>,
+}
+
+/// **The verifier's side of the EVM guest's public output** (ZKVM-103, ZKVM-104): what a chain
+/// that means to apply a call holds, and the eight output words a proof of exactly that call must
+/// carry. Computed from this crate's own Keccak and sponge, never from `evm-core`.
+///
+/// This is where authorisation is enforced. The guest binds `caller`, `address`, `callvalue`, the
+/// calldata, `gas_limit` and `context` into the digest but cannot know whether the caller agreed;
+/// the chain fills those six fields **from the transaction it authenticated** (the spender its
+/// signature or spend authority names, the calldata that spender signed, its own nonce or
+/// transaction hash in `context`) and accepts the proof only if
+/// [`accepts`](EvmStatement::accepts) holds. A proof made with any other caller — by a prover who
+/// holds the storage witnesses and nothing else — has other output words and is refused.
+///
+/// For a status other than 1 the chain sets `post_root = pre_root` and no logs, and for a status
+/// of 2 no return data and `gas_used = gas_limit`: [`output_words`](EvmStatement::output_words)
+/// hashes the fields exactly as given and applies no rule of its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvmStatement {
+    /// `keccak256` of the contract's runtime bytecode.
+    pub codehash: [u8; 32],
+    pub pre_root: Word8,
+    pub post_root: Word8,
+    pub return_data: Vec<u8>,
+    pub logs: Vec<EvmLog>,
+    pub address: U256,
+    pub caller: U256,
+    pub callvalue: U256,
+    pub calldata: Vec<u8>,
+    pub context: Word8,
+    pub gas_limit: u32,
+    pub gas_used: u32,
+}
+
+impl EvmStatement {
+    /// `keccak256(be32(n_logs) ‖ per log: be32(n_topics) ‖ topics ‖ keccak256(data))`.
+    pub fn logs_hash(&self) -> [u8; 32] {
+        let mut msg = (self.logs.len() as u32).to_be_bytes().to_vec();
+        for log in &self.logs {
+            msg.extend_from_slice(&(log.topics.len() as u32).to_be_bytes());
+            for t in &log.topics {
+                msg.extend_from_slice(&t.to_be_bytes());
+            }
+            msg.extend_from_slice(&keccak::keccak256(&log.data));
+        }
+        keccak::keccak256(&msg)
+    }
+
+    /// The 82-word `EVM_OUT` preimage.
+    pub fn preimage(&self) -> Vec<u32> {
+        let pack = |h: [u8; 32]| -> Word8 {
+            std::array::from_fn(|i| u32::from_le_bytes([h[4 * i], h[4 * i + 1], h[4 * i + 2], h[4 * i + 3]]))
+        };
+        let mut msg = Vec::with_capacity(82);
+        msg.extend_from_slice(&pack(self.codehash));
+        msg.extend_from_slice(&self.pre_root);
+        msg.extend_from_slice(&self.post_root);
+        msg.extend_from_slice(&pack(keccak::keccak256(&self.return_data)));
+        msg.extend_from_slice(&pack(self.logs_hash()));
+        msg.extend_from_slice(&self.address.0);
+        msg.extend_from_slice(&self.caller.0);
+        msg.extend_from_slice(&self.callvalue.0);
+        msg.extend_from_slice(&pack(keccak::keccak256(&self.calldata)));
+        msg.extend_from_slice(&self.context);
+        msg.push(self.gas_limit);
+        msg.push(self.gas_used);
+        msg
+    }
+
+    /// The eight output words a proof of this statement carries: `status`, then words 0..6 of
+    /// `hash(EVM_OUT, preimage)`.
+    pub fn output_words(&self, status: u32) -> [u32; 8] {
+        let d = notes::hash(domain::EVM_OUT, &self.preimage());
+        let mut out = [0u32; 8];
+        out[0] = status;
+        out[1..8].copy_from_slice(&d[..7]);
+        out
+    }
+
+    /// Whether a proof's eight output words are a proof of this statement with this status — the
+    /// check a chain makes after `Machine::verify`, and the one that refuses a call the statement's
+    /// `caller` did not make.
+    pub fn accepts(&self, status: u32, outputs: &[u32; 8]) -> bool {
+        self.output_words(status) == *outputs
+    }
+}
+
+/// `transferOwnership` in sixteen bytes, for the authorisation tests: slot 0 holds the owner, and
+/// the call replaces it with `CALLDATALOAD(0)` if `CALLER` is the owner and reverts otherwise —
+/// `CALLER PUSH0 SLOAD EQ PUSH1 10 JUMPI PUSH0 PUSH0 REVERT JUMPDEST PUSH0 CALLDATALOAD PUSH0
+/// SSTORE STOP`. The smallest contract whose only guard is `msg.sender`.
+pub const OWNABLE_CODE: [u8; 16] =
+    [0x33, 0x5f, 0x54, 0x14, 0x60, 0x0a, 0x57, 0x5f, 0x5f, 0xfd, 0x5b, 0x5f, 0x35, 0x5f, 0x55, 0x00];
+
+/// A call to [`OWNABLE_CODE`] owned by `owner`, made as `caller`, handing ownership to `to`.
+pub fn ownable_transfer(owner: U256, caller: U256, to: U256, context: Word8) -> EvmCall {
+    let mut tree = SparseTree::new();
+    tree.insert(U256::ZERO, owner);
+    EvmCall {
+        code: OWNABLE_CODE.to_vec(),
+        calldata: to.to_be_bytes().to_vec(),
+        address: TOKEN,
+        caller,
+        callvalue: U256::ZERO,
+        gas_limit: 100_000,
+        context,
+        tree,
+        touched: vec![U256::ZERO],
     }
 }
 
@@ -393,6 +539,7 @@ pub fn erc20_transfer(from: U256, to: U256, amount: U256, balances: &[(U256, U25
         caller: from,
         callvalue: U256::ZERO,
         gas_limit: FIXTURE_GAS,
+        context: [0; 8],
         tree,
         touched: vec![mapping_slot(&from, SLOT_BALANCES), mapping_slot(&to, SLOT_BALANCES)],
     }

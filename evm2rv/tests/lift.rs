@@ -351,6 +351,7 @@ fn the_lifting_hazards_match_the_interpreter_and_stage_one() {
             caller: evm_core::u256::U256::from_u32(0xca11),
             callvalue: evm_core::u256::U256::ZERO,
             gas_limit: 1_000_000,
+            context: [0; 8],
             tree: SparseTree::new(),
             touched: vec![],
         };

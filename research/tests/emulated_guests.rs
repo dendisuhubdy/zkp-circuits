@@ -114,6 +114,55 @@ fn compiled_evm_guest_reproduces_the_native_interpreter_on_view_approve_and_reve
     assert_ne!(want_ap, want_r);
 }
 
+/// ZKVM-103 through the committed image: `evm.bin` run with a caller who did not authorise the
+/// call produces a valid execution whose output words the chain's statement — built from the
+/// caller it authenticated — does not accept. The same call made by the owner is accepted, and
+/// the same proof replayed under another `context` is not.
+#[test]
+fn compiled_evm_guest_binds_the_caller_the_calldata_and_the_context() {
+    use rand_zkvm::evm::{ownable_transfer, EvmStatement};
+    let p = guests::compiled::evm();
+    let cycles = rand_zkvm::machine::Tier(16).max_cycles();
+    let mallory = U256::from_u32(0x3a11);
+    let nonce = [7, 0, 0, 0, 0, 0, 0, 21];
+
+    // Mallory holds the witness for slot 0 and runs the call as Alice, the owner.
+    let forged = ownable_transfer(ALICE, ALICE, mallory, nonce);
+    let (want, o, post) = forged.expected();
+    assert_eq!(o.status(), 1, "the forged call is a correct execution");
+    assert_ne!(post.root(), forged.tree.root(), "ownership moved");
+    let out = execute(&p, &forged.input_words(), &[], cycles).unwrap().outputs;
+    assert_eq!(out, want, "the image and the native run agree");
+
+    let statement = |caller: U256, context: [u32; 8]| EvmStatement {
+        codehash: keccak256(&forged.code),
+        pre_root: forged.tree.root(),
+        post_root: post.root(),
+        return_data: vec![],
+        logs: vec![],
+        address: forged.address,
+        caller,
+        callvalue: U256::ZERO,
+        calldata: forged.calldata.clone(),
+        context,
+        gas_limit: forged.gas_limit as u32,
+        gas_used: o.gas_used as u32,
+    };
+    // The chain authenticated Mallory as the sender: refused.
+    assert!(!statement(mallory, nonce).accepts(1, &out), "an unauthorised caller's proof was accepted");
+    // Had Alice sent it, the same words are a proof of her call …
+    assert!(statement(ALICE, nonce).accepts(1, &out));
+    // … under that nonce only.
+    assert!(!statement(ALICE, [8, 0, 0, 0, 0, 0, 0, 21]).accepts(1, &out), "a replay under another context was accepted");
+
+    // What Mallory can prove as herself: a revert, the root where it was.
+    let honest = ownable_transfer(ALICE, mallory, mallory, nonce);
+    let (want_h, o_h, post_h) = honest.expected();
+    assert_eq!(o_h.status(), 0);
+    assert_eq!(post_h.root(), honest.tree.root());
+    assert_eq!(execute(&p, &honest.input_words(), &[], cycles).unwrap().outputs, want_h);
+}
+
 #[test]
 fn compiled_sbpf_guest_matches_the_native_run_on_success_and_on_insufficient_funds() {
     use rand_zkvm::sbpf::{deserialize_accounts, spl_transfer, TOKEN_AMOUNT_AT};

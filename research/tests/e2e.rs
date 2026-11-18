@@ -667,13 +667,12 @@ fn compiled_evm_erc20_transfer_binds_the_state_root_transition() {
 
     // the post-tree the host derived agrees with what the guest bound: recompute the digest from
     // the host's post root, and check no *other* root gives these words.
-    let mut h = rand_zkvm::evm::HostRef;
     assert_eq!(
-        evm_core::abi::public_output(&mut h, &call.code, &call.tree.root(), &post.root(), &outcome),
+        call.output_for(&call.code, &call.tree.root(), &post.root(), &outcome),
         want
     );
     assert_ne!(
-        evm_core::abi::public_output(&mut h, &call.code, &call.tree.root(), &call.tree.root(), &outcome),
+        call.output_for(&call.code, &call.tree.root(), &call.tree.root(), &outcome),
         want,
         "the pre-root must not produce the same digest as the post-root"
     );
@@ -749,6 +748,7 @@ fn compiled_evm_storage_read_write_and_return_proves_and_verifies() {
         caller: U256::from_u32(0xcafe),
         callvalue: U256::ZERO,
         gas_limit: 100_000,
+        context: [0; 8],
         tree,
         touched: vec![U256::from_u32(1)],
     };
@@ -773,6 +773,53 @@ fn compiled_evm_storage_read_write_and_return_proves_and_verifies() {
         prove_time, t1.elapsed()
     );
     assert_eq!(proof.tier.0, 16, "one witness and 18 bytes of code fit tier 16");
+}
+
+/// **ZKVM-103 with a real proof.** A prover who holds the storage witness and not the owner's
+/// authority proves `transferOwnership` with `caller` set to the owner. The proof is a valid proof
+/// of `evm.bin` — `Machine::verify` accepts it, as it must: the execution is correct — and the
+/// chain's check of its output words against the statement for the sender it authenticated
+/// refuses it. The same proof is accepted for the owner's own statement, and for no other context.
+///
+/// One witness and sixteen bytes of code: tier 16, like the test above.
+#[test]
+fn compiled_evm_proof_for_an_unauthorised_caller_is_refused() {
+    use evm_core::u256::U256;
+    use rand_zkvm::evm::{ownable_transfer, EvmStatement, ALICE};
+    use rand_zkvm::tables::cpu::pv;
+    let m = Machine::new(FriProfile::Test);
+    let p = guests::compiled::evm();
+    let mallory = U256::from_u32(0x3a11);
+    let nonce = [7, 0, 0, 0, 0, 0, 0, 21];
+    let forged = ownable_transfer(ALICE, ALICE, mallory, nonce);
+    let (want, o, post) = forged.expected();
+    assert_eq!(o.status(), 1);
+
+    let (proof, exec) = m.prove_salted(&p, &forged.input_words(), &[], [3, 1, 4, 1], None).unwrap();
+    assert_eq!(exec.outputs, want);
+    assert_eq!(proof.tier.0, 16);
+    m.verify(&p.digest(), &proof).expect("the forged call is a correct execution of evm.bin");
+
+    // What the chain reads out of the verified proof: its eight output words.
+    let out: [u32; 8] = std::array::from_fn(|i| proof.public_values[pv::OUT0 + i] as u32);
+    assert_eq!(out, want);
+    let statement = |caller: U256, context: [u32; 8]| EvmStatement {
+        codehash: rand_zkvm::keccak::keccak256(&forged.code),
+        pre_root: forged.tree.root(),
+        post_root: post.root(),
+        return_data: vec![],
+        logs: vec![],
+        address: forged.address,
+        caller,
+        callvalue: U256::ZERO,
+        calldata: forged.calldata.clone(),
+        context,
+        gas_limit: forged.gas_limit as u32,
+        gas_used: o.gas_used as u32,
+    };
+    assert!(!statement(mallory, nonce).accepts(out[0], &out), "a proof for a caller who did not authorise the call was accepted");
+    assert!(statement(ALICE, nonce).accepts(out[0], &out));
+    assert!(!statement(ALICE, [8, 0, 0, 0, 0, 0, 0, 21]).accepts(out[0], &out), "a replay under another context was accepted");
 }
 
 /// `balanceOf`, `approve` and a `transfer` that exceeds the balance all run under the same guest

@@ -103,6 +103,7 @@ fn call(requested: u32, gas_limit: u64) -> EvmCall {
         caller: ALICE,
         callvalue: U256::ZERO,
         gas_limit,
+        context: [0; 8],
         tree: SparseTree::new(),
         touched: Vec::new(),
     }

@@ -24,9 +24,11 @@
 //! warm storage read), `MCOPY` 3 + 3 a word + the expansion over `max(dst, src) + len`, `CLZ` 5. Every exceptional halt consumes the whole limit, as the EVM does; only
 //! `STOP`/`RETURN`/`REVERT` leave gas on the table.
 //!
-//! **Logs keep their topics and drop their data.** The data range is still bounds-checked and paid
-//! for (8 gas a byte, plus any memory expansion), because a contract's gas must not depend on what
-//! the guest chooses to bind. The public output hashes the topics only (Task 4).
+//! **Logs keep their topics and the Keccak-256 of their data** (ZKVM-104). The data range is
+//! bounds-checked and paid for (8 gas a byte, plus any memory expansion) and then hashed where it
+//! lies in memory, so no data buffer is kept; the public output binds topics and data hash alike.
+//! The cap on one log's data is the memory's own 64 KiB — a range past it is
+//! [`Halt::OutOfBounds`], as for every other memory range.
 
 use core::cmp::min;
 
@@ -120,16 +122,20 @@ pub enum Halt {
     OutOfBounds,
 }
 
-/// One emitted log's topics. The data is dropped (the plan's ruling) — only the topics are bound
-/// by the public output, so only the topics are kept.
+/// One emitted log: its topics and `keccak256` of its data (ZKVM-104). The data itself is not
+/// kept — it is hashed out of memory when the log is emitted — so a log costs 164 bytes whatever
+/// it carried, and the public output binds the amount of a `Transfer` through this hash.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Log {
     pub n_topics: u8,
     pub topics: [U256; MAX_TOPICS],
+    /// `keccak256(data)`; `keccak256("")` for a log with no data.
+    pub data_hash: [u8; 32],
 }
 
 impl Log {
-    pub const EMPTY: Log = Log { n_topics: 0, topics: [U256::ZERO; MAX_TOPICS] };
+    /// An unused slot. Its `data_hash` is zero, which is no log's (not even an empty one's).
+    pub const EMPTY: Log = Log { n_topics: 0, topics: [U256::ZERO; MAX_TOPICS], data_hash: [0; 32] };
 }
 
 /// What the run produced. `ret`/`logs` are fixed-size, so `ret_len`/`n_logs` say how much of each
@@ -531,14 +537,15 @@ impl<'a, H: Host> Interpreter<'a, H> {
                 self.charge(G_LOG + G_LOG_TOPIC * n as u64)?;
                 let (offset, size) = (self.pop()?, self.pop()?);
                 let len = len_arg(&size)?;
-                // The data is dropped but still paid for and bounds-checked, so what the guest
-                // binds never changes what the bytecode costs.
+                // The data is paid for and bounds-checked, then hashed where it lies: the log
+                // keeps `keccak256(data)`, never the bytes.
                 self.charge(G_LOG_DATA * len as u64)?;
-                self.mem(&offset, len)?;
+                let start = self.mem(&offset, len)?;
                 if self.n_logs == MAX_LOGS {
                     return Err(Halt::OutOfBounds);
                 }
                 let mut log = Log::EMPTY;
+                log.data_hash = keccak256(&mut *self.h, &self.bufs.memory[start..start + len]);
                 log.n_topics = n as u8;
                 for i in 0..n {
                     log.topics[i] = self.pop()?;

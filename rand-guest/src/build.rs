@@ -142,7 +142,8 @@ pub struct BuildOutput {
 /// words and save ~1 900 execution cycles. (Both figures are from the same build pair, which
 /// predates two later `storage.rs` changes — a tidy-up and the duplicate-leaf-index check; the
 /// image measured 121 638 executed cycles over 18 009 program words, `docs/04-guests.md`, and
-/// with MCOPY/TLOAD/TSTORE/CLZ the committed one measures 124 606 over 19 637.)
+/// with MCOPY/TLOAD/TSTORE/CLZ it measured 124 606 over 19 637, and with the call and the log
+/// data in the public output the committed one measures 128 872 over 20 077.)
 pub fn flags(root: &Path, ld: &Path) -> Vec<String> {
     vec![
         "-C".into(),

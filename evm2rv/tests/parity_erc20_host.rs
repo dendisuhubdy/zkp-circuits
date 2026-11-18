@@ -16,7 +16,6 @@ use std::sync::{Mutex, OnceLock};
 
 use common::{host, STAGES};
 use evm2rv::emit::{translate, Options};
-use evm_core::abi::public_output;
 use evm_core::interp::{Halt, Log, Outcome, MAX_LOGS, MAX_RETURN_BYTES};
 use evm_core::u256::U256;
 use rand_zkvm::evm::{
@@ -170,6 +169,7 @@ fn approve_and_transfer_from() {
         caller: BOB,
         callvalue: U256::ZERO,
         gas_limit: tf.gas_limit,
+        context: [0; 8],
         tree: tf.tree.clone(),
         touched: tf.touched.clone(),
     };
@@ -297,7 +297,7 @@ fn a_metadata_byte_changed_is_refused_on_the_host() {
         n_logs: 0,
     };
     let root = call.tree.root();
-    let want = public_output(&mut HostRef, &call.code, &root, &root, &pre);
+    let want = call.output_for(&call.code, &root, &root, &pre);
     assert_ne!(want, interp);
     for (k, stage) in STAGES.iter().enumerate() {
         let (got, t, _) = l.run_words(&mut HostRef, k, &words);

@@ -13,7 +13,6 @@ use std::collections::BTreeSet;
 use common::{host, STAGES};
 use evm2rv::emit::{translate, Options};
 use evm2rv::guard::{chained_digest, code_digest, code_digest_c, code_words, DIGEST_CHUNK};
-use evm_core::abi::public_output;
 use evm_core::interp::{Halt, Log, Outcome, MAX_LOGS, MAX_RETURN_BYTES};
 use evm_core::u256::U256;
 use rand_zkvm::evm::{EvmCall, HostRef, SparseTree};
@@ -172,6 +171,7 @@ fn call_of(code: Vec<u8>) -> EvmCall {
         caller: U256::from_u32(0xca11),
         callvalue: U256::ZERO,
         gas_limit: 100_000,
+        context: [0; 8],
         tree: SparseTree::new(),
         touched: vec![],
     }
@@ -248,7 +248,7 @@ fn a_translated_contract_refuses_every_one_byte_mutation_at_every_position() {
         let call = call_of(code.clone());
         let words = call.input_words();
         let root = call.tree.root();
-        let want = public_output(&mut HostRef, code, &root, &root, &pre_halt());
+        let want = call.output_for(code, &root, &root, &pre_halt());
         for (k, stage) in STAGES.iter().enumerate() {
             let (got, t, _) = lib.run_words(&mut HostRef, k, &words);
             assert_eq!(got, want, "{name} ({stage:?}): the pre_halt output");
@@ -302,6 +302,7 @@ fn the_genuine_code_is_accepted_under_any_other_input() {
             caller,
             callvalue,
             gas_limit: gas,
+            context: [0; 8],
             tree: SparseTree::new(),
             touched: vec![],
         };

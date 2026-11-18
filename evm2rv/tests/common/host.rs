@@ -48,7 +48,7 @@ pub struct COut {
     pub ret_len: u32,
     pub ret: [u8; MAX_RETURN_BYTES],
     pub n_logs: u32,
-    pub logs: [[u32; 1 + 8 * MAX_TOPICS]; MAX_LOGS],
+    pub logs: [[u32; 1 + 8 * MAX_TOPICS + 8]; MAX_LOGS],
     /// A call reached a precompile (`evm_rdata_live`).
     pub rdata_live: u32,
 }
@@ -509,6 +509,10 @@ impl Lib {
                 dst.n_topics = src[0] as u8;
                 for (t, k) in dst.topics.iter_mut().zip(0..MAX_TOPICS) {
                     *t = U256(src[1 + 8 * k..9 + 8 * k].try_into().unwrap());
+                }
+                // `evm_log_t`'s `uint8_t data_hash[32]`, read here as eight native words.
+                for (b, w) in dst.data_hash.chunks_exact_mut(4).zip(&src[1 + 8 * MAX_TOPICS..]) {
+                    b.copy_from_slice(&w.to_ne_bytes());
                 }
             }
             o.n_logs = n;

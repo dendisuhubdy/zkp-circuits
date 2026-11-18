@@ -123,6 +123,7 @@ fn cancun_call(calldata: Vec<u8>, counter: u32) -> EvmCall {
         caller: ALICE,
         callvalue: U256::ZERO,
         gas_limit: 1_000_000,
+        context: [0; 8],
         tree,
         touched: vec![U256::ZERO],
     }
@@ -136,6 +137,7 @@ fn osaka_call(x: U256) -> EvmCall {
         caller: ALICE,
         callvalue: U256::ZERO,
         gas_limit: 100_000,
+        context: [0; 8],
         tree: SparseTree::new(),
         touched: vec![],
     }

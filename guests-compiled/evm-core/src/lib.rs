@@ -71,13 +71,13 @@ pub fn keccak256<H: Host>(h: &mut H, msg: &[u8]) -> [u8; 32] {
     out
 }
 
-/// The longest `dhash` message this crate hashes: the 40-word public-output preimage plus its
+/// The longest `dhash` message this crate hashes: the 82-word public-output preimage plus its
 /// domain word.
-const DHASH_MAX_WORDS: usize = 41;
+const DHASH_MAX_WORDS: usize = 83;
 
 /// `hash(domain, msg) = poseidon2([domain, msg…])` — the domain-tagged sponge every leaf, node
 /// and digest here is built from, byte-identical to research's `notes::hash`. `1 + msg.len()`
-/// must be at most 41 words.
+/// must be at most 83 words.
 ///
 /// This is the *general* form, used once per call for the public-output digest. Every leaf and
 /// node goes through [`hash_pair`] instead, which is the same sponge with none of the copying —

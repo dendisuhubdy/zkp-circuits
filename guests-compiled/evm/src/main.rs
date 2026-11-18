@@ -30,10 +30,11 @@ impl Host for Syscalls {
 static mut W: Workspace = Workspace::ZERO;
 
 /// M4.3's guest: one EVM call. The private input is the vector `abi` lays out
-/// (`[n_code, code…, n_calldata, calldata…, address, caller, callvalue, gas_limit, pre_root,
-/// n_witnesses, witness…]`); the eight public outputs are `status` and the 224-bit
-/// `hash(EVM_OUT, [codehash ‖ pre_root ‖ post_root ‖ return_hash ‖ logs_hash])` that binds the
-/// contract, the state-root transition, the return data and the logs.
+/// (`[n_code, code…, n_calldata, calldata…, address, caller, callvalue, gas_limit, context,
+/// pre_root, n_witnesses, witness…]`); the eight public outputs are `status` and the 224-bit
+/// `hash(EVM_OUT, [codehash ‖ pre_root ‖ post_root ‖ return_hash ‖ logs_hash ‖ address ‖ caller ‖
+/// callvalue ‖ calldata_hash ‖ context ‖ gas_limit ‖ gas_used])` that binds the contract, the
+/// state-root transition, the return data, the logs (topics and data), the call and its gas.
 ///
 /// `len = u32::MAX` is the honest bound, not a missing check: `read_input` past the `n_in` the
 /// proof committed to `H_IN` is unsatisfiable in-circuit (M4.1), so a truncated input vector

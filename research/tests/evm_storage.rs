@@ -221,6 +221,7 @@ fn the_host_refuses_to_build_a_vector_with_two_witnesses_at_one_position() {
         caller: U256::ZERO,
         callvalue: U256::ZERO,
         gas_limit: 1_000,
+        context: [0; 8],
         tree,
         touched: vec![s(1), s(1)],
     };

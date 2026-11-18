@@ -62,7 +62,7 @@ use common::{build_shim, host, root, run_out_of_cycles, STAGES};
 use evm2rv::blocks::static_gas;
 use evm2rv::emit::{translate, Options, Stage};
 use evm2rv::gen::{case, case_opaque, non_trapping, Case, Gas};
-use evm_core::abi::{public_output, run_call_with, Workspace};
+use evm_core::abi::{run_call_with, Workspace};
 use evm_core::ffi::HALT_INVALID;
 use evm_core::interp::{Halt, Outcome};
 use evm_core::u256::U256;
@@ -100,6 +100,7 @@ fn call_of(c: &Case) -> EvmCall {
         caller: c.caller,
         callvalue: c.callvalue,
         gas_limit: c.gas_limit,
+        context: [0; 8],
         tree,
         touched: c.touched.clone(),
     }
@@ -129,7 +130,11 @@ fn interpret(c: &Case, ws: &mut Workspace) -> (Vec<u32>, [u32; 8], Outcome) {
 fn interpret_rebound(c: &Case, ws: &mut Workspace) -> (Vec<u32>, [u32; 8], Outcome, [u32; 8]) {
     let (words, out, o) = interpret_inner(c, ws);
     let i = &ws.input;
-    let rebound = public_output(&mut HostRef, &c.code, &i.pre_root, &i.storage.root(), &o);
+    // The call as it was run: `interpret_inner` may have lowered the gas word, and the gas limit
+    // is in the digest.
+    let mut call = call_of(c);
+    call.gas_limit = words[gas_word(c)] as u64;
+    let rebound = call.output_for(&c.code, &i.pre_root, &i.storage.root(), &o);
     if c.code == c.interp_code() {
         assert_eq!(rebound, out, "seed {}: the rebound words", c.seed);
     }
@@ -168,8 +173,11 @@ fn the_guard_refuses_the_interpreters_code(
         logs: [evm_core::interp::Log::EMPTY; evm_core::interp::MAX_LOGS],
         n_logs: 0,
     };
-    let pre_root: [u32; 8] = words[gas_word(c) + 1..gas_word(c) + 9].try_into().unwrap();
-    let want = public_output(&mut HostRef, &c.interp_code(), &pre_root, &pre_root, &pre);
+    // the gas word, the eight context words, then the pre-root
+    let pre_root: [u32; 8] = words[gas_word(c) + 9..gas_word(c) + 17].try_into().unwrap();
+    let mut call = call_of(c);
+    call.gas_limit = words[gas_word(c)] as u64; // the gas limit is in the digest
+    let want = call.output_for(&c.interp_code(), &pre_root, &pre_root, &pre);
     if *got != want || gas_used != 0 || halt != Halt::OutOfBounds {
         return Err(format!(
             "seed {}: the guard let the interpreter's code through: status {} halt {halt:?} gas_used {gas_used}",
@@ -484,6 +492,7 @@ fn chainid_is_the_translation_time_constant() {
             caller,
             callvalue: U256::ZERO,
             gas_limit: 100_000,
+            context: [0; 8],
             tree: SparseTree::new(),
             touched: vec![],
         };
@@ -765,6 +774,7 @@ fn the_return_data_buffer_matches_a_model_after_a_call() {
             caller: U256::from_u32(0xca11),
             callvalue: U256::ZERO,
             gas_limit: 1_000_000,
+            context: [0; 8],
             tree: SparseTree::new(),
             touched: vec![],
         };

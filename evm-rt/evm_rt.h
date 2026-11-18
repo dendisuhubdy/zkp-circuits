@@ -102,10 +102,12 @@ extern void *evm_host;
 extern uint8_t evm_ret[MAX_RETURN_BYTES];
 extern uint32_t evm_ret_len;
 
-/* One log's topics (interp.rs's `Log`: the data is paid for and dropped). */
+/* One log (interp.rs's `Log`): its topics and keccak256 of its data, which is hashed out of
+ * memory when the log is emitted and not kept (ZKVM-104). */
 typedef struct {
     uint32_t n_topics;
     u256 topics[MAX_TOPICS];
+    uint8_t data_hash[32];
 } evm_log_t;
 extern evm_log_t evm_logs[MAX_LOGS];
 extern uint32_t evm_n_logs;

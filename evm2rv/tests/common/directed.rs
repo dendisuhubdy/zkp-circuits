@@ -157,6 +157,7 @@ impl Directed {
             caller: U256::from_u32(0xca11),
             callvalue: U256::from_u64(self.callvalue),
             gas_limit: self.gas_limit,
+            context: [0; 8],
             tree,
             touched: self.touched.clone(),
         }
@@ -244,6 +245,7 @@ pub fn run_directed(lib_name: &str, cases: &[Directed]) {
             for (a, b) in t.logs[..t.n_logs].iter().zip(&o.logs[..o.n_logs]) {
                 assert_eq!(a.n_topics, b.n_topics, "{} ({stage:?}): a log's topics", c.name);
                 assert_eq!(a.topics, b.topics, "{} ({stage:?}): a log's topics", c.name);
+                assert_eq!(a.data_hash, b.data_hash, "{} ({stage:?}): a log's data hash", c.name);
             }
         }
         // The laundered twin, against the interpreter over the laundered code.

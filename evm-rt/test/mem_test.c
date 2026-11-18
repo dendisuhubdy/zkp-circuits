@@ -307,6 +307,10 @@ static void logs(void) {
     /* stack order, deepest first: topic 0 is topics[n-1] */
     CHECK(evm_logs[0].topics[0].l[0] == 101 && evm_logs[0].topics[1].l[0] == 100);
     CHECK(u256_is_zero(&evm_logs[0].topics[2]));
+    /* the data is hashed where it lies: memory[0..40], through the host's keccak (the stub's
+     * digest is i ^ len) */
+    CHECK(stub_ptr == evm_memory && stub_len == 40);
+    CHECK(evm_logs[0].data_hash[0] == (0 ^ 40) && evm_logs[0].data_hash[31] == (31 ^ 40));
     CHECK_EQ_U64(evm_gas_used(), 375 + 375 * 2 + 8 * 40 + expansion(2));
     for (int i = 1; i < MAX_LOGS; i++) {
         a0 = 0xffffffffu; a1 = 0; a2 = 0;

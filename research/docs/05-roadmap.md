@@ -614,6 +614,22 @@ every pin of the `evm` guest's hc or program id it holds, and a chain that admit
 admits the new one only at a cut. Translated contracts (`evm2rv`) are unaffected unless their
 bytecode contains the new opcodes: the ERC-20's stage-one and stage-two hcs are unchanged.
 
+**Re-vendor note: the EVM guest's public output binds the call, the log data and the gas**
+(ZKVM-103, ZKVM-104; no constraint-set change). The `EVM_OUT` preimage grew from 40 words to 82:
+after `logs_hash` it now carries `address`, `caller`, `callvalue`, `keccak256(calldata)`, an
+eight-word `context`, `gas_limit` and `gas_used`; `logs_hash` covers each log's
+`keccak256(data)` after its topics; and the input vector has eight `context` words between
+`gas_limit` and `pre_root`. Every proof of the old image and every digest a consumer computed for
+it is void: a node that checks EVM outputs has to compute the 82-word digest
+(`rand_zkvm::evm::EvmStatement`, which it should fill from the transaction it authenticated — that
+is the authorisation check) and supply a `context`. The committed interpreter image moved —
+`guests-compiled/bin/evm.bin` hc `31e682ec…b6c289c3` → `08740025…c4dc0f23`, program id
+`47df46b2…d6c9f3978c` → `f056f928…8567ec70`, 19 637 → 20 077 program words, the ERC-20 `transfer`
+124 606 → 128 872 executed cycles (still tier 18) — and so did **every** `evm2rv` translation,
+which links the same `evm-core` harness and `evm-rt`'s `evm_log` (the ERC-20's two pinned hcs are
+in `evm2rv/README.md`). A chain that admits `evm.bin` or a translated contract by hc admits the
+new one only at a cut.
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency
