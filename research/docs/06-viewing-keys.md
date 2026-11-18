@@ -332,6 +332,7 @@ rows confirms each row independently of whoever produced it:
 | `row.time == ledger.tx.time` | `Time` |
 | `row.nf` equals the chain's | `Nullifier` |
 | `Received`: `note.pk == vk.pk()`; `Sent`: `note.from == vk.pk()` | `Party` |
+| `Received`: the envelope's receiver part opens under `vk` to `row.note`; `Sent`: its sender (`ovk`) part does | `Envelope` |
 | `Sent`: `H_NF(nk, H_CM(spent)) == nf` (a mint has neither, and must carry no `spent`) | `Nullifier` |
 | the row's role is one this disclosure can produce | `Scope` |
 | the row names a slot the transaction has | `Slot` |

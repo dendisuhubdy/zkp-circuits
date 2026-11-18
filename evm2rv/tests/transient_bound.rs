@@ -12,10 +12,17 @@
 //! its bound is `evm_rt.h`'s — and that define is checked against `interp.rs`'s constant here too
 //! (as research's `the_c_gas_constants_and_limits_are_interp_rs` does), so the three agree by
 //! construction and by behaviour.
+//!
+//! OPCODES-751: the table's second rule, on the same paths. A key set and then cleared to zero
+//! keeps its slot (`transient.rs`; `evm_cancun.c`'s `evm_tstore` overwrites a held key in place):
+//! with 16 keys held and one of them cleared, a seventeenth distinct key still halts
+//! `OutOfBounds`, and setting the cleared key again succeeds. A runtime that freed the slot on
+//! clear would let the seventeenth key in — and a translated contract would then run where the
+//! interpreter halts.
 
 mod common;
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use common::{host, root, STAGES};
 use evm2rv::emit::{translate, Options};
@@ -36,9 +43,57 @@ fn tstores(n: usize) -> Vec<u8> {
     code
 }
 
+/// The key the OPCODES-751 contracts clear: one in the middle of the table, not its last entry.
+const CLEARED: u8 = 5;
+
+/// `TSTORE(k, 1)` for k = 1..=16, then `TSTORE(CLEARED, 0)`, then `tail`.
+fn full_then_one_cleared(tail: &[u8]) -> Vec<u8> {
+    let mut code = tstores(BOUND);
+    assert_eq!(code.pop(), Some(0x00), "tstores ends in STOP");
+    code.extend_from_slice(&[0x60, 0x00, 0x60, CLEARED, 0x5d]);
+    code.extend_from_slice(tail);
+    code
+}
+
+/// 16 keys, one cleared, then a seventeenth distinct key: `TSTORE(17, 1)`, `STOP`.
+fn cleared_then_a_seventeenth() -> Vec<u8> {
+    full_then_one_cleared(&[0x60, 0x01, 0x60, (BOUND + 1) as u8, 0x5d, 0x00])
+}
+
+/// 16 keys, one cleared, then that key again: `TSTORE(CLEARED, 7)`, and return `TLOAD(1)`,
+/// `TLOAD(CLEARED)` and `TLOAD(16)` as three words (1, 7, 1).
+fn cleared_then_set_again() -> Vec<u8> {
+    let mut tail = vec![0x60, 0x07, 0x60, CLEARED, 0x5d];
+    for (k, off) in [(1u8, 0x00u8), (CLEARED, 0x20), (BOUND as u8, 0x40)] {
+        tail.extend_from_slice(&[0x60, k, 0x5c, 0x60, off, 0x52]); // PUSH1 k TLOAD PUSH1 off MSTORE
+    }
+    tail.extend_from_slice(&[0x60, 0x60, 0x60, 0x00, 0xf3]); // RETURN(0, 96)
+    full_then_one_cleared(&tail)
+}
+
+/// 16 keys, one cleared, and its `TLOAD` returned: the control that the clear happened (0).
+fn cleared_and_read() -> Vec<u8> {
+    full_then_one_cleared(&[0x60, CLEARED, 0x5c, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3])
+}
+
+/// Every contract the library holds, in order: contract `j` at stage `k` is index `2 * j + k`.
+fn contracts() -> Vec<Vec<u8>> {
+    vec![
+        tstores(BOUND),
+        tstores(BOUND + 1),
+        cleared_then_a_seventeenth(),
+        cleared_then_set_again(),
+        cleared_and_read(),
+    ]
+}
+
 fn call(n: usize) -> EvmCall {
+    call_of(tstores(n))
+}
+
+fn call_of(code: Vec<u8>) -> EvmCall {
     EvmCall {
-        code: tstores(n),
+        code,
         calldata: Vec::new(),
         address: TOKEN,
         caller: ALICE,
@@ -50,17 +105,19 @@ fn call(n: usize) -> EvmCall {
     }
 }
 
-/// Library contract index `2 * (n - BOUND) + stage`.
-fn lib() -> &'static host::Lib {
-    static L: OnceLock<host::Lib> = OnceLock::new();
+/// Library contract index `2 * j + stage` for [`contracts`]' `j` (so `2 * (n - BOUND) + stage`
+/// for the two `tstores(n)`). The mutex is `parity_erc20_host.rs`'s: the runtime's state is
+/// global, so the two tests that run contracts take turns.
+fn lib() -> &'static (host::Lib, Mutex<()>) {
+    static L: OnceLock<(host::Lib, Mutex<()>)> = OnceLock::new();
     L.get_or_init(|| {
         let mut cs = Vec::new();
-        for n in [BOUND, BOUND + 1] {
+        for code in contracts() {
             for &stage in STAGES.iter() {
-                cs.push(translate(&tstores(n), &Options { chain_id: None, stage }).unwrap().c);
+                cs.push(translate(&code, &Options { chain_id: None, stage }).unwrap().c);
             }
         }
-        host::build("transient-bound", &cs)
+        (host::build("transient-bound", &cs), Mutex::new(()))
     })
 }
 
@@ -78,7 +135,8 @@ fn the_transient_limit_constants_are_one_bound() {
 
 #[test]
 fn sixteen_transient_keys_fit_and_a_seventeenth_halts_on_every_path() {
-    let l = lib();
+    let (l, m) = lib();
+    let _g = m.lock().unwrap_or_else(|e| e.into_inner());
     for (i, n) in [BOUND, BOUND + 1].into_iter().enumerate() {
         let c = call(n);
         let (want, o, _) = c.expected();
@@ -93,6 +151,43 @@ fn sixteen_transient_keys_fit_and_a_seventeenth_halts_on_every_path() {
             assert_eq!(got, want, "evm2rv {stage:?} + evm-rt, {n} keys: the eight words");
             assert_eq!(t.halt, o.halt, "evm2rv {stage:?} + evm-rt, {n} keys: the halt");
             assert_eq!(t.gas_used, o.gas_used, "evm2rv {stage:?} + evm-rt, {n} keys: gas_used");
+        }
+    }
+}
+
+/// OPCODES-751: a cleared key keeps its slot, on every path. The interpreter's outcome is held to
+/// the literal rule first (so the two sides cannot agree on the wrong one), then the translation
+/// through the C runtime is held to the interpreter word for word.
+#[test]
+fn a_cleared_transient_key_keeps_its_slot_on_every_path() {
+    let (l, m) = lib();
+    let _g = m.lock().unwrap_or_else(|e| e.into_inner());
+    let word = |v: u8| {
+        let mut w = [0u8; 32];
+        w[31] = v;
+        w
+    };
+    // (contract index, the halt, the status word, the returned bytes, what it shows)
+    let cases: [(usize, Halt, u32, Vec<u8>, &str); 3] = [
+        (2, Halt::OutOfBounds, 2, vec![], "16 keys, one cleared, a 17th distinct key"),
+        (3, Halt::Return, 1, [word(1), word(7), word(1)].concat(), "16 keys, one cleared and set again"),
+        (4, Halt::Return, 1, word(0).to_vec(), "16 keys, one cleared and read"),
+    ];
+    let all = contracts();
+    for (j, halt, status, ret, what) in cases {
+        let c = call_of(all[j].clone());
+        let (want, o, _) = c.expected();
+        assert_eq!(o.halt, halt, "interpreter, {what}");
+        assert_eq!(want[0], status, "interpreter's status, {what}");
+        assert_eq!(&o.ret[..o.ret_len], &ret[..], "interpreter's return data, {what}");
+        let words = c.input_words();
+        for (k, stage) in STAGES.iter().enumerate() {
+            let (got, t, _) = l.run_words(&mut HostRef, 2 * j + k, &words);
+            assert_eq!(got[0], status, "evm2rv {stage:?} + evm-rt, {what}: status");
+            assert_eq!(got, want, "evm2rv {stage:?} + evm-rt, {what}: the eight words");
+            assert_eq!(t.halt, o.halt, "evm2rv {stage:?} + evm-rt, {what}: the halt");
+            assert_eq!(&t.ret[..t.ret_len], &ret[..], "evm2rv {stage:?} + evm-rt, {what}: the return data");
+            assert_eq!(t.gas_used, o.gas_used, "evm2rv {stage:?} + evm-rt, {what}: gas_used");
         }
     }
 }

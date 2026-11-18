@@ -135,6 +135,30 @@ fn a_target_dir_elsewhere_still_packs_the_fresh_elf() {
     );
 }
 
+/// ZKV-1001 (audit v14): `build` runs cargo `--locked`. A guest whose `Cargo.lock` is missing is
+/// refused — and no lockfile is written for it — instead of being built against whatever cargo
+/// resolves on the builder's machine; the same guest with its committed lockfile builds.
+#[test]
+fn a_guest_without_its_lockfile_is_refused_and_none_is_written() {
+    let guest = fib_copy();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("fib.bin");
+    let lock = guest.path().join("Cargo.lock");
+    let committed = std::fs::read(&lock).unwrap();
+    std::fs::remove_file(&lock).unwrap();
+    let o = build(guest.path(), &out, &[]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "a guest with no Cargo.lock was built: {err}");
+    assert!(err.contains("--locked"), "refused by cargo's --locked: {err}");
+    assert!(!lock.exists(), "build wrote a Cargo.lock");
+    assert!(!out.exists(), "build wrote an image");
+    // The control: with the committed lockfile back, the same directory builds, and the lockfile
+    // is left byte for byte as committed.
+    std::fs::write(&lock, &committed).unwrap();
+    hc(&build(guest.path(), &out, &[]));
+    assert_eq!(std::fs::read(&lock).unwrap(), committed, "build rewrote the Cargo.lock");
+}
+
 /// A guest with a `Cargo.toml` and nothing else: enough for the refusal, which comes before any
 /// compiler runs (and before the walk up to the checkout, so the guest need not be in one).
 fn bare_guest(parent: &Path) -> PathBuf {

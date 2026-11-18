@@ -1019,7 +1019,7 @@ pub struct ProveOptions {
     /// HCS-3's `pad_absent_hash_tables` above changes what the *default* limit is, not just what
     /// it hides: declaring the keccak/sha256 tables at the private-data floor
     /// (`MIN_PRIVATE_TABLE_LOG_HEIGHT`, 128 rows each) when a call never hashes raises `gas_max` by
-    /// `4·191 + 2·63` — the floor's four idle keccak blocks and two idle sha256 blocks, each priced
+    /// `4·133 + 2·48` — the floor's four idle keccak blocks and two idle sha256 blocks, each priced
     /// at `KECCAK_GAS - 1` / `SHA256_GAS - 1` — so a call that pads its hash tables *and* leaves
     /// `gas_limit` at `None` declares a higher ceiling than the same call without padding, even
     /// though it spends the same gas either way. A caller that wants the proof to price its actual
@@ -1565,14 +1565,16 @@ impl KeyCache {
     fn built(&self) -> usize { self.map.values().filter(|(slot, _, _)| slot.get().is_some()).count() }
 }
 
-/// The constraint set this crate's AIRs implement: 10 prices a digest-prefix row as a Poseidon2
-/// absorb (ZKV-5, `docs/05-roadmap.md`, "Constraint set 10"), after constraint set 9's MODQ chip and
-/// constraint set 8's gas meter. It is stamped into every
+/// The constraint set this crate's AIRs implement: 11 re-weights the gas meter to the committed-cell
+/// count and prices a `MODQ` call by op, through the cpu's new `MODQ_W` column and a fourth field
+/// on the `MODQ` bus (ZKVM-202, `docs/07-gas.md`; `docs/05-roadmap.md`, "Constraint set 11"), after
+/// constraint set 10's digest-prefix price (ZKV-5), constraint set 9's MODQ chip and constraint
+/// set 8's gas meter. It is stamped into every
 /// [`VerifierKeyBlob`] and checked on install, so a key exported by one constraint set is never
 /// installed by a machine of another (whose `CommonData` for the same shape usually differs —
 /// `tests/verifier_key.rs` pins those digests — and whose constraints differ even when it does not,
 /// as constraint set 10's did not). Bump it with every constraint change, re-pin or no re-pin.
-pub const CONSTRAINT_SET: u32 = 10;
+pub const CONSTRAINT_SET: u32 = 11;
 
 /// The [`VerifierKeyBlob`] wire format's version: the header layout and the `CommonData` mirror
 /// (`CommonDataWire`). Format 1 is the first.

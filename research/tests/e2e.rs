@@ -261,7 +261,7 @@ fn enough_keccak_permutations_raise_the_declared_memory_height_past_the_floor() 
     let p = a.assemble();
     let exec = rand_zkvm::emulator::execute(&p, &[], &[], Tier(10).max_cycles()).unwrap();
     assert_eq!(exec.events.iter().filter(|e| e.keccak_row.is_some()).count(), 40);
-    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 11, 0)).unwrap(); // cs8: the 40 permutations weigh 7 640 gas, past the hash-free ceiling; 11 = the height asserted below
+    let t = build_traces_salted(&p, &[], &[], [0; 4], &exec, Tier(10), rand_zkvm::gas::gas_max(Tier(10), 11, 0)).unwrap(); // cs8: the 40 permutations weigh 5 320 gas (7 640 through constraint set 10), past the hash-free ceiling; 11 = the height asserted below
     let accesses: usize = exec.events.iter().map(|e| e.accesses.len() + e.keccak_accesses.len()).sum();
     assert!(((1 << 12)..1 << 13).contains(&accesses), "{accesses} accesses: past the floor, inside one more bit");
     assert_eq!(t.mem_log_height, 13, "the access count now drives the height");

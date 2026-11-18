@@ -311,6 +311,14 @@ and passes when the rule lands.
    columns. `docs/03-privacy.md`, "LogUp terminals are blinded", has the argument; the chain side
    derives a call's program height from `program_log_height` (floored), and a deploy's pc window
    has to cover the floored table (PCW-FLOOR).
+7. **ZKVM-202 — gas weights that track committed cells** (fullnode #167). *Closed in constraint
+   set 11* (below). `MODQ_GAS = 168` was derived from the chip's block alone; counted with the
+   memory rows the chip sends and with blind and LogUp columns, `DOT4` bought 1.57 and `MSUB4`
+   1.81 times a plain cycle's cells per gas, `KECCAK` 0.70 and `SHA256` 0.77, an absorb row 1.24.
+   Not a finding that breaks soundness, so under the owner's October ruling it did not force a
+   cut; the November ruling adopted the counted weights at the next set, hash weights included.
+   `docs/07-gas.md` has the method and the count; `tests/gas_cells.rs` holds every priced row to
+   it, with `KNOWN_MISPRICED` empty.
 
 ## ZKVM-107: the round-constant switch-over
 
@@ -613,6 +621,129 @@ words, the ERC-20 `transfer` 121 638 → 124 606 executed cycles (still tier 18)
 every pin of the `evm` guest's hc or program id it holds, and a chain that admits `evm.bin` by hc
 admits the new one only at a cut. Translated contracts (`evm2rv`) are unaffected unless their
 bytecode contains the new opcodes: the ERC-20's stage-one and stage-two hcs are unchanged.
+
+## Constraint set 11: gas weights that are the committed-cell count
+
+ZKVM-202 (fullnode #167; the owner's ruling of November 2026: adopt the counted weights at the next
+constraint set, Keccak and SHA-256 lowered with the rest). `docs/07-gas.md` has the method, the
+table, the soundness argument for the per-op `MODQ` price and the fee note for governance.
+
+**What moved.**
+
+| | sets ≤ 10 | set 11 |
+|---|---:|---:|
+| `POSEIDON2_ABSORB_GAS` (absorb row, digest-prefix row, the first row's `GAS`) | 3 | 4 |
+| `KECCAK_GAS` | 192 | 134 |
+| `SHA256_GAS` | 64 | 49 |
+| `MODQ` `NTT` / `INTT` / `DOT4` / `MSUB4` | 168 flat (`MODQ_GAS`) | 193 / 193 / 264 / 304 |
+| `gas_max` at tier `t`, no hash table | `2^t − 1 + 2^(t−2)` | `2^t − 1 + 3·2^(t−3)` |
+| ceiling per keccak / sha256 / modq block | 191 / 63 / 167 | 133 / 48 / 303 |
+| cpu `col::WIDTH` | 283 | 284 (`MODQ_W`) |
+| `MODQ` bus message | `(clk, base, a1)` | `(clk, base, a1, weight − 1)` |
+| `msauth` pinned gas word, `gas_max_with_modq(18, 14, 0, 16)` | 436 159 | 447 935 |
+| `msauth` metered gas, `M` = 1 / 2 / 3 | 111 217 / 216 576 / 321 575 | 108 056 / 208 621 / 308 826 |
+
+- `gas.rs`: `MODQ_GAS` is gone; `MODQ_NTT_GAS`, `MODQ_INTT_GAS`, `MODQ_DOT4_GAS`, `MODQ_MSUB4_GAS`,
+  `MODQ_MAX_GAS`, `modq_gas(op)` and `modq_op(a1)` replace it. `row_gas` prices a `MODQ` row by
+  `a1`'s low two bits; `gas_max_with_modq` allows every modq block the heaviest op.
+- `tables/cpu.rs`: one appended column, `MODQ_W` (not a selector: `(1 − SYS_MODQ)·MODQ_W = 0`);
+  `w_next`'s modq term is `n(MODQ_W)` (degree 2 as before); the `MODQ` lookup carries it as a
+  fourth field. `tables/modq.rs`: the table entry's fourth field,
+  `192·IS_NTT + 192·IS_INTT + 263·IS_DOT + 303·IS_MSUB`. No modq column, no new bus, no new range
+  check.
+- `MSUB4` is 304, not the 305 proposed on set 10's count: `MODQ_W` widened the cpu table, the slot
+  went from 680 to 681 cells, and the weights were taken from the count after the change.
+- `msauth`: tier 18 and the pinned heights (program 12, input 12, keccak 14, sha256 0, modq 16,
+  public 7, memory 20) are unchanged — a weight moves no row. Only the gas word and the metered
+  gas moved.
+
+**What moved with it: every RV32 verifier key.** The appended cpu column and the fourth `MODQ`
+field change every shape's packed lookups, so every `common` digest of `tests/verifier_key.rs`
+moved, the modq-free shapes too (the cpu's `MODQ` lookup is declared in every batch); no
+`commitment` half moved (no preprocessed column changed). Every exported `VerifierKeyBlob` is
+refused by a set-11 machine on its `constraint_set` stamp, the tier-18 `msauth` key the fullnode
+ships included: regenerate it.
+
+**The re-vendor into the fullnode** (`deploy/sync-zkvm.sh`), beyond the wholesale rsync:
+
+1. Every caller of `gas::MODQ_GAS` stops compiling (deliberately): the fee schedule's mirror of the
+   weights becomes the seven constants above, per op for `MODQ`. A fee table keyed on the syscall
+   number alone cannot express set 11: `MODQ`'s price needs `a1 & 3`.
+2. `msauth` admission pins `pv::GAS == 447 935` (was 436 159), same tier and heights; the
+   off-by-one refusals move with it. Any admission rule that pins another guest's header-ceiling
+   gas word moves by the table above (`bundle`, `auth`: `gas_max` at their tier and heights).
+3. `BUILD_CONSTRAINT_SET` to 11, and the set-10 chains (and any still listed for set 9) into
+   `CHAINS_THIS_BUILD_CANNOT_RUN` by genesis hash with a `CONSTRAINT_SET_10_REASON` — the
+   constraint-set-10 checklist above, one set on. `check_build_runs_genesis` keys on guest hcs, and
+   no guest image changed in set 11 (`guests-compiled/bin/*` are byte-identical; a guest does not
+   embed a weight), so that check will not catch a set-10 database under a set-11 binary.
+4. Re-export and re-pin every shipped verifier key blob and every pinned key digest
+   (`inner_vk_digest`, the `msauth` tier-18 blob's SHA-256).
+5. Re-pin the rVM side from `recursion/` (below): `verify_rv32.digest`, `aggregate_program_digest`,
+   the rVM verifier keys that commit those programs, and the genesis `aggregation_tree` values.
+6. `tests/modq.rs` is vendored and now asserts `cpu::col::WIDTH == 284` and the per-op weights;
+   `tests/common/modq_run.rs`'s asker has a fifth column.
+
+A live set-10 chain moved to set 11 is a new genesis, as every set before it.
+
+**The fee change, for governance** (`docs/07-gas.md`, "What the re-weighting does to a fee"). At an
+unchanged price per gas: a plain cycle is unchanged; a `KECCAK` permutation −30 %, a `SHA256`
+compression −23 %; `MODQ` `NTT`/`INTT` +15 %, `DOT4` +57 %, `MSUB4` +81 %; a Poseidon2 absorb row
+and every digest-prefix row +33 % (so every proof's floor rises by its prefix row count). `msauth`
+meters 2.8–4.0 % less (108 056 / 208 621 / 308 826 at `M` = 1 / 2 / 3), but it proves with
+`gas_limit = None` and a fee charged on its public gas word, the header ceiling, rises 2.7 %
+(436 159 → 447 935). Whether the price per gas, the gas tiers or a ceiling-keyed fee should move
+to offset any of this is a governance decision and is not made here.
+
+**What moved downstream: the rVM programs, and this time the inner shape.** The rVM programs
+compile the cpu AIR's constraints and open its rows, so the wider cpu and the new terms move the
+`verify_rv32` / `rv32n` program digests, the inner key digest and the row counts: one production
+inner verification is 236 021 rows (235 425 in set 10), N = 1 / 2 / 3 production aggregates
+236 347 / 472 311 / 708 275 (tiers 18 / 19 / 20, unchanged), the reduce heights and the N ≤ 5
+ceiling unchanged. `rv32t` and `rv32r` read no inner constraint and do not move, but the leaf
+program did, so every rVM proof and key over it is stale.
+`recursion/docs/10-phase5-n2-tier19.md`, "Constraint set 11", has the table.
+
+**Re-pinned on the laptop** (emulation and tier ≤ 14 key generation only):
+
+- `research/tests/verifier_key.rs`: the five `common` digests (Test and Production share them);
+- `research/tests/gas.rs`, `gas_cells.rs`, `heights_bounds.rs`, `cheating.rs`, `modq.rs`: the
+  weights, ceilings, the 681-cell slot, per-op cells, `msauth`'s gas and gas word;
+- `recursion/src/programs/verify_rv32.digest`; `recursion/tests/pins.json` (the production
+  single-proof block, the three test aggregates, `phase3_attribution`'s REG accesses, reloads and
+  spills, `tree_measure.leaf_cpu_rows_emulated`); the production and test aggregate digests, the
+  Off replay, the test `inner_vk_digest`, the reduce rows (`tests/aggregate.rs`, `verifier.rs`,
+  `exit.rs`); `recursion/docs/02-aggregate.md`'s test vectors.
+
+**Pending operator runs for constraint set 11.** Not run from the agent's session (8 GB limit);
+the pins they feed are left at their old values, nothing is guessed:
+
+1. *The `msauth` Production prove* at `M = 3`, tier 18 (≈ 76 GB footprint), which also yields the
+   proof size the fullnode pins: `MSAUTH_PROVE_M=3 /usr/bin/time -l cargo test --release --test
+   msauth msauth_proves_at_m_production -- --ignored --nocapture`, once more with
+   `MSAUTH_PROVE_M=1`, then `msauth_proof_headers_match_across_m -- --ignored`. Result: the header
+   line it prints (tier 18, heights 12/12/14/0/16/7/20, gas `447935`) goes to
+   `docs/04-guests.md`, "Production prove", and to the fullnode's admission pin. The gas word
+   itself is not pending: it is `gas_max_with_modq(18, 14, 0, 16)`, asserted by
+   `tests/gas_cells.rs`.
+2. *The tier-18 `msauth` verifier key blob* the fullnode ships (stamped `constraint_set = 11`
+   now; a set-10 blob is refused on install): `cargo +1.98.1 test --release --test key_blob
+   export_the_production_msauth_key -- --ignored --nocapture` (≈ 4 GB, ≈ 80 s; the test's own note
+   says to run it outside the agent harness). It writes `target/msauth-tier18-production.vkblob`
+   and prints `KEY-BLOB: … sha256=…`; the blob and that digest go to the fullnode's shipped key
+   and its pin. No copy of the blob or its digest lives in this repository.
+3. *`research` tests `bundle`, `viewing`, `e2e`* (tier 14 and 16 proofs; outside CI's research
+   job for memory): `cargo test --release --test bundle --test viewing --test e2e`. They pin
+   proof-size bands, not weights; a failure there would be a size band to re-measure.
+4. *The rVM side*: the test tree's fixtures (≈ 34 GB) and the `tree_test` / `tree-test-genesis.json`
+   pins that follow from them, the Test twins, the production exit and aggregates and the
+   production tree — the table in `recursion/docs/10-phase5-n2-tier19.md`, "Pending operator runs
+   for constraint set 11", has each command and where its result goes. Until the test-tree
+   fixtures are regenerated the fixture-gated tests of `recursion/tests/tree.rs` fail with
+   "rvmproof is missing or stale", as after phase 5.
+5. *The CUDA backend* (`rand-zkvm-cuda`): mirrors no weight and no cpu width (it takes the trace
+   width from the matrix), so nothing to re-pin; its device tests need a GPU host and were not
+   run.
 
 **Re-vendor note: the EVM guest's public output binds the call, the log data and the gas**
 (ZKVM-103, ZKVM-104; no constraint-set change). The `EVM_OUT` preimage grew from 40 words to 82:

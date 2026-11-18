@@ -28,7 +28,7 @@
 //!
 //! | columns | what |
 //! |---|---|
-//! | `IS_REAL`, `CLK`, `BASE`, `A1` | 4 — block-constant; the `MODQ` handshake `(clk, base, a1)` |
+//! | `IS_REAL`, `CLK`, `BASE`, `A1` | 4 — block-constant; the `MODQ` handshake `(clk, base, a1, weight)` |
 //! | `IS_NTT`, `IS_INTT`, `IS_DOT`, `IS_MSUB` | 4 — block-constant one-hot op, sum `= IS_REAL` |
 //! | `OUT_BITS`, `A_BITS`, `B_BITS` | 15 — block-constant 5-bit poly offsets |
 //! | `U_L`, `V_L`, `W_L` | 9 — byte limbs of the inputs `U`, `V` and the multiplier `W` (`< 2^24`) |
@@ -81,7 +81,8 @@
 //!
 //! ## The chip's memory traffic
 //!
-//! As `sha256`: the cpu row only looks up `(CLK, BASE, A1)` on `MODQ`; this table sends every
+//! As `sha256`: the cpu row only looks up `(CLK, BASE, A1, weight)` on `MODQ` — `weight` is the
+//! call's gas beyond the row's own 1, `Σ (gas::modq_gas(op) − 1)·IS_op` (constraint set 11); this table sends every
 //! word the call reads at `ts = 4·CLK` and every word it writes at `ts = 4·CLK + 1` on `MEMORY`
 //! (rule 6), at most five sends per row, each with a 0/1 count. A transform reads on stage 0 and
 //! writes on stage 7; `DOT4` reads `V`, `W` every row and writes `O0` on `k = 3`; `MSUB4` reads `U`
@@ -374,7 +375,7 @@ pub enum Defence {
     MemoryO0,
     /// Rule 6's `MEMORY` send of the `O1` write, with its count.
     MemoryO1,
-    /// Rule 7's `MODQ` table entry `(CLK, BASE, A1)` on a real block's first row.
+    /// Rule 7's `MODQ` table entry `(CLK, BASE, A1, weight)` on a real block's first row.
     Handshake,
     /// Rule 8's three `O0` limb lookups.
     OutputRangeO0,
@@ -657,7 +658,15 @@ where
 
         // --- 7. `MODQ`: one entry per real block, on its first row. ------------------------
         if on(Defence::Handshake) {
-            bus::MODQ.table_entry(b, [clk, base, v(col::A1)], is_real.clone() * pc(pre::IS_FIRST));
+            // Constraint set 11 (ZKVM-202): the fourth field prices the call — what the cpu's `MODQ`
+            // row weighs beyond its own 1, by op. Linear in the one-hot flags, so on a real block
+            // (rule 1: boolean flags summing to `IS_REAL = 1`, tied to `A1`'s low bits) it is
+            // exactly `gas::modq_gas(op) − 1` for the op this block performs.
+            let weight = v(col::IS_NTT) * c(crate::gas::MODQ_NTT_GAS - 1)
+                + v(col::IS_INTT) * c(crate::gas::MODQ_INTT_GAS - 1)
+                + v(col::IS_DOT) * c(crate::gas::MODQ_DOT4_GAS - 1)
+                + v(col::IS_MSUB) * c(crate::gas::MODQ_MSUB4_GAS - 1);
+            bus::MODQ.table_entry(b, [clk, base, v(col::A1), weight], is_real.clone() * pc(pre::IS_FIRST));
         }
 
         // --- 8. `RANGE8`: the 29 limbs of every real row. ----------------------------------

@@ -67,7 +67,9 @@ const LOOP_OVERHEAD: usize = 326;
 /// (283 columns): 312 665 → 312 902.
 /// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: 312 902 → 264 692.
 /// Constraint set 10 (ZKV-5): +7 rows per inner proof: 264 692 → 264 713.
-const N3_ROWS: usize = 264_713;
+/// Constraint set 11 (ZKVM-202): the inner cpu gained `MODQ_W` (284 columns) and the `MODQ` lookup a
+/// fourth field, +148 rows per inner proof: 264 713 → 265 157.
+const N3_ROWS: usize = 265_157;
 
 fn shape_and_key(p: &Proof) -> (InnerShape, InnerKey) {
     let shape = InnerShape::of(
@@ -461,8 +463,10 @@ fn run_reduce_rows(exec: &recursion::emulator::Execution) -> u64 {
 /// The static count `program_rows` (what `Machine::verify_n` derives the canonical height from)
 /// is exactly what a run sends: the single-proof program's run, and the aggregate's at N = 1 and
 /// 2, emulated at the test profile — `N × program_rows`. So the canonical height is the height
-/// `build_traces` declares. Pinned: 39 392 rows a proof (`2^16` at N=1, docs/06 §3), and the
-/// ceiling at the current `REDUCE_MAX_LOG_HEIGHT = 20`: test N ≤ 26 (26 × 39 392 + 1 ≤ 2^20).
+/// `build_traces` declares. Pinned: 39 424 rows a proof (`2^16` at N=1, docs/06 §3), and the
+/// ceiling at the current `REDUCE_MAX_LOG_HEIGHT = 20`: test N ≤ 26 (26 × 39 424 + 1 ≤ 2^20).
+/// Constraint set 11 (ZKVM-202): the inner cpu gained `MODQ_W`, one more main column opened at ζ
+/// and ζg: 39 392 → 39 424; the heights and the ceiling do not move.
 /// MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ: the wider opened row (one more main column and one more permutation column, both opened at ζ and ζg) moves the reduce rows 39 296 → 39 392; the
 /// heights and the ceiling do not move.
 #[test]
@@ -474,7 +478,7 @@ fn the_reduce_height_is_canonical_in_the_program_and_n_at_the_test_profile() {
     let single = verify_rv32(&shape, &key, Checkpoints::Off).program;
     let agg = verify_rv32n(&shape, &key, Checkpoints::Off).program;
     let per = program_rows(&agg);
-    assert_eq!(per, 39_392, "the test-profile reduce rows per inner proof");
+    assert_eq!(per, 39_424, "the test-profile reduce rows per inner proof");
     assert_eq!(program_rows(&single), per, "the loop body is the single-proof pipeline");
     let tape = WitnessTape::build(FriProfile::Test, &shape, &key, &proofs[0]).unwrap();
     let exec = execute(&single, &tape.words, MAX_CYCLES).unwrap();
@@ -497,10 +501,11 @@ fn the_reduce_height_is_canonical_in_the_program_and_n_at_the_test_profile() {
 }
 
 /// The same at the production profile, statically (the emulations are the ignored B3 tests):
-/// 196 960 reduce rows a proof (196 480 before the MODQ chip: 173 120 run + 6 080 fold + 17 280 pow,
+/// 197 120 reduce rows a proof since constraint set 11 (the inner cpu's `MODQ_W` widens the opened
+/// main-trace row once more, 196 960 → 197 120; 196 480 before the MODQ chip: 173 120 run + 6 080 fold + 17 280 pow,
 /// docs/06 §3; MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ widens the opened main-trace row, 196 480 → 196 960), so the
 /// canonical heights are `2^18` at N=1, `2^19` at N=2, `2^20` at N=3–5 — three keys — and N ≥ 6 has
-/// no verifiable height at `REDUCE_MAX_LOG_HEIGHT = 20` (6 × 196 960 + 1 > 2^20), inside tier 22
+/// no verifiable height at `REDUCE_MAX_LOG_HEIGHT = 20` (6 × 197 120 + 1 > 2^20), inside tier 22
 /// which holds cpu rows to N=7: the ceiling is the reduce chip's, not the tier's.
 #[test]
 fn the_production_reduce_heights_and_n_ceiling_are_pinned() {
@@ -509,7 +514,7 @@ fn the_production_reduce_heights_and_n_ceiling_are_pinned() {
     let p = common::bundle_proofs(FriProfile::Production, 1).pop().unwrap();
     let (shape, key) = production_shape_and_key(&p.proof);
     let agg = verify_rv32n(&shape, &key, Checkpoints::Off).program;
-    assert_eq!(program_rows(&agg), 196_960, "the production reduce rows per inner proof");
+    assert_eq!(program_rows(&agg), 197_120, "the production reduce rows per inner proof");
     assert_eq!(max_reduce_n(&agg), 5, "the production N ceiling");
     let heights: Vec<Option<u8>> = (1..=7u64).map(|n| canonical_reduce_log_height(&agg, n)).collect();
     assert_eq!(heights, [Some(18), Some(19), Some(20), Some(20), Some(20), None, None]);
@@ -671,6 +676,8 @@ fn hex_words(words: &[F]) -> String {
 /// it — and that half is pinned here; the list and its digest ride on the fixtures' random
 /// notes, recomputed from the live cache and printed for the doc's worked example.
 /// MODQ chip (2026-10-11, private multisig phase 3): the inner cpu gained SYS_MODQ (283 columns, an inner shape change): `346ee184…5fb9` → `1b0c4b00…ddc7`.
+/// Constraint set 11 (ZKVM-202): the inner cpu gained `MODQ_W` (284 columns) and its `MODQ` lookup a
+/// fourth field (an inner shape and key change): `1b0c4b00…ddc7` → `dbf83e0a…a749`.
 #[test]
 fn the_admission_stub_vectors() {
     let proofs: Vec<Proof> =
@@ -679,7 +686,7 @@ fn the_admission_stub_vectors() {
     let vk_digest = recursion::shape::inner_vk_digest(&shape, &key);
     assert_eq!(
         hex_words(&vk_digest),
-        "1b0c4b0043dd5d00d710f10048bfde989a955034d7fd52f1a85595a61339ddc7",
+        "dbf83e0a450a7532def9c33931489649e8b59b0d93c50a69997b973582b6a749",
         "the inner vk digest is a deterministic constant of the fixture shape"
     );
     let pvs: Vec<Vec<u64>> = proofs.iter().map(|p| p.public_values.clone()).collect();
@@ -750,6 +757,9 @@ fn the_per_n_cycle_budget_is_pinned() {
 /// `dc350ecf…8ba0` → `e0eede8b…b6c3`. MODQ chip (2026-10-11, private multisig phase 3): the inner
 /// cpu gained SYS_MODQ (283 columns; an inner shape and key change): `e0eede8b…b6c3` → `8bc2cecb…d8c7`.
 /// Phase 5 (2026-10-12, S6a/S2b/S4a/S1b) re-recorded it: `8bc2cecb…d8c7` → `792a66d4…a982`.
+/// Constraint set 10 (ZKV-5) re-recorded it: `792a66d4…a982` → `a3d5c38b…83d3`.
+/// Constraint set 11 (ZKVM-202: the inner cpu's `MODQ_W` and the gas chain's new weights) re-recorded
+/// it: `a3d5c38b…83d3` → `df04d610…1bf2`; 236 347 rows = 236 021 + 326, tier 18.
 #[test]
 #[ignore = "a production-profile fixture proof plus a ~2M-row emulation: the M5.2 budget test's own cost class"]
 fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
@@ -773,7 +783,7 @@ fn the_production_n1_aggregate_is_the_m52_pin_plus_loop_overhead() {
     assert_eq!(single_rows, common::pins().cpu_rows, "the M5.2 pin still holds");
     assert_eq!(
         recursion::programs::digest_hex(&verify_rv32n(&shape, &key, Checkpoints::Off).program),
-        "a3d5c38b2481d59f91cb8f03ada990facdd7c152d07a7f5d25930fd7d1e883d3",
+        "df04d61027203a94054415c96e71fd7dcd06441f03662f9c0fd972d216111bf2",
         "the aggregate program's digest at the production bundle shape, as docs/02 and docs/04 state it"
     );
     let r = common::measure_aggregate(1, FriProfile::Production);

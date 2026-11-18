@@ -232,9 +232,13 @@ pub fn build_rust(dir: &Path, ld: Option<&Path>, out: &Path) -> Result<BuildOutp
     let target_dir = dir.join("target");
     let release = target_dir.join(TARGET).join("release");
     remove_elfs(&release)?;
+    // `--locked` (audit v14, ZKV-1001): the guest's committed `Cargo.lock` is part of what `hc` is
+    // a function of. Without it cargo would write a missing lockfile, or rewrite a stale one, with
+    // whatever resolution the builder's registry gives that day. Every committed guest's lockfile
+    // holds path crates only, so this changes no image.
     let status = scrub_env(&mut Command::new("cargo"))
         .arg(format!("+{TOOLCHAIN}"))
-        .args(["build", "--release", "--target", TARGET, "--target-dir"])
+        .args(["build", "--release", "--locked", "--target", TARGET, "--target-dir"])
         .arg(&target_dir)
         .arg("--config")
         .arg(&config)
