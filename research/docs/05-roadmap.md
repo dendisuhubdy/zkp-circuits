@@ -105,7 +105,10 @@ but is worth flagging alongside them (8); 7 is M4.3's measured tier.
    itself provide — a hiding salt for `hc`, so a verifier who cannot
    already guess the program cannot test candidates against it — remains
    open; see `docs/03-privacy.md`'s "`hc` is now an in-circuit digest"
-   section for exactly what changed and what didn't.
+   section for exactly what changed and what didn't, and "A hiding program
+   commitment (ZKVM-108)" there for the design that closes it at the next
+   constraint set (host arithmetic in `src/program_commitment.rs`; no
+   constraint is built).
 2. **The gas tier is public per proof, not just as a batch histogram.** A
    STARK's own size already reveals its trace height, so hiding the tier
    index buys nothing at the single-proof level; the whitepaper's

@@ -578,6 +578,99 @@ the old program-derived one; since constraint set 7 `key_derivation_v2`'s
 labelled Poseidon2 stream, HCS-1) hides nothing because there is nothing
 program-specific left in what it salts.
 
+## A hiding program commitment (ZKVM-108) — design, not built
+
+**Status.** The current constraint set publishes `hc` unsalted, exactly as the section above
+says; nothing in this section is enforced by any proof today. What exists is the host
+arithmetic (`src/program_commitment.rs`, tested in `tests/program_commitment.rs`) and a test
+that pins the gap (`tests/next_constraint_set.rs::
+two_proofs_of_one_program_publish_different_program_commitments`, `#[ignore]`d, failing by
+design: two proofs of `fib(10)` publish the same eight words, and those words are
+`Program::digest()`). The constraints below are a specification for the next constraint set.
+They have not been implemented, so none of their soundness has been tested.
+
+**What is wanted.** Two proofs of one program must not be linkable through their public values,
+an observer who knows every admitted program must not learn which one a proof ran, and the
+verifier must still refuse a program the chain has not admitted.
+
+**The route.** Salted commitment plus set membership, inside the guest proof (route 1 of the
+issue). The alternative — keep `hc` public to the aggregator and hide it in the rVM — needs no
+change here but shows the aggregating prover pool every program a user calls. The pool
+otherwise sees only finished proofs (the guest proof is made by whoever holds the witness —
+"The delegated-proving boundary" below), so that would be a new disclosure to a new party.
+
+**Definitions** (`program_commitment`'s module comment has them exactly):
+
+- `hc` stays what it is — the program digest, deterministic, now an *internal* value.
+- `hc' = H(HCC; salt, hc)`: a two-permutation sponge, 128-bit salt first, then `hc`'s four
+  lanes, header `[0, 0, 0, 0, HCC, 0, 0, 1]`. Published in place of `hc`.
+- The chain keeps an **admitted-programs tree** of fixed depth `D`: leaves are admitted
+  programs' `hc` lanes, a node is `H(ADMIT_NODE; left, right)` (two permutations), an empty
+  leaf is zero. Its root is chain state.
+- The proof shows: "I know `salt`, `hc`, an index and `D` siblings such that the program this
+  trace executed digests to `hc`, `hc'` is its salted commitment, and `hc` is a leaf under
+  `root`."
+
+**Public values.** `pv::HC0..7` carry `hc'`. Four new slots `ROOT0..3` carry the root's lanes
+as field elements (a public value is already held to `< p` by `check_public_values`, so no
+limb decomposition is needed for them). `Machine::verify(hc, proof)` becomes
+`verify(root, proof)`: the caller supplies the root it holds, and no longer a program digest.
+A caller who must know the program (a deploy check, an audit) is given `(hc, salt)` out of
+band and runs `program_commitment::opens(hc', hc, salt)`.
+
+**The constraint change** (cpu table; names are proposals):
+
+1. A new contiguous region of `2 + 2D` rows, `IS_ADMIT`, entered on the row after
+   `DIGEST_LAST` (today `IS_INDIGEST` is; it moves to the row after `ADMIT_LAST`). Same
+   pattern as the three digest regions: boolean selector, exclusive with `IS_DIGEST`,
+   `IS_HASH`, `IS_INDIGEST`, `IS_PUBDIGEST`, a dedicated `ADMIT_LAST` witness column,
+   `HASH_IDX` counting the region's rows from 0, and gas weight
+   `POSEIDON2_ABSORB_GAS` per row.
+2. Each row is one permutation on the `POSEIDON2` bus: `state_in` is `HS0..7` with lanes
+   `0..4` replaced by four new witness columns `AR0..3` (full field elements — the existing
+   `HV0..3` are 32-bit words with `ACT` flags, which is the wrong type for a digest lane);
+   `state_out` is `n(HS0..7)`. The bus fields stay degree 1.
+3. `AHC0..3`, constant over the region (`IS_ADMIT · n(IS_ADMIT) · (n(AHC_i) − AHC_i) = 0`),
+   pinned on entry to the program digest: `DIGEST_LAST · (n(AHC_i) − DPOUT_i) = 0`.
+4. Row 0 (salt): `HS4..7 = [HCC, 0, 0, 1]`, `AR0..3` = the salt, each a `u32` by the sixteen
+   `HVL0_0..15` limbs (as `IS_SALT` rows do). Row 1: `HS4..7` carried from row 0's output,
+   `AR_i = AHC_i`. Its output lanes `0..4` are `hc'`: the `DHVL0..31` / `DHIMAX0..3` /
+   `DINV0..3` canonical-word gadget that today encodes `hc` on the `DIGEST_LAST` row moves to
+   this row and feeds `pv::HC0..7`.
+5. Rows `2 + 2l` and `3 + 2l` (level `l`): new columns `CUR0..3`, `SIB0..3`, `BIT`, constant
+   over the pair, `BIT` boolean. First row: `HS4..7 = [ADMIT_NODE, 0, 0, 1]` and rate lanes
+   irrelevant (all four are overwritten), `AR_i = CUR_i + BIT · (SIB_i − CUR_i)`; second row:
+   `HS4..7` carried, `AR_i = SIB_i + BIT · (CUR_i − SIB_i)`. Level 0's `CUR = AHC`; level
+   `l + 1`'s `CUR` is level `l`'s second-row output lanes `0..4`. These mux constraints are
+   degree 3 with the selector.
+6. `ADMIT_LAST · (HASH_IDX − (1 + 2D)) = 0` fixes the depth (a protocol constant in the AIR,
+   so a short path cannot pass an inner node off as a leaf — the host check
+   `is_admitted` refuses the same thing, tested), and `ADMIT_LAST · (n(HS_i) − ROOT_i) = 0`
+   for `i < 4` publishes the root.
+7. `hc` no longer reaches a public value: delete the `DIGEST_LAST → pv::HC` pin.
+
+**Cost per proof.** `2 + 2D` cpu rows and `32 · (2 + 2D)` poseidon2 rows: at `D = 20` (a
+million programs) 42 and 1 344, the cost of digesting a 168-word program. About 15 new cpu
+columns (`IS_ADMIT`, `ADMIT_LAST`, `AR`, `AHC`, `CUR`, `SIB`, `BIT`) before any sharing with
+columns that are idle in this region; the cpu table's degree ceiling (8, pinned in
+`tests/tables.rs`) has to be re-checked with the real constraints.
+
+**What it hides and what it does not.** The anonymity set is every program under the root.
+Still public: the tier, the declared table heights (`program_log_height` narrows the candidates
+to programs of that size class — the private-data floor makes every program up to 127 words
+look alike, larger ones fall into power-of-two classes), whether the keccak / sha256 / modq
+tables are present, gas, and the outputs. A program with a distinctive shape is identifiable
+from those alone, salt or no salt; padding the declared heights to a tier-wide value is the
+lever for that and is not part of this change.
+
+**Open, for the full-node side.** (a) Roots change as programs are admitted, so the node has
+to accept a proof against any of its recent roots, as it does note anchors. (b) Admission
+becomes "insert `hc` into the tree" and no longer a per-call lookup. (c) A call that writes
+per-contract public storage names the contract by the storage it touches; this change hides
+the program of calls whose effects are commitments (the shielded-pool guests, msauth), and
+does not by itself hide which contract an EVM or sBPF call ran. (d) Whether there is one set or
+one per class of program.
+
 ## What `verify` actually checks
 
 `Machine::verify(hc, proof)` — the code a node runs — checks, in order: the
