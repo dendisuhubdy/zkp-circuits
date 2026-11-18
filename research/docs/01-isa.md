@@ -220,6 +220,12 @@ A proof header's gas ceiling is `gas::gas_max = (2^t − 1) + 2^(t−2) + 191·(
 63·(2^slh/64)` — the `+2` of the absorb rows and, since constraint set 10, the digest-prefix rows
 is bounded by the poseidon2 table's `2^(t−3)` permutation slots, so a hash-free tier-10 header's ceiling is 1 279 and a tier-14 one's 20 479.
 
+What each of these weights buys in committed trace cells, measured per operation, is in
+`07-gas.md` (`tests/gas_cells.rs`): `MODQ`'s flat 168 under-prices `DOT4` (1.57×) and `MSUB4`
+(1.81×), whose memory traffic it does not count, and `KECCAK` and `SHA256` are over-priced. The
+weights are constraint-enforced and stay as they are until the next constraint set; `07-gas.md`
+has the proposed ones.
+
 **`POSEIDON2` does not pad (audit ZKH-3).** The sponge starts from the all-zero
 state and *overwrites* the first `min(4, remaining)` lanes with each chunk, so
 within the first rate block a trailing zero word is indistinguishable from an
