@@ -2,13 +2,14 @@
 //! `docs/07-gas.md` has the method and the table this prints (`--nocapture`).
 //!
 //! Gas is meant to track prover cost, and the weights in `gas.rs` are enforced by the cpu AIR
-//! (`w_next`), so they cannot move without a constraint-set bump. This file does not move them. It
-//! measures them: table widths from the real chips and the real packed LogUp contexts, rows per
-//! operation from an emulator run of a probe guest (cross-checked against the trace generator's own
-//! real rows), gas from `gas::row_gas`. An operation whose cells per gas is more than 15 % away from
-//! a plain cycle's fails the test unless it is on `KNOWN_MISPRICED`, with its measured ratio and the
-//! weight that would fix it; an entry that is in fact inside the band fails too, so the list is
-//! emptied in the commit that re-weights at the next constraint set.
+//! (`w_next`), so they move only with a constraint set. This file measures them: table widths from
+//! the real chips and the real packed LogUp contexts, rows per operation from an emulator run of a
+//! probe guest (cross-checked against the trace generator's own real rows), gas from
+//! `gas::row_gas`. Constraint set 11 adopted the weights this count gives, so the test now holds
+//! every priced row to them: an operation whose cells per gas is more than 15 % away from a plain
+//! cycle's fails, and so does one whose weight is not the rounded count. `KNOWN_MISPRICED` — the
+//! list of exceptions the weights of constraint sets ≤ 10 needed — is empty and has to stay empty:
+//! a column added to any table moves the count, and the weights are then re-read, not excused.
 mod common;
 
 use p3_air::BaseAir;
@@ -17,7 +18,7 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use rand_zkvm::asm::{ops::*, Assembler};
 use rand_zkvm::emulator::{execute, CycleEvent, Execution, Syscall};
-use rand_zkvm::gas::{gas_max_with_modq, gas_of, row_gas, KECCAK_GAS, MODQ_GAS, POSEIDON2_ABSORB_GAS, SHA256_GAS};
+use rand_zkvm::gas::{gas_max_with_modq, gas_of, row_gas, KECCAK_GAS, MODQ_DOT4_GAS, MODQ_INTT_GAS, MODQ_MSUB4_GAS, MODQ_NTT_GAS, POSEIDON2_ABSORB_GAS, SHA256_GAS};
 use rand_zkvm::isa::{BranchCond, Program};
 use rand_zkvm::machine::{build_traces_salted, chips_with_modq, Challenge, Chip, FriProfile, Machine, Tier, Val};
 use rand_zkvm::modq::{Args, Op};
@@ -28,19 +29,22 @@ const BAND: f64 = 0.15;
 /// How tightly a `KNOWN_MISPRICED` ratio is pinned.
 const PIN: f64 = 0.005;
 
-/// An operation the count shows outside the band, kept because the weights are constraint-enforced
-/// and the owner's October ruling was not to cut a chain for them. `ratio` is its cells per gas over
-/// a plain cycle's (above 1: under-priced); `weight` is the row's total gas that brings it to 1.0,
-/// `round(cells / slot)`. Empty this list in the commit that changes `gas.rs` and `w_next`.
+/// An operation the count shows outside the band and the weights do not yet follow. `ratio` is its
+/// cells per gas over a plain cycle's (above 1: under-priced); `weight` is the row's total gas that
+/// brings it to 1.0, `round(cells / slot)`. Six entries through constraint set 10 (absorb and
+/// digest-prefix rows 1.243, `KECCAK` 0.697, `SHA256` 0.769, `DOT4` 1.572, `MSUB4` 1.814); none
+/// since set 11 re-weighted. An entry here is a decision not to cut a chain, never a fix.
+#[allow(dead_code)]
 struct Mispriced { op: &'static str, ratio: f64, weight: u64 }
-const KNOWN_MISPRICED: [Mispriced; 6] = [
-    Mispriced { op: "poseidon2 absorb", ratio: 1.243, weight: 4 },
-    Mispriced { op: "digest prefix", ratio: 1.243, weight: 4 },
-    Mispriced { op: "keccak", ratio: 0.697, weight: 134 },
-    Mispriced { op: "sha256", ratio: 0.769, weight: 49 },
-    Mispriced { op: "modq dot4", ratio: 1.572, weight: 264 },
-    Mispriced { op: "modq msub4", ratio: 1.814, weight: 305 },
+const KNOWN_MISPRICED: [Mispriced; 0] = [];
+
+/// The weights of constraint sets ≤ 10, by priced kind: what `docs/07-gas.md` compares against,
+/// and what the two earlier counts were made at.
+const SET_10: [(&str, u64); 9] = [
+    ("plain cycle", 1), ("poseidon2 absorb", 3), ("digest prefix", 3), ("keccak", 192), ("sha256", 64),
+    ("modq ntt", 168), ("modq intt", 168), ("modq dot4", 168), ("modq msub4", 168),
 ];
+fn set_10(name: &str) -> u64 { SET_10.iter().find(|(n, _)| *n == name).unwrap().1 }
 
 // ---- widths --------------------------------------------------------------------------------------
 
@@ -332,6 +336,7 @@ fn cells_per_gas_is_within_the_band_or_on_the_list() {
         let fair = fair_weight(&w, s, r, m);
         println!("{name:<18} {:>4} {:>4} {:>5} {:>10} {:>6} {c:>9} {:>5} {:>10.1} {q:>6.3} {fair:>7}", 1, s.alu, s.mem, r.chip_rows, r.chip_mem_rows, r.gas, c as f64 / r.gas as f64);
         let inside = (q - 1.0).abs() <= BAND;
+        if r.gas != fair { failures.push(format!("{name}: weighs {}, and the count gives {fair} (ratio {q:.3})", r.gas)); }
         match KNOWN_MISPRICED.iter().find(|k| k.op == *name) {
             None if !inside => failures.push(format!("{name}: ratio {q:.3} is outside ±{BAND} and not on KNOWN_MISPRICED (weight {fair} would bring it to 1.0)")),
             None => {}
@@ -354,14 +359,39 @@ fn cells_per_gas_is_within_the_band_or_on_the_list() {
         println!("{name:<24} {:>7.3} {nov:>17.3} {:>7.3} {:>10.3} {:>15.3}", ratio(&w, s, r, m), ratio(&w, s, r, Method::NoPre), ratio(&w, s, r, Method::WithQuotient), ratio(&w, s, r, Method::PerProof));
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    assert!(KNOWN_MISPRICED.is_empty(), "constraint set 11 left no exception; a new one is a ruling, recorded in docs/07-gas.md");
+
+    // The table of `docs/07-gas.md`, pinned: (cells, weight) per kind, and the slot.
+    assert_eq!(unit, 681);
+    let got: Vec<(&str, usize, u64)> = ops.iter().map(|(n, r)| (*n, cells(&w, s, r, m), r.gas)).collect();
+    assert_eq!(got, [
+        ("plain cycle", 681, 1), ("poseidon2 absorb", 2_537, 4), ("digest prefix", 2_537, 4), ("keccak", 91_061, 134), ("sha256", 33_481, 49),
+        ("modq ntt", 131_241, 193), ("modq intt", 131_241, 193), ("modq dot4", 179_625, 264), ("modq msub4", 207_273, 304),
+    ]);
+    assert_eq!((POSEIDON2_ABSORB_GAS, KECCAK_GAS, SHA256_GAS, MODQ_NTT_GAS, MODQ_INTT_GAS, MODQ_DOT4_GAS, MODQ_MSUB4_GAS), (4, 134, 49, 193, 193, 264, 304));
+
+    // What the same cells came to at the weights of constraint sets ≤ 10.
+    println!("\nat the weights of constraint sets ≤ 10: weight, ratio");
+    for (name, r) in &ops {
+        println!("{name:<24} {:>5} {:>7.3}", set_10(name), cells(&w, s, r, m) as f64 / set_10(name) as f64 / unit as f64);
+    }
 }
 
-/// The two earlier counts, reproduced from the same widths and rows, so the doc's account of why
-/// they differ is checked rather than asserted.
+/// The two earlier counts, reproduced from the same rows, so the doc's account of why they differ
+/// is checked rather than asserted. Both were made in constraint set 10: at its weights (`SET_10`)
+/// and its cpu table, one column narrower (`MODQ_W` is set 11's).
 #[test]
 fn the_earlier_counts_are_reproduced() {
-    let Measured { widths: w, slot: s, ops, .. } = measured();
-    let rows = |name: &str| ops.iter().find(|(n, _)| *n == name).unwrap().1;
+    let Measured { widths: mut w, slot: s, ops, .. } = measured();
+    assert_eq!(w.cpu.main, 284);
+    w.cpu.main -= 1;
+    let rows = |name: &str| Rows { gas: set_10(name), ..ops.iter().find(|(n, _)| *n == name).unwrap().1 };
+
+    // The method of record at set 10: the 680-cell slot and the six ratios that were on the list.
+    let m = Method::Trace;
+    assert_eq!(slot_cells(&w, s, m), 680);
+    let rec = |name: &str| (ratio(&w, s, &rows(name), m) * 1000.0).round() / 1000.0;
+    assert_eq!((rec("poseidon2 absorb"), rec("keccak"), rec("sha256"), rec("modq ntt"), rec("modq dot4"), rec("modq msub4")), (1.243, 0.697, 0.769, 1.149, 1.572, 1.814));
 
     // 17 November: main + preprocessed columns only, and an operation's cells are its chip block and
     // the chip's memory rows — the cpu row's own slot is left out of the numerator.
@@ -379,14 +409,13 @@ fn the_earlier_counts_are_reproduced() {
     let oct = |name: &str| (ratio(&w, s, &rows(name), m) * 100.0).round() / 100.0;
     assert_eq!((oct("modq dot4"), oct("modq msub4"), oct("keccak"), oct("sha256")), (1.49, 1.77, 0.61, 0.69));
 
-    // `gas.rs`'s own derivation of `MODQ_GAS`: the chip block alone at 460 cells per gas, plus the row.
+    // Set 10's own derivation of its flat `MODQ_GAS`: the chip block alone at 460 cells per gas, plus the row.
     let block = rows("modq ntt").chip_rows * w.modq.cells(Method::MainPre);
     assert_eq!(block, 76_800);
-    assert_eq!((block as f64 / 460.0).round() as u64 + 1, MODQ_GAS);
-    assert_eq!((KECCAK_GAS, SHA256_GAS, POSEIDON2_ABSORB_GAS), (192, 64, 3), "the weights this file measures; ZKVM-202 does not move them");
+    assert_eq!((block as f64 / 460.0).round() as u64 + 1, set_10("modq ntt"));
 }
 
-// ---- msauth under the proposed weights -------------------------------------------------------------
+// ---- msauth at the weights ------------------------------------------------------------------------
 
 /// The private-multisig guest (Dilithium2 verification, `guests::compiled::msauth`) at `k` active
 /// signers of a three-signer policy, on the emulator only — the fixture of `tests/msauth.rs`.
@@ -405,56 +434,53 @@ fn msauth_run(k: usize) -> (Program, Vec<u32>, Execution) {
     (p, input, e)
 }
 
-/// The header ceiling `gas::gas_max_with_modq` would compute at these weights: each term is the most
-/// its row kind can add, so the modq term takes the heaviest op's weight.
+/// The header ceiling `gas::gas_max_with_modq` computes, restated over a set of weights: each term
+/// is the most its row kind can add, so the modq term takes the heaviest op's weight.
 fn ceiling(tier: Tier, klh: u8, mlh: u8, absorb: u64, keccak_w: u64, modq_max: u64) -> u64 {
     ((1u64 << tier.0) - 1) + (absorb - 1) * (1u64 << (tier.0 - 3)) + (keccak_w - 1) * ((1u64 << klh) / keccak::BLOCK as u64) + (modq_max - 1) * ((1u64 << mlh) / modq::BLOCK as u64)
 }
 
-/// What `msauth` costs today and what it would cost at the proposed weights, for `M = 1, 2, 3`.
-/// Nothing but the gas moves: a tier is chosen by cycles and Poseidon2 permutations and a table's
-/// height by its rows, none of which a weight touches, so the pinned shape (tier 18, keccak 14,
-/// modq 16, memory 20) holds as it is. The pinned gas word is the header ceiling, and that does move.
+/// What `msauth` costs for `M = 1, 2, 3`, and what it cost through constraint set 10. Nothing but
+/// the gas moved: a tier is chosen by cycles and Poseidon2 permutations and a table's height by its
+/// rows, none of which a weight touches, so the pinned shape (tier 18, keccak 14, modq 16, memory
+/// 20) holds as it was. The pinned gas word is the header ceiling, and that did move.
 #[test]
-fn msauth_under_the_proposed_weights() {
+fn msauth_at_the_weights() {
     use rand_zkvm::msauth::{MSAUTH_TIER, PINNED_KECCAK_LOG_HEIGHT, PINNED_MODQ_LOG_HEIGHT};
-    let Measured { widths: w, slot: s, ops, .. } = measured();
-    let fair = |name: &str| fair_weight(&w, s, &ops.iter().find(|(n, _)| *n == name).unwrap().1, Method::Trace);
-    let today = |name: &str| ops.iter().find(|(n, _)| *n == name).unwrap().1.gas;
-    // Two re-weightings: every priced row at ratio 1.0, and the MODQ ops alone.
-    let all = |name: &str| fair(name);
-    let modq_only = |name: &str| if name.starts_with("modq") { fair(name) } else { today(name) };
+    let Measured { ops, .. } = measured();
+    let now = |name: &str| ops.iter().find(|(n, _)| *n == name).unwrap().1.gas;
 
     println!("\nmsauth (tier {}, pinned keccak {PINNED_KECCAK_LOG_HEIGHT} / modq {PINNED_MODQ_LOG_HEIGHT})", MSAUTH_TIER.0);
-    println!("{:>2} {:>8} {:>7} {:>7} {:>5} {:>5} {:>5} {:>6} | {:>9} {:>10} {:>9}", "M", "cycles", "prefix", "absorb", "kecc", "ntt", "intt", "dot4", "gas today", "modq-only", "all ops");
+    println!("{:>2} {:>8} {:>7} {:>7} {:>5} {:>5} {:>5} {:>5} {:>6} | {:>9} {:>9}", "M", "cycles", "prefix", "absorb", "kecc", "ntt", "intt", "dot4", "msub4", "gas", "set ≤ 10");
     let mut got = Vec::new();
     for k in 1..=3usize {
         let (p, input, e) = msauth_run(k);
         let prefix = p.digest_rows() + rand_zkvm::hash::input_digest_row_count(input.len()) + rand_zkvm::hash::public_digest_row_count(8);
         let count = |name: &str| e.events.iter().filter(|ev| rows_of(ev).0 == name).count();
         let gas = |weight: &dyn Fn(&str) -> u64| prefix as u64 * weight("digest prefix") + e.events.iter().map(|ev| weight(rows_of(ev).0)).sum::<u64>();
-        let now = gas(&today);
-        assert_eq!(now, gas_of(&p, &input, &[11, 22, 33, 44, 55, 66, 77, 88], &e.events), "the per-kind weights are the meter's");
+        let metered = gas_of(&p, &input, &[11, 22, 33, 44, 55, 66, 77, 88], &e.events);
+        assert_eq!(gas(&now), metered, "the per-kind weights are the meter's");
         assert_eq!(count("modq msub4"), k, "one MSUB4 per signature");
         assert!(e.cycles() + prefix <= MSAUTH_TIER.max_cycles());
-        println!("{k:>2} {:>8} {prefix:>7} {:>7} {:>5} {:>5} {:>5} {:>6} | {now:>9} {:>10} {:>9}", e.cycles() + prefix, count("poseidon2 absorb"), count("keccak"), count("modq ntt"), count("modq intt"), count("modq dot4"), gas(&modq_only), gas(&all));
-        got.push((count("keccak"), count("modq ntt"), count("modq intt"), count("modq dot4"), count("modq msub4"), now, gas(&modq_only), gas(&all)));
+        assert_eq!(Tier::for_cycles(e.cycles() + prefix).map(|t| t.0 <= MSAUTH_TIER.0), Some(true), "M = {k} fits the pinned tier");
+        assert!(count("keccak") * keccak::BLOCK <= 1 << PINNED_KECCAK_LOG_HEIGHT && (count("modq ntt") + count("modq intt") + count("modq dot4") + count("modq msub4")) * modq::BLOCK <= 1 << PINNED_MODQ_LOG_HEIGHT, "M = {k} fits the pinned heights");
+        println!("{k:>2} {:>8} {prefix:>7} {:>7} {:>5} {:>5} {:>5} {:>5} {:>6} | {metered:>9} {:>9}", e.cycles() + prefix, count("poseidon2 absorb"), count("keccak"), count("modq ntt"), count("modq intt"), count("modq dot4"), count("modq msub4"), gas(&set_10));
+        got.push((e.cycles() + prefix, count("keccak"), count("modq ntt"), count("modq intt"), count("modq dot4"), count("modq msub4"), metered, gas(&set_10)));
     }
-    let heaviest = |weight: &dyn Fn(&str) -> u64| ["modq ntt", "modq intt", "modq dot4", "modq msub4"].iter().map(|n| weight(n)).max().unwrap();
-    let ceil = |weight: &dyn Fn(&str) -> u64| ceiling(MSAUTH_TIER, PINNED_KECCAK_LOG_HEIGHT, PINNED_MODQ_LOG_HEIGHT, weight("poseidon2 absorb"), weight("keccak"), heaviest(weight));
-    let ceilings = (ceil(&today), ceil(&modq_only), ceil(&all));
-    println!("header ceiling (the pinned gas word): today {}, modq-only {}, all ops {}", ceilings.0, ceilings.1, ceilings.2);
-    assert_eq!(ceilings.0, gas_max_with_modq(MSAUTH_TIER, PINNED_KECCAK_LOG_HEIGHT, 0, PINNED_MODQ_LOG_HEIGHT));
+    let word = gas_max_with_modq(MSAUTH_TIER, PINNED_KECCAK_LOG_HEIGHT, 0, PINNED_MODQ_LOG_HEIGHT);
+    assert_eq!(word, ceiling(MSAUTH_TIER, PINNED_KECCAK_LOG_HEIGHT, PINNED_MODQ_LOG_HEIGHT, POSEIDON2_ABSORB_GAS, KECCAK_GAS, MODQ_MSUB4_GAS));
+    let word_set_10 = ceiling(MSAUTH_TIER, PINNED_KECCAK_LOG_HEIGHT, PINNED_MODQ_LOG_HEIGHT, 3, 192, 168);
+    println!("header ceiling (the pinned gas word): {word}; through set 10: {word_set_10}");
     for g in &got {
-        assert!(g.5 <= ceilings.0 && g.6 <= ceilings.1 && g.7 <= ceilings.2, "a run never passes its header's ceiling");
+        assert!(g.6 <= word && g.7 <= word_set_10, "a run never passes its header's ceiling");
     }
-    // Per signature: 9 NTT, 4 INTT, 4 DOT4, 1 MSUB4 and 99 Keccak permutations; then the gas, pinned
-    // (the fixture is seeded): today's, with the MODQ ops re-weighted, with every op re-weighted.
-    let pinned = [(111_217, 112_063, 108_057), (216_576, 218_268, 208_623), (321_575, 324_113, 308_829)];
+    // Per signature: 9 NTT, 4 INTT, 4 DOT4, 1 MSUB4 and 99 Keccak permutations; then the cycles and
+    // the gas, pinned (the fixture is seeded): now, and through set 10.
+    let pinned = [(85_830, 108_056, 111_217), (169_068, 208_621, 216_576), (251_946, 308_826, 321_575)];
     for (i, g) in got.iter().enumerate() {
         let k = i + 1;
-        assert_eq!((g.0, g.1, g.2, g.3, g.4), (99 * k, 9 * k, 4 * k, 4 * k, k), "M = {k}");
-        assert_eq!((g.5, g.6, g.7), pinned[i], "M = {k}");
+        assert_eq!((g.1, g.2, g.3, g.4, g.5), (99 * k, 9 * k, 4 * k, 4 * k, k), "M = {k}");
+        assert_eq!((g.0, g.6, g.7), pinned[i], "M = {k}");
     }
-    assert_eq!(ceilings, (436_159, 444_927, 447_999));
+    assert_eq!((word, word_set_10), (447_935, 436_159));
 }

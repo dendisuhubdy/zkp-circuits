@@ -58,6 +58,15 @@
 //! Constraint set 10 (ZKV-5) changed no digest here: it adds no column, lookup or preprocessed
 //! table, only the weight of a row in the gas chain, and neither half of `CommonData` carries
 //! ordinary constraints. A red-free run here is therefore not evidence that the AIR is unchanged.
+//!
+//! Re-pinned for constraint set 11 (ZKVM-202, the gas re-weighting): the cpu table's appended
+//! `MODQ_W` column and the fourth field of the `MODQ` lookup (the call's per-op weight, cpu and modq
+//! sides) change every shape's packed lookups — the modq-free shapes too, since the cpu declares its
+//! `MODQ` lookup in every batch — so every `common` moved and no `commitment` did (no preprocessed
+//! column changed). The weights themselves (`KECCAK_GAS`, `SHA256_GAS`, `POSEIDON2_ABSORB_GAS`) are
+//! ordinary constraints and would not have moved a digest alone. The constraint-set-9/10 `common`
+//! pins this replaces were `d945789b…`, `0adff627…`, `eed808f7…`, `52b999fc…`, `aa129c0d…` (same
+//! order as the shapes below).
 use p3_batch_stark::CommonData;
 use rand_zkvm::machine::{Config, FriProfile, Machine, Tier};
 use rand_zkvm::tables::{input, keccak, program, public, sha256};
@@ -128,7 +137,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "1442e70e1ddc7e9c6eabf1a6e29bd9ea37d1996d81f89768af967b77ddc3fd41",
-                "d945789bc249eda9b3667e1cb6b4ee38c44bd1ce498acb20afa663a5d65b5146",
+                "d58a149ac8e0d0116ae11e8fa45d5cec9085063d5d9023cf15f25bdce6ef4f0f",
             ),
         },
         Shape {
@@ -142,7 +151,7 @@ fn shapes() -> Vec<Shape> {
             publh: binding_publh,
             want: (
                 "54991bdde2fdf6112181fde865e25cf94fae6084cb31ef33d9f58cb4645a6cc4",
-                "0adff6278abf635c3f86fd3e3f6751f0b8c690ccdb98a51acb9926b1dfb47b5b",
+                "56a30a19cc5db0a6de714c38807a8eac799ed23ffd96b580044f4106a69f64c1",
             ),
         },
         Shape {
@@ -156,7 +165,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "0337aeaecbd7d601ac4b502153c29589ae290f179e277b2f66e1f4c29d3c48cb",
-                "eed808f70e50bf81e1b788f643dc28be4cf494d376983fc7faf63df634c2e2c6",
+                "815e7e5a30383076b80737552f81ed1c502628839dfd1fe4ca463de9d205ef82",
             ),
         },
         Shape {
@@ -170,7 +179,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "c277ab160af3160092c4a33220724276fabc2cd26e6229c5dae535eb16ba3760",
-                "52b999fcf7f4f94dc89095853729e74914d5f90d46db1fd00e1ae56e0ff68cc9",
+                "47561c55cc530ed0a1f319e4222ad48b17eb571d7eef1d9540b3ce077c802c63",
             ),
         },
         Shape {
@@ -184,7 +193,7 @@ fn shapes() -> Vec<Shape> {
             publh: public::MIN_LOG_HEIGHT,
             want: (
                 "91bffa9b1cb59d4dc85ff092b7c6180355a8680b3f559d70eabd323a1fad5448",
-                "aa129c0dcbb26432ed5609e130a9a3c3de1f3a7f49028f96cb0c6e868e7e9cdb",
+                "b0f27590506092f6ca250fc01f4fc2df9d5c4adb9a8098a77251c3010ab6a97f",
             ),
         },
     ]

@@ -3538,8 +3538,8 @@ fn any_balanced_blinds_verify() {
 
 // ───────────────────────────── Constraint set 8: the GAS column ─────────────────────────────
 
-/// Review focus 2 (cs8): a `KECCAK` row that pays one gas instead of 192. Every `GAS` from that
-/// row on is lowered by 191, so the chain is consistent everywhere but on the transition into
+/// Review focus 2 (cs8): a `KECCAK` row that pays one gas instead of `KECCAK_GAS` (134 since
+/// constraint set 11, 192 before). Every `GAS` from that row on is lowered by `KECCAK_GAS − 1`, so the chain is consistent everywhere but on the transition into
 /// the `KECCAK` row, and the `HALT` row's limbs are re-derived for the lowered total (with the
 /// `RANGE8` multiplicities moved to match), so the halt-row equation and the range bus hold too.
 /// The symbolic pass below confirms that transition is the one constraint the forgery breaks;
@@ -3548,7 +3548,7 @@ fn any_balanced_blinds_verify() {
 fn a_keccak_row_that_pays_one_gas_is_refused() {
     let (m, p, mut t) = setup_keccak();
     let k = keccak_row(&t);
-    assert_eq!(underpay_gas_from(&mut t, k, 191), vec![(k - 1, 1)], "only the GAS transition into the KECCAK row breaks");
+    assert_eq!(underpay_gas_from(&mut t, k, rand_zkvm::gas::KECCAK_GAS - 1), vec![(k - 1, 1)], "only the GAS transition into the KECCAK row breaks");
     assert!(rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &t, Tier(10)))));
 }
 
@@ -3586,29 +3586,31 @@ fn underpay_gas_from(t: &mut Traces, from: usize, by: u64) -> Vec<(usize, usize)
     failing
 }
 
-/// Final review (cs8), the `SHA256` twin: a `SYS_SHA256` row that pays one gas instead of 64.
+/// Final review (cs8), the `SHA256` twin: a `SYS_SHA256` row that pays one gas instead of
+/// `SHA256_GAS` (49 since constraint set 11, 64 before).
 #[test]
 fn a_sha256_row_that_pays_one_gas_is_refused() {
     let (m, p, mut t) = setup_sha256();
     let w = cpu::col::WIDTH;
     let k = (0..t.cpu.height()).find(|&r| t.cpu.values[r * w + cpu::col::SYS_SHA256] == F::ONE).expect("a SYS_SHA256 row");
-    assert_eq!(underpay_gas_from(&mut t, k, 63), vec![(k - 1, 1)], "only the GAS transition into the SHA256 row breaks");
+    assert_eq!(underpay_gas_from(&mut t, k, rand_zkvm::gas::SHA256_GAS - 1), vec![(k - 1, 1)], "only the GAS transition into the SHA256 row breaks");
     assert!(rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &t, Tier(10)))));
 }
 
 /// Final review (cs8), the `POSEIDON2` twin: an `IS_HASH` absorb row that pays one gas instead
-/// of three (its permutation's +2 dropped).
+/// of `POSEIDON2_ABSORB_GAS` (four since constraint set 11; its permutation's +3 dropped).
 #[test]
 fn a_poseidon2_absorb_row_that_pays_one_gas_is_refused() {
     let (m, p, mut t) = setup_poseidon2(&[1, 2, 3, 4, 5, 6, 7, 8]);
     let (_, absorbs, _) = hash_rows(&t);
     let k = absorbs[0];
-    assert_eq!(underpay_gas_from(&mut t, k, 2), vec![(k - 1, 1)], "only the GAS transition into the absorb row breaks");
+    assert_eq!(underpay_gas_from(&mut t, k, rand_zkvm::gas::POSEIDON2_ABSORB_GAS - 1), vec![(k - 1, 1)], "only the GAS transition into the absorb row breaks");
     assert!(rejects(|| m.verify(&p.digest(), &m.prove_traces(&p, &t, Tier(10)))));
 }
 
-/// Final review (cs8): row 0 starts the chain at `GAS = 0` instead of 1 — every row one short, so
-/// every transition holds and only the first-row boundary `GAS = 1` stands in the way.
+/// Final review (cs8): row 0 starts the chain one short of its weight (a digest row's
+/// `POSEIDON2_ABSORB_GAS` since ZKV-5) — every row one short, so every transition holds and only
+/// the first-row boundary stands in the way.
 #[test]
 fn a_first_row_gas_of_zero_is_refused() {
     let (m, p, mut t) = setup();

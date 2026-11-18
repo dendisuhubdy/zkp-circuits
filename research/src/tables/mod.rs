@@ -128,7 +128,8 @@ pub mod bus {
     /// (`tables::blind`). Balanced by construction; it exists to shift every published LogUp
     /// terminal by a fresh uniform element.
     pub const BLIND: PermutationCheckBus<'static> = PermutationCheckBus::new("BLIND");
-    /// Private multisig phase 3 — cpu (`SYS_MODQ` rows) → modq: (clk, base, a1). The modq table
+    /// Private multisig phase 3 — cpu (`SYS_MODQ` rows) → modq: (clk, base, a1, weight); `weight`
+    /// (constraint set 11) is the call's gas beyond its row's 1, by op. The modq table
     /// provides one entry per real 1 024-row block, on its first row, with count
     /// `IS_REAL * IS_FIRST` (no `MULT`, as `SHA256`). As on `SHA256`, the polynomials never travel
     /// here: the chip sends its own reads (`ts = 4*clk`) and writes (`ts = 4*clk + 1`) on `MEMORY`.

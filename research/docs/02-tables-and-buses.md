@@ -82,7 +82,7 @@ balances globally.
                         │    MODQ     │  main; OPTIONAL the same way, and
                         └─────────────┘  independently — present only when
                                          Proof::modq_log_height != 0
-                    provides MODQ (clk, base, a1) (lookup); consumed by cpu's
+                    provides MODQ (clk, base, a1, weight) (lookup); consumed by cpu's
                     SYS_MODQ rows. Sends its own MEMORY traffic (reads of the
                     inputs, write-backs of the outputs) and carries the
                     transforms' inter-stage hand-offs on its own MODQ_WIRE
@@ -430,7 +430,7 @@ separate fetches (`cpu`'s `PROGRAM` lookup is gated off on them below).
 exactly one traversal of the whole program for `hc`, regardless of how the
 program actually ran.
 
-## `cpu` — main, `col::WIDTH = 283` (275 through constraint set 6, 277 through set 7, 282 through set 8; `SYS_MODQ` is the 283rd)
+## `cpu` — main, `col::WIDTH = 284` (275 through constraint set 6, 277 through set 7, 282 through set 8; `SYS_MODQ` is the 283rd, constraint set 11's `MODQ_W` the 284th)
 
 (The heading read `222` from M4.1 until M4.4 corrected it: M4.2's `SYS_KECCAK`
 column took the table to 223 without the heading following, and M4.4's
@@ -1150,28 +1150,50 @@ the argument that already made an odd branch or `JAL` target unprovable.
 `tests/next_constraint_set.rs::a_jalr_to_an_odd_target_clears_bit_0` proves a
 run that lands on an odd target.
 
-### Constraint set 8: the gas meter (`GAS`, `GD0..3`)
+### Constraint set 8: the gas meter (`GAS`, `GD0..3`; constraint set 11's weights and `MODQ_W`)
 
 fullnode spec 2026-09-28 §4.2. `GAS` is the gas accumulated *through* each
-row, with exactly `gas::gas_of`'s weights: `GAS = 1` on row 0 (a digest row;
-3 since constraint set 10),
-and on every transition into a real row
-`n(GAS) = GAS + 1 + 2·n(IS_HASH) + 191·n(SYS_KECCAK) + 63·n(SYS_SHA256)`
-(constraint set 10's ZKV-5 widens the `2·` term to
-`2·(n(IS_HASH) + n(IS_DIGEST) + n(IS_INDIGEST) + n(IS_PUBDIGEST))`) —
-the constants are `gas.rs`'s (`POSEIDON2_ABSORB_GAS − 1`, `KECCAK_GAS − 1`,
-`SHA256_GAS − 1`), and the rule is degree 2 (`n(IS_REAL)` times a form linear
-in next-row selectors). On the one `HALT` row, `pv::GAS − GAS = Σ 2^(8k)·GD_k`
+row, with exactly `gas::gas_of`'s weights: `GAS = POSEIDON2_ABSORB_GAS = 4` on
+row 0 (a digest row, one permutation; 1 through set 9, 3 in set 10), and on
+every transition into a real row
+
+```
+n(GAS) = GAS + 1 + 3·(n(IS_HASH) + n(IS_DIGEST) + n(IS_INDIGEST) + n(IS_PUBDIGEST))
+             + 133·n(SYS_KECCAK) + 48·n(SYS_SHA256) + n(MODQ_W)
+```
+
+— the constants are `gas.rs`'s (`POSEIDON2_ABSORB_GAS − 1`, `KECCAK_GAS − 1`,
+`SHA256_GAS − 1`; 2, 191 and 63 through constraint set 10, whose ZKV-5 added
+the three digest selectors), and the rule is degree 2 (`n(IS_REAL)` times a
+form linear in next-row columns). The four absorb-weight selectors are
+pairwise exclusive, so a row carries that term at most once.
+
+**`MODQ_W` (constraint set 11, ZKVM-202).** A `MODQ` row's weight depends on
+its op — `NTT`/`INTT` 193, `DOT4` 264, `MSUB4` 304 — and the cpu row holds the
+op word `a1` whole (in `MEM_VAL`), undecomposed. `MODQ_W` is the row's weight
+beyond its own 1, and it is the modq chip's to state: the chip's `MODQ` table
+entry is `(CLK, BASE, A1, 192·IS_NTT + 192·IS_INTT + 263·IS_DOT + 303·IS_MSUB)`
+over its one-hot op flags, and the cpu's lookup is
+`(CLK, HASH_PTR, MEM_VAL, MODQ_W)` with count `SYS_MODQ`. `CLK` is unique per
+cpu row, so the lookup leaves `MODQ_W` one value, the price of the op the chip
+performs for that row. `(1 − SYS_MODQ)·MODQ_W = 0` pins it to zero on every
+other row, padding included — a free value there would be a credit or a debit
+on the chain. Through constraint set 10 the term was `167·n(SYS_MODQ)`, one
+flat weight; `07-gas.md` has why that under-priced `DOT4` and `MSUB4`.
+
+On the one `HALT` row, `pv::GAS − GAS = Σ 2^(8k)·GD_k`
 with each `GD_k` on `RANGE8` (`Count::bounded(SYS_HALT, 1)`), so the declared
 limit is at or above the run's gas without the run's gas being published;
 `(1 − SYS_HALT)·GD_k = 0` pins the limbs to zero everywhere else, padding
 included. The slack fits four bytes because `check_public_values` refuses a
-`pv::GAS` above `gas::gas_max(header)` =
-`(2^t − 1) + 2^(t−2) + 191·(2^klh/32) + 63·(2^slh/64)` (the `2^(t−2)`: at most
-`2^(t−3)` absorb and, since constraint set 10, digest-prefix rows together, one
-per poseidon2 permutation slot, `+2` each), and the
-largest admissible ceiling (tier 20, both hash tables at `2^20` rows,
-8 601 599) is under `2^32`. `GAS` is free on padding rows (the fill carries the
+`pv::GAS` above `gas::gas_max_with_modq(header)` =
+`(2^t − 1) + 3·2^(t−3) + 133·(2^klh/32) + 48·(2^slh/64) + 303·(2^mlh/1024)`
+(the `3·2^(t−3)`: at most `2^(t−3)` absorb and digest-prefix rows together, one
+per poseidon2 permutation slot, `+3` each; the modq term at the heaviest op),
+and the largest admissible ceiling without a modq table (tier 20, both hash
+tables at `2^20` rows, 6 586 367; 8 601 599 through set 10) is under `2^32`, as
+is the one with a `2^20`-row modq table (`tests/gas.rs`). `GAS` is free on
+padding rows (the fill carries the
 halt row's value forward). The prover refuses a limit below the run
 (`ProveError::GasLimitBelowRun`) or above the header (`GasLimitAboveHeader`)
 before building the cpu trace.
@@ -1884,11 +1906,14 @@ The `SHA256` row a third time. One appended column, `SYS_MODQ` (`WIDTH` 282 to 2
   refuses the marginally tighter `MODQ_PTR_LIMIT = 0x3000_0000 − 8 960`
   (`ExecError::ModqPtrOutOfRange`), so the highest word the chip touches stays below `2^30`.
 - `HASH_N`, `HASH_LEFT`, `HASH_IDX` and `HS0..7` pinned to zero; `off_cpu · SYS_MODQ = 0`;
-  `SYS_MODQ` in `sys_sum`; gas weight `MODQ_GAS − 1` added to `w_next`.
-- `bus::MODQ.lookup_key([CLK, HASH_PTR, MEM_VAL], count = SYS_MODQ)`. `MEM_VAL` is the `a1`
+  `SYS_MODQ` in `sys_sum`; its gas weight in `w_next` is `MODQ_W` (constraint set 11, the
+  appended 284th column: the op's weight less 1, zero off a `MODQ` row — "the gas meter" above;
+  one flat `167·SYS_MODQ` through set 10).
+- `bus::MODQ.lookup_key([CLK, HASH_PTR, MEM_VAL, MODQ_W], count = SYS_MODQ)`. `MEM_VAL` is the `a1`
   register read, the op word; it is bound to the register file by the ordinary ecall slot read
   and is not pinned, for the reason `SYS_SHA256`'s row gives. Unlike `KECCAK` and `SHA256` the
-  bus message carries three values, because the op word selects the block's behaviour.
+  bus message carries the op word, because it selects the block's behaviour, and since
+  constraint set 11 the call's weight, which the chip derives from it.
 
 None of the coefficients read or written appear on the cpu row: they are the `modq` table's own
 `MEMORY` sends.
@@ -1950,11 +1975,15 @@ rebuilt from the op bits and offsets (a reserved bit set has no satisfying assig
 without touching memory: each `(CLK, stage, index)` key is sent once at stage `p` and received
 once at stage `p + 1`, `CLK` being unique per real block. `MEMORY` sends, as `sha256`: inputs at
 slot 0 (`4·CLK`), outputs at slot 1 (`4·CLK + 1`), counted per op. `MODQ` is provided as a
-`table_entry([CLK, BASE, A1], IS_REAL·IS_FIRST)` with no `MULT`, so a real block is always
-claimed. `RANGE8` receives the 29 limb columns.
+`table_entry([CLK, BASE, A1, W], IS_REAL·IS_FIRST)` with no `MULT`, so a real block is always
+claimed; `W = 192·IS_NTT + 192·IS_INTT + 263·IS_DOT + 303·IS_MSUB` (constraint set 11) is what the
+call weighs beyond its cpu row's 1. `RANGE8` receives the 29 limb columns.
 
-**Gas.** `MODQ_GAS = 168` (1 024 × (59 + 16) = 76 800 committed cells at about 460 cells per gas,
-`KECCAK`'s and `SHA256`'s implied rate). `gas::gas_max_with_modq` adds `(2^mlh / 1024) · 167`.
+**Gas.** By op since constraint set 11: `NTT`/`INTT` 193, `DOT4` 264, `MSUB4` 304 — the block's
+1 024 rows and the memory rows the chip sends for the op (512, 2 304, 3 328), in 681-cell slots
+(`07-gas.md`). `gas::gas_max_with_modq` adds `(2^mlh / 1024) · 303`, the heaviest op's. Through
+set 10: one flat `MODQ_GAS = 168` (1 024 × (59 + 16) = 76 800 committed cells at about 460 cells
+per gas) and `(2^mlh / 1024) · 167`.
 
 ## Constraint degree budget
 
