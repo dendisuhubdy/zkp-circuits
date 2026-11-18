@@ -132,6 +132,16 @@ name = "modq_cheating"
 path = "tests/modq_cheating.rs"
 required-features = ["cheating"]
 
+[[test]]
+name = "quotient_layout"
+path = "tests/quotient_layout.rs"
+required-features = ["next-set"]
+
+[[test]]
+name = "quotient_layout_heap"
+path = "tests/quotient_layout_heap.rs"
+required-features = ["next-set"]
+
 # The quotient-layout fork of p3-batch-stark (`../vendor/PROVENANCE.md`), as `recursion/` and the
 # fullnode already take it — `QuotientLayout::PerChunk`, upstream byte for byte, is what every entry
 # point this crate calls gets, so no proof or key changes. Taken here since 2026-10-15 (audit CS9-2)

@@ -62,6 +62,17 @@ pub enum FriProfile {
     /// (86.38 against 86.41; `recursion/docs/07-rvm-rate-quarter.md`); this profile still sizes
     /// every inner proof.
     Production,
+    /// Opt-in (`next-set`, ZKVM-111): `Test`'s queries and grinding at rate 1/4 (blowup 4).
+    /// Not a production target; it exists so the rate-1/4 machine has a fast test profile.
+    #[cfg(feature = "next-set")]
+    QuarterTest,
+    /// Opt-in (`next-set`, ZKVM-111): rate 1/4 — blowup 4, 92 queries, 24 grinding bits, the
+    /// parameters the rVM's own proofs took in `recursion/docs/07-rvm-rate-quarter.md`. A
+    /// candidate for the next constraint set, **not** a profile any chain runs: the proven-bits
+    /// figure that document derives (86.38) is for the rVM's chip shapes and has not been
+    /// recomputed for this machine's. `docs/05-roadmap.md`, "ZKVM-111".
+    #[cfg(feature = "next-set")]
+    Quarter,
 }
 
 impl FriProfile {
@@ -69,12 +80,28 @@ impl FriProfile {
         match self {
             Self::Test => 16,
             Self::Production => 80,
+            #[cfg(feature = "next-set")]
+            Self::QuarterTest => 16,
+            #[cfg(feature = "next-set")]
+            Self::Quarter => 92,
         }
     }
     pub fn pow_bits(self) -> usize {
         match self {
             Self::Test => 4,
             Self::Production => 20,
+            #[cfg(feature = "next-set")]
+            Self::QuarterTest => 4,
+            #[cfg(feature = "next-set")]
+            Self::Quarter => 24,
+        }
+    }
+    /// The FRI blowup, as a base-2 log: 3 (rate 1/8) for the two live profiles.
+    pub const fn log_blowup(self) -> usize {
+        match self {
+            Self::Test | Self::Production => 3,
+            #[cfg(feature = "next-set")]
+            Self::QuarterTest | Self::Quarter => 2,
         }
     }
 }
@@ -184,7 +211,7 @@ where
 {
     let challenge_mmcs = ExtensionMmcs::new(val_mmcs.clone());
     let fri = FriParameters {
-        log_blowup: 3,
+        log_blowup: profile.log_blowup(),
         log_final_poly_len: 0,
         max_log_arity: 3,
         num_queries: profile.num_queries(),
@@ -267,6 +294,19 @@ use std::sync::{Arc, Mutex};
 
 pub const TIERS: [usize; 6] = [10, 12, 14, 16, 18, 20];
 
+/// How this machine commits each instance's quotient chunks: upstream Plonky3's one matrix per
+/// chunk. The rVM (`../recursion`, `machine::QUOTIENT_LAYOUT`) commits one matrix per instance
+/// and cut its prover's peak heap by 29 % at tier 16 doing so; flipping this constant is the
+/// same cut for this machine and a proof-format change, so a constraint-set cut (ZKVM-111).
+/// Until then the other layout is reachable only through the `next-set` feature's
+/// `Machine::{prove_traces_with_layout, verify_with_layout}`. `QuotientLayout` exists only in the
+/// vendored fork, which a package's `[patch]` gives its own builds but not a crate that depends on
+/// it (`evm2rv`, `sbpf2rv`, `rand-guest` build against crates.io's p3-batch-stark); so this and
+/// every other use of the fork's layout API is behind `next-set`, and a default build calls
+/// upstream's `verify_batch` exactly as before ZKVM-111.
+#[cfg(feature = "next-set")]
+pub const QUOTIENT_LAYOUT: p3_batch_stark::QuotientLayout = p3_batch_stark::QuotientLayout::PerChunk;
+
 // Audit COV-2 / INT-6: the private-data floor (`tables::MIN_PRIVATE_TABLE_LOG_HEIGHT`) must fit
 // every ceiling a floored table meets at the *smallest* tier, or an honest small call would be
 // refused for a height the prover chose, not one its workload needed. The verifier's own
@@ -278,6 +318,8 @@ const _: () = assert!(crate::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT as usize <= TI
 // And the floor's own derivation: 80 production queries plus the two out-of-domain points must
 // not outnumber the table's random rows (`tables::MIN_PRIVATE_TABLE_LOG_HEIGHT`'s doc comment).
 const _: () = assert!(1usize << crate::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT >= FriProfile::Production.num_queries() + 2);
+#[cfg(feature = "next-set")]
+const _: () = assert!(1usize << crate::tables::MIN_PRIVATE_TABLE_LOG_HEIGHT >= FriProfile::Quarter.num_queries() + 2);
 
 /// M4.2 (controller ruling 1): the sanity ceiling on `Proof::mem_log_height`, the analogue of
 /// `tables::program::MAX_LOG_HEIGHT` for a table that has no module of its own to hold one.
@@ -2257,6 +2299,27 @@ impl Machine {
     /// matching-but-different program producing the same `hc`, a genuine hash collision, not
     /// a free forgery.
     pub fn verify(&self, hc: &[u32; 8], proof: &Proof) -> Result<(), VerifyError> {
+        #[cfg(feature = "next-set")]
+        {
+            self.verify_under(hc, proof, QUOTIENT_LAYOUT)
+        }
+        #[cfg(not(feature = "next-set"))]
+        {
+            self.verify_under(hc, proof)
+        }
+    }
+
+    /// [`Self::verify`]'s body. Under `next-set` it takes the quotient layout the batch verifier
+    /// lists the quotient round under: `verify` passes `QUOTIENT_LAYOUT` (`PerChunk`, for which the
+    /// fork's `verify_batch_with_layout` is `verify_batch`) and only `verify_with_layout` passes
+    /// anything else (ZKVM-111). Without the feature it calls upstream's `verify_batch`, so a crate
+    /// that depends on this one does not need the fork.
+    fn verify_under(
+        &self,
+        hc: &[u32; 8],
+        proof: &Proof,
+        #[cfg(feature = "next-set")] layout: p3_batch_stark::QuotientLayout,
+    ) -> Result<(), VerifyError> {
         check_public_values(hc, proof)?;
         // M4.2 (Task 5 review): every range check on the proof's declared shape, in one place
         // and before anything is sized from it — `check_declared_heights`' doc comment has the
@@ -2299,7 +2362,28 @@ impl Machine {
         let pv_vals: Vec<Val> = proof.public_values.iter().map(|x| Val::from_u64(*x)).collect();
         let pvs: Vec<Vec<Val>> = (0..airs.len()).map(|i| if i == 1 { pv_vals.clone() } else { vec![] }).collect();
         let common = self.verifier_key_with_modq(proof.tier, proof.program_log_height, proof.input_log_height, proof.keccak_log_height, proof.sha256_log_height, proof.modq_log_height, proof.public_log_height);
-        verify_batch(&self.config, &airs, &proof.batch, &pvs, &common).map_err(|e| VerifyError::Batch(format!("{e:?}")))
+        #[cfg(feature = "next-set")]
+        let checked = p3_batch_stark::verify_batch_with_layout(&self.config, &airs, &proof.batch, &pvs, &common, layout);
+        #[cfg(not(feature = "next-set"))]
+        let checked = verify_batch(&self.config, &airs, &proof.batch, &pvs, &common);
+        checked.map_err(|e| VerifyError::Batch(format!("{e:?}")))
+    }
+
+    /// The next set's verifier for a proof whose quotient chunks were committed under `layout`
+    /// (ZKVM-111; `docs/05-roadmap.md`). Opt-in: the live verifier is [`Self::verify`], which
+    /// accepts `PerChunk` proofs only, and a verifier must not let a proof choose how it is
+    /// checked — a caller of this function has decided the layout out of band.
+    #[cfg(feature = "next-set")]
+    pub fn verify_with_layout(&self, hc: &[u32; 8], proof: &Proof, layout: p3_batch_stark::QuotientLayout) -> Result<(), VerifyError> {
+        self.verify_under(hc, proof, layout)
+    }
+
+    /// The next set's prover under `layout` (ZKVM-111): [`Self::prove_traces`] with the batch
+    /// prover told how to commit the quotient chunks. `PerChunk` is `prove_traces`.
+    #[cfg(feature = "next-set")]
+    pub fn prove_traces_with_layout(&self, traces: &Traces, tier: Tier, layout: p3_batch_stark::QuotientLayout) -> Proof {
+        let blinds = crate::tables::blind::fresh(traces.as_slice().len());
+        self.prove_traces_via(traces, tier, &blinds, |cfg, instances, prover_data| p3_batch_stark::prove_batch_with_layout(cfg, instances, prover_data, layout))
     }
 
     /// `verify`, plus the check the public segment exists for: `hash::public_digest(public_words)`

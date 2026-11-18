@@ -618,6 +618,92 @@ accounted for exactly: +178 (phase 5, the new cpu constraints), +60 (phase 6 pre
 - `tree_measure.rs`'s `production_leaf_l2` and `production_rv32r_over_the_leaf_proves`, which need
   the 256 GB droplet.
 
+## ZKVM-111: the quotient layout and rate 1/4 on the RV32 machine (opt-in, `next-set`)
+
+The RV32 machine runs at blowup 8 with Plonky3's one-matrix-per-quotient-chunk layout; the rVM
+moved to one matrix per instance and to blowup 4. Both moves are now available here **as
+opt-in entry points behind the cargo feature `next-set`**, measured, and not live:
+`machine::QUOTIENT_LAYOUT` is `PerChunk`, `FriProfile::{Test, Production}` are blowup 8, and
+`Machine::{prove, verify}` are what they were. `tests/verifier_key.rs`, `key_blob.rs`,
+`proof_binding.rs` and `zk.rs` pass unchanged.
+
+What the feature adds:
+
+- `Machine::prove_traces_with_layout` / `verify_with_layout` (the vendored `p3-batch-stark`
+  fork's `_with_layout` entry points). `verify` is now `verify_under(.., QUOTIENT_LAYOUT)`,
+  which for `PerChunk` is the fork's `verify_batch`.
+- `FriProfile::Quarter` (blowup 4, 92 queries, 24 grinding bits — the rVM's numbers) and
+  `FriProfile::QuarterTest` (blowup 4, 16 queries, 4 bits). `FriProfile::log_blowup()` is 3 for
+  the two live profiles, whose postcard encodings (0 and 1) are pinned.
+
+**The degree-8 tables do not block blowup 4.** The issue (and `tests/tables.rs`'s comment)
+reasoned that the cpu and alu tables' degree 8 forces 8 quotient chunks and therefore blowup 8.
+The rVM already proves degree-8 chips at blowup 4 — the PCS re-extrapolates onto the larger
+quotient domain — and this machine does too: `tests/quotient_layout.rs::
+the_machine_proves_and_verifies_at_rate_one_quarter` proves and verifies all ten
+`guests::all()` programs at tier 10 under `QuarterTest`, both layouts, with no AIR change, and a
+forged output is refused. The per-table degrees, measured: program 2, **cpu 8**, memory 4,
+**alu 8**, range 2, nibble 2, poseidon2 4, input 2, keccak 3, sha256 4, modq 4, public 2. So
+lowering cpu and alu to degree ≤ 5 is not a precondition of rate 1/4; it is the lever for the
+*quotient transient* (the matrix of the old LDE size held while the quotient is computed),
+which is why the layout saves 30 % at blowup 8 and only 20 % at blowup 4 below.
+
+**Measured** (2026-11-18, the 48 GB development machine, single-threaded, one run each on a
+shared box so the times are indicative; `fib(10)` at a forced tier — the heap is set by the
+table heights, not by the program; peak live heap from a counting allocator over the prove
+only; `tests/quotient_layout_heap.rs`):
+
+| tier | profile | layout | peak live heap | prove | proof bytes |
+|---|---|---|---|---|---|
+| 12 | Production (1/8, 80 q) | PerChunk (live) | 1.435 GB | 26.4 s | 1 426 026 |
+| 12 | Production | PerInstance | 1.008 GB | 19.7 s | 1 117 300 |
+| 12 | Quarter (1/4, 92 q) | PerInstance | 0.593 GB | 14.6 s | 1 238 848 |
+| 14 | Production | PerChunk (live) | 5.692 GB | 112.0 s | 1 478 443 |
+| 14 | Production | PerInstance | 3.995 GB | 92.4 s | 1 166 645 |
+| 14 | Quarter | PerChunk | 2.943 GB | 66.4 s | 1 661 886 |
+| 14 | Quarter | PerInstance | 2.362 GB | 71.6 s | 1 296 736 |
+| 16 | Production | PerInstance | 15.946 GB | 352.4 s | 1 233 939 |
+| 16 | Quarter | PerInstance | 9.434 GB | 197.3 s | 1 364 035 |
+
+At tier 14 the layout alone is −29.8 % heap and −21.1 % proof bytes; rate 1/4 with the layout
+is −58.5 % heap and −12.3 % proof bytes against today. Tier 16 under today's configuration
+(Production, PerChunk) was not run: tier 12 → 14 scales ×3.97, which puts it near 22.6 GB,
+past this session's allowance.
+
+**Tier 18 was not run** — the issue's acceptance run. The heap scales ×3.96 to ×3.99 per two
+tiers in every measured pair, so the projections are: today's configuration about 91 GB,
+PerInstance at rate 1/8 about 64 GB, **`Quarter` + PerInstance about 38 GB**. That is under
+48 GB but not by a margin that makes "completes on the 48 GB machine" a safe claim: it is a
+projection of live heap, and the ERC-20 guest also carries a keccak table that `fib` does not.
+The run, from a plain terminal:
+
+```sh
+cd research && caffeinate -is cargo test --release --test quotient_layout_heap \
+  quarter_tier18_per_instance -- --ignored --nocapture --exact
+```
+
+**Security, as far as it was checked.** `Quarter`'s numbers are the rVM's, for which
+`recursion/docs/07-rvm-rate-quarter.md` derives 86.38 proven bits against 86.41 (the
+low-degree-test term, unique decoding) and checks them with `p3-security` over the rVM's chip
+shapes. That computation has **not** been repeated for this machine's chips, so "not lower than
+today's by more than 0.03" is the rVM's result carried over, not a result here. 92 queries is
+inside the private-data floor (`2^7 ≥ queries + 2`), asserted at compile time under the
+feature.
+
+Left for the cut:
+
+1. Flip `QUOTIENT_LAYOUT` and the two live profiles' blowup, queries and grinding; bump
+   `CONSTRAINT_SET`; re-pin every key (the preprocessed LDE is half as tall).
+2. `p3-security` over this machine's shapes at `Quarter`, as `recursion/tests/security.rs`
+   does for the rVM.
+3. `../recursion`: `InnerShape::quotient_layout()` answers `PerChunk` and the verifier program
+   replays an 80-query, blowup-8 inner proof; both follow, and every aggregate digest moves.
+4. The GPU / reference backends (`prove_on`) take `prove_batch`, not `_with_layout`.
+5. The quotient transient: an auxiliary column for the alu's `div` sign fix and a narrower
+   lookup packing on the cpu would bring both to degree ≤ 5 and 4 quotient chunks. Not priced
+   here beyond the 30 % against 20 % observation above.
+6. Run tier 18 (ERC-20), tier 20 (SPL transfer) and the msauth M = 3 prove, and record them.
+
 ## Constraint set 10: a digest-prefix row costs a permutation
 
 ZKV-5 (fullnode audit v6, `randprotocol/zkp-circuits#2`). The digest-prefix rows (`IS_DIGEST`
