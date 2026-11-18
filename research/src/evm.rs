@@ -367,6 +367,7 @@ impl EvmCall {
         let env = self.env();
         let s = Statement {
             code,
+            codehash: None,
             calldata: &self.calldata,
             env: &env,
             context: &self.context,

@@ -49,20 +49,30 @@ pub fn keccak256<H: Host>(h: &mut H, msg: &[u8]) -> [u8; 32] {
         off += KECCAK_RATE;
     }
     // The final block: what is left of the message (possibly nothing — a length that is an exact
-    // multiple of the rate still needs a whole all-padding block) plus `0x01`…`0x80`.
+    // multiple of the rate still needs a whole all-padding block) plus `0x01`…`0x80`. It is
+    // absorbed straight out of `msg` like the full blocks: the whole words, then the last one to
+    // three bytes with the `0x01` after them, then the `0x80` in the rate's last byte. Staging it
+    // in a zeroed 136-byte buffer first (the first cut) cost a `memset`, a `memcpy` and 34 word
+    // loads for every call, however short the message, and a call hashes five to seven short
+    // messages (ZKVM-117).
     let take = msg.len() - off;
-    let mut block = [0u8; KECCAK_RATE];
-    block[..take].copy_from_slice(&msg[off..]);
-    block[take] ^= 0x01;
-    block[KECCAK_RATE - 1] ^= 0x80;
-    for i in 0..KECCAK_RATE / 4 {
-        state[i] ^= u32::from_le_bytes([
-            block[4 * i],
-            block[4 * i + 1],
-            block[4 * i + 2],
-            block[4 * i + 3],
-        ]);
+    let whole = take / 4;
+    let mut i = 0;
+    while i < whole {
+        let p = off + 4 * i;
+        state[i] ^= u32::from_le_bytes([msg[p], msg[p + 1], msg[p + 2], msg[p + 3]]);
+        i += 1;
     }
+    // `take <= 135`, so `whole <= 33` and the padding's first byte is inside the rate.
+    let rest = take - 4 * whole;
+    let mut last = 1u32 << (8 * rest);
+    let mut k = 0;
+    while k < rest {
+        last |= (msg[off + 4 * whole + k] as u32) << (8 * k);
+        k += 1;
+    }
+    state[whole] ^= last;
+    state[KECCAK_RATE / 4 - 1] ^= 0x8000_0000;
     h.keccak_f(&mut state);
     let mut out = [0u8; 32];
     for i in 0..8 {

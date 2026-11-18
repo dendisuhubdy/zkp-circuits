@@ -30,7 +30,10 @@ fn domain_tags_agree_between_the_note_layer_and_the_guest_crate() {
 #[test]
 fn the_guest_crates_keccak256_and_dhash_match_the_research_reference() {
     let mut h = HostRef;
-    for len in [0usize, 1, 135, 136, 137, 272] {
+    // Every length through two blocks and into a third: the last block is absorbed straight out
+    // of the message (whole words, then one to three bytes with the padding after them), so each
+    // residue mod 4 at each distance from the block's end is its own case.
+    for len in 0usize..=300 {
         let msg: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37).wrapping_add(11)).collect();
         assert_eq!(evm_core::keccak256(&mut h, &msg), rand_zkvm::keccak::keccak256(&msg), "keccak256 of {len} bytes");
     }
@@ -270,6 +273,63 @@ fn witness_words_are_528_and_round_trip() {
     t1.insert(s(9), s(9));
     assert_eq!(t1.witness(&s(9)).words().len(), 272);
     assert_ne!(t1.root(), t.root(), "the two layouts root the same storage differently");
+}
+
+/// `read_witness` (the guest's path: a witness read word by word into place) is `push` of the same
+/// witness: the same tree, the same loads and stores, the same refusals — and a refused witness
+/// takes nothing.
+#[test]
+fn a_witness_read_into_place_is_the_witness_pushed() {
+    let mut t = SparseTree::new();
+    for i in 1..=4u32 {
+        t.insert(s(i), s(10 * i));
+    }
+    let mut h = HostRef;
+    let mut pushed = StorageTree::new(t.root());
+    let mut read = StorageTree::new(t.root());
+    for i in 1..=4u32 {
+        let w = t.witness(&s(i));
+        let words = w.words();
+        let mut it = words.iter().copied();
+        read.read_witness(&mut h, || it.next().unwrap()).unwrap();
+        assert!(it.next().is_none(), "a witness is exactly its {} words", words.len());
+        pushed.push(&mut h, into_guest(w)).unwrap();
+    }
+    assert_eq!(read.len(), 4);
+    for i in 0..4 {
+        assert_eq!(read.witness(i).slot, pushed.witness(i).slot);
+        assert_eq!(read.witness(i).value, pushed.witness(i).value);
+        assert_eq!(read.witness(i).siblings, pushed.witness(i).siblings);
+        assert!(!read.witness(i).verified);
+    }
+    for i in 1..=4u32 {
+        assert_eq!(read.load(&mut h, &s(i)).unwrap(), s(10 * i));
+        read.store(&mut h, &s(i), s(7 * i)).unwrap();
+        pushed.store(&mut h, &s(i), s(7 * i)).unwrap();
+        t.insert(s(i), s(7 * i));
+        assert_eq!(read.root(), pushed.root());
+        assert_eq!(read.root(), t.root());
+    }
+    // the same slot again: refused, and the tree is as it was
+    let dup = t.witness(&s(1)).words();
+    let mut it = dup.iter().copied();
+    assert!(matches!(read.read_witness(&mut h, || it.next().unwrap()), Err(gs::StorageError::DuplicateIndex)));
+    assert_eq!(read.len(), 4);
+    assert_eq!(read.load(&mut h, &s(1)).unwrap(), s(7));
+    // a tampered witness is taken (it is checked when used) and then does not verify
+    let mut bad = t.witness(&s(9)).words();
+    bad[20] ^= 1;
+    let mut it = bad.iter().copied();
+    read.read_witness(&mut h, || it.next().unwrap()).unwrap();
+    assert!(matches!(read.load(&mut h, &s(9)), Err(gs::StorageError::BadWitness)));
+    // and the table is full at MAX_WITNESSES
+    let mut full = StorageTree::new(t.root());
+    for i in 100..100 + gs::MAX_WITNESSES as u32 {
+        let w = t.witness(&s(i)).words();
+        let mut it = w.iter().copied();
+        full.read_witness(&mut h, || it.next().unwrap()).unwrap();
+    }
+    assert!(matches!(full.read_witness(&mut h, || 0), Err(gs::StorageError::TooMany)));
 }
 
 fn into_guest(w: Witness) -> gs::Witness { gs::Witness { slot: w.slot, value: w.value, siblings: w.siblings.try_into().unwrap(), verified: false } }

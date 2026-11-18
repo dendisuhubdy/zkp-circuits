@@ -100,9 +100,9 @@ $ rand-guest/target/release/rand-guest build evm2rv/target/erc20 --max-words 655
 ...
 warning: erc20-runtime@0.1.0: evm2rv: clang Homebrew clang version 23.1.1 (/opt/homebrew/opt/llvm/bin/clang)
     Finished `release` profile [optimized] target(s) in 3.50s
-8665 words against a cap of 65535 (fits); 0 ecall(s) with a non-static a7
+7958 words against a cap of 65535 (fits); 0 ecall(s) with a non-static a7
 OK
-wrote evm2rv/target/erc20/image.bin and its .sha256 (8665 words, hc fa6d5ca096c6c8989bf074f1d2d3918ede17e06a80e36ef0ba8534d660de493d, program id 255f7e1466d03202b0fe4db82421d2eabb8d087dd2f0d6ef7795b24bace51b99)
+wrote evm2rv/target/erc20/image.bin and its .sha256 (7958 words, hc 0a08a9e4a9707a945a4a47cf57b3cd649c3a725bfda2dcba9c17cb29026f4262, program id d9db39056695a8f38a69a39993e33a311ff8a0e5ba7d4ba354b1fbc924a6d087)
 ```
 
 `--max-words 65535` is needed: the default cap is 4 096 words. `--allow-panic` is needed too: the shim links
@@ -131,8 +131,8 @@ out[4] = 80492969
 out[5] = 1294998629
 out[6] = 476639945
 out[7] = 2694991971
-cycles 95971
-tier 18
+cycles 59946
+tier 16
 ```
 
 `out[0]` is the status: 1 success, 0 revert, 2 exceptional halt. `out[1..8]` is the `EVM_OUT`
@@ -142,7 +142,7 @@ call (address, caller, value, calldata, gas limit, context) and the gas used
 
 ### 5. The same eight words as the interpreter
 
-The interpreter guest (`evm.bin`, storage layout 2, program id `4d94028f…`, hc `cd700e35…`), on the
+The interpreter guest (`evm.bin`, storage layout 2, program id `ae5f0b2b…`, hc `fae9d774…`), on the
 same input:
 
 ```
@@ -155,7 +155,7 @@ out[4] = 80492969
 out[5] = 1294998629
 out[6] = 476639945
 out[7] = 2694991971
-cycles 154517
+cycles 120892
 tier 18
 ```
 
@@ -182,9 +182,9 @@ the eight words are identical
 | | translated (stage two) | interpreter (`evm.bin`) |
 |---|---:|---:|
 | eight output words | identical | identical |
-| cycles | 95 971 | 154 517 |
-| tier | 18 | 18 |
-| program words | 8 665 | 16 588 |
+| cycles | 59 946 | 120 892 |
+| tier | 16 | 18 |
+| program words | 7 958 | 15 167 |
 
 `tests/parity.rs` runs this and seven more vectors under both stages, and also checks `gas_used`
 and the halt through a second build that reports them.
@@ -194,10 +194,10 @@ and the halt through a second build that reports them.
 ```
 $ rand-guest/target/release/rand-guest info evm2rv/target/erc20/image.bin
 form: image container
-text 8064 words at 0x10000; data 465 words (232 non-zero) at 0x17e00; prologue 601 words; program 8665 words from base_pc 0xf69c
-hc fa6d5ca096c6c8989bf074f1d2d3918ede17e06a80e36ef0ba8534d660de493d
-program id 255f7e1466d03202b0fe4db82421d2eabb8d087dd2f0d6ef7795b24bace51b99
-8665 words against a cap of 4096: does not fit
+text 7306 words at 0x10000; data 494 words (252 non-zero) at 0x17228; prologue 652 words; program 7958 words from base_pc 0xf5d0
+hc 0a08a9e4a9707a945a4a47cf57b3cd649c3a725bfda2dcba9c17cb29026f4262
+program id d9db39056695a8f38a69a39993e33a311ff8a0e5ba7d4ba354b1fbc924a6d087
+7958 words against a cap of 4096: does not fit
 ```
 
 The fullnode wallet deploys an image with:
@@ -207,7 +207,7 @@ rand program deploy evm2rv/target/erc20/image.bin
 ```
 
 It prints the program id, the word count and `hc`, then checks the chain's program cap before it
-proves anything. The image is 8 665 words. Chain 12 runs the default cap of 4 096 words, so this
+proves anything. The image is 7 958 words. Chain 12 runs the default cap of 4 096 words, so this
 deploy is refused there. It needs a chain whose genesis sets `max_program_words` high enough, for
 example `rand-node genesis ... --max-program-words 65535` (fullnode `docs/cli.md`). The cap is part
 of the genesis hash, so it cannot be raised on an existing chain.
@@ -241,9 +241,12 @@ moved every figure in this file; the difference is the guard's):
 | stage two cycles | 65 227 | 66 235 | +1 008 |
 | program words, either stage | 15 637 / 11 519 | 15 804 / 11 686 | +167 |
 
-Why `POSEIDON2` and not Keccak: the harness hashes the code with Keccak for `EVM_OUT`, but only
-after the contract has run. Reusing that hash would mean changing `evm-core`, which would move
-the pinned `evm.bin`. So the guard hashes once more, with the cheaper coprocessor hash:
+Why `POSEIDON2` and not Keccak: it is the cheaper coprocessor hash (the table below, measured when
+the guard was added). Since ZKVM-117 it is also the *only* hash of the code the guest computes:
+`EVM_OUT` carries `keccak256(code)`, the translator bakes that into the image beside the guard's
+digest, and the shim hands it to the harness once the guard has passed, so the harness does not
+hash the same bytes a second time with Keccak (ten permutations for the ERC-20). When the guard
+refuses the code the harness hashes the code it was given, as before.
 
 | guard hash (stage two transfer) | added cycles |
 |---|---:|
@@ -317,49 +320,79 @@ backlog: ecrecover, bn256 mul, the pairing, modexp past small operands, and blak
 ## Cycles against the interpreter
 
 Measured with `rand-guest run` on the vectors `tests/parity.rs` and `tests/precompiles.rs` pin,
-with the code guard in, under storage layout 2 (ZKVM-105: a depth-64 storage tree, so every Merkle
-walk is twice as long and every witness 256 words longer) and with the call, the log data and the
-gas in the public output (ZKVM-103/104). Tier in parentheses.
+with the code guard in, under storage layout 2 (a depth-64 storage tree), with the call, the log
+data and the gas in the public output, and after ZKVM-117's harness savings (below). Tier in
+parentheses.
 
 | vector | interpreter | stage one | stage two |
 |---|---:|---:|---:|
-| `transfer(BOB, 250)` | 154 517 (18) | 109 947 (18) | **95 971** (18) |
-| `approve(BOB, 5)` | 102 267 (18) | 70 594 (18) | **62 452** (16) |
-| `transferFrom(ALICE, BOB, 100)` | 210 023 (18) | 155 137 (18) | **133 887** (18) |
-| transfer of 5 000 of 1 000 (reverts) | 106 239 (18) | 70 554 (18) | 63 128 (18) |
-| transfer, out of gas at 100 | 64 332 (18) | 46 107 (16) | 45 658 (16) |
-| transfer, out of gas at 20 000 | 129 876 (18) | 91 393 (18) | 81 005 (18) |
-| transfer, out of gas at 29 955 | 152 321 (18) | 107 488 (18) | 93 973 (18) |
-| sha256 + ecrecover, underfunded | traps | 21 813 (16) | 20 751 (16) |
+| `transfer(BOB, 250)` | 120 892 (18) | 73 922 (18) | **59 946** (16) |
+| `approve(BOB, 5)` | 83 908 (18) | 46 766 (16) | **38 624** (16) |
+| `transferFrom(ALICE, BOB, 100)` | 161 920 (18) | 106 241 (18) | **84 991** (18) |
+| transfer of 5 000 of 1 000 (reverts) | 86 822 (18) | 45 331 (16) | 37 905 (16) |
+| transfer, out of gas at 100 | 49 073 (16) | 23 073 (16) | 22 624 (16) |
+| transfer, out of gas at 20 000 | 100 297 (18) | 58 633 (16) | 48 245 (16) |
+| transfer, out of gas at 29 955 | 118 547 (18) | 71 307 (18) | 57 792 (16) |
+| sha256 + ecrecover, underfunded | traps | 17 522 (16) | 16 458 (16) |
 
-The transfer's row over time: 124 606 / 80 211 / 66 235 before ZKVM-103/104; 128 872 / 84 271 /
-70 295 with the wider public output, still under layout 1's depth-32 tree; the figures above with
-the depth-64 tree.
+The transfer's row over time (interpreter / stage one / stage two):
+
+| image | cycles | stage two's tier |
+|---|---|---:|
+| before ZKVM-103/104 | 124 606 / 80 211 / 66 235 | 18 |
+| the call, log data and gas in the output (ZKVM-103/104) | 128 872 / 84 271 / 70 295 | 18 |
+| the depth-64 storage tree (ZKVM-105) | 154 517 / 109 947 / 95 971 | 18 |
+| the harness savings (ZKVM-117) | 120 892 / 73 922 / **59 946** | **16** |
 
 | program | words | hc |
 |---|---:|---|
-| interpreter (`evm.bin`, layout 2) | 16 588 | `cd700e35…993fa9e3` |
-| interpreter (`evm-v1.bin`, layout 1) | 20 153 | `fb537193…a9d75818` |
-| ERC-20, stage one | 12 783 | `c889e15cbed7222e22a11460295bbd3c02f8ea79e69feb056f9678b2ab86cb9e` |
-| ERC-20, stage two | 8 665 | `fa6d5ca096c6c8989bf074f1d2d3918ede17e06a80e36ef0ba8534d660de493d` |
-| sha256 + ecrecover contract, stage one | 12 953 | `d8d21437…3c72e0d` |
-| sha256 + ecrecover contract, stage two | 12 727 | `030fc0b0…18649ae` |
+| interpreter (`evm.bin`, layout 2) | 15 167 | `fae9d774…1f09bc0c` |
+| interpreter (`evm-v1.bin`, layout 1) | 15 111 | `7375f67a…794dca16` |
+| ERC-20, stage one | 12 076 | `e61dde652e7524ceb51a2c2edfc2ff25f752f8fd47a15733eb24f195017c383a` |
+| ERC-20, stage two | 7 958 | `0a08a9e4a9707a945a4a47cf57b3cd649c3a725bfda2dcba9c17cb29026f4262` |
+| sha256 + ecrecover contract, stage one | 12 451 | `d358b7db…d9676203` |
+| sha256 + ecrecover contract, stage two | 12 223 | `666bfc23…a722154f` |
 
-Every image is about 3 500 words smaller than under layout 1: the compiler unrolled the 32-level
-Merkle loops and leaves the 64-level ones as loops. Before ZKVM-105: 20 077 (`08740025…c4dc0f23`),
-16 280 (`69052c42…e932`), 12 162 (`7c691208…8389`), 16 326 (`0b5bf110…4dc5a5`) and 16 100
-(`9f9fe816…d12bc9`). Before ZKVM-103/104: 19 637 (`31e682ec…6c289c3`), 15 804 (`9cdb79e7…48c8`),
-11 686 (`a0feae92…8ff6`), 15 858 (`c8f00a09…f946fd`) and 15 630 (`011120cf…058c33`).
+Before ZKVM-117: 16 588 (`cd700e35…993fa9e3`), 20 153 (`fb537193…a9d75818`), 12 783
+(`c889e15c…cb9e`), 8 665 (`fa6d5ca0…493d`), 12 953 (`d8d21437…3c72e0d`) and 12 727
+(`030fc0b0…18649ae`). Before ZKVM-105: 20 077 (`08740025…c4dc0f23`), 16 280 (`69052c42…e932`),
+12 162 (`7c691208…8389`), 16 326 (`0b5bf110…4dc5a5`) and 16 100 (`9f9fe816…d12bc9`). Before
+ZKVM-103/104: 19 637 (`31e682ec…6c289c3`), 15 804 (`9cdb79e7…48c8`), 11 686 (`a0feae92…8ff6`),
+15 858 (`c8f00a09…f946fd`) and 15 630 (`011120cf…058c33`).
 
-Stage two runs the three ERC-20 calls in 62.1% (`transfer`), 61.1% (`approve`) and 63.7%
-(`transferFrom`) of the interpreter's cycles. Stage one takes 69.0 to 73.9%. The ratios rose with
-the tree's depth because the storage walks are harness, the same code in both.
+Stage two runs the three ERC-20 calls in 49.6% (`transfer`), 46.0% (`approve`) and 52.5%
+(`transferFrom`) of the interpreter's cycles. Stage one takes 55.7 to 65.6%.
 
-**The transfer stays at tier 18.** The tier bound is total rows (cycles plus digest rows: one per
+**The transfer is a tier-16 workload.** The tier bound is total rows (cycles plus digest rows: one per
 four program words, one per four input words, and the public-input digest) at or under 65 535,
-plus a separate Poseidon2 budget (`rand-guest/src/main.rs:244-248`). The transfer's 95 971 cycles
-plus 2 530 digest rows are 98 501 total, 32 966 over tier 16's 65 535; its 3 933 Poseidon2
-permutations are well under tier 16's 8 192, so cycles, not Poseidon2, keep it at tier 18.
+plus a separate Poseidon2 budget (`rand-guest/src/main.rs:244-248`). The transfer's 59 946 cycles
+plus 2 353 digest rows are 62 299 total, 3 236 under tier 16's 65 535, and its 3 756 Poseidon2
+permutations are well under tier 16's 8 192. `tests/parity.rs::the_stage_two_transfer_fits_tier_16`
+pins that; `tests/proof.rs::the_stage_two_erc20_transfer_proves_at_tier_16` is the proof
+(`#[ignore]`d: about 17 GB). `transferFrom` (three storage slots) is still tier 18.
+
+### What the harness savings were (ZKVM-117)
+
+None of them changes the machine: no syscall, no table, no constraint. Measured on the stage-two
+transfer, 95 971 cycles before:
+
+| change | where | what it removed |
+|---|---|---|
+| the Merkle walk hashes in place, in a window that slides down a buffer | `evm-core/src/storage.rs` (`walk`) | a fresh 17-word message per level and the digest copied out and back in: about 207 cycles a level became about 59, eight of them the syscall's own rows |
+| a witness is read from the tape into its place | `storage.rs` (`read_witness`), `abi.rs` | a 2 KiB `Witness` built on the stack and moved: a `memcpy` call of 5 168 cycles per witness |
+| the code's Keccak is baked into the image and published once the guard has passed | `evm2rv/src/guard.rs`, the shim, `abi.rs` (`run_call_with_executor_and_codehash`) | `keccak256` of the code in the guest: ten permutations and about 7 000 cycles for the ERC-20 |
+| Keccak's last block is absorbed straight from the message | `evm-core/src/lib.rs` | a zeroed 136-byte staging buffer, a `memcpy` and 34 word loads on every call |
+| the logs preimage buffer is not zeroed | `abi.rs` (`logs_hash`) | a 1 316-byte `memset` on every call |
+| `U256` equality compares words | `evm-core/src/u256.rs` | a `memcmp` call of about 200 cycles per comparison (the interpreter's gain: 15 649 cycles of its transfer were that call) |
+| the public-output preimage is built in the buffer it is hashed in | `abi.rs` | one copy of 83 words |
+
+What is left of stage two's 59 946, from a pc histogram over the image's symbols (one-off, not
+committed): the storage walks 15 459 (260 sponge calls at about 59), the remaining Keccak calls
+about 4 000, decoding the input about 15 200 (1 441 words read one `READ_INPUT` at a time, the
+1 296 bytes of code unpacked a byte at a time — the bulk-read syscall the issue names would take
+most of that, and needs a constraint-set change), `memset`/`memcpy` calls about 9 600 (the
+runtime's `u256` helpers, the zeroed `Outcome`, Keccak's zeroed state), and the contract and the
+rest of the runtime the remainder.
 
 ### Where the cycles go
 
@@ -376,10 +409,10 @@ before the code guard.
 
 Stage two cuts the contract's own execution by 35%. The guard adds 1 008 cycles to the harness,
 so the harness was about 39 928 of stage two's 66 235 cycles: about 60% of a transfer. ZKVM-103/104
-added about 4 060 more to the harness (the calldata hash, the log-data hash, the longer digest), so
-it was about 44 000 of 70 295, and the depth-64 storage tree (ZKVM-105) added about 25 700 more:
-about 69 700 of 95 971, **about 73% of a transfer**, taking the contract's own 25 789 as
-unchanged (the split was not re-measured). No translation work can go below that floor.
+added about 4 060 more to the harness (the calldata hash, the log-data hash, the longer digest) and
+the depth-64 storage tree (ZKVM-105) about 25 700 more: about 69 700 of 95 971, 73%. ZKVM-117's
+savings took about 36 000 back: about 34 000 of 59 946, **about 57% of a transfer**, taking the
+contract's own 25 789 as unchanged (that split was not re-measured). No translation work can go below that floor.
 
 ## Proving
 

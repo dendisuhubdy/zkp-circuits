@@ -455,9 +455,10 @@ pub fn translate(code: &[u8], opts: &Options) -> Result<Emitted, EmitError> {
         Stage::One => translate_one(code, opts)?,
         Stage::Two => crate::lift::translate(code, opts)?,
     };
-    e.c.push_str(&crate::guard::code_digest_c(&crate::guard::code_digest(
-        code,
-    )));
+    e.c.push_str(&crate::guard::code_digest_c(
+        &crate::guard::code_digest(code),
+        &crate::guard::code_keccak_words(code),
+    ));
     Ok(e)
 }
 

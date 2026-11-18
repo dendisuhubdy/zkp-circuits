@@ -65,6 +65,45 @@ fn the_translated_erc20_transfer_proves_and_verifies() {
     eprintln!("verified: {:.3}s", t1.elapsed().as_secs_f64());
 }
 
+/// **ZKVM-117's acceptance for the ERC-20: the stage-two translation of `transfer` proves at tier
+/// 16.** After the harness savings (the in-place Merkle walk, witnesses read into place, the baked
+/// code hash, the Keccak tail absorbed straight from the message) the call is 59 946 cycles and
+/// 62 299 rows all in, under tier 16's 65 535 — it was tier 18 at 66 235 cycles before any of
+/// this work, and 95 971 under the depth-64 storage tree before the savings.
+///
+/// `#[ignore]`d for its cost, not its result: measured once at about 17 GB resident.
+///
+/// ```text
+/// cd evm2rv && /usr/bin/time -l cargo +1.98.1 test --test proof \
+///     the_stage_two_erc20_transfer_proves_at_tier_16 -- --ignored --exact --nocapture
+/// ```
+#[test]
+#[ignore]
+fn the_stage_two_erc20_transfer_proves_at_tier_16() {
+    let base = root().join("evm2rv/target/proof");
+    let (image, hc) = build_shim(
+        &root().join("guests-compiled/evm/contracts/erc20.runtime.hex"),
+        &base.join("erc20-stage2"),
+        "erc20-evm2rv-proof-stage2",
+        false,
+        Stage::Two,
+    );
+    eprintln!("proving the stage-two translated ERC-20 (hc {hc})");
+    let program = Program::from_flat_image(&std::fs::read(&image).unwrap()).unwrap();
+    let call = erc20_transfer(ALICE, BOB, U256::from_u32(250), &[(ALICE, U256::from_u32(1000))]);
+    let (want, outcome, _) = call.expected();
+    assert_eq!(outcome.status(), 1);
+    let m = Machine::new(FriProfile::Test);
+    let t0 = std::time::Instant::now();
+    let (proof, exec) = m.prove(&program, &call.input_words(), &[], None).expect("prove");
+    eprintln!("proved: {} cycles, tier {}, {:.1}s", exec.cycles(), proof.tier.0, t0.elapsed().as_secs_f64());
+    assert_eq!(exec.outputs, want, "the translation's eight words are the interpreter's");
+    assert_eq!(proof.tier.0, 16, "the translated transfer fits tier 16");
+    let t1 = std::time::Instant::now();
+    m.verify(&program.digest(), &proof).expect("verify");
+    eprintln!("verified: {:.3}s", t1.elapsed().as_secs_f64());
+}
+
 /// Proves and verifies the interpreter's own guest (`guests-compiled/bin/evm.bin`) on the same
 /// `transfer` vector, so the README can compare proof times directly with the translated program.
 /// Only run if the translated program's proof fit the notes' budget (about 24 GB, about 45

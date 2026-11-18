@@ -84,10 +84,10 @@ use crate::interp::{
     MAX_RETURN_BYTES, MAX_TOPICS,
 };
 use crate::storage::{
-    StorageError, StorageTree, Witness, EVM_OUT_DOMAIN, LAYOUT_VERSION, MAX_WITNESSES,
+    StorageError, StorageTree, EVM_OUT_DOMAIN, LAYOUT_VERSION, MAX_WITNESSES,
 };
 use crate::u256::U256;
-use crate::{dhash, keccak256, Host};
+use crate::{keccak256, Host};
 
 /// Words in the public-output digest's preimage: the layout version, ten 8-word hashes, roots and
 /// call fields, then `gas_limit` and `gas_used`.
@@ -290,15 +290,10 @@ pub fn decode_input<H: Host, F: FnMut(u32) -> u32>(
     }
     dst.storage.reset(dst.pre_root);
     for _ in 0..n {
-        let w = Witness {
-            slot: c.u256(),
-            value: c.u256(),
-            siblings: core::array::from_fn(|_| c.word8()),
-            verified: false,
-        };
-        // `n <= MAX_WITNESSES` was checked above, so `TooMany` cannot happen; the reachable
-        // rejection is a second witness at a leaf position already taken.
-        match dst.storage.push(h, w) {
+        // Read into place (`read_witness`): `n <= MAX_WITNESSES` was checked above, so `TooMany`
+        // cannot happen; the reachable rejection is a second witness at a leaf position already
+        // taken.
+        match dst.storage.read_witness(h, || c.word()) {
             Ok(()) => {}
             Err(StorageError::DuplicateIndex) => return Err(ParseError::DuplicateWitnessIndex),
             Err(_) => return Err(ParseError::TooManyWitnesses),
@@ -329,21 +324,35 @@ pub fn hash_words(h: &[u8; 32]) -> [u32; 8] {
 /// they are dropped.
 pub fn logs_hash<H: Host>(h: &mut H, o: &Outcome) -> [u8; 32] {
     let n = if o.status() == 1 { o.n_logs } else { 0 };
-    let mut msg = [0u8; LOGS_MAX_BYTES];
+    // The message is at most `LOGS_MAX_BYTES` (1 316) and usually far less — 4 bytes for no logs,
+    // 136 for one `Transfer` — so the buffer is sized by the bound but only the bytes written are
+    // ever initialised or read. Zeroing all of it first was a `memset` call of about 1 000 guest
+    // cycles on every call, logs or none (ZKVM-117).
+    let mut buf = core::mem::MaybeUninit::<[u8; LOGS_MAX_BYTES]>::uninit();
+    let base = buf.as_mut_ptr() as *mut u8;
     let mut p = 0;
-    msg[p..p + 4].copy_from_slice(&(n as u32).to_be_bytes());
-    p += 4;
+    let mut put = |bytes: &[u8]| {
+        debug_assert!(p + bytes.len() <= LOGS_MAX_BYTES);
+        // SAFETY: `p + bytes.len() <= LOGS_MAX_BYTES` — the count is 4 bytes, and each of the at
+        // most `MAX_LOGS` logs (`take(n)`, `n <= o.logs.len()`) writes 4 bytes, at most
+        // `MAX_TOPICS` 32-byte topics (`take` over a `MAX_TOPICS` array) and 32 bytes, which is
+        // `LOGS_MAX_BYTES` exactly — so the destination is inside `buf`; `bytes` is a live slice
+        // that cannot overlap the local `buf`.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(p), bytes.len()) };
+        p += bytes.len();
+    };
+    put(&(n as u32).to_be_bytes());
     for log in o.logs.iter().take(n) {
-        msg[p..p + 4].copy_from_slice(&(log.n_topics as u32).to_be_bytes());
-        p += 4;
-        for topic in log.topics.iter().take(log.n_topics as usize) {
-            msg[p..p + 32].copy_from_slice(&topic.to_be_bytes());
-            p += 32;
+        let topics = (log.n_topics as usize).min(MAX_TOPICS);
+        put(&(topics as u32).to_be_bytes());
+        for topic in log.topics.iter().take(topics) {
+            put(&topic.to_be_bytes());
         }
-        msg[p..p + 32].copy_from_slice(&log.data_hash);
-        p += 32;
+        put(&log.data_hash);
     }
-    keccak256(h, &msg[..p])
+    // SAFETY: the first `p` bytes of `buf` were written by `put` above, contiguously from 0.
+    let msg = unsafe { core::slice::from_raw_parts(base as *const u8, p) };
+    keccak256(h, msg)
 }
 
 /// The call a public output is about: everything the digest binds that is not the run's own
@@ -352,6 +361,14 @@ pub fn logs_hash<H: Host>(h: &mut H, o: &Outcome) -> [u8; 32] {
 #[derive(Clone, Copy)]
 pub struct Statement<'a> {
     pub code: &'a [u8],
+    /// `hash_words(keccak256(code))` when whoever builds the statement already knows it, so that
+    /// [`public_output`] does not hash `code` again; `None` hashes it. The interpreter's guest
+    /// always passes `None`. A translated contract's shim passes the hash its translator baked
+    /// into the image, and only once its code guard has shown the input's code to be the code
+    /// that hash is of (ZKVM-117: hashing 1 296 bytes of ERC-20 code in the guest is ten
+    /// permutations and about 7 000 cycles). A wrong value here is a wrong digest: this is the
+    /// image's own claim about its code, bound by `hc` like the rest of the image.
+    pub codehash: Option<[u32; 8]>,
     pub calldata: &'a [u8],
     /// `address`, `caller`, `callvalue` and `gas_limit` — all four are bound.
     pub env: &'a Env,
@@ -374,22 +391,30 @@ pub fn public_output<H: Host>(h: &mut H, s: &Statement<'_>, o: &Outcome) -> [u32
     let status = o.status();
     let post = if status == 1 { s.post_root } else { s.pre_root };
     let ret: &[u8] = if status == 2 { &[] } else { &o.ret[..o.ret_len] };
-    let mut msg = [0u32; OUT_WORDS];
-    msg[0] = LAYOUT_VERSION;
-    msg[1..9].copy_from_slice(&hash_words(&keccak256(h, s.code)));
-    msg[9..17].copy_from_slice(s.pre_root);
-    msg[17..25].copy_from_slice(post);
-    msg[25..33].copy_from_slice(&hash_words(&keccak256(h, ret)));
-    msg[33..41].copy_from_slice(&hash_words(&logs_hash(h, o)));
-    msg[41..49].copy_from_slice(&s.env.address.0);
-    msg[49..57].copy_from_slice(&s.env.caller.0);
-    msg[57..65].copy_from_slice(&s.env.callvalue.0);
-    msg[65..73].copy_from_slice(&hash_words(&keccak256(h, s.calldata)));
-    msg[73..81].copy_from_slice(s.context);
+    // The preimage is built in the buffer it is hashed in, behind its domain word (`dhash` would
+    // copy all 83 words once more).
+    let mut msg = [0u32; 1 + OUT_WORDS];
+    msg[0] = EVM_OUT_DOMAIN;
+    msg[1] = LAYOUT_VERSION;
+    let codehash = match s.codehash {
+        Some(known) => known,
+        None => hash_words(&keccak256(h, s.code)),
+    };
+    msg[2..10].copy_from_slice(&codehash);
+    msg[10..18].copy_from_slice(s.pre_root);
+    msg[18..26].copy_from_slice(post);
+    msg[26..34].copy_from_slice(&hash_words(&keccak256(h, ret)));
+    msg[34..42].copy_from_slice(&hash_words(&logs_hash(h, o)));
+    msg[42..50].copy_from_slice(&s.env.address.0);
+    msg[50..58].copy_from_slice(&s.env.caller.0);
+    msg[58..66].copy_from_slice(&s.env.callvalue.0);
+    msg[66..74].copy_from_slice(&hash_words(&keccak256(h, s.calldata)));
+    msg[74..82].copy_from_slice(s.context);
     // One word each: the input's `gas_limit` is one word, and `gas_used` never exceeds it.
-    msg[81] = s.env.gas_limit as u32;
-    msg[82] = o.gas_used as u32;
-    let d = dhash(h, EVM_OUT_DOMAIN, &msg);
+    msg[82] = s.env.gas_limit as u32;
+    msg[83] = o.gas_used as u32;
+    h.poseidon2(&mut msg, 1 + OUT_WORDS);
+    let d = &msg;
     let mut out = [0u32; 8];
     out[0] = status;
     out[1..8].copy_from_slice(&d[..7]);
@@ -403,6 +428,7 @@ const NO_ENV: Env =
     Env { address: U256::ZERO, caller: U256::ZERO, callvalue: U256::ZERO, gas_limit: 0 };
 const NO_CALL: Statement<'static> = Statement {
     code: &[],
+    codehash: None,
     calldata: &[],
     env: &NO_ENV,
     context: &[0; 8],
@@ -414,6 +440,7 @@ const NO_CALL: Statement<'static> = Statement {
 fn statement<'a>(i: &'a CallInput, post_root: &'a [u32; 8]) -> Statement<'a> {
     Statement {
         code: &i.code[..i.code_len],
+        codehash: None,
         calldata: &i.calldata[..i.calldata_len],
         env: &i.env,
         context: &i.context,
@@ -524,6 +551,26 @@ pub fn run_call_with_executor<H: Host, F: FnMut(u32) -> u32>(
     len: u32,
     exec: Executor<'_, H>,
 ) -> ([u32; 8], Outcome) {
+    run_call_with_executor_and_codehash(h, w, read, len, exec, &mut || None)
+}
+
+/// Asked once, after the executor has returned: the code hash, if the executor already knows it
+/// (`Statement::codehash`), or `None` to have the harness hash the input's code.
+pub type KnownCodehash<'a> = &'a mut dyn FnMut() -> Option<[u32; 8]>;
+
+/// [`run_call_with_executor`] for an executor that may already know `keccak256` of the code it
+/// ran: `known` is asked after `exec` returns and its answer, if any, goes into the public output
+/// in place of a hash of the input's code. The answer must be the hash of the vector's code — a
+/// translated contract's shim returns its baked hash only when its code guard passed, and `None`
+/// (hash the input's code, as the interpreter does) when it refused the code.
+pub fn run_call_with_executor_and_codehash<H: Host, F: FnMut(u32) -> u32>(
+    h: &mut H,
+    w: &mut Workspace,
+    read: F,
+    len: u32,
+    exec: Executor<'_, H>,
+    known: KnownCodehash<'_>,
+) -> ([u32; 8], Outcome) {
     let mut c = InputCursor::new(read, len);
     if decode_input(h, &mut w.input, &mut c).is_err() {
         return malformed(h);
@@ -538,7 +585,9 @@ pub fn run_call_with_executor<H: Host, F: FnMut(u32) -> u32>(
         &mut w.bufs,
     );
     let post = i.storage.root();
-    let out = public_output(h, &statement(i, &post), &o);
+    let mut st = statement(i, &post);
+    st.codehash = known();
+    let out = public_output(h, &st, &o);
     (out, o)
 }
 

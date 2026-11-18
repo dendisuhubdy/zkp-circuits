@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use common::{host, STAGES};
 use evm2rv::emit::{translate, Options};
-use evm2rv::guard::{chained_digest, code_digest, code_digest_c, code_words, DIGEST_CHUNK};
+use evm2rv::guard::{chained_digest, code_digest, code_digest_c, code_keccak_words, code_words, DIGEST_CHUNK};
 use evm_core::interp::{Halt, Log, Outcome, MAX_LOGS, MAX_RETURN_BYTES};
 use evm_core::u256::U256;
 use rand_zkvm::evm::{EvmCall, HostRef, SparseTree};
@@ -137,9 +137,16 @@ fn the_message_packs_the_length_then_four_bytes_a_word_little_endian() {
 fn the_emitted_constant_is_the_digest_at_both_stages_whatever_the_chain_id() {
     let code = sixty_four();
     let d = code_digest(&code);
-    let tail = code_digest_c(&d);
-    assert!(tail.contains("static const uint32_t d[8] = {"));
-    for w in d {
+    // The second eight words are keccak256 of the code, packed as `EVM_OUT` carries a hash: the
+    // image's own claim about its code, which the harness publishes once the guard has passed.
+    let k = code_keccak_words(&code);
+    let kb = rand_zkvm::keccak::keccak256(&code);
+    for (i, w) in k.iter().enumerate() {
+        assert_eq!(*w, u32::from_le_bytes([kb[4 * i], kb[4 * i + 1], kb[4 * i + 2], kb[4 * i + 3]]));
+    }
+    let tail = code_digest_c(&d, &k);
+    assert!(tail.contains("static const uint32_t d[16] = {"));
+    for w in d.iter().chain(&k) {
         assert!(tail.contains(&format!("0x{w:08x}u")), "{w:#x}");
     }
     assert!(tail.ends_with("return d;\n}\n"));
@@ -155,7 +162,7 @@ fn the_emitted_constant_is_the_digest_at_both_stages_whatever_the_chain_id() {
     other[10] ^= 0x40;
     let c = translate(&other, &Options::default()).unwrap().c;
     assert!(!c.ends_with(&tail));
-    assert!(c.ends_with(&code_digest_c(&code_digest(&other))));
+    assert!(c.ends_with(&code_digest_c(&code_digest(&other), &code_keccak_words(&other))));
 }
 
 /// CODESIZE, PUSH0, MSTORE, PUSH1 32, PUSH0, RETURN: returns its own length (7). Every mutation

@@ -827,3 +827,31 @@ fn gas_used_in_the_public_output_is_the_interpreters() {
     assert_eq!(s_s.gas_used, s_s.gas_limit);
     assert!(s_s.accepts(2, &out_s));
 }
+
+/// ZKVM-117: a statement that already knows the code's hash (`Statement::codehash`, what a
+/// translated contract's shim passes once its code guard has passed) gives the same eight words as
+/// one that hashes the code — and the value is taken at its word: a different hash is a different
+/// digest, never silently corrected.
+#[test]
+fn a_known_codehash_is_the_hash_of_the_code_or_another_statement() {
+    use evm_core::abi::{public_output, Statement};
+    let c = sample();
+    let (out, o, post) = c.expected();
+    let env = c.env();
+    let (pre, post) = (c.tree.root(), post.root());
+    let statement = |codehash| Statement {
+        code: &c.code,
+        codehash,
+        calldata: &c.calldata,
+        env: &env,
+        context: &c.context,
+        pre_root: &pre,
+        post_root: &post,
+    };
+    assert_eq!(public_output(&mut HostRef, &statement(None), &o), out);
+    let known = hash_words(&keccak256(&c.code));
+    assert_eq!(public_output(&mut HostRef, &statement(Some(known)), &o), out);
+    let mut wrong = known;
+    wrong[3] ^= 1;
+    assert_ne!(public_output(&mut HostRef, &statement(Some(wrong)), &o), out);
+}

@@ -993,6 +993,14 @@ admission of more than one `hc` for the EVM guest, a layout field in a contract'
 `EvmStatement.layout` set from it. `deploy/sync-zkvm.sh` rsyncs `research/src`, which now
 `include_bytes!`s both images.
 
+**Re-vendor note: ZKVM-117's harness savings moved both EVM images again** (no constraint-set
+change, no change to the input vector or the public output: every call's eight words are what
+they were under ZKVM-105). `evm.bin` hc `cd700e35…993fa9e3` → `fae9d774…1f09bc0c` (16 588 → 15 167
+words), `evm-v1.bin` hc `fb537193…a9d75818` → `7375f67a…794dca16` (20 153 → 15 111), and every
+`evm2rv` translation (its table of two constants per contract, `evm_code_digest`, is now sixteen
+words: the guard's digest and the code's Keccak). The ERC-20 `transfer` is 120 892 cycles
+interpreted (tier 18) and 59 946 translated at stage two (**tier 16**).
+
 ## Relationship to `../../fullnode`
 
 `fullnode/` does not exist yet; this crate is its seed, not its dependency

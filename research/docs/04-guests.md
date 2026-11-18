@@ -29,13 +29,14 @@ slower than the RISC-V native path:
 **The translator, `evm2rv`, is done (2026-09-18, `circuits/evm2rv`).** It compiles the bytecode to
 C over `evm-rt/` ahead of time, in a shim crate `rand-guest build` turns into an image. The shim
 reuses the interpreter's ABI harness, so the input vector and the eight public output words do not
-change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 95 971 cycles
-against the interpreter's 154 517, at 8 665 program words against 16 588 (the committed
-`evm.bin`, storage layout 2, program id `4d94028f…`, hc `cd700e35…`; 70 295 against 128 872 under
-layout 1's depth-32 tree, 66 235 against 124 606 before ZKVM-103/104 put the call, the log data
-and the gas into the output, and 121 638 and 18 009 for the interpreter before
-MCOPY/TLOAD/TSTORE/CLZ). The harness it shares
-with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 73%
+change. Stage two (register lifting, the default) runs the ERC-20 `transfer` in 59 946 cycles —
+**tier 16** since ZKVM-117's harness savings (`evm2rv/README.md` lists them) — against the
+interpreter's 120 892 (tier 18), at 7 958 program words against 15 167 (the committed
+`evm.bin`, storage layout 2, program id `ae5f0b2b…`, hc `fae9d774…`; 95 971 against 154 517
+before those savings, 70 295 against 128 872 under layout 1's depth-32 tree, 66 235 against
+124 606 before ZKVM-103/104 put the call, the log data and the gas into the output, and 121 638
+and 18 009 for the interpreter before MCOPY/TLOAD/TSTORE/CLZ). The harness it shares
+with the interpreter (decoding, storage witnesses, the ABI's hashes, the digest) is now about 57%
 of those cycles, so further gains must come from the harness or the coprocessors above. One `hc`
 per contract: the image carries a digest of its source bytecode and refuses any other code
 (status 2), because `CODECOPY` reads the input code. All nine precompiles run in software;
@@ -461,10 +462,14 @@ finds a 32-bit pair and shows it is two independent slots under layout 2;
 runs the same pair through both committed images.
 
 **What it costs.** Every Merkle walk is twice as long: the ERC-20 `transfer`
-goes from 128 872 to 154 517 executed cycles under the interpreter (still tier
-18), and each witness is 256 words longer on the input tape. The walk itself is
-software around a `POSEIDON2` call per level; a looped Merkle-verify syscall
-(ZKVM-117) would take most of that back and needs a constraint-set change.
+went from 128 872 to 154 517 executed cycles under the interpreter (still tier
+18), and each witness is 256 words longer on the input tape. ZKVM-117's
+guest-side savings then took more than that back — the walk hashes in place at
+about 59 cycles a level where it was about 207, so four 64-level walks now cost
+less than four 32-level ones did — and the committed image runs the transfer in
+120 892. What remains of a level is the `POSEIDON2` call's own 8 rows and about
+50 cycles around it; a looped Merkle-verify syscall would remove most of the 50
+and needs a constraint-set change.
 
 **Authorisation: the output binds the call (ZKVM-103).** `caller`, `address`,
 `callvalue`, the calldata, `gas_limit` and `context` are private inputs a prover
@@ -542,9 +547,9 @@ slots touched, one `Transfer` log.
 | | |
 |---|---|
 | contract | `guests-compiled/evm/contracts/ERC20.sol`, `solc 0.8.37`, `--optimize --optimize-runs 200 --evm-version shanghai`, 1 296 bytes of runtime bytecode (committed as hex; `contracts/SOLC.md` records the binary's sha256 and the exact command) |
-| guest program | **16 588 words** (`evm.bin`, storage layout 2, program id `4d94028f…`, hc `cd700e35…`) — 14 478 of text plus a 2 110-instruction data prologue (20 077 = 17 985 + 2 092 under layout 1, where the 32-level loops were unrolled; 19 637 = 17 598 + 2 039 before ZKVM-103/104); the rows below this one, and the digest-row count, were measured on the pre-MCOPY/TLOAD/TSTORE/CLZ image of 18 009 words: 16 370 of text plus a 1 639-instruction data prologue for 2 444 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations), and 4 503 program-digest rows |
+| guest program | **15 167 words** (`evm.bin`, storage layout 2, program id `ae5f0b2b…`, hc `fae9d774…`) — 13 030 of text plus a 2 137-instruction data prologue (16 588 = 14 478 + 2 110 before ZKVM-117; 20 077 = 17 985 + 2 092 under layout 1, where the 32-level loops were unrolled; 19 637 = 17 598 + 2 039 before ZKVM-103/104); the rows below this one, and the digest-row count, were measured on the pre-MCOPY/TLOAD/TSTORE/CLZ image of 18 009 words: 16 370 of text plus a 1 639-instruction data prologue for 2 444 bytes of `.rodata` (the opcode dispatch's jump tables and the panic locations), and 4 503 program-digest rows |
 | input vector | 1 441 words (the bytecode, 68 bytes of calldata, the env, the eight context words, two 528-word witnesses) → 362 input-digest rows (929 and 234 with layout 1's 272-word witnesses; 921 and 232 before the context) |
-| cycles | **154 517 executed** on the committed image, 159 026 with both digest prefixes (128 872 and 134 126 under layout 1's depth-32 tree; 124 606 executed before ZKVM-103/104 added the calldata hash, the log-data hash and the 82-word digest; 121 638 executed, 126 373 total, on the pre-MCOPY/TLOAD/TSTORE/CLZ image) |
+| cycles | **120 892 executed** on the committed image, 125 046 with both digest prefixes (154 517 and 159 026 before ZKVM-117's harness savings — the in-place Merkle walk, witnesses read into place, word-wise `U256` equality, the Keccak tail; 128 872 and 134 126 under layout 1's depth-32 tree; 124 606 executed before ZKVM-103/104 added the calldata hash, the log-data hash and the 82-word digest; 121 638 executed, 126 373 total, on the pre-MCOPY/TLOAD/TSTORE/CLZ image) |
 | Poseidon2 | 1 070 absorb rows (132 sponge calls: four 32-level Merkle walks, plus the leaves and the output digest), 5 805 permutations in all with the digest prefixes — on the pre-MCOPY image under layout 1. Under layout 2 the four walks are 64 levels each (260 sponge calls with the leaves) and `rand-guest run --tier 18` reports 5 831 permutations all in |
 | Keccak | 20 permutations on the committed image (`codehash` over 1 296 bytes is ten of them; two mapping-slot hashes; the return-data and logs hashes; since ZKVM-103/104 the calldata hash, the `Transfer`'s data hash and a second block of the longer logs preimage); 17 before |
 | tier | **`Tier(18)`** — `keccak_log_height` would be 10 (17 permutations = 544 rows, padded to 1 024) |

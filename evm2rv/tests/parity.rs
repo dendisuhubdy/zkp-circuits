@@ -89,12 +89,15 @@ fn images(stage: Stage) -> &'static Images {
 /// Re-derived for ZKVM-103/104 (the 82-word `EVM_OUT` preimage in `evm-core`, the log's data hash
 /// in `evm-rt` and the shim); it was `9cdb79e7…48c8`. Re-derived for ZKVM-105 (storage layout 2:
 /// `evm-core`'s depth-64 tree and the layout word in the preimage); it was `69052c42…e932`.
-const ERC20_HC: &str = "c889e15cbed7222e22a11460295bbd3c02f8ea79e69feb056f9678b2ab86cb9e";
+/// Re-derived for ZKVM-117 (the in-place Merkle walk, witnesses read into place, the baked code
+/// hash); it was `c889e15c…cb9e`.
+const ERC20_HC: &str = "e61dde652e7524ceb51a2c2edfc2ff25f752f8fd47a15733eb24f195017c383a";
 
 /// The same for the stage-two translation (Task 8): a different program, so a different digest.
 /// Re-derived in Task 9 for the code guard; it was `87aba574…0ccad`. Re-derived for ZKVM-103/104;
-/// it was `a0feae92…8ff6`. Re-derived for ZKVM-105; it was `7c691208…8389`.
-const ERC20_HC_STAGE2: &str = "fa6d5ca096c6c8989bf074f1d2d3918ede17e06a80e36ef0ba8534d660de493d";
+/// it was `a0feae92…8ff6`. Re-derived for ZKVM-105; it was `7c691208…8389`. Re-derived for
+/// ZKVM-117; it was `fa6d5ca0…493d`.
+const ERC20_HC_STAGE2: &str = "0a08a9e4a9707a945a4a47cf57b3cd649c3a725bfda2dcba9c17cb29026f4262";
 
 /// `hc` of the stage-one ERC-20 translation (`--stage 1`), pinned (fix round 1, item 7). Uses
 /// the parity build.
@@ -170,6 +173,19 @@ fn transfer_250() -> EvmCall {
 #[test]
 fn transfer_matches_the_interpreter() {
     check("transfer", &transfer_250(), 1);
+}
+
+/// **The stage-two ERC-20 `transfer` is a tier-16 workload** (ZKVM-117's acceptance, as `rand-guest
+/// run` computes the tier: executed cycles plus the digest rows against tier 16's 65 535, and the
+/// Poseidon2 budget). It was tier 18 through every earlier image. Pinned as a tier, with the cycle
+/// count bounded a little above the 59 946 measured, so a harness change that spends the margin
+/// (3 236 rows) fails here before it silently costs a tier. The proof itself is
+/// `tests/proof.rs::the_stage_two_erc20_transfer_proves_at_tier_16`, which is `#[ignore]`d.
+#[test]
+fn the_stage_two_transfer_fits_tier_16() {
+    let (_, cycles, tier) = run_tier(&images(Stage::Two).plain, &transfer_250().input_words());
+    assert_eq!(tier, Some(16), "{cycles} cycles");
+    assert!(cycles <= 61_000, "{cycles} cycles: the margin under tier 16 is being spent");
 }
 
 /// `approve(BOB, 5)` from ALICE: the nested `_allowances` mapping and one `Approval` log with three
