@@ -159,6 +159,15 @@ fn build_config(profile: FriProfile, mmcs_rng: SaltRng, pcs_rng: SaltRng) -> Con
     generic_config(profile, Dft::default(), val_mmcs, pcs_rng)
 }
 
+/// A proving `Config` salted from two labels instead of OS entropy — a test accessor, not a proving
+/// path (`tests/parallel.rs`: what of a proof does and does not depend on thread scheduling can only
+/// be measured with the entropy held fixed). A proof made with it is not hiding, which is why
+/// `make_config` never does this and why it is `#[doc(hidden)]`, like `val_mmcs_for_tests`.
+#[doc(hidden)]
+pub fn seeded_config_for_tests(profile: FriProfile, mmcs_label: &[u8], pcs_label: &[u8]) -> Config {
+    build_config(profile, SaltRng::key(mmcs_label), SaltRng::key(pcs_label))
+}
+
 /// The FRI/PCS setup, written once over any value-MMCS and DFT. Every backend goes through
 /// here, so "the reference backend uses the same FRI parameters as the CPU one" is not a
 /// comment that can drift — `build_config` is literally this function with the Plonky3

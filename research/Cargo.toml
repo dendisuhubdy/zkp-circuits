@@ -43,6 +43,9 @@ postcard = { version = "1", features = ["alloc"] }
 ml-kem = "=0.3.2"
 chacha20poly1305 = "=0.11.0"
 rand-zkvm-cuda = { path = "../rand-zkvm-cuda", optional = true }
+# The `parallel` feature's switch: Plonky3's maybe-rayon shim, whose own `parallel` feature turns
+# rayon on in every p3 crate that goes through it (DFTs, Merkle commits, quotient evaluation, FRI).
+p3-maybe-rayon = { version = "=0.7.0", optional = true }
 # The EVM interpreter core (M4.3): a no_std library with its own workspace root, compiled into the
 # `evm` guest on riscv32im and run natively here. A normal dependency, not a dev-dependency, because
 # `src/evm.rs` (the host side of the storage tree: `HostRef`, `SparseTree`) is part of the library —
@@ -104,6 +107,12 @@ cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/cuda"]
 # enabling it would put a CUDA toolkit back in the way of a no-GPU test run. The two features
 # are siblings; either one turns on `Backend::Cuda`.
 mock-cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/mock-driver"]
+# Plonky3's own `parallel` feature (rayon) for the prover, off by default — `recursion/`'s feature of
+# the same name, which forwards to this one. Keys and digests do not move (`tests/verifier_key.rs`
+# passes with it on) and every proof verifies, but a proof's *bytes* are not a function of its seeds
+# on more than one thread: `AGENTS.md`'s "The `parallel` feature" names the two steps that depend on
+# scheduling. Opt-in because a default would switch rayon on in every crate that depends on this one.
+parallel = ["dep:p3-maybe-rayon", "p3-maybe-rayon/parallel"]
 
 # `required-features` lets a consumer that builds this test without the `cheating` feature skip the
 # target instead of failing (`cheating.rs`, vendored by the fullnode, needs no feature); inside research/ the self
@@ -123,6 +132,14 @@ required-features = ["cheating"]
 # path stays on `prove_batch`, which enforces the self-check exactly as crates.io's crate does.
 [patch.crates-io]
 p3-batch-stark = { path = "../vendor/p3-batch-stark" }
+# The hiding-RNG lock patch (`../vendor/PROVENANCE.md`, upstream Plonky3 #2363), as `recursion/` takes
+# it, for every build of this package root: upstream holds a spin lock on the PCS and MMCS RNGs
+# across rayon work, which under the `parallel` feature can spin for ever. A liveness fix only — it
+# does not make a seeded proof reproducible across threads. Single-threaded it changes which stream
+# the PCS's random columns are read from (a forked child instead of the shared generator), which no
+# key and no test depends on: keys take no PCS randomness and proving seeds from OS entropy.
+p3-fri = { path = "../vendor/p3-fri" }
+p3-merkle-tree = { path = "../vendor/p3-merkle-tree" }
 
 [profile.release]
 opt-level = 3

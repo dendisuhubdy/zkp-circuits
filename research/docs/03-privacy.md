@@ -74,6 +74,27 @@ M2.2 cut the queries: both are dominated by trace commitment and, for the
 first verify, the uncached `verifier_key` recomputation — costs the query
 count does not touch.
 
+**Re-taken on 2026-11-17 with the `parallel` feature (ZKVM-109)**, the same test at the
+constraint-set-10 tree, release profile, on a 48 GB MacBook (Apple M4 Max, 16 threads); two
+consecutive runs per cell. "Serial" is the default build (no rayon), "parallel" is `cargo test
+--release --features parallel --test e2e measure_production_profile_at_tier_10_and_12 -- --ignored
+--nocapture` with rayon's default 16 threads:
+
+| | tier 10 | tier 12 |
+| --- | --- | --- |
+| prove time, serial | 7.10 s, 7.05 s | 29.17 s, 29.05 s |
+| prove time, parallel (16 threads) | **1.39 s, 1.59 s** | **4.57 s, 4.87 s** |
+| verify time, serial | 317.9 ms, 316.4 ms | 1 155.7 ms, 1 129.4 ms |
+| verify time, parallel (16 threads) | 138.9 ms, 146.8 ms | 428.2 ms, 413.3 ms |
+| proof size (serial; parallel) | 1 378 444 / 1 373 419; 1 370 860 / 1 366 796 bytes | 1 432 334 / 1 426 478; 1 424 301 / 1 432 204 bytes |
+
+About 6× on prove at tier 12, and the proofs are the same proofs — same size to within the run-to-run
+percent, same keys (`tests/verifier_key.rs` passes with the feature on). The serial figures are above
+the table's 22.7 s because the machine has grown since 2026-09-12 (constraint sets 6 to 10), not
+because of this change. What the feature does *not* give is a proof that is a function of its seeds:
+on more than one thread the quotient blinding's seed order and the query proof-of-work witness depend
+on scheduling (`AGENTS.md`, "The `parallel` feature").
+
 **Consequence for the node's 1 MiB proof cap.** At 80 queries a *keccak-free*
 tier-10 proof is already ~1.20 MB, past the 1 MiB cap the full node applies
 to a submitted proof, and a proof carrying the keccak table measures
@@ -165,7 +186,10 @@ suite rather than quietly costing every proof on the chain.
 **An EVM call proof (M4.3) is the first real workload that carries the table.**
 `guests::compiled::evm` on a storage read-modify-write proves at `Tier(16)` with
 `keccak_log_height = 7` and measures 773 848 bytes at
-`FriProfile::Test` (438 s to prove, 14.2 s to verify); the ERC-20
+`FriProfile::Test` (438 s to prove, 14.2 s to verify — serial, plain `cargo test`, the
+constraint-set-6 tree; re-taken on 2026-11-17 at constraint set 10 under `--release` on the 48 GB
+MacBook, 16 threads: **481.3 s serial, 76.7 s with `--features parallel`**, verify 18.0 s and
+6.2 s, 814 484 and 813 716 bytes, peak resident 18.1 GB and 22.0 GB); the ERC-20
 `transfer` is the same guest at tier 18, whose proof the development machine could
 not build at all (three attempts, ≥ 28.5 GB resident at SIGKILL on a 48 GB laptop —
 `docs/04-guests.md` has the command and the ≥ 64 GB requirement).

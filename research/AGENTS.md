@@ -270,10 +270,77 @@ its only two patches (everything else rides along in the wholesale rsync —
   and `prove` on the same guest), and each draws its own salt, so the equality
   fails by construction. This is a pre-existing failure, not a regression, and
   not this milestone's to fix.
+- `cargo test --features parallel` (add `--release` for the timings below) — the same suite with
+  Plonky3's rayon on. Opt-in; see "The `parallel` feature" below for what it guarantees, what it
+  does not, and the measured times. The serial figures above stay the reference for plain
+  `cargo test`.
 - `cargo run --release` — the narrated demo, ~6-7 minutes wall time (thirteen
   proofs — one production-profile proof). The test suite covers everything it
   shows; don't run it casually.
 - The toolchain is pinned by `rust-toolchain.toml`; let `rustup` pick it up.
+
+## The `parallel` feature
+
+`parallel = ["dep:p3-maybe-rayon", "p3-maybe-rayon/parallel"]` (ZKVM-109, 2026-11-17) turns on
+Plonky3's rayon for the DFTs, Merkle commits, quotient evaluation and FRI of every prove and verify
+in this crate. It is **off by default** and should stay so: a default feature of this crate is
+switched on in every crate that depends on it (`recursion`, `rand-guest`, `evm2rv`, `sbpf2rv`, and
+the fullnode's vendored copy), and a single-threaded build is what a debugging session and a
+memory-tight host want. `recursion`'s `parallel` forwards to it. `rand-guest`, `evm2rv` and `sbpf2rv` forward
+nothing: none of their commands proves (only a test or two each does — `rand-guest/tests/prove.rs`,
+`evm2rv/tests/proof.rs`, `sbpf2rv/tests/parity.rs`), and each is its own package root, so
+`research`'s `[patch.crates-io]` does not reach it — turning rayon on there would also need the
+vendor patch entries in that crate's manifest, or it runs upstream's deadlock-prone lock. It needs the two
+lock-patched crates in `../vendor` (`p3-fri`, `p3-merkle-tree`; `../vendor/PROVENANCE.md`), which
+this crate's `[patch.crates-io]` takes for every build — that patch stops a spin lock deadlocking
+under rayon and does nothing else.
+
+**The contract is "keys and digests unchanged, every proof verifies" — not "the same bytes".**
+
+- Keys: `tests/verifier_key.rs`'s pinned `commitment`/`common` digests were taken from the serial
+  build and pass unchanged with the feature on. Program, input and public digests are computed
+  outside Plonky3 and cannot move.
+- Proofs: `tests/parallel.rs` proves and verifies under the feature and checks that a seeded proof's
+  main and permutation commitments are the same from run to run on any thread count.
+- **A seeded proof does not reproduce on more than one thread.** Do not write a test, a fixture or a
+  protocol step that assumes it does. Two steps depend on scheduling, both upstream Plonky3 0.7.0:
+  1. *Quotient blinding seed order.* The batch prover computes each instance's quotient inside a
+     parallel iterator (`../vendor/p3-batch-stark/src/prover.rs`, `per_instance`) and calls
+     `pcs.get_quotient_ldes` there; each call forks its blinding RNG from the one shared PCS RNG
+     (`../vendor/p3-fri/src/hiding_pcs.rs`, `fork_rng`), so which instance gets which child seed is
+     whichever worker takes the lock first. The quotient commitment moves, and everything after it.
+  2. *The query proof-of-work witness.* `DuplexChallenger::grind` searches with rayon's
+     `find_map_any` (`p3-challenger-0.7.0/src/grinding_challenger.rs`), which returns a valid
+     witness, not the smallest; the witness is absorbed, so the query indices move.
+  Measured: the serial build and the feature at `RAYON_NUM_THREADS=1` give byte-identical seeded
+  proofs; at 16 threads every proof differs; with both steps made sequential in a throwaway patch,
+  ten of ten 16-thread proofs equalled the serial bytes, and with either one left in they did not.
+  Neither is patched (a ruling of 2026-11-17): no key, digest or test depends on proof bytes, every
+  real prove draws OS entropy anyway (`make_config`), and the fullnode's prover has run the RV32
+  machine under rayon since it gained its own `parallel` feature. The `#[ignore]`d diagnostic in
+  `tests/parallel.rs` re-measures all of this; its doc comment has the three commands.
+
+Measured 2026-11-17, constraint set 10, `--release`, 48 GB MacBook (Apple M4 Max), rayon's default
+16 threads; prove time alone as the tests print it, two runs where two are given:
+
+| proof | serial | `--features parallel` | command (append `--features parallel` after `--release`) |
+| --- | --- | --- | --- |
+| tier 10, `fib(10)`, Production | 7.10 s, 7.05 s | 1.39 s, 1.59 s | `cargo test --release --test e2e measure_production_profile_at_tier_10_and_12 -- --ignored --nocapture` |
+| tier 12, `fib(650)`, Production | 29.17 s, 29.05 s | 4.57 s, 4.87 s | the same |
+| tier 16, the EVM storage call, Test | 481.3 s | 76.7 s | `cargo test --release --test e2e compiled_evm_storage_read_write_and_return_proves_and_verifies -- --nocapture` |
+
+The whole suite under `cargo test --release --features parallel --no-fail-fast -- --test-threads=1
+--skip compiled_evm_storage_read_write_and_return_proves_and_verifies` (that one test is the 22 GB
+row above, run on its own): **817 passed, 0 failed, 11 ignored** over 51 test binaries in 1 861 s
+wall, 11.7 GB peak resident — one test at a time, because rayon already fills the cores and it keeps
+the peak to one proof's. `tests/modq_cheating.rs` is half of it (940 s). This is a release run, so
+`debug_assertions` is off and it is the weaker run the note under `cargo test` above describes; it is
+not comparable with the 1 032 s debug figure there.
+
+Verify is faster too (tier 12: 1.14 s → 0.42 s; the tier-16 call: 18.0 s → 6.2 s). **Memory is not
+smaller, and at tier 16 it is larger**: the EVM call peaked at 18.1 GB resident serially and 22.0 GB
+under the feature (`/usr/bin/time -l`), so the feature does not by itself fit a proving suite onto a
+smaller host.
 
 ## Invariants that have actually been broken here
 

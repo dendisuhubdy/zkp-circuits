@@ -516,6 +516,7 @@ neither the ERC-20's 1 296-byte `codehash` nor its second Merkle walk:
 | cycles | 28 201 executed |
 | tier | `Tier(16)`, `keccak_log_height = 7`, `mem_log_height = 18` |
 | proof | 773 848 bytes; 438 s to prove, 14.2 s to verify |
+| proof, re-taken 2026-11-17 (constraint set 10, `--release`, 48 GB MacBook, 16 threads) | serial: 814 484 bytes, 481.3 s to prove, 18.0 s to verify, 18.1 GB peak resident; `--features parallel`: 813 716 bytes, **76.7 s** to prove, 6.2 s to verify, 22.0 GB peak resident |
 
 `compiled_evm_balance_of_approve_and_a_revert_execute_correctly` runs three
 more call shapes through the *same* binary and the same `hc` — `balanceOf`

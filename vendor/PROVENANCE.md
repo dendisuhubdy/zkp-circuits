@@ -7,8 +7,19 @@
   the lock and never holds it across rayon work. Upstream: Plonky3 issue #2363, PR #2368.
 - Copied verbatim (`diff -r` clean) from `randprotocol/fullnode` `vendor/`: `p3-fri` at fullnode commit 4d5b0391,
   `p3-merkle-tree` at 0e70ddc4 (fullnode HEAD c69a0b0f).
-- Used by `recursion/` (its `[patch.crates-io]`, every build; the `parallel` feature turns rayon on).
-  `research/` does not use them yet. Drop both once a Plonky3 release carries #2368.
+- Used by `recursion/` (its `[patch.crates-io]`, every build; the `parallel` feature turns rayon on)
+  and, since 2026-11-17 (ZKVM-109), by `research/` on the same terms: every build, with its own opt-in
+  `parallel` feature, which `recursion`'s forwards to. Drop both once a Plonky3 release carries #2368.
+- What the patch is and is not: a **liveness** fix (no spin lock held across rayon work). It does not
+  make a proof reproducible from its seeds under rayon, and nothing else here does either: on more
+  than one thread the batch prover hands the PCS's forked blinding seeds to instances in scheduling
+  order (`p3-batch-stark/src/prover.rs`, the `per_instance` parallel iterator calling
+  `get_quotient_ldes`), and the query proof-of-work search is rayon's `find_map_any`
+  (`p3-challenger` 0.7.0, unpatched). Keys and digests are unaffected; `research/AGENTS.md`'s "The
+  `parallel` feature" and `research/tests/parallel.rs` have the measurement.
+- Single-threaded, the `p3-fri` patch reads the PCS's random columns from a forked child generator
+  where upstream reads the shared one, so a *seeded* proof's bytes differ from crates.io's. No key
+  takes PCS randomness (`research/tests/verifier_key.rs` passes unchanged) and no test pins a proof.
 
 ## p3-batch-stark 0.7.0 — the quotient-layout fork (2026-10-04)
 

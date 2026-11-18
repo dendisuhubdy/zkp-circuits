@@ -26,6 +26,7 @@ cd research
 cargo build --release   # first build takes a few minutes; Plonky3 is a large dependency tree
 cargo run --release     # the narrated demo, ~6-7 minutes wall time (thirteen proofs — M4.4's sha256_demo is the newest guest in the closing sweep — one of them the narrated production-profile one)
 cargo test              # 395 tests (389 pass, 6 ignored, ~17 min): emulator, per-table constraints, cheating provers, zero knowledge, end-to-end, keccak, sha256, the public input segment, the EVM guest's four host suites, the sBPF interpreter + the real SPL Token program, viewing keys, shielded-pool bundles
+cargo test --release --features parallel   # the same suite on every core (rayon, opt-in): about 6x faster proving; keys unchanged, proofs verify, proof bytes not reproducible across threads (AGENTS.md)
 ```
 
 Optional, outside `cargo test`: `tools/alu_z3/` is an SMT model of the ALU AIR (issue #66) -- `pip install z3-solver`, then `cd tools/alu_z3 && python3 alu_z3_int.py --timeout 60 Add Sltu Divu` (output uniqueness per op) and `python3 sanity.py --sensitivity` (dropping a load-bearing constraint brings its old forgery back); its README has the rest.

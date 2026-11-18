@@ -72,7 +72,9 @@ mock-cuda = ["dep:rand-zkvm-cuda", "rand-zkvm-cuda/mock-driver"]
 # the same proofs (same config, transcript and FRI parameters — `docs/03`'s retype discipline),
 # made on every core. Needs the two patched crates under `../vendor/` (hiding RNG lock forked,
 # never held across rayon work — upstream Plonky3 #2363; the fullnode's patch, copied verbatim).
-parallel = ["dep:p3-maybe-rayon", "p3-maybe-rayon/parallel", "dep:rayon"]
+# `rand_zkvm/parallel` is `research`'s feature of the same name, forwarded so the dependency says so
+# itself; cargo's feature unification already gave the RV32 machine rayon through the shared shim.
+parallel = ["dep:p3-maybe-rayon", "p3-maybe-rayon/parallel", "dep:rayon", "rand_zkvm/parallel"]
 
 # `research`'s profiles, verbatim. This crate is its own package root, so cargo reads *these*
 # tables and not `research/`'s — and without the dependency override every p3 crate and

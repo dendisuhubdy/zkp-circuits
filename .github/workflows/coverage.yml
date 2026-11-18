@@ -57,19 +57,29 @@ jobs:
           # after 40 minutes of the other files, so the run of 2026-11-07 hit the 120-minute limit
           # with 42 of its 43 tests done. Nothing is dropped: the first job runs what it ran before
           # those two files existed, and each of them has its own job below.
+          #
+          # All three build with `--features parallel` since ZKVM-109: Plonky3's rayon, on the
+          # runner's four cores. Keys and digests do not move with it (`tests/verifier_key.rs`, in
+          # the first job, pins them from the serial build) and every proof still verifies. What it
+          # costs is memory per proof, so the limits above were re-measured with it, at four rayon
+          # threads on a laptop (2026-11-18, `/usr/bin/time -l`, the largest single test process):
+          # 7.3 GB for the first job at four test threads, 8.8 GB for `modq` one test at a time.
+          # The serial build is still what `cargo test` in `research/` runs by default.
           - crate: research
-            args: --release --lib $(for f in tests/*.rs; do n=$(basename "$f" .rs); case "$n" in bundle|viewing|e2e|modq|modq_cheating) ;; *) printf -- '--test %s ' "$n";; esac; done)
+            args: --release --features parallel --lib $(for f in tests/*.rs; do n=$(basename "$f" .rs); case "$n" in bundle|viewing|e2e|modq|modq_cheating) ;; *) printf -- '--test %s ' "$n";; esac; done)
           # One test at a time: the peak is then the largest single proof, 9.6 GB.
           - crate: research
             part: research-modq
-            args: --release --test modq -- --test-threads=1
+            args: --release --features parallel --test modq -- --test-threads=1
           # Two at a time: each forgery proof peaks at 5.9 GB, and the file's own limit of three
-          # (`MODQ_SLOTS`, sized for a 48 GB laptop) is 17.7 GB. The proofs are single-threaded, so
-          # two abreast is about 80 minutes on a fast runner and 120 on a slow one: its own limit.
+          # (`MODQ_SLOTS`, sized for a 48 GB laptop) is 17.7 GB. Single-threaded, two abreast was
+          # about 80 minutes on a fast runner and 120 on a slow one, hence its own limit; both
+          # figures (and the 5.9 GB) are the serial build's and were not re-taken with
+          # `--features parallel`, which is why the two-at-a-time limit and the 180 minutes stay.
           - crate: research
             part: research-modq-cheating
             timeout: 180
-            args: --release --test modq_cheating -- --test-threads=2
+            args: --release --features parallel --test modq_cheating -- --test-threads=2
           # The hosted runner is killed by the rVM's proving suites (fullnode's nightly-rvm dies the
           # same way), so only the files that prove nothing, or a tier-12 precompile at most, are
           # measured: aggregate, cheating, device_model, exit, fixtures, machine, memprofile,
