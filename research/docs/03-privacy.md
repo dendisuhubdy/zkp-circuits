@@ -30,10 +30,34 @@ queries, 4 PoW bits, for a fast `cargo test`). Both use blowup 8 and the same
 hiding PCS; only the query count, grinding difficulty, and folding arity
 differ.
 
-| | queries | PoW bits | blowup | conjectured | proven (proximity gaps) |
+| | queries | PoW bits | blowup | proven bits (unique decoding) | legacy `log_blowup·q + g` |
 | --- | --- | --- | --- | --- | --- |
-| `Production` | 80 | 20 | 8 | `3·80+20 = 260` | ~86 bits |
-| `Test` | 16 | 4 | 8 | `3·16+4 = 52` | ~17 bits |
+| `Production` | 80 | 20 | 8 | **86.41** | 260 — a formula's value, not a security level |
+| `Test` | 16 | 4 | 8 | 17.28 | 52 |
+
+### The security figure, stated once
+
+**This is the one place the figure is derived; every other mention should link here.**
+
+- **Proven: 86.41 bits** for this machine at `Production`. Under the unique-decoding
+  (proximity-gaps) bound each FRI query contributes `log2(2 / (1 + ρ))` bits at rate `ρ`, and
+  grinding adds its bits: `q · log2(2 / (1 + ρ)) + g = 80 · log2(2 / (1 + 1/8)) + 20 = 80 · 0.8301 +
+  20 = 86.41`. The recursion VM proves at rate 1/4 with 92 queries and 24 grinding bits:
+  `92 · log2(2 / (1 + 1/4)) + 24 = 92 · 0.6781 + 24 = 86.38`
+  (`recursion/docs/07-rvm-rate-quarter.md`, which also checks the figure with `p3-security` over the
+  rVM's real chip shapes).
+- **The "260" this table used to call "conjectured" is not a number of bits of security.** It is
+  the legacy ethSTARK expression `log_blowup · q + g = 3 · 80 + 20`, and it exceeds the 128 bits of
+  the challenge field (Goldilocks²) and of the hash's collision resistance, which cap any soundness
+  claim. `recursion/docs/07-rvm-rate-quarter.md` §1 computes `p3-security`'s conjectured bound for
+  the rVM at these FRI parameters as **95.44 bits**, bound by the field term and not by the rate; it
+  has not been computed separately for this machine's batch. `machine.rs`'
+  `production_profile_meets_the_100_bit_conjectured_target` asserts the legacy expression is at
+  least 100, which is a floor on a formula, not a claim of 260 or of 100 bits.
+- **Zero knowledge is statistical**, through `HidingFriPcs`, and Plonky3 0.7 says of its own
+  batch prover `// TODO: This approach is only statistically ZK.` (the section above). That caveat
+  belongs beside the soundness figure: 86.41 is a soundness statement and says nothing about how
+  much a proof hides.
 
 `Production` is the whitepaper's own parameter table (Draft 3, Part III: FRI
 80/8/20), **restored on 2026-09-12** after the zk audit (finding ZM1). M2.2

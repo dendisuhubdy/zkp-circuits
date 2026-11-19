@@ -26,13 +26,16 @@ directory and compares the programs, and by `rand-guest info`.
 
 `rand-guest build` compiles with the pinned toolchain and the fixed flags, checks the ELF
 against the machine, packs the image and prints its `hc`. `bin/<guest>.bin.sha256` pins each
-image; `rand-guest/tests/build.rs` rebuilds all four and compares. A guest with a data segment
+image; `rand-guest/tests/build.rs` rebuilds all six and compares. A guest with a data segment
 links with its own `.ld` (`evm.ld`, `sbpf.ld`: `guest.ld` with `ORIGIN` raised for the
 prologue), which `rand-guest` finds by itself.
 
-## The two shapes the four pins have
+## The two shapes the six pins have
 
-`evm.bin` and `sbpf.bin` are image containers (`docs/01-isa.md`'s "The image container"):
+Six images are pinned in `bin/` (`*.bin.sha256`): `fib`, `keccak256`, `evm`, `sbpf`,
+`dilithium-verify` and `msauth`.
+
+`evm.bin`, `sbpf.bin`, `dilithium-verify.bin` and `msauth.bin` are image containers (`docs/01-isa.md`'s "The image container"):
 `rand-guest build` packs every guest into this form, header and all, and `rand-guest/tests/build.rs`
 gates them byte for byte against the committed `.bin`.
 

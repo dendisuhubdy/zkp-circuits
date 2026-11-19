@@ -1,5 +1,7 @@
 # 09 — Phase 4: the Merkle spans — one inner verification in tier 19
 
+> **Current figures:** [`11-current-numbers.md`](11-current-numbers.md). The rows, tiers and measurements below are this phase's record and are not updated when a later phase moves them.
+
 Design: `docs/superpowers/specs/2026-10-09-rvm-phase4-spans-design.md`. Plan:
 `docs/superpowers/plans/2026-10-09-rvm-phase4-spans.md`. Branch `feat/rvm-phase4-spans`, planned
 on `71e1a04` (rate ¼ merged) and rebased before the first cut onto `c83b1c7` (the tree-aggregation

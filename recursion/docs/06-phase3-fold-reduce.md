@@ -1,5 +1,7 @@
 # 06 — Phase 3: the reduce chip takes the reduction layout, the fold and the index powers
 
+> **Current figures:** [`11-current-numbers.md`](11-current-numbers.md). The rows, tiers and measurements below are this phase's record and are not updated when a later phase moves them.
+
 Design: `docs/superpowers/specs/2026-10-05-rvm-phase3-fold-reduce-design.md`. Plan:
 `docs/superpowers/plans/2026-10-05-rvm-phase3-fold-reduce.md`. Branch `feat/rvm-phase3`, base
 `2c1f068`, rebased onto `origin/main` `40e4657` (the quotient-layout merge, which owns

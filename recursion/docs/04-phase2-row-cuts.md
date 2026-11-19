@@ -1,5 +1,7 @@
 # 04 — Phase 2 row cuts: the inner verifier at tier 20, and the prover's live heap
 
+> **Current figures:** [`11-current-numbers.md`](11-current-numbers.md). The rows, tiers and measurements below are this phase's record and are not updated when a later phase moves them.
+
 Design: `docs/superpowers/specs/2026-10-03-rvm-phase2-row-cuts-design.md`. Plan:
 `docs/superpowers/plans/2026-10-03-rvm-phase2-row-cuts.md`. Branch `feat/rvm-phase2`, base
 `cba8468` (constraint set 8). Every row count here comes from the emulator's event log through

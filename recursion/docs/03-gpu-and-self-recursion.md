@@ -51,6 +51,11 @@ Two formulas, verbatim from `rand-zkvm-cuda`:
   `CudaError::Alloc { bytes, free }` ("use a lower tier") before any copy
   (`src/gpu/ntt.rs:26-29`, `src/gpu/hash.rs:16-19`).
 
+**These two tables model tiers 21 to 23, which is where production stood when they were written.
+Production is now tiers 18 to 20** (N = 1, 2, 3 inner proofs; `11-current-numbers.md`), at rate ¼
+rather than ⅛, and the model has not been re-derived for those tiers: read the tables as the
+record of the device limits at the heights shown, not as today's production sizes.
+
 The NTT chunk table at the tier's cpu LDE height (2^(t+3), log_blowup 3), columns per pass and
 passes over the cpu table's 66 columns (72 since ZKQ-3, 2026-09-27 — the tables below are the
 66-column measurement):
@@ -283,9 +288,11 @@ file's header is run on a GPU host.
 
 ## Still ahead (blocked-on-provisioning)
 
-- **T3** — the PTX build and hardware bring-up on the fleet GPU node
-  (`rand-zkvm-cuda/ptx/PTX_BUILD.md`'s checklist, in order; Linux, R580+ driver, CUDA 13,
-  LLVM 21, sm_80-class or newer, 80 GB device class, ≥ 160 GB host).
+- **T3** — the PTX build and hardware bring-up: **done once**, on a rented DigitalOcean
+  `gpu-h100x1-80gb` (H100 80 GB) on 2026-09-28 (`rand-zkvm-cuda/ptx/PTX_BUILD.md`, "First
+  hardware run"). No PTX is committed and there is no fleet GPU node, so a proving machine still
+  builds its own by that file's checklist (Linux, R580+ driver, CUDA 13, LLVM 21, sm_80-class or
+  newer, 80 GB device class, ≥ 160 GB host).
 - **T4** — N re-measured at production on the GPU (the per-N table of `docs/02-aggregate.md`
   completed with GPU columns), on that node.
 

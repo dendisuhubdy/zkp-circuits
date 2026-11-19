@@ -1,5 +1,7 @@
 # 07 — The rVM at rate ¼: its own FRI profile, at equal proven security
 
+> **Current figures:** [`11-current-numbers.md`](11-current-numbers.md). The rows, tiers and measurements below are this phase's record and are not updated when a later phase moves them.
+
 Design: `docs/superpowers/specs/2026-10-06-rvm-rate-quarter-design.md`. Plan:
 `docs/superpowers/plans/2026-10-06-rvm-rate-quarter.md`. Branch `feat/rvm-rate-quarter`, base
 `3316e11` (phase 3 merged). Every security figure here is a line `tests/security.rs` prints

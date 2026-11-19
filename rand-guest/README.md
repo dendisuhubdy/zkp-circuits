@@ -319,13 +319,14 @@ the bundled one.
 
 ## Byte/program identity for the committed guests
 
-`fib`, `keccak256`, `evm`, and `sbpf` are the four guests pinned in `guests-compiled/bin/` (each
-`<name>.bin` with a `<name>.bin.sha256`), and `rand-guest/tests/build.rs` gates all four on every
-run. `evm` and `sbpf` are image containers: rebuilding must reproduce the committed bytes exactly,
+`fib`, `keccak256`, `evm`, `sbpf`, `dilithium-verify` and `msauth` are the six guests pinned in
+`guests-compiled/bin/` (each `<name>.bin` with a `<name>.bin.sha256`), and
+`rand-guest/tests/build.rs` gates all six on every run. `evm`, `sbpf`, `dilithium-verify` and
+`msauth` are image containers: rebuilding must reproduce the committed bytes exactly,
 checked by comparing SHA-256 hashes. `fib` and `keccak256` are the legacy flat-binary pins: since
 `build` always writes the container form, the byte gate does not apply to them; instead the test
 compares the *program* the freshly built image loads to against the program the committed flat
 binary loads to — same `base_pc`, same `words`, same `digest()` (`hc`). `c-fib`, the C path's
-guest, is not one of the four pins; it exists to exercise `--lang c` end to end and is checked
+guest, is not one of the six pins; it exists to exercise `--lang c` end to end and is checked
 functionally (build, check, run to the same `fib(20) = 6765` the Rust `fib` guest gives), not
 pinned.

@@ -1,4 +1,4 @@
-//! `rand-guest build` over the four committed guests gives their committed images, and `check`
+//! `rand-guest build` over the six committed guests gives their committed images, and `check`
 //! and `info` agree with `build` on what one of them is.
 //!
 //! The build needs the pinned toolchain with the guest target and llvm-tools installed

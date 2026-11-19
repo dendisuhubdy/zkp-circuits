@@ -1,5 +1,7 @@
 # 08 — Tree aggregation: a leaf of L bundle proofs, 2-to-1 interior steps, every level recomputed
 
+> **Current figures:** [`11-current-numbers.md`](11-current-numbers.md). The rows, tiers and measurements below are this phase's record and are not updated when a later phase moves them.
+
 Design: `docs/superpowers/specs/2026-10-08-tree-aggregation-design.md`. Plan: `docs/superpowers/plans/2026-10-08-tree-aggregation.md`.
 
 ## 1. The child, measured (Task 0, production)
