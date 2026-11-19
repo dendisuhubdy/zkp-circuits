@@ -518,7 +518,8 @@ What this costs and what it leaves open:
 **Traps.** `Halt` is `Stop`, `Return`, `Revert`, `OutOfGas`, `StackUnderflow`,
 `StackOverflow` (1024), `BadJump`, `Invalid` (`0xfe`), `Trap(op)` for anything
 outside the subset, `NoWitness`, `BadWitness`, and `OutOfBounds` (a memory
-range past 64 KiB, return data past 1 KiB, more logs than `MAX_LOGS`, an
+range past 64 KiB, return data past 1 KiB, more logs than `MAX_LOGS`, a
+seventeenth transient-storage key, an
 over-long code or calldata, and every `ParseError` — including two witnesses at
 one leaf position). Everything but `Stop`/`Return`/`Revert` is status
 2 and burns the whole gas limit. None of them is a panic: every length
@@ -527,17 +528,28 @@ SDK's handler halts with `out[7] = 0xdeadbeef`, which is a provable run whose
 outputs are not a call result (ZKVM-106) — where an exceptional halt produces
 a proof that says the call was invalid.
 
-**Out of scope, and why each one traps rather than being stubbed:**
+**Out of scope, and why each one traps rather than being stubbed.** This is the
+interpreter's list, with the reason for each. The table of record, for every
+opcode byte and precompile address, on both the interpreter and a translation,
+with each one's gas against mainnet's, is
+[`evm2rv/COMPATIBILITY.md`](../../evm2rv/COMPATIBILITY.md): it is generated from
+`evm2rv::compat`, and `evm2rv/tests/compat.rs` runs every byte on both paths
+against it. `evm2rv check <bytecode>` lists the trapping opcodes in a contract.
 
 | Opcodes | Why not |
 |---|---|
-| `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE`, `CREATE2` | needs `CALL` semantics: a second frame, a second code/storage pair, return-data plumbing and revert scoping. One contract per proof is M4.3's scope |
-| every precompile (`ECRECOVER`, `MODEXP`, the BN254 pairs, `BLAKE2F`, …) | needs a chip each (secp256k1 recovery, a modular-arithmetic chip, a pairing) — the table above |
-| `BLOCKHASH`, `TIMESTAMP`, `NUMBER`, `COINBASE`, `DIFFICULTY`/`PREVRANDAO`, `GASLIMIT`, `CHAINID`, `BASEFEE`, `BLOBHASH` | needs block context, i.e. public values the chain would have to supply and the verifier check. Nothing in the ERC-20 subset reads them |
-| `BALANCE`, `SELFBALANCE`, `ORIGIN`, `GASPRICE`, `EXTCODESIZE`/`EXTCODECOPY`/`EXTCODEHASH` | needs account state beyond one contract's storage — a second tree and a second witness kind |
+| `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE`, `CREATE2` | needs `CALL` semantics: a second frame, a second code/storage pair, return-data plumbing and revert scoping. One contract per proof is M4.3's scope. (A translation runs the four calls when the target is a precompile; the interpreter traps on every call) |
+| every precompile (`ECRECOVER`, `MODEXP`, the BN254 pairs, `BLAKE2F`, …) | in the interpreter, a call to one traps like any call. A translation runs Shanghai's nine in software (`evm-rt/precompiles.c`); the dear ones still want a chip each (secp256k1 recovery, a modular-arithmetic chip, a pairing) — the table above |
+| `BLOCKHASH`, `TIMESTAMP`, `NUMBER`, `COINBASE`, `DIFFICULTY`/`PREVRANDAO`, `GASLIMIT`, `CHAINID`, `BASEFEE`, `BLOBHASH`, `BLOBBASEFEE` | needs block context, i.e. public values the chain would have to supply and the verifier check. Nothing in the ERC-20 subset reads them. (A translation runs `CHAINID` as the constant given at translation, which the image hash binds) |
+| `BALANCE`, `SELFBALANCE`, `ORIGIN`, `GASPRICE`, `EXTCODESIZE`/`EXTCODECOPY`/`EXTCODEHASH` | needs account state beyond one contract's storage — a second tree and a second witness kind. (A translation runs `ORIGIN` as `CALLER`) |
 | `SELFDESTRUCT` | needs account deletion semantics *and* balance transfer |
-| `TLOAD`/`TSTORE`, `MCOPY` | Cancun; the guest targets Shanghai, and `solc --evm-version shanghai` emits neither. (This is why the contract is compiled with that flag: on a 0.8.37 default, `MCOPY` appears and traps) |
 | `RETURNDATACOPY` with a non-zero length | there is no inner call, so the return-data buffer is always empty; `RETURNDATASIZE` is 0 and a zero-length copy is legal |
+
+`MCOPY`, `TLOAD`/`TSTORE` (Cancun) and `CLZ` (Osaka) were on this list when
+M4.3 shipped and are not any more: the interpreter and the translation both
+implement them (`interp.rs`'s module doc; 16 transient keys a call). The ERC-20
+is still compiled with `--evm-version shanghai`, so its bytecode has none of
+them.
 
 **Measured**, `FriProfile::Test`, `research/tests/e2e.rs`'s `compiled_evm_*`
 tests (`cargo +1.98.1 test --release --test e2e compiled_evm -- --nocapture`):

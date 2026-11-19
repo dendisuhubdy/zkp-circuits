@@ -258,6 +258,38 @@ A code one byte different from the source is refused in 30 344 cycles (stage one
 (stage two), tier 16. `tests/guard.rs` also runs 16 381- and 24 575-byte codes, which need a
 second `POSEIDON2` call.
 
+## Compatibility
+
+**The guest is a single-contract EVM with a documented subset, not a mainnet-equivalent one, and
+its gas is not mainnet gas.** [COMPATIBILITY.md](COMPATIBILITY.md) is the one place that says
+what that means: every opcode byte and every precompile address, what the interpreter does with
+it, what a translation does with it, and its gas against mainnet's; the fixed caps; and the open
+question of calls between contracts. It is generated from `src/compat.rs`, and `tests/compat.rs`
+runs all 256 opcode bytes through the interpreter and through a translation at both stages
+against it, so the table cannot say something the code does not do.
+
+[CYCLES.md](CYCLES.md) is the measured cost of each opcode in the interpreter image, in cycles
+(`tests/cycles.rs` measures it on the committed `evm.bin`).
+
+Before translating or proving a contract, scan it:
+
+```console
+$ evm2rv check ../guests-compiled/evm/contracts/erc20.runtime.hex
+../guests-compiled/evm/contracts/erc20.runtime.hex: 1296 code bytes
+0 always trap, 0 may trap, 0 trap in the interpreter only
+10 SLOAD/SSTORE: their gas is not mainnet's (COMPATIBILITY.md)
+3 undefined bytes (they halt on mainnet too; data embedded in the code reads as these)
+clean: nothing in this code traps in a translation
+```
+
+`check` disassembles the code (push data skipped) and lists every opcode that always traps, traps
+for some operands (a call runs only to a precompile; `RETURNDATACOPY`), or runs in a translation
+but not in the interpreter (`CHAINID`, `ORIGIN`), with its offset and the table's reason. The exit
+status is 0 when nothing traps, 1 when something always traps (or the code is over the size cap),
+2 when the only findings trap for some operands. `--interpreter` gives the verdict for the
+interpreter instead of a translation. It is a scan, not a reachability analysis: an opcode in dead
+code, or data that reads as one, is listed like any other.
+
 ## The observable contract
 
 What must match the interpreter is the status, the eight output words and `gas_used`. The halt
@@ -429,7 +461,7 @@ prover is unchanged; this is a memory gap, not a correctness gap.
 
 ## Tests
 
-`cargo +1.98.1 test --release` in this directory: 70 tests, plus the 2 ignored proofs.
+`cargo +1.98.1 test --release` in this directory: 152 tests, plus the 2 ignored proofs.
 
 | file | what |
 |---|---|
@@ -440,5 +472,7 @@ prover is unchanged; this is a memory gap, not a correctness gap.
 | `parity.rs` | the ERC-20's 8 vectors, both stages, against `evm.bin` and the native interpreter; the hc pins; the guard refusing a one-byte change |
 | `precompiles.rs` | a sha256 + ecrecover contract, end to end |
 | `fuzz.rs` | 10 000 random programs, plain and opaque, both stages, against the interpreter; a sample through the real pipeline |
+| `compat.rs` | the compatibility table against the code: all 256 opcode bytes on both paths and both stages, the conditional rows, every precompile address, the gas rules, the caps, `COMPATIBILITY.md`, and `evm2rv check` |
+| `cycles.rs` | the cycles of each opcode in `evm.bin`, and `CYCLES.md` |
 | `guard.rs` | the code guard's digest, and long codes through the real pipeline |
 | `toolchain.rs` | the clang pin and its override |
